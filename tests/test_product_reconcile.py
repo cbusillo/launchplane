@@ -30,6 +30,8 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetStaffTestingHold,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimePlan
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -50,6 +52,7 @@ from control_plane.contracts.product_profile_record import (
     ProductPreviewProfile,
 )
 from control_plane.contracts.product_reconcile import (
+    GitHubAppWebhookDeliveryRecord,
     ProductReconcileLeaseLostError,
     ProductReconcileRequestRecord,
     ProductReconcileTarget,
@@ -84,11 +87,13 @@ from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.product_reconcile import (
     PLAN_BLOCKER_DESCRIPTIONS,
     PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS,
+    PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS,
     TESTING_FAILURE_DESCRIPTIONS,
     RECONCILE_SOURCE,
     PreviewProviderHooks,
     ProductReconcileError,
     TestingProviderHooks,
+    _plan_testing_target,
     request_product_reconcile_sweep,
     reconcile_reservation_scope,
     resolve_build_provenance_transport,
@@ -120,6 +125,7 @@ from tests.merge_train_policy_fixtures import build_test_merge_train_policy_reco
 from tests.support.durable_operations import durable_operation_authorization_payload
 from tests.support.artifact_manifests import artifact_manifest_v2
 from control_plane.workflows.generic_web_deploy_provider import (
+    DokployGenericWebDeployProvider,
     GenericWebProviderDeploymentObservation,
 )
 from control_plane.workflows.generic_web_preview import (
@@ -1305,6 +1311,16 @@ class ProductReconcileStaffTestingHoldTests(ProductReconcileTestCase):
 class FakeGenericWebGitHub(FakeGitHub):
     """example/site as a generic-web product: its build uploads the generic-web manifest."""
 
+    def get_json(self, path: str) -> object:
+        if "/attempts/" in path:
+            run_id = int(path.split("/actions/runs/")[1].split("/")[0])
+            return self.runs[run_id]
+        payload = super().get_json(path)
+        if "/actions/workflows/build.yml/runs?" in path:
+            assert isinstance(payload, dict)
+            payload["total_count"] = len(cast(list[object], payload["workflow_runs"]))
+        return payload
+
     def get_bytes(self, path: str) -> bytes:
         run_id = int(path.split("/actions/artifacts/")[1].split("/")[0]) // 10
         commit = cast(str, self.runs[run_id]["head_sha"])
@@ -1359,6 +1375,193 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             target_name="site-testing-app",
         )
         self.testing_hooks = TestingProviderHooks(generic_web_deploy_provider=lambda: self.deploys)
+
+    def record_legacy_baseline(self, commit: str = OLDER, *, sha_tagged: bool = False) -> None:
+        identity = RuntimeIdentity(
+            context="cm",
+            instance="testing",
+            deployment_record_id="deployment-legacy",
+            artifact_id=f"{IMAGE_REPOSITORY}@{_digest(commit)}" if sha_tagged else f"sha-{commit}",
+            source_git_ref=commit,
+            image_reference=(
+                f"{IMAGE_REPOSITORY}:sha-{commit}"
+                if sha_tagged
+                else f"{IMAGE_REPOSITORY}@{_digest(commit)}"
+            ),
+        )
+        self.store.write_environment_inventory(
+            EnvironmentInventory(
+                context=identity.context,
+                instance=identity.instance,
+                deployment_record_id=identity.deployment_record_id,
+                source_git_ref=commit,
+                runtime_identity=identity,
+                deploy=DeploymentEvidence(
+                    target_name="site-testing-app",
+                    target_type="application",
+                    deploy_mode="image",
+                    status="pass",
+                ),
+                updated_at="2026-10-05T12:00:00Z",
+            )
+        )
+
+    def test_sellyouroutboard_legacy_baseline_moves_to_verified_forward_build(self) -> None:
+        # #3141: the deployed baseline predates push Build/manifest adoption.
+        baseline = "206aff0581fa6fc817a30666094af4c738881a01"
+        candidate = "50e779ca85ab6812a82dcd476fbb02cfccca9ec1"
+        self.github.first_parents = {candidate: baseline, baseline: ""}
+        self.record_legacy_baseline(baseline, sha_tagged=True)
+        self.github.add_run(37825455941, candidate)
+        self.github.runs[37825455941]["run_started_at"] = "2026-10-08T18:35:20Z"
+        self.request()
+
+        provider = DokployGenericWebDeployProvider()
+        with (
+            patch.object(
+                provider, "_read_provider_config", return_value=("https://provider.test", "test")
+            ),
+            patch.object(
+                self.deploys, "execute_artifact_deploy", wraps=provider.execute_artifact_deploy
+            ),
+            patch("control_plane.dokploy.api.latest_deployment_for_target", return_value={}),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload", return_value={"env": ""}
+            ),
+            patch("control_plane.dokploy.api.update_dokploy_target_env"),
+            patch("control_plane.dokploy.api.dokploy_request") as provider_write,
+            patch("control_plane.dokploy.api.trigger_deployment"),
+            patch("control_plane.dokploy.api.wait_for_target_deployment"),
+        ):
+            plan = self.reconcile()
+
+        self.assertEqual(plan["action"], "deploy", plan)
+        self.assertEqual(plan["deploy_status"], "pass")
+        self.assertEqual(plan["desired_commit"], candidate)
+        self.assertTrue(plan["current_commit_seen"])
+        self.assertEqual(
+            provider_write.call_args.kwargs["payload"]["dockerImage"],
+            f"{IMAGE_REPOSITORY}:sha-{candidate}",
+        )
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        assert inventory.runtime_identity is not None
+        self.assertEqual(inventory.runtime_identity.source_git_ref, candidate)
+        self.assertEqual(
+            inventory.runtime_identity.artifact_id, f"{IMAGE_REPOSITORY}@{_digest(candidate)}"
+        )
+        self.assertEqual(
+            inventory.runtime_identity.image_reference, f"{IMAGE_REPOSITORY}:sha-{candidate}"
+        )
+
+    def test_legacy_baseline_selection_covers_native_verireel_and_generic_web(self) -> None:
+        self.record_legacy_baseline()
+        self.github.add_run(20, DEPLOYABLE)
+        self.github.runs[20]["run_started_at"] = "2026-10-08T12:00:00Z"
+        for driver_id in ("generic-web", "verireel"):
+            with self.subTest(driver_id=driver_id):
+                plan, desired = _plan_testing_target(
+                    record_store=self.store,
+                    profile=_generic_web_profile().model_copy(update={"driver_id": driver_id}),
+                    repository_id=REPOSITORY_ID,
+                    transport=self.github,
+                )
+                self.assertEqual(plan["action"], "deploy", plan)
+                self.assertIsNotNone(desired)
+        self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_legacy_baseline_still_requires_a_complete_build_inventory(self) -> None:
+        self.record_legacy_baseline()
+        self.github.add_run(20, DEPLOYABLE)
+        self.github.runs[20]["run_started_at"] = "2026-10-08T12:00:00Z"
+        get_json = self.github.get_json
+        for total, runs in (
+            (2, [self.github.runs[20]]),
+            (None, [self.github.runs[20]]),
+            (True, [self.github.runs[20]]),
+            (2, [self.github.runs[20], self.github.runs[20]]),
+        ):
+            with self.subTest(total=total, returned=len(runs)):
+
+                def incomplete(path: str) -> object:
+                    if "/actions/workflows/build.yml/runs?" in path:
+                        return {"total_count": total, "workflow_runs": runs}
+                    return get_json(path)
+
+                self.request()
+                with patch.object(self.github, "get_json", incomplete):
+                    plan = self.reconcile()
+                self.assertEqual(
+                    (plan["action"], plan["reason"]), ("none", "incomplete_build_runs")
+                )
+                self.assertTrue(plan["held"])
+                self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_legacy_baseline_still_requires_first_parent_history_to_reach_it(self) -> None:
+        self.record_legacy_baseline()
+        self.github.add_run(20, DEPLOYABLE)
+        self.github.runs[20]["run_started_at"] = "2026-10-08T12:00:00Z"
+        self.github.first_parents = {NEWEST: DEPLOYABLE, DEPLOYABLE: OLDER}
+        self.request()
+
+        plan = self.reconcile()
+
+        self.assertEqual((plan["action"], plan["reason"]), ("none", "incomplete_commit_history"))
+        self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_legacy_baseline_does_not_admit_an_unverified_candidate_manifest(self) -> None:
+        self.record_legacy_baseline()
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with patch.object(
+            self.github, "get_bytes", side_effect=BuildProvenanceError("Manifest unavailable")
+        ):
+            plan = self.reconcile()
+        self.assertEqual((plan["action"], plan["reason"]), ("none", "no_verified_build"))
+        self.assertTrue(plan["rejected_builds"])
+        self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_legacy_baseline_does_not_admit_older_source_or_builds(self) -> None:
+        for current, candidate, started, reason in (
+            (DEPLOYABLE, OLDER, "2026-10-08T12:00:00Z", "ancestor_build"),
+            (OLDER, DEPLOYABLE, "2026-10-04T12:00:00Z", "build_order_unverified"),
+        ):
+            with self.subTest(reason=reason):
+                self.record_legacy_baseline(current)
+                self.github.runs.clear()
+                self.github.add_run(20, candidate)
+                self.github.runs[20]["run_started_at"] = started
+                self.request()
+
+                plan = self.reconcile()
+
+                self.assertEqual((plan["action"], plan["reason"]), ("none", reason))
+                self.assertTrue(plan["held"])
+                self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_legacy_baseline_without_a_recorded_digest_stays_held(self) -> None:
+        self.record_legacy_baseline()
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        assert inventory.runtime_identity is not None
+        self.store.write_environment_inventory(
+            inventory.model_copy(
+                update={
+                    "runtime_identity": inventory.runtime_identity.model_copy(
+                        update={"image_reference": ""}
+                    )
+                }
+            )
+        )
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+
+        plan = self.reconcile()
+
+        self.assertEqual((plan["action"], plan["reason"]), ("none", "incomplete_build_runs"))
+        self.assertEqual(self.deploys.runtime_identities, [])
 
     def failed_deploy(self) -> ProductReconcileRequestRecord:
         self.github.add_run(20, DEPLOYABLE)
@@ -1585,7 +1788,9 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             context_name="cm", instance_name="testing"
         )
         assert inventory.runtime_identity is not None
-        self.assertEqual(inventory.runtime_identity.image_reference, image)
+        self.assertEqual(
+            inventory.runtime_identity.image_reference, f"{IMAGE_REPOSITORY}:sha-{DEPLOYABLE}"
+        )
         # Nothing went to the Odoo artifact store or its operation queue.
         self.assertEqual(self.store.list_artifact_manifests(), ())
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
@@ -2909,6 +3114,218 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         (comment,) = self.comments.on(5)
         return cast(str, comment["body"])
 
+    def sweep_preview(self) -> bool:
+        targets = request_product_reconcile_sweep(
+            self.store, "2026-09-30T12:00:00Z", lambda _store, _profile: self.github
+        )
+        return "site:preview:5" in targets
+
+    def run_swept_preview(self) -> ProductReconcileRequestRecord:
+        # Use the real worker even when the testing target is claimed first.
+        completed = self.run_once()
+        return completed if completed.target_kind == "preview" else self.run_once()
+
+    def test_sweep_recovers_a_closed_absent_preview_after_a_failed_pr_read(self) -> None:
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        self.request("preview", 5)
+        with patch.object(self.github, "get_json", side_effect=ProductReconcileError("refused")):
+            failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertIn("Waiting for:", self.comment_body())
+        self.assertEqual(self.store.list_preview_records(), ())
+
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+
+        feedback = cast(dict[str, object], recovered.last_plan["pr_feedback"])
+        self.assertEqual(
+            (feedback["status"], feedback["delivery_status"]), ("cleared", "delivered")
+        )
+        self.assertEqual(self.comments.on(5), [])
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.sweep_preview())
+
+    def test_sweep_recovers_failed_clear_delivery_without_another_close_event(self) -> None:
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        self.comments.fail_writes = True
+        self.reconcile_preview()
+        self.assertIn("Waiting for:", self.comment_body())
+        self.comments.fail_writes = False
+
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+
+        self.assertEqual(
+            cast(dict[str, object], recovered.last_plan["pr_feedback"])["delivery_status"],
+            "delivered",
+        )
+        self.assertEqual(self.comments.on(5), [])
+        self.assertFalse(self.sweep_preview())
+
+    def test_unreadable_closed_pr_stops_recovery_and_a_new_event_can_resume(self) -> None:
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        self.request("preview", 5)
+        with patch.object(self.github, "get_json", side_effect=ProductReconcileError("denied")):
+            self.run_once()
+            recoveries = 0
+            while self.sweep_preview():
+                failed = self.run_swept_preview()
+                recoveries += 1
+                self.assertLessEqual(
+                    recoveries,
+                    PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS,
+                    "unbounded feedback recovery",
+                )
+        self.assertIn("Waiting for:", self.comment_body())
+        self.assertEqual(self.provider.applied, [])
+        self.assertGreater(recoveries, 0)
+        self.assertIn("feedback_recovery_stop_reason", failed.last_plan)
+        self.assertFalse(self.sweep_preview())
+
+        self.reconcile_preview()
+
+        self.assertEqual(self.comments.on(5), [])
+
+    def test_sweep_does_not_guess_failed_or_legacy_feedback_is_pending(self) -> None:
+        self.github.pull_request["state"] = "closed"
+        for feedback in (
+            {"status": "failed", "delivery_status": "failed"},
+            {"delivery_status": "failed"},
+        ):
+            with self.subTest(feedback=feedback):
+                self.request("preview", 5)
+                request = self.store.claim_next_product_reconcile_request("seed", 600)
+                assert request is not None
+                self.store.complete_product_reconcile_request(
+                    request.target_key, "seed", "failed", {"pr_feedback": feedback}, "real failure"
+                )
+                self.assertFalse(self.sweep_preview())
+
+    def test_recovery_discovers_feedback_beyond_the_default_history_limit(self) -> None:
+        for number in range(10, 120):
+            self.store.request_product_reconcile(
+                ProductReconcileTarget(
+                    product="site", target_kind="preview", pull_request_number=number
+                ),
+                "2026-09-28T12:00:00Z",
+            )
+            request = self.store.claim_next_product_reconcile_request("seed", 600)
+            assert request is not None
+            self.store.complete_product_reconcile_request(request.target_key, "seed", "done", {})
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        targets = request_product_reconcile_sweep(
+            self.store, "2026-09-30T12:00:00Z", lambda _store, _profile: self.github
+        )
+        self.assertIn("site:preview:5", targets)
+
+    def test_failed_clear_delivery_stops_without_erasing_the_pending_comment(self) -> None:
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        self.comments.fail_writes = True
+        self.reconcile_preview()
+        recoveries = 0
+        while self.sweep_preview():
+            failed = self.run_swept_preview()
+            recoveries += 1
+            self.assertLessEqual(
+                recoveries,
+                PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS,
+                "unbounded failed deletion recovery",
+            )
+        self.assertGreater(recoveries, 0)
+        self.assertIn("feedback_recovery_stop_reason", failed.last_plan)
+        self.assertIn("Waiting for:", self.comment_body())
+        self.assertEqual(self.provider.applied, [])
+
+    def test_ended_preview_does_not_hide_failed_pending_cleanup_from_the_sweep(self) -> None:
+        for state in ("destroyed", "teardown_pending"):
+            with self.subTest(state=state):
+                self.github.pull_request["state"] = "open"
+                self.reconcile_preview()
+                self.write_preview(number=5, state=state)
+                self.github.pull_request["state"] = "closed"
+                self.comments.fail_writes = True
+                self.reconcile_preview()
+                self.comments.fail_writes = False
+
+                self.assertTrue(self.sweep_preview())
+                recovered = self.run_swept_preview()
+
+                self.assertEqual(recovered.last_plan["action"], "none")
+                self.assertEqual(self.comments.on(5), [])
+                self.assertEqual(self.provider.applied, [])
+
+    def test_a_verified_close_gets_cleanup_retries_after_open_pr_reads_exhausted(self) -> None:
+        self.reconcile_preview()
+        for _ in range(PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS):
+            self.request("preview", 5)
+            with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+                self.run_once()
+        self.assertFalse(self.sweep_preview())
+        self.github.pull_request["state"] = "closed"
+        self.comments.fail_writes = True
+        self.reconcile_preview()
+        self.comments.fail_writes = False
+
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+
+        self.assertEqual(recovered.last_plan["action"], "none")
+        self.assertEqual(self.comments.on(5), [])
+
+    def test_read_failures_after_verified_close_do_not_reset_the_cleanup_budget(self) -> None:
+        self.reconcile_preview()
+        self.github.pull_request["state"] = "closed"
+        self.comments.fail_writes = True
+        self.reconcile_preview()
+        recoveries = 0
+        while self.sweep_preview():
+            with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+                failed = self.run_swept_preview()
+            recoveries += 1
+            self.assertLessEqual(recoveries, PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS)
+        self.assertGreater(recoveries, 0)
+        self.assertIn("feedback_recovery_stop_reason", failed.last_plan)
+        self.assertIn("Waiting for:", self.comment_body())
+
+    def test_close_webhook_rearms_exhausted_open_read_recovery_once(self) -> None:
+        self.reconcile_preview()
+        with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+            for _ in range(PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS):
+                self.request("preview", 5)
+                self.run_once()
+        self.assertFalse(self.sweep_preview())
+        self.github.pull_request["state"] = "closed"
+        target = ProductReconcileTarget(
+            product="site", target_kind="preview", pull_request_number=5
+        )
+        delivery = GitHubAppWebhookDeliveryRecord(
+            delivery_id="close-during-outage",
+            event="pull_request",
+            action="closed",
+            repository_id=REPOSITORY_ID,
+            received_at="2026-09-30T12:00:00Z",
+            target_keys=(target.target_key,),
+        )
+        self.store.record_github_app_webhook_delivery(delivery, (target,), delivery.received_at)
+        with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+            self.run_swept_preview()
+        self.assertEqual(
+            self.store.record_github_app_webhook_delivery(
+                delivery, (target,), delivery.received_at
+            ),
+            "duplicate",
+        )
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+        self.assertEqual(recovered.last_plan["action"], "none")
+        self.assertEqual(self.comments.on(5), [])
+        self.assertEqual(self.provider.applied, [])
+
     def test_closing_before_a_preview_build_clears_pending_feedback(self) -> None:
         self.assertEqual(self.reconcile_preview()["action"], "wait")
         self.assertIn("Waiting for: a verified build", self.comment_body())
@@ -3697,6 +4114,16 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
 
 
 class ProductReconcileSweepTests(ProductReconcileTestCase):
+    def test_unreadable_feedback_history_keeps_other_sweep_targets(self) -> None:
+        self.write_preview(number=5)
+        self.github.open_pulls = [{"number": 7}]
+        with patch.object(self.store, "list_product_reconcile_requests", side_effect=ValueError):
+            with self.assertLogs("control_plane.product_reconcile", "WARNING"):
+                requested = request_product_reconcile_sweep(
+                    self.store, "2026-09-29T12:00:00Z", lambda _store, _profile: self.github
+                )
+        self.assertEqual(set(requested), {"site:testing", "site:preview:5", "site:preview:7"})
+
     def test_sweep_requests_mapped_testing_targets_and_live_previews(self) -> None:
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(_profile("unmapped"))

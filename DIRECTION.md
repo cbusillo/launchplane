@@ -9,9 +9,10 @@ source is corrected or closed. Issues are a work list, not instructions.
 
 Launchplane is the small control layer that lets agents build, preview,
 deploy, promote, back up, restore, and merge every product, and record a
-Client's accept-or-reject decision. SellYourOutboard and VeriReel are the only
-real live production sites; the CM website is next; every other product's
-"prod" is not live.
+Client's accept-or-reject decision. A live site is the production lane of a
+product recorded as live. A product is recorded as live when its Client uses
+production for real business; a missing or wrong record does not override
+the overall direction's stop on Client business systems.
 
 Judge every change by one question: can a product be maintained without
 anyone touching Launchplane? Work that adds upkeep to Launchplane itself needs
@@ -23,6 +24,12 @@ never supplies its build inputs. Launchplane reacts to source-control events,
 verifies which repository and commit an artifact came from, and deploys it
 with the site's runtime settings and secrets. The artifact is the only handoff
 between them.
+
+Launchplane should not depend on GitHub. GitHub is the git host we use
+today; others may follow, including one we run ourselves. New code talks to
+GitHub through Launchplane's own names for things (a change, a comment, a
+check result, a merge); old code moves over only when other work touches it.
+Adding another host is its own milestone, when the Director chooses it.
 
 Launchplane needs no caller grant for the work it starts from source-control
 events (verifying a build and deploying it to that site's previews and testing
@@ -53,20 +60,17 @@ acceptance. Admin is a permission, not a role; the Director normally holds it.
 
 An agent asks the Director before:
 
-- deploying to, promoting, or changing a real live site (SellYourOutboard,
-  VeriReel, and the CM website once it launches), except a release the
-  product's Client accepted, which Launchplane promotes itself through the
-  gated path
-- restoring or deleting data, or weakening a backup gate
-- creating credentials, granting access, or changing who can merge
+- changing a real live site outside the Client's accepted release; a deploy or promotion there comes only from that accepted release, and rolling back to an earlier Client-accepted release is part of that gated path
+- restoring or deleting a live site's data, or weakening a backup gate that protects a live site
+- creating credentials that can reach a live site, granting access, or changing who can merge
 - spending money or creating paid resources
 - anything a Client should weigh in on; that question goes to the Client
 
 Everything else is ordinary engineering and needs no ceremony, including
-work on products that are not live.
+work on products that are not live. The overall direction owns the rule for
+testing and preview lanes.
 
-Reading is never a stop. The Director's agents may read every Launchplane
-record and ask only before a write, a grant, or a change.
+The overall direction owns who may read and plan, including Client agents.
 
 ## Journey
 
@@ -84,8 +88,8 @@ blocks that run is the next piece of work.
   records, `owner-acceptance` grants and exact bindings, shadow mode, and the
   manager, delegate, and waiver roles
 - a GitHub approval standing in for a Client's decision in Launchplane
-- Every Code; Codex Lab runs agent work, and old identifiers stay only until
-  their readers move
+- Every Code and Codex Lab; old identifiers stay only until their readers
+  move
 - hardware-key authorization recovery, disposable canaries, and the dev lane
 - billing and collections, and general planning or work graphs inside
   Launchplane

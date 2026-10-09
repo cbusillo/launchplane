@@ -27,6 +27,14 @@ BACKUP_FAILURE_DESCRIPTIONS: dict[str, str] = {
         "The backup host does not match the host the lane's backup target names."
     ),
     "backup_lease_lost": "The backup worker lost its lease before it finished.",
+    "backup_effect_outcome_unknown": (
+        "The backup worker was interrupted after a provider step started. Its outcome is "
+        "unknown, so Launchplane stopped the release and will not retry this capture automatically."
+    ),
+    "backup_progress_unavailable": (
+        "Launchplane could not save the backup's progress. The capture stopped; any provider "
+        "effect already started requires reconciliation before another attempt."
+    ),
     "backup_operation_store_unavailable": "Launchplane could not record the backup's progress.",
     "backup_source_busy": "Another backup of the same source was running.",
     "backup_source_lock_lost": "The backup lost its lock on the source while it ran.",

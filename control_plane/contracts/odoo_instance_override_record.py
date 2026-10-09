@@ -5,10 +5,11 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane.contracts.runtime_environment_record import ScalarValue
+from control_plane.contracts.odoo_import_parameters import import_parameter_runtime_key
 
 OdooOverrideApplyPhase = Literal["restore", "deploy", "promotion", "preview", "manual"]
 OdooOverrideApplyStatus = Literal["skipped", "pending", "pass", "fail"]
-OdooOverrideValueSource = Literal["literal", "secret_binding"]
+OdooOverrideValueSource = Literal["literal", "secret_binding", "runtime_environment"]
 _ODOO_XMLID_RE = re.compile(r"^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_-]+)+$")
 
 
@@ -59,6 +60,10 @@ class OdooOverrideValue(BaseModel):
 
     @model_validator(mode="after")
     def _validate_value_source(self) -> "OdooOverrideValue":
+        if self.source == "runtime_environment":
+            if self.value is not None or self.secret_binding_id:
+                raise ValueError("Runtime-backed overrides must not duplicate values or secrets")
+            return self
         if self.source == "literal":
             if self.value is None:
                 raise ValueError("literal Odoo override values require value")
@@ -83,6 +88,12 @@ class OdooConfigParameterOverride(BaseModel):
     key: str
     value: OdooOverrideValue
 
+    @model_validator(mode="after")
+    def _validate_runtime_reference(self) -> "OdooConfigParameterOverride":
+        if self.value.source == "runtime_environment":
+            import_parameter_runtime_key(self.key)
+        return self
+
     @field_validator("key", mode="after")
     @classmethod
     def _validate_key(cls, value: str) -> str:
@@ -98,6 +109,12 @@ class OdooAddonSettingOverride(BaseModel):
     addon: str
     setting: str
     value: OdooOverrideValue
+
+    @model_validator(mode="after")
+    def _validate_runtime_reference(self) -> "OdooAddonSettingOverride":
+        if self.value.source == "runtime_environment":
+            raise ValueError("Addon settings do not support runtime-environment references")
+        return self
 
     @field_validator("addon", mode="after")
     @classmethod

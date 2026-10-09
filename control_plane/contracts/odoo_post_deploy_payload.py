@@ -7,7 +7,6 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.odoo_instance_override_record import (
-    OdooOverrideValueSource,
     OdooWebsiteBootstrapPayload,
 )
 from control_plane.contracts.runtime_environment_record import ScalarValue
@@ -18,7 +17,7 @@ OdooPostDeployWorkflowIntent = Literal["deploy", "restore", "bootstrap"]
 class OdooPostDeployRenderedValue(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source: OdooOverrideValueSource
+    source: Literal["literal", "secret_binding"]
     value: ScalarValue | None = None
     secret_binding_id: str = ""
     environment_variable: str = ""

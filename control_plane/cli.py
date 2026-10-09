@@ -2567,10 +2567,19 @@ def _run_compose_post_deploy_update(
         dokploy_source.protected_shopify_store_keys_for_target_definition(target_definition)
     )
     if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
+        override_runtime_store = (
+            PostgresRecordStore(database_url=database_url)
+            if any(
+                item.value.source == "runtime_environment"
+                for item in odoo_override_record.config_parameters
+            )
+            else None
+        )
         try:
             post_deploy_environment = (
                 control_plane_odoo_instance_overrides.build_post_deploy_environment(
                     odoo_override_record,
+                    record_store=override_runtime_store,
                     protected_shopify_store_keys=protected_shopify_store_keys,
                 )
             )
@@ -2586,6 +2595,9 @@ def _run_compose_post_deploy_update(
                 detail=str(error),
             )
             raise
+        finally:
+            if override_runtime_store is not None:
+                override_runtime_store.close()
     try:
         dokploy_post_deploy.run_compose_post_deploy_update(
             host=host,
@@ -2647,19 +2659,19 @@ def _write_odoo_instance_override_apply_result(
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:
-        updated_record = record.model_copy(
-            update={
-                "last_apply": OdooOverrideApplyResult(
-                    attempted=status in {"pending", "pass", "fail"},
-                    status=status,
-                    applied_at=utc_now_timestamp() if status in {"pass", "fail"} else "",
-                    detail=detail,
-                ),
-                "updated_at": utc_now_timestamp(),
-                "source_label": "odoo-post-deploy-driver",
-            }
+        now = utc_now_timestamp()
+        postgres_store.update_odoo_instance_override_apply_result(
+            context_name=record.context,
+            instance_name=record.instance,
+            last_apply=OdooOverrideApplyResult(
+                attempted=status in {"pending", "pass", "fail"},
+                status=status,
+                applied_at=now if status in {"pass", "fail"} else "",
+                detail=detail,
+            ),
+            updated_at=now,
+            source_label="odoo-post-deploy-driver",
         )
-        postgres_store.write_odoo_instance_override_record(updated_record)
     finally:
         postgres_store.close()
 

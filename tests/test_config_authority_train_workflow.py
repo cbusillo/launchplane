@@ -30,6 +30,7 @@ class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
         rejected: bool = False,
         target_movement: str = "",
         repository: str = "example/product",
+        reconstructed: bool = False,
         overrides: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], Path, str, str]:
         product = root / "product-repo"
@@ -58,6 +59,23 @@ class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
             _git(product, "checkout", "candidate")
             _git(product, "merge", "--no-ff", "-m", "candidate second entry", second_head)
         head = _git(product, "rev-parse", "HEAD")
+        before = "0" * 40
+        if reconstructed:
+            before = head
+            _git(product, "branch", "previous-candidate", before)
+            parents = _git(product, "show", "-s", "--format=%P", head).split()
+            head = _git(
+                product,
+                "commit-tree",
+                f"{head}^{{tree}}",
+                "-p",
+                parents[0],
+                "-p",
+                parents[1],
+                "-m",
+                "reconstructed candidate",
+            )
+            _git(product, "reset", "--hard", head)
         if target_movement and target_movement != "shallow":
             _git(product, "checkout", "trunk")
             if target_movement == "deleted":
@@ -115,7 +133,7 @@ class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
             ),
             "GITHUB_REPOSITORY": repository,
             "DEFAULT_BRANCH": "trunk",
-            "BASE_SHA": "0" * 40,
+            "BASE_SHA": before,
             "HEAD_SHA": head,
             "FAIL_ON_FINDINGS": "true",
             "AUDIT_PYTHON_VERSION": "3.13",
@@ -158,6 +176,75 @@ class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self._assert_pair(capture, base, head)
             self.assertTrue(json.loads(result.stdout)["gate"]["rejected_findings"])
+
+    def test_reconstructed_train_ref_scans_all_entries_against_original_base(self) -> None:
+        for batch, rejected, movement in (
+            (False, True, ""),
+            (True, True, ""),
+            (True, True, "advanced"),
+            (True, True, "landed"),
+            (True, False, ""),
+        ):
+            with (
+                self.subTest(batch=batch, rejected=rejected, movement=movement),
+                TemporaryDirectory() as directory,
+            ):
+                result, capture, base, head = self._exercise(
+                    Path(directory),
+                    batch=batch,
+                    rejected=rejected,
+                    target_movement=movement,
+                    reconstructed=True,
+                )
+                self._assert_pair(capture, base, head)
+                self.assertEqual(result.returncode == 0, not rejected, result.stderr)
+                self.assertEqual(
+                    bool(json.loads(result.stdout)["gate"]["rejected_findings"]), rejected
+                )
+
+    def test_non_train_events_retain_their_explicit_commit_pair(self) -> None:
+        for overrides in (
+            {"EVENT_NAME": "push", "EVENT_REF": "refs/heads/feature"},
+            {"EVENT_NAME": "pull_request"},
+            {"EVENT_NAME": "merge_group"},
+        ):
+            with self.subTest(overrides=overrides), TemporaryDirectory() as directory:
+                root = Path(directory)
+                result, capture, _, head = self._exercise(
+                    root, reconstructed=True, rejected=True, overrides=overrides
+                )
+                before = _git(root / "product-repo", "rev-parse", "previous-candidate")
+                self.assertNotEqual(before, head)
+                self.assertEqual(
+                    _git(root / "product-repo", "rev-parse", f"{before}^{{tree}}"),
+                    _git(root / "product-repo", "rev-parse", f"{head}^{{tree}}"),
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self._assert_pair(capture, before, head)
+                self.assertFalse(json.loads(result.stdout)["gate"]["rejected_findings"])
+
+    def test_reconstructed_train_ref_refuses_missing_comparison_history(self) -> None:
+        for movement in ("deleted", "unrelated", "fast_forward", "shallow"):
+            with self.subTest(movement=movement), TemporaryDirectory() as directory:
+                result, capture, _, _ = self._exercise(
+                    Path(directory), reconstructed=True, target_movement=movement
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(capture.exists())
+
+    def test_train_updates_refuse_unsupported_or_missing_target_metadata(self) -> None:
+        for overrides in (
+            {"DEFAULT_BRANCH": ""},
+            {"GITHUB_REPOSITORY": ""},
+            {"EVENT_REF": "refs/heads/launchplane/train/example/product/release/fixture-batch"},
+            {"EVENT_REF": "refs/heads/launchplane/train/ordinary/fixture"},
+        ):
+            with self.subTest(overrides=overrides), TemporaryDirectory() as directory:
+                result, capture, _, _ = self._exercise(
+                    Path(directory), reconstructed=True, rejected=True, overrides=overrides
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(capture.exists())
 
     def test_target_advancement_or_landing_does_not_hide_candidate_changes(self) -> None:
         for movement in ("advanced", "landed"):

@@ -8766,7 +8766,8 @@
               "authz_policy_admin_unreachable",
               "authz_policy_applying_admin_removed",
               "authz_policy_strict_human_admin_unreachable",
-              "authz_policy_administrator_quorum_unsatisfied"
+              "authz_policy_administrator_quorum_unsatisfied",
+              "authz_policy_delivery_activation_active"
             ],
             "title": "Code",
             "type": "string"
@@ -9832,6 +9833,14 @@
             "title": "Project Name",
             "type": "string"
           },
+          "public_hosts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Public Hosts",
+            "type": "array"
+          },
           "require_prod_gate": {
             "default": false,
             "title": "Require Prod Gate",
@@ -9906,6 +9915,7 @@
           "instance",
           "policies",
           "project_name",
+          "public_hosts",
           "require_prod_gate",
           "require_test_gate",
           "schema_version",
@@ -16683,7 +16693,8 @@
           "source": {
             "enum": [
               "literal",
-              "secret_binding"
+              "secret_binding",
+              "runtime_environment"
             ],
             "title": "Source",
             "type": "string"
@@ -22401,6 +22412,7 @@
                 "authz_policy_applying_admin_removed",
                 "authz_policy_strict_human_admin_unreachable",
                 "authz_policy_administrator_quorum_unsatisfied",
+                "authz_policy_delivery_activation_active",
                 "repository_not_exact",
                 "workflow_refs_not_singleton",
                 "workflow_ref_not_exact",
@@ -23114,6 +23126,17 @@
             "title": "Provider Key Adoption",
             "type": "array"
           },
+          "public_hosts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductConfigPublicHostsResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "reason": {
             "default": "",
             "title": "Reason",
@@ -23443,6 +23466,109 @@
           "key"
         ],
         "title": "ProductConfigProviderKeyAdoptionResult",
+        "type": "object"
+      },
+      "ProductConfigPublicHostsResult": {
+        "additionalProperties": false,
+        "properties": {
+          "added": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Added",
+            "type": "array"
+          },
+          "after": {
+            "items": {
+              "type": "string"
+            },
+            "title": "After",
+            "type": "array"
+          },
+          "before": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Before",
+            "type": "array"
+          },
+          "certificate_type": {
+            "const": "none",
+            "default": "none",
+            "title": "Certificate Type",
+            "type": "string"
+          },
+          "https": {
+            "const": true,
+            "default": true,
+            "title": "Https",
+            "type": "boolean"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "read_back_hosts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Read Back Hosts",
+            "type": "array"
+          },
+          "removed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Removed",
+            "type": "array"
+          },
+          "runtime_port": {
+            "maximum": 65535,
+            "minimum": 1,
+            "title": "Runtime Port",
+            "type": "integer"
+          },
+          "service_name": {
+            "const": "web",
+            "default": "web",
+            "title": "Service Name",
+            "type": "string"
+          },
+          "unchanged": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unchanged",
+            "type": "array"
+          },
+          "updated": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Updated",
+            "type": "array"
+          },
+          "verified": {
+            "title": "Verified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "added",
+          "after",
+          "before",
+          "certificate_type",
+          "https",
+          "plan_digest",
+          "read_back_hosts",
+          "removed",
+          "runtime_port",
+          "service_name",
+          "unchanged",
+          "updated",
+          "verified"
+        ],
+        "title": "ProductConfigPublicHostsResult",
         "type": "object"
       },
       "ProductConfigRuntimeEnvironmentRecordSummary": {
@@ -30801,6 +30927,12 @@
           "owner_test_notes": {
             "title": "Owner Test Notes",
             "type": "string"
+          },
+          "preview_era_notes": {
+            "default": false,
+            "title": "Preview Era Notes",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           },
           "pull_request_number": {
             "minimum": 1,

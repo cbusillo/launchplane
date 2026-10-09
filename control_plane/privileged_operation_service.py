@@ -8,6 +8,7 @@ from typing import Literal, Protocol, cast, get_args
 from pydantic import ValidationError
 
 from control_plane.contracts.privileged_operation import (
+    ManagedAuthzPolicySetExecutionEvidence,
     ManagedAuthzPolicySetHumanEvidence,
     ManagedAuthzPolicySetProposalInput,
     ManagedMergeTrainPolicyImportHumanEvidence,
@@ -471,6 +472,12 @@ def _build_privileged_operation_semantic_review(
             record,
             expiry_state=lifecycle.expiry_state,
         )
+        if (
+            isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
+            and record.execution.failure_code == "authz_policy_delivery_activation_active"
+            and "authz_policy_delivery_activation_active" not in authz_blocker_codes
+        ):
+            authz_blocker_codes += ("authz_policy_delivery_activation_active",)
         authz_policy_metrics: tuple[PrivilegedOperationSemanticReviewMetric, ...] = (
             PrivilegedOperationSemanticReviewMetric(
                 kind="policy_rules_added", label="Added", value=diff.added_rule_count

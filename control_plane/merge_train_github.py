@@ -52,6 +52,7 @@ from control_plane.github_payload import required_string_text
 from control_plane.github_response_headers import GitHubResponseHeadersObserver
 from control_plane.github_response_headers import notify_github_quota_response_headers
 from control_plane.github_request_timing import timed_github_request
+from control_plane.merge_train_codeowners import individual_landing_snapshots
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
 from control_plane.source_control_change import change_fingerprint
@@ -1694,6 +1695,36 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     ) -> None:
         repository_path = _repository_path(repository)
         normalized_label = _required_value(label, "GitHub label is required.")
+        label_path = f"/repos/{repository_path}/labels/{quote(normalized_label, safe='')}"
+        try:
+            self.transport.request(
+                method="POST",
+                path=f"/repos/{repository_path}/issues/{pull_request_number}/labels",
+                body={"labels": [normalized_label]},
+            )
+            return
+        except MergeTrainGitHubError as error:
+            if error.status_code != 422:
+                raise
+            # A validation refusal can mean the policy's label has not been created.
+            try:
+                self.transport.request(method="GET", path=label_path)
+            except MergeTrainGitHubError as lookup_error:
+                if lookup_error.status_code != 404:
+                    raise
+            else:
+                raise error
+        try:
+            self.transport.request(
+                method="POST",
+                path=f"/repos/{repository_path}/labels",
+                body={"name": normalized_label, "color": "b60205"},
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code != 422:
+                raise
+            # Another controller may have created the label on a different base lane.
+            self.transport.request(method="GET", path=label_path)
         self.transport.request(
             method="POST",
             path=f"/repos/{repository_path}/issues/{pull_request_number}/labels",
@@ -2226,6 +2257,12 @@ class GitHubMergeTrainSnapshotReader:
                 )
                 for pull_request in relevant_pull_requests
             ),
+        )
+        pull_requests = individual_landing_snapshots(
+            transport=self.transport,
+            repository_path=repository_path,
+            base_sha=base_sha,
+            pull_requests=pull_requests,
         )
         return MergeTrainDryRunSnapshot(
             repository=repository,
@@ -3884,6 +3921,8 @@ def _github_request_route_template(path: str) -> str:
         "/repos/{owner}/{repo}/pulls/{number}/commits",
         "/repos/{owner}/{repo}/issues/{number}/comments",
         "/repos/{owner}/{repo}/issues/{number}/labels",
+        "/repos/{owner}/{repo}/labels",
+        "/repos/{owner}/{repo}/labels/{label}",
         "/repos/{owner}/{repo}/issues/{number}/timeline",
         "/repos/{owner}/{repo}/issues/{number}/events",
         "/repos/{owner}/{repo}/branches/{branch}",

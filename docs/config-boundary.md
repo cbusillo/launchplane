@@ -135,7 +135,7 @@ previews and releases is separate and grants no merge authority; see
 | Preview routing/config                     | `LAUNCHPLANE_PREVIEW_BASE_URL`                                                             | Launchplane runtime-environment records                                                                       | Shared control-plane-owned runtime value.                                                                                                                                                                                                                            |
 | GitHub workflow runtime integration values | `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`                                                    | Launchplane runtime-environment records and managed secrets                                                   | Current docs already classify these as DB-backed target state.                                                                                                                                                                                                       |
 | Product/tenant runtime env                 | Odoo runtime values, tenant-specific env keys                                              | Launchplane runtime-environment records and managed secrets                                                   | Includes shared and per-instance overlays.                                                                                                                                                                                                                           |
-| Odoo application override intent           | Former `ENV_OVERRIDE_CONFIG_PARAM__*`, Authentik, and Shopify override shapes              | Launchplane Odoo instance override records plus managed secret bindings                                       | `ENV_OVERRIDE_*` names are migration inputs to retire, not the durable contract.                                                                                                                                                                                     |
+| Odoo application override intent           | Runtime-backed import references; legacy Authentik and Shopify override shapes              | Launchplane Odoo instance override records plus managed secret bindings                                       | Supported non-secret import parameters resolve references to lane runtime records; see [import reconciliation](operations.md#odoo-instance-override-contracts). Other legacy override shapes remain migration inputs.                                                                                                                                                                                     |
 | Worker/runtime-action config               | Product-specific worker commands, host/user metadata, operation knobs, and secret bindings | Launchplane runtime-environment records and managed secrets                                                   | Delegated-worker dispatch strips inherited process values and injects the DB-resolved runtime contract into the worker environment.                                                                                                                                  |
 | Dokploy target-id overrides                | DB records                                                                                 | Launchplane target-id records                                                                                 | File catalogs are not a supported authority.                                                                                                                                                                                                                         |
 | Stable target definitions                  | Launchplane DB-backed target records                                                       | Launchplane DB-backed target records                                                                          | Repo catalogs should be examples only, not seed or authority material.                                                                                                                                                                                               |
@@ -298,16 +298,22 @@ supplied snapshots exactly, rather than calculating a merge base: a PR behind
 its base can report authority absent from the newer base but present in its head.
 The reusable gate maps PR, merge-group and ordinary push events to their explicit
 commit pairs and fetches a missing named commit from the checked-out repository.
-A newly created default-branch train ref has a zero before SHA. For that event,
-the gate fetches the repository's event-supplied default branch and selects the
-first shared commit in the candidate and target branch's first-parent histories.
+A default-branch train ref uses its original candidate base on both creation
+(zero before SHA) and update. The gate fetches the repository's event-supplied
+default branch and selects the first shared commit in the candidate and target
+branch's first-parent histories.
 This recovers the train's original base across all batch entries, including when
 the target advances or merges the candidate while the job is queued. The
 comparison covers every batch entry and stays bound to committed snapshots.
+Comparing a reconstructed candidate to the previous candidate would hide
+rejected authority when their trees are identical; train updates therefore
+recover the base independently of the push's before SHA.
 Missing history, no shared base, a same-head base, other zero-SHA comparisons,
-and unmapped events fail closed. Branch/tag creation outside that default-branch
-train path uses pull_request or merge_group verification, or the CLI with an
-explicit pair/full-audit. Changed symlink paths
+and unmapped events fail closed. Train branch pushes with missing target
+metadata or an unsupported ref also refuse, rather than falling back to an
+ordinary push comparison. Unsupported train refs and branch/tag creation outside
+that default-branch train path use pull_request or merge_group verification,
+or the CLI with an explicit pair/full-audit. Changed symlink paths
 resolve only within the committed tree and are classified under the link path;
 links outside that tree or through submodules fail closed. Link hops are bounded,
 and a broken base-side link supplies no preexisting finding exemption, so a PR

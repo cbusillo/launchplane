@@ -514,6 +514,18 @@ def ordinary_agent_delivery_administration_github_id(
     )
 
 
+def ordinary_agent_delivery_administration_removed(
+    current_policy: LaunchplaneAuthzPolicy,
+    candidate_policy: LaunchplaneAuthzPolicy,
+) -> bool:
+    github_id = ordinary_agent_delivery_administration_github_id(current_policy)
+    return (
+        github_id > 0
+        and ordinary_agent_delivery_administration_state(candidate_policy, github_id=github_id)
+        != "active"
+    )
+
+
 def _has_explicit_action_overlap(policy: LaunchplaneAuthzPolicy) -> bool:
     actions = set(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS)
     return any(

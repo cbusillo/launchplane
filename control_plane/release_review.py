@@ -15,6 +15,7 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.release_review import (
     ReleaseChecklist,
     ReleaseEvidenceReason,
@@ -27,6 +28,7 @@ from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.release_review_github import (
     GitHubRead,
     pull_requests_missing_owner_test_notes,
+    recorded_preview_hosts,
     read_release_changes,
 )
 from control_plane.release_review_shared import read_shared_source_changes, repository_key
@@ -34,6 +36,15 @@ from control_plane.workflows.launchplane import github_api_request, resolve_laun
 
 
 class ReleaseReviewStore(Protocol):
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewRecord, ...]: ...
+
     def release_review_publication_lock(
         self, *, record_id: str
     ) -> AbstractContextManager[None]: ...
@@ -65,6 +76,10 @@ class ReleaseReviewStore(Protocol):
     def list_release_review_decision_records(
         self, *, product: str, limit: int | None = None
     ) -> tuple[ReleaseReviewDecisionRecord, ...]: ...
+
+    def read_release_review_decision_record(
+        self, *, product: str, record_id: str
+    ) -> ReleaseReviewDecisionRecord: ...
 
 
 RELEASE_RECORD_PENDING = (
@@ -184,11 +199,24 @@ def build_release_review(
     shared_sources: tuple[SharedSourceReview, ...] = ()
     additional_changes: tuple[str, ...] = ()
     try:
+        # Preview drivers write bare repository anchors; readers accept both
+        # bare and owner/repo. Keep both within the product's preview context.
+        preview_hosts = recorded_preview_hosts(
+            (
+                record
+                for anchor in (profile.repository, profile.repository.rsplit("/", 1)[-1])
+                for record in store.list_preview_records(
+                    context_name=profile.preview.context, anchor_repo=anchor
+                )
+            ),
+            repository=profile.repository,
+        )
         items, untracked = read_release_changes(
             repository=profile.repository,
             production_commit=production.source_commit,
             candidate_commit=candidate.source_commit,
             read=read,
+            preview_hosts=preview_hosts,
         )
         if production.shared_addons_digest != candidate.shared_addons_digest:
             shared_sources, additional_changes = read_shared_source_changes(
@@ -196,6 +224,7 @@ def build_release_review(
                 candidate=store.read_artifact_manifest(candidate.artifact_id),
                 repository=profile.repository,
                 read=read,
+                preview_hosts=preview_hosts,
             )
     except ReleaseEvidenceUnavailable:
         raise

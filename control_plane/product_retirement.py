@@ -24,6 +24,7 @@ from control_plane.contracts.product_retirement import (
     build_product_retirement_record_id,
     canonical_sha256,
     provider_identifier_sha256,
+    product_retirement_secret_authority,
 )
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
@@ -110,7 +111,9 @@ class ProductRetirementStore(Protocol):
         limit: int | None = None,
     ) -> tuple[SecretBinding, ...]: ...
 
-    def write_secret_record(self, record: SecretRecord) -> object: ...
+    def disable_product_retirement_secret(
+        self, *, expected_record: SecretRecord, updated_at: str, updated_by: str
+    ) -> bool: ...
 
     def write_secret_binding(self, binding: SecretBinding) -> object: ...
 
@@ -1075,15 +1078,14 @@ class DokployProductRetirementAdapter:
     def _disable_managed_secrets(self, records: tuple[SecretRecord, ...]) -> None:
         for record in records:
             if record.status != "disabled":
-                self._record_store.write_secret_record(
-                    record.model_copy(
-                        update={
-                            "status": "disabled",
-                            "updated_at": self._requested_at,
-                            "updated_by": self._identity.actor,
-                        }
+                if not self._record_store.disable_product_retirement_secret(
+                    expected_record=record,
+                    updated_at=self._requested_at,
+                    updated_by=self._identity.actor,
+                ):
+                    raise ProductRetirementBlockedError(
+                        "Managed secret authority changed while retiring."
                     )
-                )
             for binding in self._record_store.list_secret_bindings(
                 integration=record.integration,
                 context_name=record.context,
@@ -1381,12 +1383,7 @@ def _secret_snapshot(
     pairs = sorted(
         (
             provider_identifier_sha256(record.secret_id),
-            canonical_sha256(
-                record.model_dump(
-                    mode="json",
-                    exclude={"status", "updated_at", "updated_by"},
-                )
-            ),
+            canonical_sha256(product_retirement_secret_authority(record)),
         )
         for record in records
     )

@@ -139,6 +139,14 @@ route, execute action, static execution credential, or agent execution path.
   Validation accepts only those exact canonical digest projections. New records
   continue to write the current request and evidence digests, and every other
   mismatch fails closed.
+  Removing retired delivery administration is blocked while any unrevoked,
+  unsuperseded delivery activation is unexpired. Planning and semantic review
+  report `authz_policy_delivery_activation_active` before approval. The locked
+  policy write rechecks the same prerequisite against the database clock and
+  reports that specific pre-effect failure if an activation appeared after
+  planning. Expired history does not block retirement and is preserved. Policy
+  CAS, schema evidence, administrator retention, quorum and retry checks still
+  apply; retirement does not prove client credential or connection revocation.
 - `managed-merge-train-policy-import` version 1 accepts one complete schema-
   valid candidate merge-train policy record, a reason, and optional related
   issue. Its planner reads exactly one active merge-train policy record and
