@@ -12,6 +12,7 @@ returned.
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import re
 from typing import Literal, Protocol, cast
 
 import click
@@ -236,12 +237,45 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
             _testing_failure_fix(code),
             (failed,),
         )
+    if _completed_testing_noop(plan):
+        return _step(
+            step_id,
+            "clear",
+            "already_deployed",
+            "The completed reconcile records matching current and desired testing build provenance.",
+            record_ids=(str(plan["current_artifact_id"]),),
+        )
     return _step(
         step_id,
         "unknown",
         safe_operation_error_code(str(plan.get("reason") or "")) or "no_deploy_outcome",
         "The last reconcile plan recorded no deploy outcome.",
         "wait",
+    )
+
+
+def _completed_testing_noop(plan: dict[str, object]) -> bool:
+    if (
+        plan.get("reconcile_state") != "done"
+        or plan.get("action") != "none"
+        or plan.get("reason") != "already_deployed"
+        or plan.get("held") is not False
+    ):
+        return False
+    artifact = plan.get("current_artifact_id")
+    commit = plan.get("current_commit")
+    digest = plan.get("current_image_digest")
+    return (
+        isinstance(artifact, str)
+        and bool(artifact.strip())
+        and artifact != "[redacted]"
+        and artifact == plan.get("desired_artifact_id")
+        and isinstance(commit, str)
+        and re.fullmatch(r"[0-9a-f]{40}", commit) is not None
+        and commit == plan.get("desired_commit")
+        and isinstance(digest, str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is not None
+        and digest == plan.get("desired_image_digest")
     )
 
 
@@ -530,7 +564,10 @@ def _testing_reconcile_plan(
     testing = next((record for record in requests if record.target_kind == "testing"), None)
     if testing is None:
         return None
-    return dict(product_reconcile_request_view(testing).last_plan)
+    return {
+        **product_reconcile_request_view(testing).last_plan,
+        "reconcile_state": testing.state,
+    }
 
 
 def _latest_promotion(
