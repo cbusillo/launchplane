@@ -78,7 +78,7 @@ from control_plane.contracts.authz_denial_record import AuthzDenialRecord
 from control_plane.authz_candidate_preparation import (
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
-    ordinary_agent_delivery_administration_github_id,
+    ordinary_agent_delivery_administration_removed,
     ordinary_agent_delivery_administration_state,
 )
 from control_plane.contracts.authz_policy_record import (
@@ -446,7 +446,10 @@ from control_plane.contracts.production_backup_authority import (
     ProductionBackupPolicyRecord,
     ProductionBackupTargetRecord,
 )
-from control_plane.contracts.product_retirement import ProductRetirementRecord
+from control_plane.contracts.product_retirement import (
+    ProductRetirementRecord,
+    product_retirement_secret_authority,
+)
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.product_reconcile import (
     PRODUCT_RECONCILE_REQUEST_STATES,
@@ -6132,6 +6135,76 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
+        self._write_product_authority_bundle(bundle)
+
+    def write_product_public_hosts_bundle(
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        expected_target: DokployTargetRecord,
+        expected_target_id: DokployTargetIdRecord,
+        expected_provider_target: ProviderTargetRecord,
+        apply_provider: Callable[[], None],
+    ) -> None:
+        """Check ownership/binding before effects; commit only after provider read-back."""
+
+        def guard(session: Any) -> None:
+            requested_hosts = set(bundle.dokploy_targets[0].public_hosts)
+            for row in session.scalars(select(LaunchplaneDokployTargetRow)).all():
+                if (row.context, row.instance) != (
+                    expected_target.context,
+                    expected_target.instance,
+                ):
+                    other = DokployTargetRecord.model_validate(row.payload)
+                    if requested_hosts.intersection((*other.domains, *other.public_hosts)):
+                        raise DokployTargetRecordChanged(
+                            "A public host is already owned by another target."
+                        )
+            for orm_type, model_type, expected in (
+                (LaunchplaneDokployTargetRow, DokployTargetRecord, expected_target),
+                (LaunchplaneDokployTargetIdRow, DokployTargetIdRecord, expected_target_id),
+                (LaunchplaneProviderTargetRow, ProviderTargetRecord, expected_provider_target),
+            ):
+                row = session.scalar(
+                    select(orm_type)
+                    .where(
+                        orm_type.context == expected_target.context,
+                        orm_type.instance == expected_target.instance,
+                    )
+                    .with_for_update()
+                )
+                if row is None or model_type.model_validate(row.payload) != expected:
+                    raise DokployTargetRecordChanged("Public-host target binding changed.")
+            for row in session.scalars(select(LaunchplaneDokployTargetIdRow)).all():
+                if row.target_id == expected_target_id.target_id and (
+                    row.context,
+                    row.instance,
+                ) != (expected_target.context, expected_target.instance):
+                    raise DokployTargetRecordChanged(
+                        "Public-host target is shared with another lane."
+                    )
+            for row in session.scalars(select(LaunchplaneProviderTargetRow)).all():
+                if (
+                    row.provider_id == "dokploy"
+                    and row.target_id == expected_target_id.target_id
+                    and (row.context, row.instance)
+                    != (expected_target.context, expected_target.instance)
+                ):
+                    raise DokployTargetRecordChanged(
+                        "Public-host target is shared with another lane."
+                    )
+
+        self._write_product_authority_bundle(
+            bundle, guard_provider=guard, apply_provider=apply_provider
+        )
+
+    def _write_product_authority_bundle(
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        guard_provider: Callable[[Any], None] | None = None,
+        apply_provider: Callable[[], None] | None = None,
+    ) -> None:
         if not bundle.requires_write():
             return
         with self._session_factory() as session:
@@ -6169,6 +6242,8 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ProductProfileConflictError(
                         "Product profile changed during bundle write."
                     )
+            if guard_provider is not None:
+                guard_provider(session)
             for expected_source in bundle.secret_copy_sources:
                 source_row = session.scalar(
                     select(LaunchplaneSecretRow)
@@ -6394,6 +6469,11 @@ class PostgresRecordStore(HumanSessionStore):
                     self._idempotency_row(bundle.idempotency_record),
                     step_name="write_idempotency",
                 )
+            # All database preconditions (including runtime/secret writes) have
+            # passed. Provider failure rolls the whole bundle and success receipt back.
+            if apply_provider is not None:
+                session.flush()
+                apply_provider()
             session.commit()
 
     def _write_runtime_environment_with_expectation(
@@ -20380,7 +20460,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def list_product_reconcile_requests(
-        self, *, state: str = "", product: str = "", limit: int = 100
+        self, *, state: str = "", product: str = "", limit: int | None = 100
     ) -> tuple[ProductReconcileRequestRecord, ...]:
         filters: list[object] = []
         if product:
@@ -34914,41 +34994,20 @@ class PostgresRecordStore(HumanSessionStore):
             confirmation_consumption=confirmation_consumption,
         )
 
-        administration_github_id = ordinary_agent_delivery_administration_github_id(
-            current_record.policy
-        )
         removes_delivery_administration = (
-            administration_github_id > 0
-            and replacement_record is not None
-            and ordinary_agent_delivery_administration_state(
-                replacement_record.policy,
-                github_id=administration_github_id,
+            replacement_record is not None
+            and ordinary_agent_delivery_administration_removed(
+                current_record.policy, replacement_record.policy
             )
-            != "active"
         )
-        if removes_delivery_administration:
-            activation_statement = (
-                select(LaunchplaneOrdinaryAgentDeliveryActivationRow)
-                .where(
-                    LaunchplaneOrdinaryAgentDeliveryActivationRow.revoked_at.is_(None),
-                    LaunchplaneOrdinaryAgentDeliveryActivationRow.superseded_at.is_(None),
-                )
-                .limit(1)
+        if removes_delivery_administration and self._has_unexpired_delivery_activation(session):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return AuthzPolicyCompareWriteResult(
+                status="authz_policy_delivery_activation_active",
+                current_record=current_record,
             )
-            if not self.database_url.startswith("sqlite"):
-                activation_statement = activation_statement.with_for_update()
-            activation_row = session.scalar(activation_statement)
-            if activation_row is not None:
-                activation = self._ordinary_agent_delivery_activation_from_row(activation_row)
-                if activation.revoked_at or activation.superseded_by_activation_id:
-                    raise ValueError("Current activation projection is inconsistent.")
-                if reservation_row is not None:
-                    session.delete(reservation_row)
-                    session.commit()
-                return AuthzPolicyCompareWriteResult(
-                    status="reconciliation_required",
-                    current_record=current_record,
-                )
 
         if confirmation_consumption is not None:
             if replacement_record is None:
@@ -35039,6 +35098,28 @@ class PostgresRecordStore(HumanSessionStore):
             current_record=result_record,
             idempotency_record=stored_completion,
         )
+
+    def _has_unexpired_delivery_activation(self, session: Any, *, lock_rows: bool = True) -> bool:
+        statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
+            LaunchplaneOrdinaryAgentDeliveryActivationRow.revoked_at.is_(None),
+            LaunchplaneOrdinaryAgentDeliveryActivationRow.superseded_at.is_(None),
+        )
+        if lock_rows and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        rows = tuple(session.scalars(statement).all())
+        observed_at = datetime.fromisoformat(self._database_mutation_timestamp(session))
+        for row in rows:
+            activation = self._ordinary_agent_delivery_activation_from_row(row)
+            if activation.revoked_at or activation.superseded_by_activation_id:
+                raise ValueError("Current activation projection is inconsistent.")
+            if observed_at < datetime.fromisoformat(activation.activation_expires_at):
+                return True
+        return False
+
+    def has_unexpired_delivery_activation(self) -> bool:
+        """Read the retirement prerequisite using the same DB clock as the locked write."""
+        with self._session_factory() as session:
+            return self._has_unexpired_delivery_activation(session, lock_rows=False)
 
     def list_authz_policy_records(
         self,
@@ -37717,6 +37798,38 @@ class PostgresRecordStore(HumanSessionStore):
     def write_secret_record(self, record: SecretRecord) -> None:
         # Existing records are row-guarded; concurrent direct creates arbitrate by uniqueness.
         self._write_row(self._secret_row(record))
+
+    def disable_product_retirement_secret(
+        self, *, expected_record: SecretRecord, updated_at: str, updated_by: str
+    ) -> bool:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                select(LaunchplaneSecretRow)
+                .where(LaunchplaneSecretRow.secret_id == expected_record.secret_id)
+                .with_for_update()
+            )
+            if row is None:
+                return False
+            current = SecretRecord.model_validate(row.payload)
+            if product_retirement_secret_authority(current) != product_retirement_secret_authority(
+                expected_record
+            ):
+                return False
+            if current.status != "disabled":
+                session.merge(
+                    self._secret_row(
+                        current.model_copy(
+                            update={
+                                "status": "disabled",
+                                "updated_at": updated_at,
+                                "updated_by": updated_by,
+                            }
+                        )
+                    )
+                )
+                session.commit()
+            return True
 
     def _write_bundled_metadata_row(self, row: Base) -> None:
         with self._session_factory() as session:

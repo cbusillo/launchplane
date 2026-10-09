@@ -37,6 +37,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentReminderStateRecord,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS,
     build_public_ingress_incident_event_id,
     build_public_ingress_material_fingerprint,
     public_ingress_material_fingerprint_sha256,
@@ -1457,6 +1458,13 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             record_store=store, product=profile.product, action_allowed=lambda *_: False
         )
         prod = next(lane for lane in overview.environments if lane.environment == "prod")
+        self.assertEqual(detail.target.expected_runtime_identity, identity)
+        self.assertEqual(detail.target.observed_runtime_identity, identity)
+        self.assertEqual(detail.target.runtime_identity_status, "match")
+        self.assertEqual(
+            detail.target.runtime_identity_detail,
+            detail.topology.observed.placement.runtime_identity_detail,
+        )
         for projected in (detail, prod):
             self.assertEqual(projected.provenance.freshness_status, "verified")
             self.assertEqual(projected.provenance.refreshed_at, observation.observed_at)
@@ -1464,6 +1472,45 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             self.assertEqual(projected.topology.observed.placement.trust_state, "verified")
         assert store.summary.inventory is not None
         self.assertEqual(store.summary.inventory.updated_at, recorded_at)
+        wrong_identity = identity.model_copy(update={"artifact_id": "wrong-artifact"})
+        mismatch = observation.model_copy(
+            update={
+                "status": "fail",
+                "targets": (
+                    observation.targets[0].model_copy(
+                        update={
+                            "status": "fail",
+                            "runtime_identity_status": "mismatch",
+                            "observed_runtime_identity": wrong_identity,
+                            "runtime_identity_detail": "Artifact does not match.",
+                        }
+                    ),
+                ),
+            }
+        )
+        stale = observation.model_copy(
+            update={
+                "observed_at": (
+                    checked - timedelta(seconds=PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS + 1)
+                ).isoformat()
+            }
+        )
+        for probe, status, observed in (
+            (mismatch, "mismatch", wrong_identity),
+            (stale, "match", identity),
+        ):
+            with self.subTest(probe_status=status, observed_at=probe.observed_at):
+                store._observations = (probe,)
+                projected = build_product_environment_detail(
+                    record_store=store,
+                    product=profile.product,
+                    environment="prod",
+                    action_allowed=lambda *_: False,
+                )
+                self.assertEqual(projected.target.runtime_identity_status, status)
+                self.assertEqual(projected.target.observed_runtime_identity, observed)
+                self.assertNotEqual(projected.provenance.freshness_status, "verified")
+                self.assertNotEqual(projected.trust_state, "verified")
         store._observations = ()
         store.summary = summary.model_copy(
             update={
@@ -1492,6 +1539,8 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertNotEqual(detail.provenance.freshness_status, "verified")
         self.assertEqual(detail.provenance.source_record_id, identity.deployment_record_id)
         self.assertEqual(detail.topology.observed.placement.runtime_identity_status, "mismatch")
+        self.assertEqual(detail.target.runtime_identity_status, "mismatch")
+        self.assertEqual(detail.target.observed_runtime_identity, wrong_identity)
 
     def test_private_monitoring_read_model_ignores_reconciliation_as_probe_evidence(
         self,

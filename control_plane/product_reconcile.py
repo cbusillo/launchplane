@@ -20,7 +20,7 @@ from control_plane.lane_movement import (
     require_forward_build,
 )
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -213,6 +213,7 @@ GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS = 300
 TESTING_BUILD_RUN_PAGE_SIZE = 50
 TESTING_VERIFY_LIMIT = 3
 _ENDED_PREVIEW_STATES = frozenset({"destroyed", "teardown_pending"})
+PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS = 3
 OPEN_PULL_REQUEST_SWEEP_PAGES = 5
 _LEASE_LOST = "This worker no longer holds the reconcile request's lease; nothing more was changed."
 _LOGGER = logging.getLogger(__name__)
@@ -227,6 +228,10 @@ class ProductReconcileError(Exception):
 
 
 class ProductReconcileStore(Protocol):
+    def list_product_reconcile_requests(
+        self, *, state: str = "", product: str = "", limit: int | None = 100
+    ) -> tuple[ProductReconcileRequestRecord, ...]: ...
+
     def read_idempotency_record(
         self, *, scope: str, route_path: str, idempotency_key: str
     ) -> LaunchplaneIdempotencyRecord | None: ...
@@ -658,6 +663,7 @@ def _deploy_generic_web_testing(
         product=profile.product,
         image_reference=desired.image_reference,
         source_commit=desired.manifest.source_commit,
+        deploy_reference=f"{desired.manifest.image.repository}:sha-{desired.manifest.source_commit}",
     )
     # The deployment testing ran when this deploy was decided is part of its key:
     # every deploy and rollback records a new one, so a lane changed since gets the
@@ -1190,6 +1196,7 @@ def _plan_testing_target(
         lane=lane,
         current_commit=current_commit,
         current_run_id=current_run_id,
+        current_image_digest=current_digest,
         selection=selection,
     )
     plan: dict[str, object] = {
@@ -2030,6 +2037,33 @@ def run_product_reconcile_once(
     )
     if feedback is not None:
         plan[PR_FEEDBACK_PLAN_KEY] = feedback
+    if request.target_kind == "preview" and _needs_absent_preview_feedback_recovery(plan):
+        # Only unresolved reads or terminal clear delivery consume this budget. Open
+        # PRs waiting for builds retain their ordinary event/sweep coverage.
+        if outcome.error or plan.get("reason") == "pull_request_not_open":
+            closed = not outcome.error and plan.get("reason") == "pull_request_not_open"
+            previously_closed = request.last_plan.get("feedback_recovery_closed_observed") is True
+            attempts = _feedback_recovery_failed_attempts(request.last_plan)
+            new_delivery = bool(request.last_delivery_id) and request.last_delivery_id != (
+                request.last_plan.get("feedback_recovery_delivery_id")
+            )
+            if new_delivery or (closed and not previously_closed):
+                # Reads failing while open must not spend the later close's cleanup
+                # budget. Once closed is observed, read failures keep that same budget.
+                attempts = 0
+            plan["feedback_recovery_delivery_id"] = request.last_delivery_id
+            if closed or previously_closed:
+                plan["feedback_recovery_closed_observed"] = True
+            plan["feedback_recovery_failed_attempts"] = attempts + 1
+            if (
+                _feedback_recovery_failed_attempts(plan)
+                >= PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS
+            ):
+                plan["feedback_recovery_stop_reason"] = (
+                    "Supplemental preview feedback recovery exhausted; open-PR sweeps and new "
+                    "events remain eligible. A closed target requires supported reconciliation "
+                    "or remediation; the failed read or delivery remains unresolved."
+                )
     if outcome.deferred:
         # Folding a request into our running one returns it to pending on completion.
         record_store.request_product_reconcile(
@@ -2167,9 +2201,10 @@ def request_product_reconcile_sweep(
                     product=profile.product, target_kind="preview", pull_request_number=number
                 )
             )
-        for preview in record_store.list_preview_records(
+        previews = record_store.list_preview_records(
             context_name=preview_context, anchor_repo=_preview_anchor_repo(profile)
-        ):
+        )
+        for preview in previews:
             if preview.state not in _ENDED_PREVIEW_STATES:
                 targets.append(
                     ProductReconcileTarget(
@@ -2178,10 +2213,54 @@ def request_product_reconcile_sweep(
                         pull_request_number=preview.anchor_pr_number,
                     )
                 )
+        preview_numbers = {
+            preview.anchor_pr_number
+            for preview in previews
+            if preview.state not in _ENDED_PREVIEW_STATES
+        }
+        if profile.preview.enabled:
+            try:
+                requests = record_store.list_product_reconcile_requests(
+                    product=profile.product, limit=None
+                )
+            except (OSError, ValueError, SQLAlchemyError) as error:
+                _LOGGER.warning(
+                    "Sweep could not read %s's preview feedback history: %s", profile.product, error
+                )
+                continue
+            for request in requests:
+                if (
+                    request.target_kind == "preview"
+                    and request.state in {"done", "failed"}
+                    and request.pull_request_number not in preview_numbers
+                    and _needs_absent_preview_feedback_recovery(request.last_plan)
+                    and _feedback_recovery_failed_attempts(request.last_plan)
+                    < PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS
+                ):
+                    targets.append(
+                        ProductReconcileTarget(
+                            product=profile.product,
+                            target_kind="preview",
+                            pull_request_number=request.pull_request_number,
+                        )
+                    )
     unique_targets = {target.target_key: target for target in targets}
     for target in unique_targets.values():
         record_store.request_product_reconcile(target, now)
     return tuple(unique_targets)
+
+
+def _feedback_recovery_failed_attempts(plan: Mapping[str, object]) -> int:
+    count = plan.get("feedback_recovery_failed_attempts", 0)
+    return max(0, count) if isinstance(count, int) and not isinstance(count, bool) else 0
+
+
+def _needs_absent_preview_feedback_recovery(plan: Mapping[str, object]) -> bool:
+    feedback = plan.get(PR_FEEDBACK_PLAN_KEY)
+    return isinstance(feedback, dict) and (
+        feedback.get("status") == "pending"
+        or (feedback.get("status") == "cleared" and feedback.get("delivery_status") != "delivered")
+    )
 
 
 def _open_pull_requests(
@@ -2235,6 +2314,7 @@ def _desired_release(
     lane: ProductLaneProfile,
     current_commit: str = "",
     current_run_id: int = 0,
+    current_image_digest: str = "",
     selection: dict[str, object] | None = None,
 ) -> tuple[VerifiedBuildArtifact | VerifiedGenericWebBuild | None, list[dict[str, str]], str]:
     default_branch = profile.default_branch
@@ -2304,6 +2384,7 @@ def _desired_release(
         and run.get("conclusion") == "success"
         and run.get("head_sha")
     }
+    generic_web = reconciles_as_generic_web(profile)
     if current_commit and (
         current_commit not in built_commits
         or (
@@ -2311,7 +2392,22 @@ def _desired_release(
             and not any(isinstance(run, dict) and run.get("id") == current_run_id for run in runs)
         )
     ):
-        return None, [], "incomplete_build_runs"
+        # Before product-owned Build adoption, a recorded generic-web deployment
+        # has a source/digest but no contract Build. Only a complete run inventory
+        # may substitute that identity; missing recorded runs still refuse.
+        total = payload.get("total_count")
+        run_ids = {
+            run["id"] for run in runs if isinstance(run, dict) and type(run.get("id")) is int
+        }
+        if not (
+            generic_web
+            and not current_run_id
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", current_image_digest)
+            and type(total) is int
+            and total == len(runs) == len(run_ids)
+        ):
+            return None, [], "incomplete_build_runs"
+        audit["current_build_evidence"] = "recorded_runtime_identity"
     ordered: list[str] = []
     history_seen = 0
     current_seen = not current_commit
@@ -2326,8 +2422,8 @@ def _desired_release(
             current_seen = current_seen or sha == current_commit
             if sha in built_commits:
                 ordered.append(sha)
-                if len(ordered) == len(built_commits):
-                    break
+            if current_seen and len(ordered) == len(built_commits):
+                break
     audit.update(
         commit_history_seen=history_seen,
         current_commit_seen=current_seen,
@@ -2337,7 +2433,6 @@ def _desired_release(
     if not current_seen:
         return None, [], "incomplete_commit_history"
     rejected: list[dict[str, str]] = []
-    generic_web = reconciles_as_generic_web(profile)
     for commit in ordered[:TESTING_VERIFY_LIMIT]:
         try:
             verified: VerifiedBuildArtifact | VerifiedGenericWebBuild = (
@@ -2390,8 +2485,10 @@ def _current_testing_release(
     identity = inventory.runtime_identity
     if identity is None:
         return "", ""
-    digest = _image_reference_digest(identity.image_reference) or _artifact_digest(
-        record_store, identity.artifact_id
+    digest = (
+        _image_reference_digest(identity.image_reference)
+        or _image_reference_digest(identity.artifact_id)
+        or _artifact_digest(record_store, identity.artifact_id)
     )
     return identity.artifact_id, digest.lower()
 

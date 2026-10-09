@@ -43,6 +43,10 @@ class ProductOnboardingRecordStore(ProductAuthorityBundleStore, Protocol):
 
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None: ...
 
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
+
     def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None: ...
 
     def write_provider_target_record(self, record: ProviderTargetRecord) -> None: ...
@@ -430,6 +434,19 @@ def plan_product_onboarding_authority_bundle(
         existing_profile=existing_product_profile,
     )
     provider_targets = build_provider_target_records(manifest=manifest, updated_at=recorded_at)
+    preserved_targets: list[DokployTargetRecord] = []
+    for target in provider_targets:
+        try:
+            current_target = record_store.read_dokploy_target_record(
+                context_name=target.context, instance_name=target.instance
+            )
+        except (FileNotFoundError, KeyError):
+            preserved_targets.append(target)
+        else:
+            preserved_targets.append(
+                target.model_copy(update={"public_hosts": current_target.public_hosts})
+            )
+    provider_targets = tuple(preserved_targets)
     provider_target_ids = build_provider_target_id_records(
         manifest=manifest, updated_at=recorded_at
     )

@@ -942,6 +942,12 @@ def _owner_acceptance_system_event(
 
 
 class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_approved_rotation_survives_stale_retirement(self) -> None:
+        from tests.test_retirement_approved_rotation import RetirementApprovedRotationTests
+
+        with _head_postgres_database() as url:
+            await RetirementApprovedRotationTests().assert_approved_rotation_survives(url)
+
     async def test_checkpoint_insert_race_recovers_through_http(self) -> None:
         for profile_failure, secret_drift in ((True, False), (False, False), (False, True)):
             with (
@@ -3349,6 +3355,42 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_expired_delivery_history_allows_approved_native_retirement(self) -> None:
+        from tests.test_delivery_administration_retirement import (
+            _approve,
+            _history,
+            _observed_at,
+            _plan,
+            _seed_policy,
+        )
+
+        with _head_postgres_database() as url:
+            store = PostgresRecordStore(database_url=url)
+            try:
+                policy = _seed_policy(store)
+                _history(store, expires_at=_observed_at(store) - timedelta(days=1))
+                history = store.list_ordinary_agent_delivery_activation_records()
+                events = store.list_ordinary_agent_delivery_activation_event_records()
+                plan = _plan(store)
+                _approve(store, plan, policy)
+                execute_approved_privileged_operations_once(record_store=store)
+                completed = store.read_privileged_operation_record(plan.operation_id)
+                self.assertEqual(completed.status, "executed")
+                current = store.list_authz_policy_records(status="active")[0]
+                self.assertEqual(current.revision, policy.revision + 1)
+                self.assertEqual(
+                    current.policy,
+                    policy.policy.model_copy(
+                        update={"github_humans": policy.policy.github_humans[:-1]}
+                    ),
+                )
+                self.assertEqual(store.list_ordinary_agent_delivery_activation_records(), history)
+                self.assertEqual(
+                    store.list_ordinary_agent_delivery_activation_event_records(), events
+                )
+            finally:
+                store.close()
+
     def test_source_scan_delivery_has_one_lease_and_recovers_without_stale_publication(
         self,
     ) -> None:
@@ -3686,8 +3728,8 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 session.commit()
             activation = _activation_record(
                 operation_id=source.operation_id,
-                installed_at="2026-09-12T16:02:00Z",
-                expires_at="2026-09-12T17:02:00Z",
+                installed_at=active.updated_at,
+                expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
             )
             return (
                 store,
@@ -3743,7 +3785,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         )
 
                     if first_action == "activation":
-                        self.assertEqual(outcomes, ("written", "reconciliation_required"))
+                        self.assertEqual(
+                            outcomes, ("written", "authz_policy_delivery_activation_active")
+                        )
                         self.assertEqual(
                             len(base_store.list_ordinary_agent_delivery_activation_records()), 1
                         )
