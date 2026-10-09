@@ -4,6 +4,7 @@ Delivery is best-effort: saved decisions and comments do not depend on GitHub
 accepting the owner-review check run.
 """
 
+from contextlib import ExitStack
 from collections.abc import Callable
 from dataclasses import dataclass
 import logging
@@ -36,6 +37,7 @@ from control_plane.product_review_feedback import publish_owner_feedback
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
+    launchplane_github_token,
 )
 
 OWNER_REVIEW_STATUS_CONTEXT: Final = OWNER_REVIEW_CHECK_NAME
@@ -133,80 +135,89 @@ class OwnerReviewStatusPublisher:
         retire_leftovers: bool = False,
     ) -> OwnerReviewStatus | None:
         """Best-effort: never raises. Returns the status written, if any."""
-
-        repository = profile.repository.strip()
-        try:
-            token = self.github_token(
-                control_plane_root=self.control_plane_root,
-                context_name=context.strip() or profile.preview.context,
-                repository=repository,
-                purpose="pull_request_feedback",
-            ).strip()
-            if not token or "/" not in repository:
-                _LOGGER.info(
-                    "Client review status skipped: no source-control credential.",
+        with ExitStack() as credentials:
+            repository = profile.repository.strip()
+            try:
+                token = credentials.enter_context(
+                    launchplane_github_token(
+                        token_resolver=self.github_token,
+                        api_request=self.api_request,
+                        control_plane_root=self.control_plane_root,
+                        context_name=context.strip() or profile.preview.context,
+                        repository=repository,
+                        purpose="pull_request_feedback",
+                    )
+                ).strip()
+                if not token or "/" not in repository:
+                    _LOGGER.info(
+                        "Client review status skipped: no source-control credential.",
+                        extra={
+                            "repository": repository,
+                            "pull_request_number": pull_request_number,
+                        },
+                    )
+                    return None
+                facts = self._pull_request_facts(
+                    repository=repository, pull_request_number=pull_request_number, token=token
+                )
+            except Exception:
+                _LOGGER.warning(
+                    "Client review status could not read the pull request.",
+                    exc_info=True,
                     extra={"repository": repository, "pull_request_number": pull_request_number},
                 )
                 return None
-            facts = self._pull_request_facts(
-                repository=repository, pull_request_number=pull_request_number, token=token
-            )
-        except Exception:
-            _LOGGER.warning(
-                "Client review status could not read the pull request.",
-                exc_info=True,
-                extra={"repository": repository, "pull_request_number": pull_request_number},
-            )
-            return None
-        written: OwnerReviewStatus | None = None
-        try:
-            with store.product_review_lock(
-                repository=repository, pull_request_number=pull_request_number, purpose="feedback"
-            ):
-                try:
-                    self._publish_feedback(
-                        store=store,
-                        profile=profile,
-                        pull_request_number=pull_request_number,
-                        token=token,
-                    )
-                except Exception:
-                    _LOGGER.warning(
-                        "Client decision is saved but feedback delivery is pending.",
-                        exc_info=True,
-                        extra={
-                            "repository": repository,
-                            "pull_request_number": pull_request_number,
-                        },
-                    )
-                if profile.owner.review_label.strip().casefold() in facts.labels:
-                    written = self._write_status(
-                        store=store,
-                        profile=profile,
-                        pull_request_number=pull_request_number,
-                        facts=facts,
-                        token=token,
-                    )
-        except Exception:
-            _LOGGER.warning(
-                "Client review status could not be written.",
-                exc_info=True,
-                extra={"repository": repository, "pull_request_number": pull_request_number},
-            )
-        if retire_leftovers:
-            for retire in (self._retire_owner_acceptance_check,):
-                try:
-                    retire(repository=repository, facts=facts, token=token)
-                except Exception:
-                    _LOGGER.warning(
-                        "A retired pull request signal could not be updated.",
-                        exc_info=True,
-                        extra={
-                            "repository": repository,
-                            "pull_request_number": pull_request_number,
-                        },
-                    )
-        return written
+            written: OwnerReviewStatus | None = None
+            try:
+                with store.product_review_lock(
+                    repository=repository,
+                    pull_request_number=pull_request_number,
+                    purpose="feedback",
+                ):
+                    try:
+                        self._publish_feedback(
+                            store=store,
+                            profile=profile,
+                            pull_request_number=pull_request_number,
+                            token=token,
+                        )
+                    except Exception:
+                        _LOGGER.warning(
+                            "Client decision is saved but feedback delivery is pending.",
+                            exc_info=True,
+                            extra={
+                                "repository": repository,
+                                "pull_request_number": pull_request_number,
+                            },
+                        )
+                    if profile.owner.review_label.strip().casefold() in facts.labels:
+                        written = self._write_status(
+                            store=store,
+                            profile=profile,
+                            pull_request_number=pull_request_number,
+                            facts=facts,
+                            token=token,
+                        )
+            except Exception:
+                _LOGGER.warning(
+                    "Client review status could not be written.",
+                    exc_info=True,
+                    extra={"repository": repository, "pull_request_number": pull_request_number},
+                )
+            if retire_leftovers:
+                for retire in (self._retire_owner_acceptance_check,):
+                    try:
+                        retire(repository=repository, facts=facts, token=token)
+                    except Exception:
+                        _LOGGER.warning(
+                            "A retired pull request signal could not be updated.",
+                            exc_info=True,
+                            extra={
+                                "repository": repository,
+                                "pull_request_number": pull_request_number,
+                            },
+                        )
+            return written
 
     def _publish_feedback(
         self,

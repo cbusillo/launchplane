@@ -321,6 +321,16 @@ def _tenant_admission_evaluation_result() -> TenantAdmissionControllerRunOnceRes
 
 
 class TenantAdmissionHttpTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        def provider(**kwargs: object) -> object:
+            if kwargs.get("path") == "/installation/token" and kwargs.get("method") == "DELETE":
+                return None
+            raise AssertionError("Provider operations must use the test's fake GitHub client")
+
+        transport = patch("control_plane.http_app.github_api_request", side_effect=provider)
+        transport.start()
+        self.addCleanup(transport.stop)
+
     async def test_read_only_evaluation_exposes_checks_without_retired_human_actions(
         self,
     ) -> None:

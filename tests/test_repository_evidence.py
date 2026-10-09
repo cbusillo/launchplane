@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 import unittest
 
@@ -98,8 +99,12 @@ class _GitHubApi:
         self.commits = commits if commits is not None else (_commit_payload(),)
         self.pull_request_reads = 0
         self.paths: list[str] = []
+        self.revoked: list[str] = []
 
-    def __call__(self, *, path: str, token: str) -> object:
+    def __call__(self, *, path: str, token: str, method: str = "GET") -> object:
+        if path == "/installation/token" and method == "DELETE":
+            self.revoked.append(token)
+            return None
         self.paths.append(path)
         self.last_token = token
         if path == "/repos/example/shared-addons":
@@ -147,6 +152,19 @@ class _GitHubApi:
 
 
 class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
+    def test_borrowed_train_token_remains_owned_by_the_train(self) -> None:
+        github = _GitHubApi()
+        provider = GitHubRepositoryEvidenceProvider(
+            control_plane_root=Path("."),
+            github_token=lambda **kwargs: "train-token",
+            github_api=github,
+            token_context="launchplane",
+            github_token_scope=lambda **kwargs: nullcontext("train-token"),
+        )
+        provider.list_open_pull_requests(REPOSITORY, limit=20)
+        self.assertEqual(github.last_token, "train-token")
+        self.assertEqual(github.revoked, [])
+
     def test_lists_bounded_open_pull_requests(self) -> None:
         github_api = _GitHubApi()
         provider = GitHubRepositoryEvidenceProvider(
@@ -163,6 +181,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
         self.assertEqual(pull_requests[0].pull_request_number, 2000)
         self.assertEqual(pull_requests[0].title, "Current Owner acceptance candidate")
         self.assertEqual(github_api.last_token, "server-token")
+        self.assertEqual(github_api.revoked, ["server-token"])
 
     def test_resolves_repository_head_tree_and_complete_changed_paths(self) -> None:
         github_api = _GitHubApi()
@@ -194,6 +213,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
             ),
         )
         self.assertEqual(github_api.last_token, "server-token")
+        self.assertEqual(github_api.revoked, ["server-token"])
         self.assertEqual(github_api.pull_request_reads, 2)
         assert evidence.authorship is not None
         self.assertEqual(evidence.authorship.resolution, "resolved")
@@ -329,13 +349,13 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
 
     def test_incomplete_file_pagination_fails_closed(self) -> None:
         class FullPagesGitHubApi(_GitHubApi):
-            def __call__(self, *, path: str, token: str) -> object:
+            def __call__(self, *, path: str, token: str, method: str = "GET") -> object:
                 if "/files?" in path:
                     return [
                         {"filename": f"path-{index}.py", "status": "modified"}
                         for index in range(100)
                     ]
-                return super().__call__(path=path, token=token)
+                return super().__call__(path=path, token=token, method=method)
 
         provider = GitHubRepositoryEvidenceProvider(
             control_plane_root=Path("."),
@@ -355,7 +375,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
 
     def test_current_item_resolution_uses_smaller_file_page_bound(self) -> None:
         class FullPagesGitHubApi(_GitHubApi):
-            def __call__(self, *, path: str, token: str) -> object:
+            def __call__(self, *, path: str, token: str, method: str = "GET") -> object:
                 if "/files?" in path:
                     self.paths.append(path)
                     page = path.rsplit("=", 1)[-1]
@@ -363,7 +383,7 @@ class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
                         {"filename": f"path-{page}-{index}.py", "status": "modified"}
                         for index in range(100)
                     ]
-                return super().__call__(path=path, token=token)
+                return super().__call__(path=path, token=token, method=method)
 
         github_api = FullPagesGitHubApi()
         provider = GitHubRepositoryEvidenceProvider(

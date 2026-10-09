@@ -523,7 +523,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
             "https://github.com/cbusillo/sellyouroutboard/releases/tag/v0.3.0",
         )
         self.assertEqual(
-            github_requests[-1],
+            next(request for request in github_requests if request[0] == "POST"),
             (
                 "POST",
                 "/repos/cbusillo/sellyouroutboard/releases",

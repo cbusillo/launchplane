@@ -119,6 +119,7 @@ __all__ = [
     "ordinary_agent_enrollment_permissions",
     "inspect_ordinary_agent_github_app_installation",
     "revoke_installation_token",
+    "revoke_installation_token_value",
 ]
 
 
@@ -747,7 +748,7 @@ def _mint_repository_installation_token(
         )
     except Exception as validation_error:
         try:
-            _revoke_installation_token_value(
+            revoke_installation_token_value(
                 token=token,
                 api_request=validation_error_revoke_api_request or api_request,
             )
@@ -763,13 +764,13 @@ def revoke_installation_token(
     installation_token: GitHubAppInstallationToken,
     api_request: GitHubApiRequest = github_api_request,
 ) -> None:
-    _revoke_installation_token_value(
+    revoke_installation_token_value(
         token=installation_token.token,
         api_request=api_request,
     )
 
 
-def _revoke_installation_token_value(
+def revoke_installation_token_value(
     *,
     token: str,
     api_request: GitHubApiRequest,

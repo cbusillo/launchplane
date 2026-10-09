@@ -44,7 +44,9 @@ class _EvidenceApi:
         self.pull_request_reads = 0
         self.file_reads = 0
 
-    def __call__(self, *, path: str, token: str) -> object:
+    def __call__(self, *, path: str, token: str, method: str = "GET") -> object:
+        if method == "DELETE":
+            return None
         repository = "/".join(path.split("/")[2:4])
         if "/files?" in path:
             self.file_reads += 1

@@ -1,7 +1,10 @@
 import hashlib
 import hmac
 import json
+import logging
 import re
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal, Protocol, TypedDict
 from urllib.error import HTTPError, URLError
@@ -456,37 +459,39 @@ def _resolve_companion_sources(
     sources: list[PreviewSourceRecord] = []
     summaries: list[PreviewPullRequestSummary] = []
     for companion in metadata.companions:
-        github_token = resolve_launchplane_github_token(
+        with launchplane_github_token(
+            token_resolver=resolve_launchplane_github_token,
+            api_request=github_api_request,
             control_plane_root=control_plane_root,
             context_name=context_name,
             repository=f"{github_owner}/{companion.repo}",
-        )
-        if not github_token:
-            return None, None
-        try:
-            companion_head_sha, companion_pr_url = fetch_github_pull_request_head(
-                owner=github_owner,
-                repo=companion.repo,
-                pr_number=companion.pr_number,
-                token=github_token,
+        ) as github_token:
+            if not github_token:
+                return None, None
+            try:
+                companion_head_sha, companion_pr_url = fetch_github_pull_request_head(
+                    owner=github_owner,
+                    repo=companion.repo,
+                    pr_number=companion.pr_number,
+                    token=github_token,
+                )
+            except click.ClickException:
+                return None, None
+            sources.append(
+                PreviewSourceRecord(
+                    repo=companion.repo,
+                    git_sha=companion_head_sha,
+                    selection="companion",
+                )
             )
-        except click.ClickException:
-            return None, None
-        sources.append(
-            PreviewSourceRecord(
-                repo=companion.repo,
-                git_sha=companion_head_sha,
-                selection="companion",
+            summaries.append(
+                PreviewPullRequestSummary(
+                    repo=companion.repo,
+                    pr_number=companion.pr_number,
+                    head_sha=companion_head_sha,
+                    pr_url=companion_pr_url,
+                )
             )
-        )
-        summaries.append(
-            PreviewPullRequestSummary(
-                repo=companion.repo,
-                pr_number=companion.pr_number,
-                head_sha=companion_head_sha,
-                pr_url=companion_pr_url,
-            )
-        )
     return tuple(sources), tuple(summaries)
 
 
@@ -509,6 +514,47 @@ def resolve_launchplane_github_token(
         purpose=purpose,
         retry_provider_errors=retry_provider_errors,
     )
+
+
+@contextmanager
+def launchplane_github_token(
+    *,
+    control_plane_root: Path,
+    context_name: str,
+    repository: str = "",
+    purpose: str = "repository_read",
+    retry_provider_errors: bool = False,
+    token_resolver: Callable[..., str] | None = None,
+    api_request: Callable[..., object] | None = None,
+) -> Iterator[str]:
+    """Own a Delivery token until this operation returns, fails or is interrupted.
+
+    Revocation is best effort: it must not mask a provider failure or turn a
+    completed write into a retry. Validated bounded expiry remains the backstop.
+    """
+    from control_plane.github_app_identity import revoke_installation_token_value
+
+    resolver = token_resolver or resolve_launchplane_github_token
+    token = resolver(
+        control_plane_root=control_plane_root,
+        context_name=context_name,
+        repository=repository,
+        purpose=purpose,
+        **({"retry_provider_errors": True} if retry_provider_errors else {}),
+    )
+    try:
+        yield token
+    finally:
+        if token:
+            try:
+                revoke_installation_token_value(
+                    token=token, api_request=api_request or github_api_request
+                )
+            except Exception as error:
+                # Provider exceptions can contain credentials and private URLs.
+                logging.getLogger(__name__).warning(
+                    "Delivery App token revocation failed (%s).", type(error).__name__
+                )
 
 
 def fetch_github_pull_request_head(

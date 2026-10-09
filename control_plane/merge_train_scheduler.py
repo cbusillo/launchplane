@@ -10,6 +10,7 @@ record's ``scheduler`` block stays the switch: ``enabled`` selects the target an
 
 import logging
 import time
+from contextlib import nullcontext
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -329,6 +330,7 @@ def _run_controller(
         repository_evidence_provider=GitHubRepositoryEvidenceProvider(
             control_plane_root=control_plane_root,
             github_token=lambda **_: token,
+            github_token_scope=lambda **_: nullcontext(token),
             github_api=github_api_request,
             token_context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ),

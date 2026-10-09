@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path as FileSystemPath
@@ -11,6 +12,7 @@ from control_plane import (
     product_operational_readiness_service as control_plane_product_operational_readiness_service,
 )
 from control_plane import product_read_service as control_plane_product_read_service
+from control_plane.workflows.launchplane import github_api_request, launchplane_github_token
 from control_plane.agent_context_service import (
     AgentContextPayload,
     AgentContextSection,
@@ -107,6 +109,7 @@ class ProductReadRouteDependencies:
     workflow_credentials_ready: Callable[[str, str], bool]
     control_plane_root: FileSystemPath
     github_token: Callable[..., str]
+    github_api: Callable[..., object] = github_api_request
 
 
 class ProductEnvironmentConfigStatusResponse(BaseModel):
@@ -592,72 +595,77 @@ def _tenant_admission_agent_context_section(
     record_store: object,
     dependencies: ProductReadRouteDependencies,
 ) -> AgentContextSection:
-    candidate = request.candidate
-    if not dependencies.common.authorization_allows(
-        identity=identity,
-        action=TENANT_ADMISSION_STATUS_READ_ACTION,
-        product=candidate.product,
-        context=candidate.context,
-        target=AuthorizationTarget(scope="context"),
-    ):
+    with ExitStack() as credentials:
+        candidate = request.candidate
+        if not dependencies.common.authorization_allows(
+            identity=identity,
+            action=TENANT_ADMISSION_STATUS_READ_ACTION,
+            product=candidate.product,
+            context=candidate.context,
+            target=AuthorizationTarget(scope="context"),
+        ):
+            return AgentContextSection(
+                status="unauthorized",
+                reason_code="tenant_admission_unauthorized",
+            )
+        try:
+            store = require_tenant_admission_status_store(record_store)
+        except TypeError:
+            return AgentContextSection(
+                status="unavailable",
+                reason_code="tenant_admission_storage_unavailable",
+            )
+        try:
+            token = credentials.enter_context(
+                launchplane_github_token(
+                    token_resolver=dependencies.github_token,
+                    api_request=dependencies.github_api,
+                    control_plane_root=dependencies.control_plane_root,
+                    context_name=candidate.context,
+                    repository=candidate.repository,
+                    purpose="admission_read",
+                )
+            ).strip()
+        except click.ClickException:
+            return AgentContextSection(
+                status="unavailable",
+                reason_code="tenant_admission_github_unavailable",
+            )
+        if not token:
+            return AgentContextSection(
+                status="unavailable",
+                reason_code="tenant_admission_github_unavailable",
+            )
+        try:
+            evaluation = evaluate_tenant_admission_candidate(
+                request=request,
+                store=store,
+                token=token,
+            )
+        except TenantAdmissionControllerStaleCandidateError:
+            return AgentContextSection(
+                status="unavailable",
+                reason_code="tenant_admission_stale_candidate",
+            )
+        except (
+            TenantAdmissionControllerError,
+            MergeTrainGitHubError,
+            LookupError,
+            TypeError,
+            ValueError,
+        ):
+            return AgentContextSection(
+                status="unavailable",
+                reason_code="tenant_admission_unavailable",
+            )
         return AgentContextSection(
-            status="unauthorized",
-            reason_code="tenant_admission_unauthorized",
+            status="available",
+            payload={
+                "evaluation": build_tenant_admission_evaluation_read_model(
+                    evaluation=evaluation,
+                ).model_dump(mode="json")
+            },
         )
-    try:
-        store = require_tenant_admission_status_store(record_store)
-    except TypeError:
-        return AgentContextSection(
-            status="unavailable",
-            reason_code="tenant_admission_storage_unavailable",
-        )
-    try:
-        token = dependencies.github_token(
-            control_plane_root=dependencies.control_plane_root,
-            context_name=candidate.context,
-            repository=candidate.repository,
-            purpose="admission_read",
-        ).strip()
-    except click.ClickException:
-        return AgentContextSection(
-            status="unavailable",
-            reason_code="tenant_admission_github_unavailable",
-        )
-    if not token:
-        return AgentContextSection(
-            status="unavailable",
-            reason_code="tenant_admission_github_unavailable",
-        )
-    try:
-        evaluation = evaluate_tenant_admission_candidate(
-            request=request,
-            store=store,
-            token=token,
-        )
-    except TenantAdmissionControllerStaleCandidateError:
-        return AgentContextSection(
-            status="unavailable",
-            reason_code="tenant_admission_stale_candidate",
-        )
-    except (
-        TenantAdmissionControllerError,
-        MergeTrainGitHubError,
-        LookupError,
-        TypeError,
-        ValueError,
-    ):
-        return AgentContextSection(
-            status="unavailable",
-            reason_code="tenant_admission_unavailable",
-        )
-    return AgentContextSection(
-        status="available",
-        payload={
-            "evaluation": build_tenant_admission_evaluation_read_model(
-                evaluation=evaluation,
-            ).model_dump(mode="json")
-        },
-    )
 
 
 def register_protected_artifact_read_routes(
