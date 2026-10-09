@@ -64,7 +64,12 @@ class OdooStableBootstrapStore(Protocol):
         self, *, context_name: str, instance_name: str
     ) -> OdooInstanceOverrideRecord: ...
 
-    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> object: ...
+    def write_odoo_instance_override_record(
+        self,
+        record: OdooInstanceOverrideRecord,
+        *,
+        expected_record: OdooInstanceOverrideRecord | None = None,
+    ) -> object: ...
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
@@ -410,7 +415,9 @@ def execute_odoo_stable_bootstrap(
         normalized_override_record is not None
         and normalized_override_record is not odoo_override_record
     ):
-        record_store.write_odoo_instance_override_record(normalized_override_record)
+        record_store.write_odoo_instance_override_record(
+            normalized_override_record, expected_record=odoo_override_record
+        )
         odoo_override_record = normalized_override_record
 
     ship_request = _build_bootstrap_ship_request(
@@ -467,6 +474,7 @@ def execute_odoo_stable_bootstrap(
             post_deploy_environment = (
                 control_plane_odoo_instance_overrides.build_post_deploy_environment(
                     odoo_override_record,
+                    record_store=record_store,
                     protected_shopify_store_keys=protected_shopify_store_keys,
                 )
             )

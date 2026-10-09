@@ -761,6 +761,27 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("secret_class must be one of", result.stderr)
 
+    def test_reonboarding_preserves_product_config_public_hosts(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+            apply_product_onboarding_manifest(record_store=store, manifest=manifest)
+            target = store.list_dokploy_target_records()[0]
+            store.write_dokploy_target_record(
+                target.model_copy(update={"public_hosts": ("public.example.com",)})
+            )
+            apply_product_onboarding_manifest(record_store=store, manifest=manifest)
+            self.assertEqual(
+                store.read_dokploy_target_record(
+                    context_name=target.context,
+                    instance_name=target.instance,
+                ).public_hosts,
+                ("public.example.com",),
+            )
+
     def test_apply_product_onboarding_manifest_writes_canonical_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

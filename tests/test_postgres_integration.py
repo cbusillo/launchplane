@@ -28,6 +28,14 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.odoo_import_overrides import plan_import_override_reconciliation
+from control_plane.workflows.odoo_post_deploy import _write_odoo_instance_override_apply_result
+from tests.test_odoo_import_override_reconciliation import (
+    KEYS as IMPORT_KEYS,
+    override_record as _import_override_record,
+    runtime_record as _import_runtime_record,
+)
+from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from tests.test_odoo_addon_settings_override import _existing_record as _addon_override_record
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -1338,6 +1346,59 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     target,
                 )
                 self.assertEqual(store.list_odoo_instance_override_records(), ())
+
+    def test_import_override_reconciliation_refuses_a_changed_runtime_snapshot(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_profile_payload_with_prod_lane()
+            )
+            store.write_product_profile_record(profile)
+            store.write_runtime_environment_record(_import_runtime_record())
+            store.write_odoo_instance_override_record(_import_override_record())
+            _plan, bundle = plan_import_override_reconciliation(
+                record_store=store,
+                profile=profile,
+                record=_import_override_record(),
+                keys=IMPORT_KEYS,
+            )
+            other = PostgresRecordStore(database_url=store.database_url)
+            try:
+                other.write_runtime_environment_record(
+                    _import_runtime_record().model_copy(update={"updated_at": "changed"})
+                )
+            finally:
+                other.close()
+            with self.assertRaises(RuntimeEnvironmentConflictError):
+                store.write_product_authority_bundle(bundle)
+            self.assertEqual(
+                store.read_odoo_instance_override_record(
+                    context_name="cm", instance_name="testing"
+                ),
+                _import_override_record(),
+            )
+            _plan, fresh_bundle = plan_import_override_reconciliation(
+                record_store=store,
+                profile=profile,
+                record=_import_override_record(),
+                keys=IMPORT_KEYS,
+            )
+            store.write_product_authority_bundle(fresh_bundle)
+            _write_odoo_instance_override_apply_result(
+                record_store=store,
+                record=_import_override_record(),
+                status="pass",
+                detail="Late completion of the pre-reconciliation payload",
+            )
+            after = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            )
+            self.assertTrue(
+                all(
+                    item.value.source == "runtime_environment"
+                    for item in after.config_parameters
+                    if item.key in IMPORT_KEYS
+                )
+            )
 
     def test_profile_guard_rejects_a_bundle_after_another_connection_changes_the_owner(
         self,
@@ -3355,6 +3416,42 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_expired_delivery_history_allows_approved_native_retirement(self) -> None:
+        from tests.test_delivery_administration_retirement import (
+            _approve,
+            _history,
+            _observed_at,
+            _plan,
+            _seed_policy,
+        )
+
+        with _head_postgres_database() as url:
+            store = PostgresRecordStore(database_url=url)
+            try:
+                policy = _seed_policy(store)
+                _history(store, expires_at=_observed_at(store) - timedelta(days=1))
+                history = store.list_ordinary_agent_delivery_activation_records()
+                events = store.list_ordinary_agent_delivery_activation_event_records()
+                plan = _plan(store)
+                _approve(store, plan, policy)
+                execute_approved_privileged_operations_once(record_store=store)
+                completed = store.read_privileged_operation_record(plan.operation_id)
+                self.assertEqual(completed.status, "executed")
+                current = store.list_authz_policy_records(status="active")[0]
+                self.assertEqual(current.revision, policy.revision + 1)
+                self.assertEqual(
+                    current.policy,
+                    policy.policy.model_copy(
+                        update={"github_humans": policy.policy.github_humans[:-1]}
+                    ),
+                )
+                self.assertEqual(store.list_ordinary_agent_delivery_activation_records(), history)
+                self.assertEqual(
+                    store.list_ordinary_agent_delivery_activation_event_records(), events
+                )
+            finally:
+                store.close()
+
     def test_source_scan_delivery_has_one_lease_and_recovers_without_stale_publication(
         self,
     ) -> None:
@@ -3692,8 +3789,8 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 session.commit()
             activation = _activation_record(
                 operation_id=source.operation_id,
-                installed_at="2026-09-12T16:02:00Z",
-                expires_at="2026-09-12T17:02:00Z",
+                installed_at=active.updated_at,
+                expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
             )
             return (
                 store,
@@ -3749,7 +3846,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         )
 
                     if first_action == "activation":
-                        self.assertEqual(outcomes, ("written", "reconciliation_required"))
+                        self.assertEqual(
+                            outcomes, ("written", "authz_policy_delivery_activation_active")
+                        )
                         self.assertEqual(
                             len(base_store.list_ordinary_agent_delivery_activation_records()), 1
                         )

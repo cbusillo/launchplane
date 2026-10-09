@@ -796,6 +796,7 @@ def execute_odoo_prod_backup_restore_apply(
                 phase="deploy",
             ),
             run_destructive_restore=False,
+            allow_historical_sender_contract=True,
             provider_effect_checkpoint=provider_checkpoint("post_deploy_started"),
         )
         post_deploy_evidence = PostDeployUpdateEvidence(
@@ -1153,6 +1154,7 @@ def execute_odoo_prod_backup_restore_verification_replay(
                 phase="deploy",
             ),
             run_destructive_restore=False,
+            allow_historical_sender_contract=True,
             provider_effect_checkpoint=lambda effect: provider_effect_checkpoint(
                 "post_deploy_started", effect
             ),

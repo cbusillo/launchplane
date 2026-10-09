@@ -12,6 +12,7 @@ from control_plane import provider_key_adoption
 from control_plane import product_secret_copy
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.public_hosts import normalize_public_hosts
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentScope
 from control_plane.contracts.runtime_environment_record import (
     ScalarValue,
@@ -179,7 +180,7 @@ def normalize_product_config_payload(payload: dict[str, object]) -> dict[str, ob
         normalized_runtime_input["retired_provider_keys"] = runtime_input["retired_provider_keys"]
     if runtime_input.get("adopt_provider_keys") is not None:
         normalized_runtime_input["adopt_provider_keys"] = runtime_input["adopt_provider_keys"]
-    return {
+    normalized: dict[str, object] = {
         "schema_version": payload.get("schema_version", 1),
         "product": product,
         "context": context_name,
@@ -187,6 +188,14 @@ def normalize_product_config_payload(payload: dict[str, object]) -> dict[str, ob
         "runtime_env": normalized_runtime_input,
         "secrets": [dict(secret) for secret in secrets],
     }
+    if "public_hosts" in payload:
+        if instance_name != "prod" or not context_name:
+            raise ProductConfigError("Public hosts require an exact prod lane.")
+        try:
+            normalized["public_hosts"] = list(normalize_public_hosts(payload["public_hosts"]))
+        except ValueError as error:
+            raise ProductConfigError(str(error)) from error
+    return normalized
 
 
 def apply_product_config_bundle(
@@ -221,6 +230,11 @@ def plan_product_config_authority_bundle(
     lane_provider_env_reader: LaneProviderEnvReader | None = None,
     secret_copy_source_authorizer: Callable[[SecretRecord], bool] | None = None,
 ) -> tuple[dict[str, object], ProductAuthorityBundle]:
+    if "public_hosts" in payload:
+        raise ProductConfigError(
+            "Public hosts require the service product-config dry-run/apply path.",
+            code="public_hosts_service_required",
+        )
     if mode not in {"dry-run", "apply"}:
         raise ProductConfigError("Product config mode must be 'dry-run' or 'apply'.")
     normalized_payload = normalize_product_config_payload(payload)

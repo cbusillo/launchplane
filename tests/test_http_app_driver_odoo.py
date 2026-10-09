@@ -36,6 +36,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
 from control_plane.contracts.runtime_identity import parse_runtime_identity_payload
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
 from control_plane.http_app import create_launchplane_fastapi_app, idempotency_scope
 from control_plane.workflows.launchplane import resolve_launchplane_github_token
 from control_plane.odoo_instance_overrides import (
@@ -7719,6 +7720,40 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_odoo_setting_writers_return_conflict_for_stale_overrides(self) -> None:
+        cases = (
+            (
+                "odoo-config-parameter-override.yml",
+                "odoo_config_parameter_override.write",
+                _post_odoo_config_parameter_override,
+                self._config_override_payload(),
+            ),
+            (
+                "odoo-website-bootstrap-override.yml",
+                "odoo_website_bootstrap_override.write",
+                _post_odoo_website_bootstrap_override,
+                self._website_override_payload(),
+            ),
+        )
+        for workflow, action, post, payload in cases:
+            with self.subTest(workflow=workflow), TemporaryDirectory() as directory:
+                root = Path(directory)
+                store = self._store_with_tenant_profile(root / "state")
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(self._tenant_identity(workflow_name=workflow)),
+                    authz_policy=self._tenant_policy(action=action, workflow_name=workflow),
+                    record_store_factory=lambda: store,
+                    control_plane_root_path=root,
+                )
+                with patch.object(
+                    store,
+                    "write_odoo_instance_override_record",
+                    side_effect=OdooInstanceOverrideConflictError("changed during write"),
+                ):
+                    response = await post(app, payload, idempotency_key="fixture-stale-setting")
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], "stale")
 
     async def test_odoo_config_parameter_override_writes_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

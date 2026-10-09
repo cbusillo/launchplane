@@ -32,6 +32,16 @@ class OdooPostDeployStore(Protocol):
 
     def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> object: ...
 
+    def update_odoo_instance_override_apply_result(
+        self,
+        *,
+        context_name: str,
+        instance_name: str,
+        last_apply: OdooOverrideApplyResult,
+        updated_at: str,
+        source_label: str,
+    ) -> OdooInstanceOverrideRecord: ...
+
 
 class OdooPostDeployRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -97,20 +107,18 @@ def _write_odoo_instance_override_apply_result(
     source_label: str = "odoo-post-deploy-driver",
 ) -> OdooInstanceOverrideRecord:
     now = utc_now_timestamp()
-    updated_record = record.model_copy(
-        update={
-            "last_apply": OdooOverrideApplyResult(
-                attempted=status in {"pending", "pass", "fail"},
-                status=status,
-                applied_at=now if status in {"pass", "fail"} else "",
-                detail=detail,
-            ),
-            "updated_at": now,
-            "source_label": source_label,
-        }
+    return record_store.update_odoo_instance_override_apply_result(
+        context_name=record.context,
+        instance_name=record.instance,
+        last_apply=OdooOverrideApplyResult(
+            attempted=status in {"pending", "pass", "fail"},
+            status=status,
+            applied_at=now if status in {"pass", "fail"} else "",
+            detail=detail,
+        ),
+        updated_at=now,
+        source_label=source_label,
     )
-    record_store.write_odoo_instance_override_record(updated_record)
-    return updated_record
 
 
 def _prefix_post_deploy_readback_evidence(markers: dict[str, str]) -> dict[str, str]:
@@ -120,7 +128,7 @@ def _prefix_post_deploy_readback_evidence(markers: dict[str, str]) -> dict[str, 
 def _require_record_store(record_store: object) -> OdooPostDeployStore:
     required_methods = (
         "read_odoo_instance_override_record",
-        "write_odoo_instance_override_record",
+        "update_odoo_instance_override_apply_result",
     )
     missing_methods = tuple(
         method_name
@@ -171,6 +179,7 @@ def execute_odoo_post_deploy(
     hold_uncertain_effects: bool = False,
     provider_operation_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
+    allow_historical_sender_contract: bool = False,
 ) -> OdooPostDeployResult:
     typed_record_store = _require_record_store(record_store)
     odoo_override_record = _read_odoo_instance_override_record(
@@ -208,6 +217,7 @@ def execute_odoo_post_deploy(
             post_deploy_environment = (
                 control_plane_odoo_instance_overrides.build_post_deploy_environment(
                     odoo_override_record,
+                    record_store=record_store,
                     workflow_intent=workflow_intent,
                     protected_shopify_store_keys=protected_shopify_store_keys,
                 )
@@ -258,12 +268,22 @@ def execute_odoo_post_deploy(
                 before_provider_mutation=before_provider_effect,
                 deployment_title=provider_operation_title,
                 schedule_execution_timeout_seconds=schedule_execution_timeout_seconds,
+                allow_historical_sender_contract=allow_historical_sender_contract,
             )
             or {}
         )
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             post_deploy_readback_markers
         )
+        if (
+            override_payload
+            and override_payload.website_bootstrap
+            and override_payload.website_bootstrap.company_email
+        ):
+            dokploy_post_deploy.require_odoo_company_email_readback_evidence(
+                post_deploy_readback_markers,
+                allow_historical_contract=allow_historical_sender_contract,
+            )
     except (click.ClickException, OSError) as error:
         determinate_failure = isinstance(
             error,
@@ -322,7 +342,6 @@ def execute_odoo_post_deploy(
 
     override_status: OdooOverrideApplyStatus = "skipped"
     applied_at = ""
-    detail = "No Odoo instance override record matched this post-deploy request."
     if odoo_override_record is not None:
         if override_should_apply and (
             workflow_environment_overrides or required_workflow_environment_keys
@@ -335,6 +354,11 @@ def execute_odoo_post_deploy(
             detail = "No Odoo instance overrides were rendered for this post-deploy run."
         else:
             detail = f"Odoo instance override record is not configured for phase {request.phase}."
+        sender_skip_reason = post_deploy_readback_markers.get(
+            "website_bootstrap_company_email_skip_reason", ""
+        )
+        if sender_skip_reason:
+            detail += f" Website company sender was not verified: {sender_skip_reason}."
         updated_record = _write_odoo_instance_override_apply_result(
             record_store=typed_record_store,
             record=odoo_override_record,

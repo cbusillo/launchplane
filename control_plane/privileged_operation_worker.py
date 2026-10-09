@@ -1111,6 +1111,8 @@ def _execute_managed_authz_policy_set(
         )
     if write_result.status == "stale":
         raise ValueError("approved_plan_drift")
+    if write_result.status == "authz_policy_delivery_activation_active":
+        raise ValueError(write_result.status)
     if write_result.status not in {"written", "unchanged", "replayed"}:
         raise ValueError("authz_policy_write_conflict")
     if route_result.changed:
@@ -1361,6 +1363,7 @@ def _failure_code(error: Exception) -> str:
         "approved_plan_drift",
         "authz_policy_readback_failed",
         "authz_policy_write_conflict",
+        "authz_policy_delivery_activation_active",
         "execution_recovery_failed",
         "executor_result_error",
         "merge_train_policy_readback_failed",

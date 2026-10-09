@@ -155,7 +155,12 @@ class OdooStableTargetReplacementStore(
 
     def write_environment_inventory(self, record: EnvironmentInventory) -> object: ...
 
-    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> object: ...
+    def write_odoo_instance_override_record(
+        self,
+        record: OdooInstanceOverrideRecord,
+        *,
+        expected_record: OdooInstanceOverrideRecord | None = None,
+    ) -> object: ...
 
     def write_release_tuple_record(self, record: ReleaseTupleRecord) -> object: ...
 
@@ -1352,6 +1357,7 @@ def build_odoo_stable_target_replacement_plan(
             if override_record is not None and "deploy" in override_record.apply_on:
                 override = control_plane_odoo_instance_overrides.build_post_deploy_environment(
                     override_record,
+                    record_store=record_store,
                     protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
                 )
                 driver_owned_keys.update(override.payload.required_container_environment_keys)
@@ -1752,12 +1758,15 @@ def execute_odoo_stable_target_replacement_apply(
         normalized_override_record is not None
         and normalized_override_record is not odoo_override_record
     ):
-        record_store.write_odoo_instance_override_record(normalized_override_record)
+        record_store.write_odoo_instance_override_record(
+            normalized_override_record, expected_record=odoo_override_record
+        )
     runtime_override_environment: dict[str, str] = {}
     runtime_override_payload = None
     if normalized_override_record is not None and "deploy" in normalized_override_record.apply_on:
         runtime_override = control_plane_odoo_instance_overrides.build_post_deploy_environment(
             normalized_override_record,
+            record_store=record_store,
             workflow_intent="deploy",
             protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
         )
@@ -1885,6 +1894,34 @@ def execute_odoo_stable_target_replacement_apply(
             runtime_port=profile.runtime_port,
         )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+        current_identity = _runtime_identity_map(current_env_map)
+        try:
+            inventory = record_store.read_environment_inventory(
+                context_name=plan.context, instance_name=plan.instance
+            )
+        except FileNotFoundError:
+            inventory = None
+        # Provider identity is written before post-deploy succeeds. A failed
+        # forward attempt must not grant its own retry a historical exception.
+        allow_historical_sender_contract = rollback or (
+            inventory is not None
+            and inventory.deploy.status == "pass"
+            and inventory.post_deploy_update.status != "fail"
+            and inventory.artifact_identity is not None
+            and inventory.artifact_identity.artifact_id == artifact_id
+            and inventory.source_git_ref == source_git_ref
+            and all(
+                current_identity.get(key) == value
+                for key, value in {
+                    "product": profile.product,
+                    "context": plan.context,
+                    "instance": plan.instance,
+                    "artifact_id": artifact_id,
+                    "source_git_ref": source_git_ref,
+                    "image_reference": image_reference,
+                }.items()
+            )
+        )
         if (
             ODOO_VERSION_ENV_KEY in current_env_map
             and ODOO_VERSION_ENV_KEY not in retired_provider_keys
@@ -2308,6 +2345,7 @@ def execute_odoo_stable_target_replacement_apply(
                 run_destructive_restore=plan.data_source_mode == "upstream_restore",
                 provider_effect_checkpoint=provider_effect_checkpoint,
                 hold_uncertain_effects=hold_uncertain_effects,
+                allow_historical_sender_contract=allow_historical_sender_contract,
                 schedule_execution_timeout_seconds=(
                     request.timeout_seconds if plan.data_source_mode == "upstream_restore" else None
                 ),
@@ -2372,6 +2410,7 @@ def execute_odoo_stable_target_replacement_apply(
                     phase="deploy",
                 ),
                 run_destructive_restore=False,
+                allow_historical_sender_contract=allow_historical_sender_contract,
                 provider_effect_checkpoint=provider_effect_checkpoint,
             )
         post_deploy_evidence = PostDeployUpdateEvidence(

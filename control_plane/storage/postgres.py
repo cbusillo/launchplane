@@ -78,7 +78,7 @@ from control_plane.contracts.authz_denial_record import AuthzDenialRecord
 from control_plane.authz_candidate_preparation import (
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
-    ordinary_agent_delivery_administration_github_id,
+    ordinary_agent_delivery_administration_removed,
     ordinary_agent_delivery_administration_state,
 )
 from control_plane.contracts.authz_policy_record import (
@@ -326,7 +326,10 @@ from control_plane.contracts.merge_train_policy import (
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
-from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooInstanceOverrideRecord,
+    OdooOverrideApplyResult,
+)
 from control_plane.contracts.odoo_prod_promotion_operation import (
     ODOO_PROD_PROMOTION_OPERATION_PHASE_SEQUENCE,
     OdooProdPromotionCheckpoint,
@@ -678,6 +681,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
+    OdooInstanceOverrideConflictError,
     RuntimeEnvironmentWrite,
     runtime_environment_records_match,
 )
@@ -6135,6 +6139,76 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
+        self._write_product_authority_bundle(bundle)
+
+    def write_product_public_hosts_bundle(
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        expected_target: DokployTargetRecord,
+        expected_target_id: DokployTargetIdRecord,
+        expected_provider_target: ProviderTargetRecord,
+        apply_provider: Callable[[], None],
+    ) -> None:
+        """Check ownership/binding before effects; commit only after provider read-back."""
+
+        def guard(session: Any) -> None:
+            requested_hosts = set(bundle.dokploy_targets[0].public_hosts)
+            for row in session.scalars(select(LaunchplaneDokployTargetRow)).all():
+                if (row.context, row.instance) != (
+                    expected_target.context,
+                    expected_target.instance,
+                ):
+                    other = DokployTargetRecord.model_validate(row.payload)
+                    if requested_hosts.intersection((*other.domains, *other.public_hosts)):
+                        raise DokployTargetRecordChanged(
+                            "A public host is already owned by another target."
+                        )
+            for orm_type, model_type, expected in (
+                (LaunchplaneDokployTargetRow, DokployTargetRecord, expected_target),
+                (LaunchplaneDokployTargetIdRow, DokployTargetIdRecord, expected_target_id),
+                (LaunchplaneProviderTargetRow, ProviderTargetRecord, expected_provider_target),
+            ):
+                row = session.scalar(
+                    select(orm_type)
+                    .where(
+                        orm_type.context == expected_target.context,
+                        orm_type.instance == expected_target.instance,
+                    )
+                    .with_for_update()
+                )
+                if row is None or model_type.model_validate(row.payload) != expected:
+                    raise DokployTargetRecordChanged("Public-host target binding changed.")
+            for row in session.scalars(select(LaunchplaneDokployTargetIdRow)).all():
+                if row.target_id == expected_target_id.target_id and (
+                    row.context,
+                    row.instance,
+                ) != (expected_target.context, expected_target.instance):
+                    raise DokployTargetRecordChanged(
+                        "Public-host target is shared with another lane."
+                    )
+            for row in session.scalars(select(LaunchplaneProviderTargetRow)).all():
+                if (
+                    row.provider_id == "dokploy"
+                    and row.target_id == expected_target_id.target_id
+                    and (row.context, row.instance)
+                    != (expected_target.context, expected_target.instance)
+                ):
+                    raise DokployTargetRecordChanged(
+                        "Public-host target is shared with another lane."
+                    )
+
+        self._write_product_authority_bundle(
+            bundle, guard_provider=guard, apply_provider=apply_provider
+        )
+
+    def _write_product_authority_bundle(
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        guard_provider: Callable[[Any], None] | None = None,
+        apply_provider: Callable[[], None] | None = None,
+    ) -> None:
         if not bundle.requires_write():
             return
         with self._session_factory() as session:
@@ -6172,6 +6246,8 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ProductProfileConflictError(
                         "Product profile changed during bundle write."
                     )
+            if guard_provider is not None:
+                guard_provider(session)
             for expected_source in bundle.secret_copy_sources:
                 source_row = session.scalar(
                     select(LaunchplaneSecretRow)
@@ -6216,6 +6292,31 @@ class PostgresRecordStore(HumanSessionStore):
                     raise RuntimeEnvironmentConflictError(
                         "Runtime selectors changed before commit."
                     )
+            for write in bundle.odoo_instance_override_writes:
+                current = session.scalar(
+                    select(LaunchplaneOdooInstanceOverrideRow)
+                    .where(
+                        LaunchplaneOdooInstanceOverrideRow.context == write.record.context,
+                        LaunchplaneOdooInstanceOverrideRow.instance == write.record.instance,
+                    )
+                    .with_for_update()
+                )
+                if (
+                    current is None
+                    or OdooInstanceOverrideRecord.model_validate(current.payload)
+                    != write.expected_record
+                ):
+                    raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
+                self._merge_authority_row(
+                    session,
+                    LaunchplaneOdooInstanceOverrideRow(
+                        context=write.record.context,
+                        instance=write.record.instance,
+                        updated_at=write.record.updated_at,
+                        payload=self._payload_dict(write.record),
+                    ),
+                    step_name="write_odoo_instance_override",
+                )
             for secret_id in bundle.absent_secret_ids:
                 if (
                     session.scalar(
@@ -6397,6 +6498,11 @@ class PostgresRecordStore(HumanSessionStore):
                     self._idempotency_row(bundle.idempotency_record),
                     step_name="write_idempotency",
                 )
+            # All database preconditions (including runtime/secret writes) have
+            # passed. Provider failure rolls the whole bundle and success receipt back.
+            if apply_provider is not None:
+                session.flush()
+                apply_provider()
             session.commit()
 
     def _write_runtime_environment_with_expectation(
@@ -34917,41 +35023,20 @@ class PostgresRecordStore(HumanSessionStore):
             confirmation_consumption=confirmation_consumption,
         )
 
-        administration_github_id = ordinary_agent_delivery_administration_github_id(
-            current_record.policy
-        )
         removes_delivery_administration = (
-            administration_github_id > 0
-            and replacement_record is not None
-            and ordinary_agent_delivery_administration_state(
-                replacement_record.policy,
-                github_id=administration_github_id,
+            replacement_record is not None
+            and ordinary_agent_delivery_administration_removed(
+                current_record.policy, replacement_record.policy
             )
-            != "active"
         )
-        if removes_delivery_administration:
-            activation_statement = (
-                select(LaunchplaneOrdinaryAgentDeliveryActivationRow)
-                .where(
-                    LaunchplaneOrdinaryAgentDeliveryActivationRow.revoked_at.is_(None),
-                    LaunchplaneOrdinaryAgentDeliveryActivationRow.superseded_at.is_(None),
-                )
-                .limit(1)
+        if removes_delivery_administration and self._has_unexpired_delivery_activation(session):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return AuthzPolicyCompareWriteResult(
+                status="authz_policy_delivery_activation_active",
+                current_record=current_record,
             )
-            if not self.database_url.startswith("sqlite"):
-                activation_statement = activation_statement.with_for_update()
-            activation_row = session.scalar(activation_statement)
-            if activation_row is not None:
-                activation = self._ordinary_agent_delivery_activation_from_row(activation_row)
-                if activation.revoked_at or activation.superseded_by_activation_id:
-                    raise ValueError("Current activation projection is inconsistent.")
-                if reservation_row is not None:
-                    session.delete(reservation_row)
-                    session.commit()
-                return AuthzPolicyCompareWriteResult(
-                    status="reconciliation_required",
-                    current_record=current_record,
-                )
 
         if confirmation_consumption is not None:
             if replacement_record is None:
@@ -35042,6 +35127,28 @@ class PostgresRecordStore(HumanSessionStore):
             current_record=result_record,
             idempotency_record=stored_completion,
         )
+
+    def _has_unexpired_delivery_activation(self, session: Any, *, lock_rows: bool = True) -> bool:
+        statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
+            LaunchplaneOrdinaryAgentDeliveryActivationRow.revoked_at.is_(None),
+            LaunchplaneOrdinaryAgentDeliveryActivationRow.superseded_at.is_(None),
+        )
+        if lock_rows and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        rows = tuple(session.scalars(statement).all())
+        observed_at = datetime.fromisoformat(self._database_mutation_timestamp(session))
+        for row in rows:
+            activation = self._ordinary_agent_delivery_activation_from_row(row)
+            if activation.revoked_at or activation.superseded_by_activation_id:
+                raise ValueError("Current activation projection is inconsistent.")
+            if observed_at < datetime.fromisoformat(activation.activation_expires_at):
+                return True
+        return False
+
+    def has_unexpired_delivery_activation(self) -> bool:
+        """Read the retirement prerequisite using the same DB clock as the locked write."""
+        with self._session_factory() as session:
+            return self._has_unexpired_delivery_activation(session, lock_rows=False)
 
     def list_authz_policy_records(
         self,
@@ -37669,6 +37776,7 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         required_context_owner: tuple[str, str] | None = None,
         required_product_config_target: tuple[str, str, str] | None = None,
+        expected_record: OdooInstanceOverrideRecord | None = None,
     ) -> None:
         row = LaunchplaneOdooInstanceOverrideRow(
             context=record.context,
@@ -37676,12 +37784,30 @@ class PostgresRecordStore(HumanSessionStore):
             updated_at=record.updated_at,
             payload=self._payload_dict(record),
         )
-        if required_context_owner is None and required_product_config_target is None:
+        if (
+            required_context_owner is None
+            and required_product_config_target is None
+            and expected_record is None
+        ):
             self._write_row(row)
             return
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            if expected_record is not None:
+                current = session.scalar(
+                    select(LaunchplaneOdooInstanceOverrideRow)
+                    .where(
+                        LaunchplaneOdooInstanceOverrideRow.context == record.context,
+                        LaunchplaneOdooInstanceOverrideRow.instance == record.instance,
+                    )
+                    .with_for_update()
+                )
+                if (
+                    current is None
+                    or OdooInstanceOverrideRecord.model_validate(current.payload) != expected_record
+                ):
+                    raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             require_bundle_context_owner(
                 ProductAuthorityBundle(
                     required_context_owner=required_context_owner,
@@ -37694,6 +37820,41 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.merge(row)
             session.commit()
+
+    def update_odoo_instance_override_apply_result(
+        self,
+        *,
+        context_name: str,
+        instance_name: str,
+        last_apply: OdooOverrideApplyResult,
+        updated_at: str,
+        source_label: str,
+    ) -> OdooInstanceOverrideRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            row = session.scalar(
+                select(LaunchplaneOdooInstanceOverrideRow)
+                .where(
+                    LaunchplaneOdooInstanceOverrideRow.context == context_name,
+                    LaunchplaneOdooInstanceOverrideRow.instance == instance_name,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise FileNotFoundError("Odoo override record no longer exists")
+            current = OdooInstanceOverrideRecord.model_validate(row.payload)
+            updated = current.model_copy(
+                update={
+                    "last_apply": last_apply,
+                    "updated_at": updated_at,
+                    "source_label": source_label,
+                }
+            )
+            row.payload = self._payload_dict(updated)
+            row.updated_at = updated_at
+            session.commit()
+            return updated
 
     def read_odoo_instance_override_record(
         self, *, context_name: str, instance_name: str
