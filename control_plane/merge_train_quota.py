@@ -93,6 +93,9 @@ def _retry_deadline(state: MergeTrainControllerStateRecord) -> datetime | None:
         match = re.fullmatch(r"(reset_at|retry_after_seconds):([0-9]{1,12})", part)
         if match is None:
             continue
+        if match[1] == "reset_at" and "primary_exhausted:false" in parts:
+            # A secondary refusal can carry a primary reset for quota still available.
+            continue
         try:
             value = int(match[2])
             deadline = (

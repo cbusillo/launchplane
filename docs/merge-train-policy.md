@@ -220,13 +220,21 @@ HTTP 429 and HTTP 403 with `retry-after` or `x-ratelimit-remaining: 0` use
 as `reset_at` (Unix seconds for GitHub's primary quota window). A valid numeric
 `retry-after` is recorded separately as `retry_after_seconds`; secondary limits
 can have a different retry delay from the primary reset time. Automatic admission
-honors the later recorded deadline before resolving a token or calling the
+honors the applicable recorded deadline before resolving a token or calling the
 provider, even without Level 1 history. Retry-After starts at the persisted
 failure timestamp; repeated wakes and status reads do not extend it. Quota
 failures without usable timing metadata wait at least one minute. Admission and
 controller/status report `github_rate_limit_pending` and `next_allowed_at`.
 The existing sweep or a wake after that time resumes ordinary admission and
 lease/reconciliation checks; expiry supplies no merge authority.
+New failure evidence records `primary_exhausted` from the bounded numeric
+remaining header. When primary quota remains, its routine reset header does
+not prolong a secondary Retry-After wait. When primary quota is exhausted, or
+older evidence lacks this distinction, admission honors the later recorded
+deadline. Manual controller and phase routes do not enforce scheduler admission;
+callers read admission before invoking them. Acquiring unfinished state through
+those routes can replace the quota detail with resume evidence; automatic
+deferral applies while the original quota failure remains recorded.
 
 Targets using the same configured App on the same repository account share an
 installation quota even when their tokens restrict different repository IDs.

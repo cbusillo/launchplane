@@ -16,7 +16,11 @@ from control_plane.merge_train_scheduler import (
     MergeTrainScheduledTargetResult,
     run_merge_train_scheduler_pass,
 )
+from control_plane.merge_train_controller_run_once import (
+    _controller_exception_reconciliation_detail,
+)
 from tests.test_merge_train_admission import _RunHistoryStore, _run_record
+from tests.test_merge_train_github_failures import _failed_request
 from tests.test_merge_train_scheduler import _policy_record
 
 
@@ -60,6 +64,36 @@ class _QuotaStore(_RunHistoryStore):
 
 
 class MergeTrainQuotaTests(TestCase):
+    def test_secondary_limit_with_primary_quota_left_recovers_after_retry_after(self) -> None:
+        reset_at = int((_FAILED_AT + timedelta(minutes=59)).timestamp())
+        for remaining, minutes in (("100", 1), ("0", 59)):
+            error = _failed_request(
+                429,
+                {
+                    "X-RateLimit-Remaining": remaining,
+                    "X-RateLimit-Reset": str(reset_at),
+                    "Retry-After": "60",
+                },
+            )
+            state = _failure("cbusillo/alpha", _controller_exception_reconciliation_detail(error))
+            store = _QuotaStore(None, controller_state_records=(state,))
+            decision = evaluate_merge_train_admission_from_store(
+                store=store,
+                repository=state.repository,
+                base_branch=state.base_branch,
+                requested_at=_stamp(_FAILED_AT + timedelta(seconds=1)),
+            )
+            self.assertEqual(
+                decision.next_allowed_at, _stamp(_FAILED_AT + timedelta(minutes=minutes))
+            )
+            recovered = evaluate_merge_train_admission_from_store(
+                store=store,
+                repository=state.repository,
+                base_branch=state.base_branch,
+                requested_at=decision.next_allowed_at,
+            )
+            self.assertTrue(recovered.admitted)
+
     def test_recorded_deadlines_override_absent_dry_run_and_old_mutation_history(self) -> None:
         repository = "cbusillo/sellyouroutboard"
         reset = int((_FAILED_AT + timedelta(minutes=12)).timestamp())

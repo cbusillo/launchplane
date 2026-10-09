@@ -114,6 +114,7 @@ class MergeTrainGitHubError(RuntimeError):
         rate_limited: bool = False,
         rate_limit_reset: int | None = None,
         retry_after_seconds: int | None = None,
+        primary_quota_exhausted: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -121,6 +122,7 @@ class MergeTrainGitHubError(RuntimeError):
         self.rate_limited = rate_limited
         self.rate_limit_reset = rate_limit_reset
         self.retry_after_seconds = retry_after_seconds
+        self.primary_quota_exhausted = primary_quota_exhausted
 
 
 class MergeTrainGitHubStaleHeadError(MergeTrainGitHubError):
@@ -3969,6 +3971,8 @@ def _github_http_error(
     reset_time = int(reset) if re.fullmatch(r"[0-9]{1,12}", reset) else None
     retry_after = headers.get("retry-after", "").strip() if headers is not None else ""
     retry_seconds = int(retry_after) if re.fullmatch(r"[0-9]{1,12}", retry_after) else None
+    remaining = headers.get("x-ratelimit-remaining", "").strip() if headers is not None else ""
+    primary_exhausted = int(remaining) == 0 if re.fullmatch(r"[0-9]{1,12}", remaining) else None
     error_type = MergeTrainGitHubStaleHeadError if status_code == 409 else MergeTrainGitHubError
     return error_type(
         f"GitHub API request failed: {description}",
@@ -3977,4 +3981,5 @@ def _github_http_error(
         rate_limited=rate_limited,
         rate_limit_reset=reset_time if rate_limited else None,
         retry_after_seconds=retry_seconds if rate_limited else None,
+        primary_quota_exhausted=primary_exhausted if rate_limited else None,
     )
