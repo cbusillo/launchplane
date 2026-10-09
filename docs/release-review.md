@@ -153,7 +153,12 @@ approval; the saved Launchplane decision remains authoritative.
 Publishers of the same saved decision serialize lookup, issue creation and the
 stored URL acknowledgement with a per-decision storage lock. After waiting, a
 publisher reads the saved decision again and reuses its authoritative URL. The
-PostgreSQL transaction lock and local file lock release when their worker exits;
+PostgreSQL holder reads and acknowledges that exact decision using its lock
+transaction's connection, so waiting publishers cannot exhaust the pool it
+needs to finish. The URL commits with that transaction before publication
+returns. Lock waits are bounded to five seconds (or an earlier configured
+statement timeout); storage failures leave the saved decision pending for retry.
+The PostgreSQL transaction lock and local file lock release when their worker exits;
 an interrupted acknowledgement recovers the existing issue by its marker before
 any new creation. Local SQLite publication requires a file-backed database so
 separate processes share the file lock.
@@ -252,9 +257,6 @@ rewrite the checklist and audit fields.
 The Client's decision route uses the same creation and publication operations,
 so a Client retry cannot upsert a stale unpublished snapshot over the worker's
 publication. An already published winner needs no further source-control lookup.
-The first stored issue URL is authoritative. Concurrent external issue creation
-can still produce a duplicate issue with that decision's marker; publication
-serialization is tracked separately in [#3030](https://github.com/cbusillo/launchplane/issues/3030).
 Missing notes, missing lane identities or a Client, a held or prelaunch product,
 and a request for changes or admin override on that checklist start nothing. A failed
 release is not automatically retried with another acceptance of the same
@@ -344,8 +346,8 @@ decision. Before a step is queued, the worker checks all of the following:
 - the recompiled checklist digest still equals the decision's, and it is
   approved.
 
-The worker repeats the decision, Client and hold checks before every provider
-effect. The promotion still checks release approval for the exact candidate and
+The worker repeats the decision, Client and hold checks before forward provider
+effects. The promotion still checks release approval for the exact candidate and
 the verified backup. Once generic-web production has changed, automatic rollback
 remains allowed to restore the admitted previous deployment even if acceptance
 is withdrawn. A crash or uncertain provider outcome keeps the provider operation
@@ -353,10 +355,45 @@ fenced for reconciliation rather than repeating the release.
 
 A changed candidate, a newer decision, or a hold therefore stops the release
 before its next step and never falls back to a newer testing build. A failed or
-cancelled step stops the release, and nothing more runs until the Client
-accepts again. An admin override never starts a release; it stays a hand
+cancelled step stops forward progress; the successful rollback drill never runs
+for a failed promotion. An admin override never starts a release; it stays a hand
 promotion from the Release panel. No automated identity gains a promote right,
 and an automation token still cannot submit a decision.
+
+For Odoo, promotion admission pins the checklist's production artifact and its
+passing deployment in the operation's initial checkpoint. The worker verifies
+that binding again before the first production write and records that write's
+boundary durably. A determinate deployment or post-deploy/health failure commits
+the failed promotion and queues its recovery rollback in one lane-locked
+transaction. Recovery explicitly names that failed promotion and redeploys only
+the pinned artifact with existing data; it does not restore a database or reuse
+a backup for another forward promotion. It verifies post-deploy, health,
+canonical URL, logos and runtime identity through the existing replacement path,
+and writes the recovered deployment, inventory, release tuple and rollback
+outcome. The release stays failed, with a separate `recovery` step in its
+readback, labeled automatic recovery rather than a rollback drill. Failure on
+the second promotion has its own recovery operation. A missing passing baseline
+prevents the first backup from being queued and appears as `blocked_reason` in
+the release run.
+
+Recovery uses the original admitted acceptance, even if releases become held,
+the Client changes, a newer decision replaces acceptance or testing moves after
+the first write. Its worker checks the exact source operation, original
+published decision, failed promotion and pinned passing deployment; it supplies
+no caller promotion or manual rollback permission. Missing recovery provenance
+holds the lane for reconciliation. Pre-write failures queue no recovery. A lost
+response, unobserved deployment, post-deploy timeout, interrupted recovery or
+expired lease after effects remains `reconciliation_required`; the worker does
+not replay an uncertain write or report it passed. A determinate failed recovery
+is recorded as failed and is not automatically retried. Admin reconciliation is
+still required for uncertainty; deployed-path qualification is separate from
+these deterministic provider tests.
+
+Queued Odoo administrator promotions and rollbacks also hold uncertain effects
+for reconciliation. Synchronous non-worker callers retain their existing result
+handling. Client promotions queued by an older worker without a recovery pin
+are refused before writing; requalify pending release operations when deploying
+this worker, and record fresh acceptance if such a release was stopped.
 
 The review page says before the Accept button whether accepting puts the
 version on the live site, naming it, or whether releases are held. After

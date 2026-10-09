@@ -2,7 +2,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import click
 
@@ -42,6 +42,7 @@ from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
 )
 from control_plane.workflows.generic_web_deploy import (
+    GenericWebDeployResult,
     GenericWebDeployRequest,
     GenericWebDeployStore,
     GenericWebPostDeployContext,
@@ -98,6 +99,17 @@ class _GenericWebDeployStore:
         ]
         self.deployments.append(record)
 
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[DeploymentRecord, ...]:
+        records = tuple(
+            record
+            for record in self.deployments
+            if (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
+        return records[:limit] if limit is not None else records
+
     def read_deployment_record(self, record_id: str) -> DeploymentRecord:
         for record in self.deployments:
             if record.record_id == record_id:
@@ -111,6 +123,14 @@ class _GenericWebDeployStore:
             if (existing.context, existing.instance) != (record.context, record.instance)
         ]
         self.inventories.append(record)
+
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory:
+        for record in self.inventories:
+            if (record.context, record.instance) == (context_name, instance_name):
+                return record
+        raise FileNotFoundError(f"{context_name}/{instance_name}")
 
 
 class _IntegrationKeyGenericWebDeployStore(_GenericWebDeployStore):
@@ -540,6 +560,128 @@ class _LegacyFakeGenericWebDeployProvider(_FakeGenericWebDeployProvider):
 
 
 class GenericWebDeployTests(unittest.TestCase):
+    def test_release_after_rollback_uses_saved_build_proof_when_uploads_expire(self) -> None:
+        from tests.support.lane_builds import LaneBuildGitHub
+
+        for legacy in (False, True):
+            with self.subTest(legacy_baseline=legacy):
+                profile = _profile()
+                old, new = "1" * 40, "2" * 40
+                github = LaneBuildGitHub(
+                    profile.repository,
+                    profile.image.repository,
+                    {old: "sha256:" + "f" * 64, new: "sha256:" + "b" * 64},
+                )
+                if legacy:
+                    github.runs.pop(1)
+                github.run_started_at[2] = "2026-10-01T11:00:00Z"
+                store = _GenericWebDeployStore(profile)
+                provider = _FakeGenericWebDeployProvider()
+
+                def deploy(
+                    commit: str, number: int, rollback: bool = False
+                ) -> GenericWebDeployResult:
+                    return execute_generic_web_deploy(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=GenericWebDeployRequest(
+                            product=profile.product,
+                            instance="testing",
+                            artifact_id=f"{profile.image.repository}@{github.digests[commit]}",
+                            source_git_ref=commit,
+                        ),
+                        deploy_provider=provider,
+                        rollback=rollback,
+                        deployment_record_id=f"deploy-{number}",
+                    )
+
+                with (
+                    patch("control_plane.lane_movement._source_transport", return_value=github),
+                    patch(
+                        "control_plane.workflows.generic_web_deploy.utc_now_timestamp",
+                        side_effect=[
+                            "2026-10-01T10:00:00Z",
+                            "2026-10-01T10:01:00Z",
+                            "2026-10-02T10:00:00Z",
+                            "2026-10-02T10:01:00Z",
+                            "2026-10-03T10:00:00Z",
+                            "2026-10-03T10:01:00Z",
+                            "2026-10-04T10:00:00Z",
+                            "2026-10-04T10:01:00Z",
+                        ],
+                    ),
+                ):
+                    self.assertEqual(deploy(old, 1).deploy_status, "pass")
+                    self.assertEqual(deploy(new, 2).deploy_status, "pass")
+                    with patch.object(
+                        github,
+                        "get_bytes",
+                        side_effect=AssertionError("expired uploads must not be needed"),
+                    ):
+                        self.assertEqual(deploy(old, 3, rollback=True).deploy_status, "pass")
+                        self.assertEqual(deploy(new, 4).deploy_status, "pass")
+                self.assertEqual(
+                    [identity.source_git_ref for identity in provider.runtime_identities],
+                    [old, new, old, new],
+                )
+
+    def test_stale_deploy_and_recovery_retry_cannot_replace_a_newer_lane_build(self) -> None:
+        for instance in ("testing", "prod"):
+            with self.subTest(instance=instance):
+                profile = _profile()
+                profile = profile.model_copy(
+                    update={"lanes": (profile.lanes[0].model_copy(update={"instance": instance}),)}
+                )
+                store = _GenericWebDeployStore(profile)
+                provider = _FakeGenericWebDeployProvider()
+                current = _request(instance).model_copy(update={"source_git_ref": "2" * 40})
+                first = execute_generic_web_deploy(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=current,
+                    deploy_provider=provider,
+                )
+                self.assertEqual(first.deploy_status, "pass")
+                before = tuple(provider.runtime_identities)
+                older = current.model_copy(
+                    update={
+                        "artifact_id": profile.image.repository + "@sha256:" + "1" * 64,
+                        "source_git_ref": "1" * 40,
+                    }
+                )
+                transport = Mock()
+                transport.get_json.return_value = {
+                    "status": "behind",
+                    "base_commit": {"sha": current.source_git_ref},
+                    "merge_base_commit": {"sha": older.source_git_ref},
+                }
+                with patch(
+                    "control_plane.product_reconcile.resolve_build_provenance_transport",
+                    return_value=transport,
+                ):
+                    for recorded in (False, True):
+                        refused = execute_generic_web_deploy(
+                            control_plane_root=Path("."),
+                            record_store=store,
+                            request=older,
+                            deploy_provider=provider,
+                            recorded_artifact=recorded,
+                        )
+                        self.assertEqual(refused.deploy_status, "fail")
+                        self.assertFalse(refused.provider_effect_attempted)
+                        self.assertEqual(tuple(provider.runtime_identities), before)
+                        failure = store.deployments[-1].failure
+                        assert failure is not None
+                        self.assertEqual(failure.code, "lane_movement.ancestor_build")
+                    rolled_back = execute_generic_web_deploy(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=older,
+                        deploy_provider=provider,
+                        rollback=True,
+                    )
+                    self.assertEqual(rolled_back.deploy_status, "pass")
+
     @staticmethod
     def _provider_mutation_adapter(
         *,
@@ -888,7 +1030,9 @@ class GenericWebDeployTests(unittest.TestCase):
             "ghcr.io/cbusillo/sellyouroutboard@sha256:"
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         )
-        deploy_reference = "ghcr.io/cbusillo/sellyouroutboard:sha-abcdef1234567890"
+        deploy_reference = (
+            "ghcr.io/cbusillo/sellyouroutboard:sha-abcdef1234567890abcdef1234567890abcdef12"
+        )
         store = _GenericWebDeployStore(_profile())
         deploy_provider = _FakeGenericWebDeployProvider()
 
@@ -900,7 +1044,7 @@ class GenericWebDeployTests(unittest.TestCase):
                 instance="testing",
                 artifact_id=artifact_id,
                 deploy_reference=deploy_reference,
-                source_git_ref="abcdef1234567890",
+                source_git_ref="abcdef1234567890abcdef1234567890abcdef12",
             ),
             deploy_provider=deploy_provider,
         )

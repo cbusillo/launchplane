@@ -2703,17 +2703,13 @@ def _target_summary(
     *,
     topology: ProductEnvironmentTopology,
 ) -> ProductTargetSummary:
-    expected_identity = None
-    destination_health = None
+    observed_placement = topology.observed.placement
     artifact_manifest = lane_summary.artifact_manifest if lane_summary is not None else None
-    if lane_summary is not None and lane_summary.inventory is not None:
-        expected_identity = lane_summary.inventory.runtime_identity
-        destination_health = lane_summary.inventory.destination_health
-    elif lane_summary is not None and lane_summary.latest_deployment is not None:
-        expected_identity = lane_summary.latest_deployment.runtime_identity
-        destination_health = lane_summary.latest_deployment.destination_health
     recorded_placement = topology.provider_recorded.placement
-    if topology.provider_recorded.authority_status != "missing":
+    if (
+        topology.provider_recorded.authority_status != "missing"
+        or recorded_placement.provider_target_record_present
+    ):
         return ProductTargetSummary(
             provider=recorded_placement.provider,
             target_type=recorded_placement.target_type,
@@ -2721,30 +2717,18 @@ def _target_summary(
             provider_target_type=recorded_placement.provider_target_type,
             target_id_recorded=recorded_placement.provider_target_record_present,
             artifact_manifest=artifact_manifest,
-            expected_runtime_identity=expected_identity,
-            observed_runtime_identity=destination_health.observed_runtime_identity
-            if destination_health is not None
-            else None,
-            runtime_identity_status=destination_health.runtime_identity_status
-            if destination_health is not None
-            else "unchecked",
-            runtime_identity_detail=destination_health.runtime_identity_detail
-            if destination_health is not None
-            else "",
+            expected_runtime_identity=observed_placement.expected_runtime_identity,
+            observed_runtime_identity=observed_placement.observed_runtime_identity,
+            runtime_identity_status=observed_placement.runtime_identity_status,
+            runtime_identity_detail=observed_placement.runtime_identity_detail,
             trust_state=recorded_placement.trust_state,
         )
     return ProductTargetSummary(
         artifact_manifest=artifact_manifest,
-        expected_runtime_identity=expected_identity,
-        observed_runtime_identity=destination_health.observed_runtime_identity
-        if destination_health is not None
-        else None,
-        runtime_identity_status=destination_health.runtime_identity_status
-        if destination_health is not None
-        else "unchecked",
-        runtime_identity_detail=destination_health.runtime_identity_detail
-        if destination_health is not None
-        else "",
+        expected_runtime_identity=observed_placement.expected_runtime_identity,
+        observed_runtime_identity=observed_placement.observed_runtime_identity,
+        runtime_identity_status=observed_placement.runtime_identity_status,
+        runtime_identity_detail=observed_placement.runtime_identity_detail,
         trust_state="missing",
     )
 

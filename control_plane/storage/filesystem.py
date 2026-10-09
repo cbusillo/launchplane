@@ -89,7 +89,10 @@ from control_plane.contracts.merge_train_policy import (
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
-from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooInstanceOverrideRecord,
+    OdooOverrideApplyResult,
+)
 from control_plane.contracts.odoo_prod_backup_restore_operation import (
     ODOO_PROD_BACKUP_RESTORE_OPERATION_PHASE_SEQUENCE,
     OdooProdBackupRestoreCheckpoint,
@@ -180,7 +183,10 @@ from control_plane.contracts.production_backup_authority import (
 from control_plane.contracts.detached_application_retirement import (
     DetachedApplicationRetirementRecord,
 )
-from control_plane.contracts.product_retirement import ProductRetirementRecord
+from control_plane.contracts.product_retirement import (
+    ProductRetirementRecord,
+    product_retirement_secret_authority,
+)
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.public_ingress_monitoring import (
@@ -246,8 +252,10 @@ from control_plane.storage.product_authority_bundle import (
     SecretRecordConflictError,
     require_bundle_context_owner,
     ProductAuthorityBundle,
+    ProductProfileConflictError,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
+    OdooInstanceOverrideConflictError,
     RuntimeEnvironmentDelete,
     RuntimeEnvironmentWrite,
     runtime_environment_records_match,
@@ -483,7 +491,12 @@ class FilesystemRecordStore:
         if not bundle.requires_write():
             return
         with self._product_authority_bundle_lock():
-            require_bundle_context_owner(bundle, self._list_product_profile_records_locked())
+            profiles = self._list_product_profile_records_locked()
+            require_bundle_context_owner(bundle, profiles)
+            current_profiles = {profile.product: profile for profile in profiles}
+            for expected_profile in bundle.expected_product_profiles:
+                if current_profiles.get(expected_profile.product) != expected_profile:
+                    raise ProductProfileConflictError("Product profile changed before commit.")
             for expected_source in bundle.secret_copy_sources:
                 try:
                     current_record = self._read_model_locked(
@@ -588,6 +601,21 @@ class FilesystemRecordStore:
         stage_dir: Path,
         entries: list[_AuthorityBundleStageEntry],
     ) -> None:
+        for write in bundle.odoo_instance_override_writes:
+            record_id = f"{write.record.context}-{write.record.instance}"
+            current = self._read_model_locked(
+                OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
+            )
+            if current != write.expected_record:
+                raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
+            self._stage_product_authority_bundle_write(
+                stage_dir=stage_dir,
+                entries=entries,
+                record_type="odoo_instance_overrides",
+                record_id=record_id,
+                model=write.record,
+                step_name="write_odoo_instance_override",
+            )
         for delete_item in bundle.delete_runtime_environments:
             self._stage_product_authority_bundle_delete(
                 entries=entries,
@@ -3763,6 +3791,34 @@ class FilesystemRecordStore:
     def write_secret_record(self, record: SecretRecord) -> Path:
         return self._write_model("launchplane_secrets", record.secret_id, record)
 
+    def disable_product_retirement_secret(
+        self, *, expected_record: SecretRecord, updated_at: str, updated_by: str
+    ) -> bool:
+        with self._product_authority_bundle_lock():
+            try:
+                current = self._read_model_locked(
+                    SecretRecord, "launchplane_secrets", expected_record.secret_id
+                )
+            except FileNotFoundError:
+                return False
+            if product_retirement_secret_authority(current) != product_retirement_secret_authority(
+                expected_record
+            ):
+                return False
+            if current.status != "disabled":
+                self._write_model_locked(
+                    "launchplane_secrets",
+                    current.secret_id,
+                    current.model_copy(
+                        update={
+                            "status": "disabled",
+                            "updated_at": updated_at,
+                            "updated_by": updated_by,
+                        }
+                    ),
+                )
+            return True
+
     def read_secret_record(self, secret_id: str) -> SecretRecord:
         return self._read_model(SecretRecord, "launchplane_secrets", secret_id)
 
@@ -5337,7 +5393,11 @@ class FilesystemRecordStore:
                     current_record = self.read_odoo_stable_target_replacement_operation_record(
                         record.operation_id
                     )
-                    if current_record.status != "pending":
+                    from control_plane.lane_movement import source_read_retry_ready
+
+                    if current_record.status != "pending" or not source_read_retry_ready(
+                        current_record, claimed_at
+                    ):
                         continue
                     claimed_record = current_record.model_copy(
                         update={
@@ -6728,8 +6788,17 @@ class FilesystemRecordStore:
         *,
         required_context_owner: tuple[str, str] | None = None,
         required_product_config_target: tuple[str, str, str] | None = None,
+        expected_record: OdooInstanceOverrideRecord | None = None,
     ) -> Path:
         with self._product_authority_bundle_lock():
+            if expected_record is not None:
+                current = self._read_model_locked(
+                    OdooInstanceOverrideRecord,
+                    "odoo_instance_overrides",
+                    f"{record.context}-{record.instance}",
+                )
+                if current != expected_record:
+                    raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             if required_context_owner is not None or required_product_config_target is not None:
                 require_bundle_context_owner(
                     ProductAuthorityBundle(
@@ -6741,6 +6810,30 @@ class FilesystemRecordStore:
             return self._write_model_locked(
                 "odoo_instance_overrides", f"{record.context}-{record.instance}", record
             )
+
+    def update_odoo_instance_override_apply_result(
+        self,
+        *,
+        context_name: str,
+        instance_name: str,
+        last_apply: OdooOverrideApplyResult,
+        updated_at: str,
+        source_label: str,
+    ) -> OdooInstanceOverrideRecord:
+        with self._product_authority_bundle_lock():
+            record_id = f"{context_name}-{instance_name}"
+            current = self._read_model_locked(
+                OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
+            )
+            updated = current.model_copy(
+                update={
+                    "last_apply": last_apply,
+                    "updated_at": updated_at,
+                    "source_label": source_label,
+                }
+            )
+            self._write_model_locked("odoo_instance_overrides", record_id, updated)
+            return updated
 
     def read_odoo_instance_override_record(
         self, *, context_name: str, instance_name: str
@@ -7033,6 +7126,16 @@ class FilesystemRecordStore:
         ]
         records.sort(key=lambda record: (record.decided_at, record.record_id), reverse=True)
         return tuple(records if limit is None else records[:limit])
+
+    def read_release_review_decision_record(
+        self, *, product: str, record_id: str
+    ) -> ReleaseReviewDecisionRecord:
+        record = self._read_model(
+            ReleaseReviewDecisionRecord, "launchplane_release_review_decisions", record_id
+        )
+        if record.product != product:
+            raise FileNotFoundError(record_id)
+        return record
 
     @contextmanager
     def product_review_lock(

@@ -463,7 +463,28 @@ def _provider_recorded_topology(
     now: datetime,
 ) -> ProductProviderRecordedTopology:
     if route_binding is None:
-        return ProductProviderRecordedTopology()
+        target = lane_summary.provider_target if lane_summary is not None else None
+        if target is None:
+            return ProductProviderRecordedTopology()
+        provenance = DataProvenance(
+            source_kind="record",
+            source_record_id=f"provider-target:{target.context}/{target.instance}",
+            recorded_at=target.updated_at,
+            refreshed_at=target.updated_at,
+            freshness_status="recorded",
+            detail="Launchplane provider-target placement record; no public route authority.",
+        )
+        return ProductProviderRecordedTopology(
+            placement=ProductTopologyPlacement(
+                provider=target.provider_id,
+                target_type=target.target_category,
+                target_name=target.display_name,
+                provider_target_type=target.provider_target_type,
+                provider_target_record_present=True,
+                trust_state="recorded",
+                provenance=provenance,
+            ),
+        )
     trust_state = _effective_freshness(
         route_binding.source.freshness_status,
         stale_after=route_binding.source.stale_after,

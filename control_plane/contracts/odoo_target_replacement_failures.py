@@ -94,3 +94,7 @@ def deploy_failure_description(code: str) -> str:
     if not code.startswith(DEPLOY_BLOCKED_PREFIX):
         return ""
     return DEPLOY_BLOCKED_DESCRIPTIONS.get(code.removeprefix(DEPLOY_BLOCKED_PREFIX), "")
+
+
+class OdooProviderEffectUncertainError(RuntimeError):
+    """A release provider write may still be running; retain its lane for reconciliation."""

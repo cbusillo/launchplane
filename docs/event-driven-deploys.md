@@ -71,6 +71,17 @@ reservation. The webhook request never waits on a deploy.
   branch's first-parent history that has a verified release build. A late
   build of an older commit is never desired while a newer one exists, so it
   cannot replace a newer deploy.
+  - Selection refuses an incomplete read: the run list must include the running
+    commit and its recorded build run. A generic-web baseline deployed before
+    the Build contract may instead use its recorded source and immutable image
+    digest (including a digest-pinned artifact ID paired with a provider SHA
+    tag), only when the successful Build inventory is complete with distinct
+    run ids and no recorded build run is missing. First-parent history must
+    reach the running commit in either case. The candidate still needs verified
+    Build/manifest evidence and the forward-only movement checks below. The
+    saved plan includes run and history counts, rejected builds, and whether
+    recorded runtime identity supplied baseline evidence. Missing evidence
+    leaves the lane unchanged with a recorded reason.
   - If testing already runs the desired artifact, stop.
   - Otherwise, `record_verified_build_artifact` and queue the stable target
     replacement for the testing lane. Its idempotency key is the lane plus
@@ -85,6 +96,11 @@ reservation. The webhook request never waits on a deploy.
   - **Generic-web:** the reconcile deploys the verified image itself, in
     process, through the generic-web deploy route's durable provider
     operation, under reservation scope `launchplane-reconcile:<product>`.
+    The request keeps the verified digest as its artifact identity and supplies
+    the same repository's canonical `sha-<source_commit>` tag as the provider
+    deploy reference, as required by Dokploy application targets. Recovery uses
+    the exact retained request, including that reference; legacy saved-plan
+    reconstruction retains its original digest-only shape and fingerprint.
     Nothing goes to the artifact store; the deploy records the image as the
     lane's runtime identity. Its key is the desired digest, the stored lane
     authority, and the deployment record testing ran when the deploy
@@ -231,8 +247,10 @@ needs no workflow to report previews or testing deploys.
 - **Preview:** one comment on the PR, marked `<!-- launchplane-reconcile-preview -->`
   and edited in place: waiting for a verified build of the head commit, ready
   (with the preview URL), retired, or failed with a short, redacted reason
-  (`cleanup_failed` when a destroy failed). A plan that changes nothing, is
-  deferred, or is held for another driver says nothing.
+  (`cleanup_failed` when a destroy failed). Closing a PR before its preview
+  build arrives removes its pending comment and records terminal cleared feedback;
+  a closed PR without feedback history posts nothing. Other plans that change
+  nothing, are deferred, or are held for another driver say nothing.
 - **Testing:** one comment on the PR GitHub merged as the desired commit
   (`merge_commit_sha` equals it), marked `<!-- launchplane-reconcile-testing -->`:
   the deploy is queued, the testing lane runs it, it is waiting because the
@@ -276,6 +294,68 @@ needs no workflow to report previews or testing deploys.
 - **Missing preview settings:** a preview refused because its runtime
   environment is incomplete names the missing keys (names only, never values)
   on the plan as `missing_keys`, in the request's error, and in the PR comment.
+
+## Forward build changes
+
+Testing and preview selection, stable deploys (including Client promotions,
+native VeriReel deploys and generic-web recovery retries), the ship executor,
+and preview applies check the requested build against the lane's current
+recorded build before provider effects. A different commit must be a proven
+descendant, or diverged history with verified provenance proving a newer
+artifact. This permits an explicit deploy after a history rewrite and a
+preview following a rebased PR head.
+An ancestor is always refused. Changing an image at the same commit requires
+newer build provenance; legacy preview records can use a verified build that
+started after the serving generation was requested. Historical preview build
+verification must match the exact recorded image; desired preview builds
+still have to match the current PR head. Missing ordering evidence is a refusal, not permission
+to replace the lane. Existing explicit rollback operations, including pinned
+failed-release recovery and the release drill, retain their rollback authority.
+Requests cannot supply a rollback exception to a deploy or preview apply.
+
+The supported forward path is a verified descendant build, or a same-commit
+or diverged-history build whose provenance proves it is newer. Generic-web
+requests must bind their source to the verified uploaded image. A provider
+tag must be the full source-SHA tag or a tag declared in that build's manifest;
+the immutable image digest remains the artifact identity. An intentional backward change
+uses the existing rollback operation and its own authority. Refusals remain in
+the reconcile plan or failed deployment/operation record. Stable-lane profile
+repair edits routing metadata and does not deploy an image.
+
+Generic-web deploy records retain verified build provenance with the exact
+image/source pair, so later promotion or a release drill does not depend on
+the uploaded manifest still being available on GitHub. Rollbacks carry that
+proof forward. For older builds without provenance, the earliest successful
+deployment of the same image/source is the observation bound; a rollback's
+new timestamp does not make that old artifact younger. A legacy lane with no
+usable bound still requires a newly built verified artifact. Native VeriReel
+preview refreshes, including the driver extension, enforce the preview guard
+inside refresh serialization. Existing previews need their configured product
+profile to resolve source authority; product onboarding/profile records supply
+that supported configuration path.
+
+Testing searches up to 20 pages of successful build runs and first-parent
+history to find its running build. An omitted running run or commit still
+holds selection with the observed counts. If the running build is beyond
+those bounds, or its history was rewritten, the supported service
+deploy/target-replacement operation can request an exact verified newer build;
+it still checks source and artifact order before
+effects. A source read outage before effects retains refusal evidence and
+allows another attempt, without consuming the testing failure budget or
+stopping an accepted Client release. Odoo operations wait before retrying,
+with exponential delays from 30 seconds to 30 minutes, so a source outage
+does not starve work on other lanes, including their rollbacks. Operations on
+the same lane remain serialized; an authorized pending-operation cancellation
+is the existing way to free that lane. Missing configured read authority
+is a terminal refusal. Direct preview source-read failures can retry with the
+same idempotency key; each refusal still gets a failed deployment record.
+Preview refusals retain the serving generation and remain visible in the
+operation response or reconcile plan. Generic-web preview checks include a
+failed active generation because it may already have changed a provider app.
+
+This guards code order, not database reversibility. An Odoo rollback preserves
+the existing database and runs post-deploy module work; it does not undo schema
+or data migrations. Backup, restore and release gates retain their own rules.
 
 ## Staff-testing hold
 
@@ -346,6 +426,26 @@ record, and of every open pull request, drafts included (one list of open pull
 requests per product, with the build-provenance token). A missed event is
 corrected within one sweep. Reconciling is idempotent, so the sweep runs the same code as
 the events, and a missed or out-of-order event is corrected within one sweep.
+
+For PRs with no live preview, the sweep also revisits recorded pending feedback
+and failed cleared-feedback delivery. It reads the PR through the normal reconcile
+path before clearing anything; a refused read never proves the PR is closed.
+Unresolved reads or terminal clear deliveries stop automatic recovery at
+`PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS` in
+[`product_reconcile.py`](../control_plane/product_reconcile.py), recorded as `feedback_recovery_failed_attempts` and
+`feedback_recovery_stop_reason` on the plan; supported reconciliation or remediation
+is required after exhaustion.
+The first successfully observed close gets a fresh cleanup budget, so read failures
+while open do not consume it. Further read failures retain that budget until the
+feedback is delivered or the PR is observed open again. An unreadable history skips
+only that product's supplemental recovery, leaving other sweep targets eligible.
+Successful delivery leaves the recovery set; a new event can retry an exhausted
+target with a fresh budget bound to its persisted delivery ID; duplicate deliveries
+do not refill it. Open PRs waiting for a build retain normal sweep coverage. Failed feedback
+and legacy entries without a status remain visible for supported observation rather
+than being assumed pending. Destroyed and teardown-pending preview records do not
+hide stale pending feedback; their reconciliation remains a no-op. Previews still
+requiring lifecycle work retain their existing sweep coverage and retry rules.
 
 ## Director steps
 

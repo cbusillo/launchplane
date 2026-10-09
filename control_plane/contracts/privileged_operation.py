@@ -1223,6 +1223,7 @@ PrivilegedOperationSemanticReviewBlockerCode = Literal[
     "authz_policy_applying_admin_removed",
     "authz_policy_strict_human_admin_unreachable",
     "authz_policy_administrator_quorum_unsatisfied",
+    "authz_policy_delivery_activation_active",
     "repository_not_exact",
     "workflow_refs_not_singleton",
     "workflow_ref_not_exact",

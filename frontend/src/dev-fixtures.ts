@@ -3252,7 +3252,7 @@ export function releaseDecisionForFixture(
   const steps = releaseStart === "promote_with_rollback_drill"
     ? (["backup", "promote", "rollback", "backup", "promote"] as const) : (["backup", "promote"] as const);
   return { ...response, release_run: releaseStart ? {
-    decision_record_id: "fixture-release-decision", rollback_drill: releaseStart === "promote_with_rollback_drill", state: "running",
+    decision_record_id: "fixture-release-decision", rollback_drill: releaseStart === "promote_with_rollback_drill", state: "running", blocked_reason: "",
     steps: steps.map((kind, index) => ({ step: `${kind}-${index}`, kind, status: index === 0 ? "running" : "not_started", operation_id: `fixture-operation-${index}` })),
   } : response.release_run, review: {
     ...response.review,

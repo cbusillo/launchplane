@@ -686,6 +686,7 @@ def _roll_back_production(
                 f"{provider_operation_title} rollback" if provider_operation_title else ""
             ),
             deployment_record_id=f"{deployment_record_id}-rollback",
+            rollback=True,
             provider_effect_checkpoint=_rollback_phase_checkpoint(provider_effect_checkpoint),
         )
     except Exception as error:  # noqa: BLE001 - recorded on the promotion, then re-raised.

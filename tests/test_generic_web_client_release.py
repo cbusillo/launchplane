@@ -146,6 +146,19 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.enterContext(patch.object(self.provider, "resolve_deploy_target", side_effect=resolve))
         self.fail_health = False
         self.raw_read = github_read
+        from tests.support.lane_builds import LaneBuildGitHub
+
+        transport = LaneBuildGitHub(
+            self.profile.repository,
+            self.profile.image.repository,
+            {BASE: "sha256:" + "f" * 64, HEAD: "sha256:" + "b" * 64},
+        )
+        self.enterContext(
+            patch(
+                "control_plane.product_reconcile.resolve_build_provenance_transport",
+                return_value=transport,
+            )
+        )
         self.publish = self.enterContext(
             patch(
                 "control_plane.client_release.publish_release_decision",
@@ -279,6 +292,29 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         promotions = self.store.list_promotion_records()
         self.assertEqual(promotions[0].backup_record_id, backup.backup_record_id)
         self.assertEqual(promotions[0].destination_health.status, "pass")
+
+    def test_github_outage_before_deploy_retries_accepted_release_without_rollback(self) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        with patch(
+            "control_plane.workflows.generic_web_deploy.require_forward_lane_build",
+            side_effect=LaneMovementRefused("source_order_unavailable"),
+        ):
+            for _ in range(4):
+                self.assertEqual(self.advance(), ())
+                run = read_client_release_run(
+                    store=self.store, profile=self.profile, decision=accepted
+                )
+                assert run is not None
+                self.assertNotEqual(run.state, "stopped")
+                self.assertEqual(self.provider.deployed_artifacts, [])
+        self.assertEqual(len(self.advance()), 1)
+        self.assertEqual(
+            self.provider.deployed_artifacts, [accepted.checklist.candidate.artifact_id]
+        )
 
     def test_failed_health_rolls_back_and_stops_without_repeating_release(self) -> None:
         self.fail_health = True

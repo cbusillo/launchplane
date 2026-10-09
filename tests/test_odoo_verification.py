@@ -427,6 +427,37 @@ class OdooVerificationTests(unittest.TestCase):
         self.assertEqual(attempts, 2)
         sleep_mock.assert_called_once()
 
+    def test_public_canonical_is_verified_on_origin_before_dns_switch(self) -> None:
+        origin = "https://cm-website-prod.shinycomputers.com"
+        public_url = "https://cellmechanic.com"
+        calls: list[str] = []
+
+        def response(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
+            calls.append(url)
+            if url == origin:
+                return (
+                    200,
+                    f'<link rel="canonical" href="{public_url}"><img src="/web/image/website/7/logo">',
+                    "text/html",
+                )
+            if url == f"{origin}/launchplane/health":
+                return 200, '{"status":"ok"}', "application/json"
+            if url == f"{origin}/web/image/website/7/logo":
+                return 200, "logo", "image/png"
+            self.fail(f"Probe escaped the origin: {url}")
+
+        with patch("control_plane.workflows.odoo_verification._http_text", side_effect=response):
+            result = verify_odoo_stable_readiness(
+                base_url=public_url, probe_base_url=origin, timeout_seconds=1
+            )
+        self.assertEqual(
+            (result.health_status, result.canonical_status, result.logo_status),
+            ("pass", "pass", "pass"),
+        )
+        self.assertEqual(result.evidence.canonical_url, public_url)
+        self.assertEqual(result.evidence.health_url, f"{origin}/launchplane/health")
+        self.assertTrue(all(url.startswith(origin) for url in calls))
+
 
 if __name__ == "__main__":
     unittest.main()

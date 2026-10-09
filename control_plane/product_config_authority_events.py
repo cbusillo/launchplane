@@ -415,10 +415,14 @@ def publish_product_config_authority_evidence(
         + json.dumps(
             {
                 "rejected_finding_count": gate.get("rejected_finding_count"),
+                "rejected_coverage_gap_count": gate.get("rejected_coverage_gap_count"),
                 "coverage_gap_count": coverage.get("coverage_gap_count"),
                 "hashes": evidence.get("hashes"),
                 "rejected_findings_sample": cast(
                     list[JsonValue], gate.get("rejected_findings") or []
+                )[:10],
+                "rejected_coverage_gaps_sample": cast(
+                    list[JsonValue], gate.get("rejected_coverage_gaps") or []
                 )[:10],
             },
             sort_keys=True,

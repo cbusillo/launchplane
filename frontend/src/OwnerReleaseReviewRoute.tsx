@@ -9,6 +9,7 @@ const RELEASE_STEP_LABELS: Record<ClientReleaseRunView["steps"][number]["kind"],
   backup: "Verified backup",
   promote: "Put this version live",
   rollback: "Rollback drill: return to the current version",
+  recovery: "Automatic recovery: restore the previous passing version",
 };
 const RELEASE_STEP_STATUS: Record<ClientReleaseRunView["steps"][number]["status"], string> = {
   not_started: "Not started",
@@ -23,12 +24,13 @@ const RELEASE_RUN_STATE: Record<ClientReleaseRunView["state"], string> = {
   waiting: "Starting",
   running: "In progress",
   passed: "Live",
-  stopped: "Stopped. Nothing more will run until an admin looks at it.",
+  stopped: "Stopped",
 };
 
 function ReleaseRunProgress({ run }: { run: ClientReleaseRunView }) {
   return <section className="owner-review-latest" aria-label="Release progress">
     <h3>Release progress: {RELEASE_RUN_STATE[run.state]}</h3>
+    {run.blocked_reason ? <p role="status">{run.blocked_reason}</p> : null}
     <ol>{run.steps.map(step => <li key={step.step}>{RELEASE_STEP_LABELS[step.kind]}: {RELEASE_STEP_STATUS[step.status]}</li>)}</ol>
   </section>;
 }

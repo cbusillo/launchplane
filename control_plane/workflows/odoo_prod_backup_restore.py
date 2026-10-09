@@ -21,6 +21,7 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.public_hosts import resolve_public_base_url
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_prod_backup_restore import (
     OdooProdBackupRestoreApplyRequest,
@@ -796,6 +797,7 @@ def execute_odoo_prod_backup_restore_apply(
                 phase="deploy",
             ),
             run_destructive_restore=False,
+            allow_historical_sender_contract=True,
             provider_effect_checkpoint=provider_checkpoint("post_deploy_started"),
         )
         post_deploy_evidence = PostDeployUpdateEvidence(
@@ -839,7 +841,11 @@ def execute_odoo_prod_backup_restore_apply(
             },
         )
         verification = verify_odoo_stable_readiness(
-            base_url=plan.base_url,
+            base_url=resolve_public_base_url(
+                instance=plan.instance, public_hosts=target_record.public_hosts
+            )
+            or plan.base_url,
+            probe_base_url=plan.base_url,
             health_url=plan.health_url,
             verify_health=True,
             verify_canonical=True,
@@ -1153,6 +1159,7 @@ def execute_odoo_prod_backup_restore_verification_replay(
                 phase="deploy",
             ),
             run_destructive_restore=False,
+            allow_historical_sender_contract=True,
             provider_effect_checkpoint=lambda effect: provider_effect_checkpoint(
                 "post_deploy_started", effect
             ),
@@ -1197,7 +1204,11 @@ def execute_odoo_prod_backup_restore_verification_replay(
     )
     try:
         verification = verify_odoo_stable_readiness(
-            base_url=plan.base_url,
+            base_url=resolve_public_base_url(
+                instance=plan.instance, public_hosts=target_record.public_hosts
+            )
+            or plan.base_url,
+            probe_base_url=plan.base_url,
             health_url=plan.health_url,
             verify_health=True,
             verify_canonical=True,

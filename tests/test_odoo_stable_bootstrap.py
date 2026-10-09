@@ -205,7 +205,12 @@ class _Store:
                 return record
         raise FileNotFoundError(f"{context_name}/{instance_name}")
 
-    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> None:
+    def write_odoo_instance_override_record(
+        self,
+        record: OdooInstanceOverrideRecord,
+        *,
+        expected_record: OdooInstanceOverrideRecord | None = None,
+    ) -> None:
         self.odoo_instance_override_records.append(record)
 
 
@@ -273,6 +278,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
         self.assertEqual(post_deploy_mock.call_args.kwargs["request"].phase, "deploy")
         verify_readiness.assert_called_once_with(
             base_url="https://cm-testing.shinycomputers.com",
+            probe_base_url="",
             health_url="https://cm-testing.shinycomputers.com/launchplane/health",
             verify_health=True,
             verify_canonical=True,

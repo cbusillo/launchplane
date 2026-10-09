@@ -5,7 +5,7 @@ import unittest
 from collections.abc import Callable
 from tempfile import TemporaryDirectory
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import Mock, patch
 
 import click
@@ -71,6 +71,7 @@ from control_plane.product_reconcile import (
 from control_plane.workflows.odoo_stable_operation_worker import _unexpected_error_code
 from control_plane.contracts.odoo_target_replacement_failures import (
     DEPLOY_BLOCKED_DESCRIPTIONS,
+    OdooProviderEffectUncertainError,
     deploy_blocked_code,
     deploy_blocked_code_for_runtime_error,
     deploy_failure_description,
@@ -242,7 +243,12 @@ class _Store:
     def write_environment_inventory(self, record: EnvironmentInventory) -> None:
         self.environment_inventories.append(record)
 
-    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> None:
+    def write_odoo_instance_override_record(
+        self,
+        record: OdooInstanceOverrideRecord,
+        *,
+        expected_record: OdooInstanceOverrideRecord | None = None,
+    ) -> None:
         self.odoo_instance_override_record = record
 
     def write_release_tuple_record(self, record: object) -> None:
@@ -562,6 +568,76 @@ def _request(path: str, query: object | None = None, **_: object) -> JsonValue:
 
 
 class OdooStableTargetReplacementTests(unittest.TestCase):
+    def test_lost_provider_response_holds_only_release_callers_and_keeps_lineage(self) -> None:
+        for hold_uncertain_effects in (False, True):
+            with self.subTest(hold_uncertain_effects=hold_uncertain_effects):
+                store = _Store(
+                    target_record=_target_record(),
+                    target_id_record=_target_id_record(),
+                    inventory=_inventory(),
+                )
+                checkpoint = Mock()
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                        return_value=("host", "token"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                        return_value={
+                            "name": "cm-testing",
+                            "env": "\n".join(
+                                (
+                                    *_DATABASE_ENV_LINES,
+                                    "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                                    "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                                    "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                                )
+                            ),
+                        },
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                        return_value={"deploymentId": "deploy-123", "status": "success"},
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                        return_value=_site_environment({}),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source",
+                        side_effect=click.ClickException(
+                            "Provider response was lost after the write."
+                        ),
+                    ),
+                ):
+
+                    def apply() -> object:
+                        return execute_odoo_stable_target_replacement_apply(
+                            control_plane_root=Path("."),
+                            record_store=store,
+                            request=OdooStableTargetReplacementApplyRequest(
+                                product=store.profile.product, instance="testing"
+                            ),
+                            dokploy_request=_request,
+                            provider_effect_checkpoint=checkpoint,
+                            hold_uncertain_effects=hold_uncertain_effects,
+                        )
+
+                    if hold_uncertain_effects:
+                        with self.assertRaises(OdooProviderEffectUncertainError):
+                            apply()
+                    else:
+                        result = cast(OdooStableTargetReplacementApplyResult, apply())
+                        self.assertEqual(result.deploy_status, "fail")
+                checkpoint.assert_called_once()
+                self.assertEqual(store.deployment_records[-1].deploy.status, "fail")
+                self.assertEqual(
+                    store.deployment_records[-1].runtime_source.get("provider_outcome"),
+                    "uncertain" if hold_uncertain_effects else None,
+                )
+                self.assertEqual(store.environment_inventories, [])
+
     def test_merge_required_odoo_install_modules_prepends_and_dedupes(self) -> None:
         self.assertEqual(
             _merge_required_odoo_install_modules("cm_website, disable_odoo_online, website"),
@@ -1914,6 +1990,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         verify_readiness.assert_called_once_with(
             base_url="https://cm-testing.shinycomputers.com",
+            probe_base_url="",
             health_url="https://cm-testing.shinycomputers.com/launchplane/health",
             verify_health=True,
             verify_canonical=True,
@@ -2092,9 +2169,37 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
 
     def test_apply_can_deploy_explicit_stored_artifact(self) -> None:
+        self._apply_stored_artifact()
+
+    def test_stale_replacement_refuses_ancestor_before_provider_writes(self) -> None:
+        self._apply_stored_artifact(backwards=True)
+
+    def test_explicit_rollback_can_replace_a_newer_build(self) -> None:
+        self._apply_stored_artifact(backwards=True, rollback=True)
+
+    def test_same_artifact_redeploy_keeps_the_historical_sender_contract(self) -> None:
+        self._apply_stored_artifact(replay=True)
+
+    def test_failed_forward_identity_does_not_relax_sender_check_on_retry(self) -> None:
+        self._apply_stored_artifact(replay=True, failed_forward_retry=True)
+
+    def _apply_stored_artifact(
+        self,
+        *,
+        backwards: bool = False,
+        rollback: bool = False,
+        replay: bool = False,
+        failed_forward_retry: bool = False,
+    ) -> None:
+        current_commit = ("b" if backwards else "a") * 40
+        desired_commit = (
+            current_commit
+            if replay and not failed_forward_retry
+            else ("a" if backwards else "b") * 40
+        )
         fresh_manifest = _artifact_manifest(
             artifact_id="artifact-cm-fresh",
-            source_commit="feed123",
+            source_commit=desired_commit,
             digest="sha256:fresh",
             odoo_install_modules=(
                 "launchplane_settings",
@@ -2120,8 +2225,17 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             profile=profile,
             target_record=_target_record(),
             target_id_record=_target_id_record(),
-            inventory=_inventory(),
-            artifact_manifests=(_artifact_manifest(), fresh_manifest),
+            inventory=_inventory().model_copy(
+                update={
+                    "source_git_ref": current_commit,
+                    "artifact_identity": ArtifactIdentityReference(
+                        artifact_id=fresh_manifest.artifact_id
+                        if replay and not failed_forward_retry
+                        else "artifact-cm-testing"
+                    ),
+                }
+            ),
+            artifact_manifests=(_artifact_manifest(source_commit=current_commit), fresh_manifest),
         )
         persisted_env = ""
 
@@ -2139,6 +2253,19 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                         "ODOO_DB_VOLUME=cm_testing_odoo_db",
                         "ODOO_INSTALL_MODULES=cm_website,legacy_theme",
+                        "LAUNCHPLANE_RUNTIME_IDENTITY_JSON="
+                        + json.dumps(
+                            {
+                                "product": profile.product,
+                                "context": "cm",
+                                "instance": "testing",
+                                "artifact_id": fresh_manifest.artifact_id,
+                                "source_git_ref": desired_commit,
+                                "image_reference": f"{fresh_manifest.image.repository}@{fresh_manifest.image.digest}",
+                            }
+                        )
+                        if replay
+                        else "",
                     )
                 ),
             }
@@ -2147,7 +2274,49 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             nonlocal persisted_env
             persisted_env = env_text
 
+        def post_deploy_outcome(**kwargs: object) -> OdooPostDeployResult:
+            status: Literal["pass", "fail"] = "pass"
+            error = ""
+            if failed_forward_retry:
+                from control_plane.dokploy import post_deploy as post_deploy_adapter
+
+                evidence = {
+                    "log_available": "true",
+                    **dict.fromkeys(
+                        post_deploy_adapter.ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS, "true"
+                    ),
+                    **dict.fromkeys(
+                        post_deploy_adapter.ODOO_WEBSITE_BOOTSTRAP_REQUIRED_READBACK_MARKERS, "true"
+                    ),
+                    post_deploy_adapter.ODOO_COMPANY_EMAIL_CONTRACT_MARKER: "false",
+                }
+                try:
+                    post_deploy_adapter.require_odoo_company_email_readback_evidence(
+                        evidence,
+                        allow_historical_contract=bool(kwargs["allow_historical_sender_contract"]),
+                    )
+                except post_deploy_adapter.OdooPostDeployReadbackFailure as refusal:
+                    status = "fail"
+                    error = str(refusal)
+            return OdooPostDeployResult(
+                context="cm",
+                instance="testing",
+                phase="deploy",
+                post_deploy_status=status,
+                error_message=error,
+            )
+
+        transport = Mock()
+        transport.get_json.return_value = {
+            "status": "behind" if backwards else "ahead",
+            "base_commit": {"sha": current_commit},
+            "merge_base_commit": {"sha": desired_commit if backwards else current_commit},
+        }
         with (
+            patch(
+                "control_plane.product_reconcile.resolve_build_provenance_transport",
+                return_value=transport,
+            ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
@@ -2191,13 +2360,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
-                return_value=OdooPostDeployResult(
-                    context="cm",
-                    instance="testing",
-                    phase="deploy",
-                    post_deploy_status="pass",
-                ),
-            ),
+                side_effect=post_deploy_outcome,
+            ) as post_deploy,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
                 return_value=_verification_result(),
@@ -2213,12 +2377,31 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     product="odoo-tenant-cm",
                     instance="testing",
                     artifact_id="artifact-cm-fresh",
-                    source_git_ref="feed123",
+                    source_git_ref=desired_commit,
                 ),
                 dokploy_request=cast(DokployRequest, _request),
+                rollback=rollback,
             )
 
-        self.assertEqual(result.deploy_status, "pass")
+        if backwards and not rollback:
+            self.assertEqual(result.deploy_status, "fail")
+            self.assertEqual(result.error_code, "lane_movement.ancestor_build")
+            sync_source.assert_not_called()
+            self.assertEqual(store.environment_inventories, [])
+            failure = store.deployment_records[-1].failure
+            assert failure is not None
+            self.assertEqual(failure.code, result.error_code)
+            return
+        if failed_forward_retry:
+            self.assertEqual(result.deploy_status, "fail")
+            self.assertIn("company sender", result.error_message)
+            self.assertEqual(store.environment_inventories, [])
+            return
+        self.assertEqual(result.deploy_status, "pass", result.error_message)
+        self.assertEqual(
+            post_deploy.call_args.kwargs["allow_historical_sender_contract"],
+            rollback or (replay and not failed_forward_retry),
+        )
         self.assertEqual(result.artifact_id, "artifact-cm-fresh")
         self.assertEqual(
             result.image_reference,
@@ -2231,10 +2414,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             "launchplane_settings,disable_odoo_online,cm_website",
         )
         final_deployment = store.deployment_records[-1]
-        self.assertEqual(final_deployment.source_git_ref, "feed123")
+        self.assertEqual(final_deployment.source_git_ref, desired_commit)
         assert final_deployment.runtime_identity is not None
         self.assertEqual(final_deployment.runtime_identity.artifact_id, "artifact-cm-fresh")
-        self.assertEqual(final_deployment.runtime_identity.source_git_ref, "feed123")
+        self.assertEqual(final_deployment.runtime_identity.source_git_ref, desired_commit)
         self.assertEqual(final_deployment.destination_health.runtime_identity_status, "unchecked")
         verify_runtime_identity.assert_not_called()
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")

@@ -5,7 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -26,6 +26,7 @@ from typing import (
 )
 
 from pydantic import BaseModel, JsonValue, TypeAdapter
+from control_plane.lane_movement import source_read_retry_ready
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -51,7 +52,7 @@ from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import DeclarativeBase, Mapped, aliased, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_column, sessionmaker
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
@@ -77,7 +78,7 @@ from control_plane.contracts.authz_denial_record import AuthzDenialRecord
 from control_plane.authz_candidate_preparation import (
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
-    ordinary_agent_delivery_administration_github_id,
+    ordinary_agent_delivery_administration_removed,
     ordinary_agent_delivery_administration_state,
 )
 from control_plane.contracts.authz_policy_record import (
@@ -325,7 +326,10 @@ from control_plane.contracts.merge_train_policy import (
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
-from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooInstanceOverrideRecord,
+    OdooOverrideApplyResult,
+)
 from control_plane.contracts.odoo_prod_promotion_operation import (
     ODOO_PROD_PROMOTION_OPERATION_PHASE_SEQUENCE,
     OdooProdPromotionCheckpoint,
@@ -445,7 +449,10 @@ from control_plane.contracts.production_backup_authority import (
     ProductionBackupPolicyRecord,
     ProductionBackupTargetRecord,
 )
-from control_plane.contracts.product_retirement import ProductRetirementRecord
+from control_plane.contracts.product_retirement import (
+    ProductRetirementRecord,
+    product_retirement_secret_authority,
+)
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.product_reconcile import (
     PRODUCT_RECONCILE_REQUEST_STATES,
@@ -674,6 +681,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
+    OdooInstanceOverrideConflictError,
     RuntimeEnvironmentWrite,
     runtime_environment_records_match,
 )
@@ -5792,6 +5800,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
         self._provider_evidence_context = local()
+        self._release_review_publication_context = local()
 
     @property
     def backend_name(self) -> str:
@@ -6131,6 +6140,76 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
+        self._write_product_authority_bundle(bundle)
+
+    def write_product_public_hosts_bundle(
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        expected_target: DokployTargetRecord,
+        expected_target_id: DokployTargetIdRecord,
+        expected_provider_target: ProviderTargetRecord,
+        apply_provider: Callable[[], None],
+    ) -> None:
+        """Check ownership/binding before effects; commit only after provider read-back."""
+
+        def guard(session: Any) -> None:
+            requested_hosts = set(bundle.dokploy_targets[0].public_hosts)
+            for row in session.scalars(select(LaunchplaneDokployTargetRow)).all():
+                if (row.context, row.instance) != (
+                    expected_target.context,
+                    expected_target.instance,
+                ):
+                    other = DokployTargetRecord.model_validate(row.payload)
+                    if requested_hosts.intersection((*other.domains, *other.public_hosts)):
+                        raise DokployTargetRecordChanged(
+                            "A public host is already owned by another target."
+                        )
+            for orm_type, model_type, expected in (
+                (LaunchplaneDokployTargetRow, DokployTargetRecord, expected_target),
+                (LaunchplaneDokployTargetIdRow, DokployTargetIdRecord, expected_target_id),
+                (LaunchplaneProviderTargetRow, ProviderTargetRecord, expected_provider_target),
+            ):
+                row = session.scalar(
+                    select(orm_type)
+                    .where(
+                        orm_type.context == expected_target.context,
+                        orm_type.instance == expected_target.instance,
+                    )
+                    .with_for_update()
+                )
+                if row is None or model_type.model_validate(row.payload) != expected:
+                    raise DokployTargetRecordChanged("Public-host target binding changed.")
+            for row in session.scalars(select(LaunchplaneDokployTargetIdRow)).all():
+                if row.target_id == expected_target_id.target_id and (
+                    row.context,
+                    row.instance,
+                ) != (expected_target.context, expected_target.instance):
+                    raise DokployTargetRecordChanged(
+                        "Public-host target is shared with another lane."
+                    )
+            for row in session.scalars(select(LaunchplaneProviderTargetRow)).all():
+                if (
+                    row.provider_id == "dokploy"
+                    and row.target_id == expected_target_id.target_id
+                    and (row.context, row.instance)
+                    != (expected_target.context, expected_target.instance)
+                ):
+                    raise DokployTargetRecordChanged(
+                        "Public-host target is shared with another lane."
+                    )
+
+        self._write_product_authority_bundle(
+            bundle, guard_provider=guard, apply_provider=apply_provider
+        )
+
+    def _write_product_authority_bundle(
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        guard_provider: Callable[[Any], None] | None = None,
+        apply_provider: Callable[[], None] | None = None,
+    ) -> None:
         if not bundle.requires_write():
             return
         with self._session_factory() as session:
@@ -6168,6 +6247,8 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ProductProfileConflictError(
                         "Product profile changed during bundle write."
                     )
+            if guard_provider is not None:
+                guard_provider(session)
             for expected_source in bundle.secret_copy_sources:
                 source_row = session.scalar(
                     select(LaunchplaneSecretRow)
@@ -6212,6 +6293,31 @@ class PostgresRecordStore(HumanSessionStore):
                     raise RuntimeEnvironmentConflictError(
                         "Runtime selectors changed before commit."
                     )
+            for write in bundle.odoo_instance_override_writes:
+                current = session.scalar(
+                    select(LaunchplaneOdooInstanceOverrideRow)
+                    .where(
+                        LaunchplaneOdooInstanceOverrideRow.context == write.record.context,
+                        LaunchplaneOdooInstanceOverrideRow.instance == write.record.instance,
+                    )
+                    .with_for_update()
+                )
+                if (
+                    current is None
+                    or OdooInstanceOverrideRecord.model_validate(current.payload)
+                    != write.expected_record
+                ):
+                    raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
+                self._merge_authority_row(
+                    session,
+                    LaunchplaneOdooInstanceOverrideRow(
+                        context=write.record.context,
+                        instance=write.record.instance,
+                        updated_at=write.record.updated_at,
+                        payload=self._payload_dict(write.record),
+                    ),
+                    step_name="write_odoo_instance_override",
+                )
             for secret_id in bundle.absent_secret_ids:
                 if (
                     session.scalar(
@@ -6393,6 +6499,11 @@ class PostgresRecordStore(HumanSessionStore):
                     self._idempotency_row(bundle.idempotency_record),
                     step_name="write_idempotency",
                 )
+            # All database preconditions (including runtime/secret writes) have
+            # passed. Provider failure rolls the whole bundle and success receipt back.
+            if apply_provider is not None:
+                session.flush()
+                apply_provider()
             session.commit()
 
     def _write_runtime_environment_with_expectation(
@@ -9606,6 +9717,8 @@ class PostgresRecordStore(HumanSessionStore):
                     model_type=OdooStableTargetReplacementOperationRecord,
                     payload=row.payload,
                 )
+                if not source_read_retry_ready(record, claimed_at):
+                    continue
                 if not self.database_url.startswith("sqlite"):
                     self._lock_odoo_stable_lane(
                         session,
@@ -10478,6 +10591,8 @@ class PostgresRecordStore(HumanSessionStore):
                 self._lock_odoo_stable_lane(session, product="", context="", instance="")
             for row in cast(list[Any], session.scalars(statement).all()):
                 record = self._read_payload(model_type=model_type, payload=row.payload)
+                if not source_read_retry_ready(record, claimed_at):
+                    continue
                 if not self.database_url.startswith("sqlite"):
                     self._lock_odoo_stable_lane(
                         session,
@@ -10500,7 +10615,17 @@ class PostgresRecordStore(HumanSessionStore):
                     update={
                         "status": "running",
                         "phase": "running",
-                        "checkpoints": (),
+                        "checkpoints": (
+                            (
+                                *record.checkpoints,
+                                type(record.checkpoints[0])(
+                                    phase="running",
+                                    recorded_at=claimed_at,
+                                ),
+                            )
+                            if record.checkpoints
+                            else ()
+                        ),
                         "started_at": record.started_at or claimed_at,
                         "updated_at": claimed_at,
                         "lease_owner": normalized_lease_owner,
@@ -10594,10 +10719,18 @@ class PostgresRecordStore(HumanSessionStore):
             return checkpointed_record
 
     def _complete_release_operation(
-        self, record: Any, *, row_type: Any, model_type: Any, lease_owner: str
+        self, record: Any, *, row_type: Any, model_type: Any, lease_owner: str, recovery: Any = None
     ) -> bool:
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            if recovery is not None:
+                self._lock_odoo_stable_lane(
+                    session,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                )
+            else:
+                self._begin_serialized_write(session)
             row = self._locked_release_operation_row(session, row_type, record.operation_id)
             current_record = self._read_payload(model_type=model_type, payload=row.payload)
             if not self._release_operation_lease_is_current(
@@ -10605,6 +10738,10 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 return False
             self._sync_release_operation_row(row, record)
+            if recovery is not None:
+                session.add(
+                    self._release_operation_row(LaunchplaneOdooProdRollbackOperationRow, recovery)
+                )
             session.commit()
             return True
 
@@ -10643,7 +10780,11 @@ class PostgresRecordStore(HumanSessionStore):
                             **released_lease,
                             "status": "pending",
                             "phase": "created",
-                            "checkpoints": (),
+                            "checkpoints": tuple(
+                                checkpoint
+                                for checkpoint in record.checkpoints
+                                if checkpoint.phase == "created"
+                            ),
                             "started_at": "",
                             "updated_at": now,
                         }
@@ -10839,11 +10980,37 @@ class PostgresRecordStore(HumanSessionStore):
     def complete_odoo_prod_promotion_operation_record(
         self, *, record: OdooProdPromotionOperationRecord, lease_owner: str
     ) -> bool:
+        from control_plane.odoo_release_recovery import (
+            build_odoo_release_recovery,
+            odoo_release_wrote_production,
+        )
+
+        recovery = build_odoo_release_recovery(self, record)
+        if (
+            record.status == "fail"
+            and record.authorization.grant == "client_release_acceptance"
+            and odoo_release_wrote_production(record)
+            and recovery is None
+        ):
+            record = record.model_copy(
+                update={
+                    "status": "reconciliation_required",
+                    "phase": record.checkpoints[-1].phase,
+                    "finished_at": "",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
+                    "result": None,
+                    "error_code": "operation_reconciliation_required",
+                    "error_message": "The failed Odoo release lacks verified recovery provenance; reconcile production before releasing the lane.",
+                }
+            )
         return self._complete_release_operation(
             record,
             row_type=LaunchplaneOdooProdPromotionOperationRow,
             model_type=OdooProdPromotionOperationRecord,
             lease_owner=lease_owner,
+            recovery=recovery,
         )
 
     def recover_expired_odoo_prod_promotion_operation_records(
@@ -19777,9 +19944,26 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 yield
             return
-        with self._session_factory() as session, session.begin():
-            self._lock_landing_authority(session, f"release-review-publication:{record_id}")
-            yield
+        try:
+            with self._session_factory() as session, session.begin():
+                session.execute(text("SET LOCAL lock_timeout = '5s'"))
+                self._lock_landing_authority(session, f"release-review-publication:{record_id}")
+                previous = getattr(self._release_review_publication_context, "publication", None)
+                self._release_review_publication_context.publication = (record_id, session)
+                try:
+                    yield
+                finally:
+                    self._release_review_publication_context.publication = previous
+        except SQLAlchemyError as error:
+            raise ValueError(
+                "Release decision publication is unavailable; retry the saved decision."
+            ) from error
+
+    def _release_review_publication_session(self, record_id: str) -> Session | None:
+        publication = getattr(self._release_review_publication_context, "publication", None)
+        if publication is not None and publication[0] == record_id:
+            return cast(Session, publication[1])
+        return None
 
     def record_release_review_decision_publication(
         self, *, record_id: str, release_issue_url: str
@@ -19787,7 +19971,12 @@ class PostgresRecordStore(HumanSessionStore):
         """Publish an existing decision once, preserving its audit and any stored URL."""
         if not release_issue_url.strip():
             raise ValueError("Release decision publication requires an issue URL.")
-        with self._session_factory() as session:
+        publication_session = self._release_review_publication_session(record_id)
+        with (
+            nullcontext(publication_session)
+            if publication_session is not None
+            else self._session_factory() as session
+        ):
             self._begin_serialized_write(session)
             statement = select(LaunchplaneReleaseReviewDecisionRow).where(
                 LaunchplaneReleaseReviewDecisionRow.record_id == record_id
@@ -19802,7 +19991,10 @@ class PostgresRecordStore(HumanSessionStore):
                 return stored
             published = stored.model_copy(update={"release_issue_url": release_issue_url})
             row.payload = self._payload_dict(published)
-            session.commit()
+            if publication_session is None:
+                session.commit()
+            else:
+                session.flush()
             return published
 
     def list_release_review_decision_records(
@@ -19822,6 +20014,17 @@ class PostgresRecordStore(HumanSessionStore):
     def read_release_review_decision_record(
         self, *, product: str, record_id: str
     ) -> ReleaseReviewDecisionRecord:
+        session = self._release_review_publication_session(record_id)
+        if session is not None:
+            row = session.scalar(
+                select(LaunchplaneReleaseReviewDecisionRow).where(
+                    LaunchplaneReleaseReviewDecisionRow.product == product,
+                    LaunchplaneReleaseReviewDecisionRow.record_id == record_id,
+                )
+            )
+            if row is None:
+                raise FileNotFoundError(record_id)
+            return ReleaseReviewDecisionRecord.model_validate(row.payload)
         return self._read_model(
             model_type=ReleaseReviewDecisionRecord,
             orm_model=LaunchplaneReleaseReviewDecisionRow,
@@ -20323,7 +20526,7 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def list_product_reconcile_requests(
-        self, *, state: str = "", product: str = "", limit: int = 100
+        self, *, state: str = "", product: str = "", limit: int | None = 100
     ) -> tuple[ProductReconcileRequestRecord, ...]:
         filters: list[object] = []
         if product:
@@ -34857,41 +35060,20 @@ class PostgresRecordStore(HumanSessionStore):
             confirmation_consumption=confirmation_consumption,
         )
 
-        administration_github_id = ordinary_agent_delivery_administration_github_id(
-            current_record.policy
-        )
         removes_delivery_administration = (
-            administration_github_id > 0
-            and replacement_record is not None
-            and ordinary_agent_delivery_administration_state(
-                replacement_record.policy,
-                github_id=administration_github_id,
+            replacement_record is not None
+            and ordinary_agent_delivery_administration_removed(
+                current_record.policy, replacement_record.policy
             )
-            != "active"
         )
-        if removes_delivery_administration:
-            activation_statement = (
-                select(LaunchplaneOrdinaryAgentDeliveryActivationRow)
-                .where(
-                    LaunchplaneOrdinaryAgentDeliveryActivationRow.revoked_at.is_(None),
-                    LaunchplaneOrdinaryAgentDeliveryActivationRow.superseded_at.is_(None),
-                )
-                .limit(1)
+        if removes_delivery_administration and self._has_unexpired_delivery_activation(session):
+            if reservation_row is not None:
+                session.delete(reservation_row)
+                session.commit()
+            return AuthzPolicyCompareWriteResult(
+                status="authz_policy_delivery_activation_active",
+                current_record=current_record,
             )
-            if not self.database_url.startswith("sqlite"):
-                activation_statement = activation_statement.with_for_update()
-            activation_row = session.scalar(activation_statement)
-            if activation_row is not None:
-                activation = self._ordinary_agent_delivery_activation_from_row(activation_row)
-                if activation.revoked_at or activation.superseded_by_activation_id:
-                    raise ValueError("Current activation projection is inconsistent.")
-                if reservation_row is not None:
-                    session.delete(reservation_row)
-                    session.commit()
-                return AuthzPolicyCompareWriteResult(
-                    status="reconciliation_required",
-                    current_record=current_record,
-                )
 
         if confirmation_consumption is not None:
             if replacement_record is None:
@@ -34982,6 +35164,28 @@ class PostgresRecordStore(HumanSessionStore):
             current_record=result_record,
             idempotency_record=stored_completion,
         )
+
+    def _has_unexpired_delivery_activation(self, session: Any, *, lock_rows: bool = True) -> bool:
+        statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
+            LaunchplaneOrdinaryAgentDeliveryActivationRow.revoked_at.is_(None),
+            LaunchplaneOrdinaryAgentDeliveryActivationRow.superseded_at.is_(None),
+        )
+        if lock_rows and not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update()
+        rows = tuple(session.scalars(statement).all())
+        observed_at = datetime.fromisoformat(self._database_mutation_timestamp(session))
+        for row in rows:
+            activation = self._ordinary_agent_delivery_activation_from_row(row)
+            if activation.revoked_at or activation.superseded_by_activation_id:
+                raise ValueError("Current activation projection is inconsistent.")
+            if observed_at < datetime.fromisoformat(activation.activation_expires_at):
+                return True
+        return False
+
+    def has_unexpired_delivery_activation(self) -> bool:
+        """Read the retirement prerequisite using the same DB clock as the locked write."""
+        with self._session_factory() as session:
+            return self._has_unexpired_delivery_activation(session, lock_rows=False)
 
     def list_authz_policy_records(
         self,
@@ -37609,6 +37813,7 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         required_context_owner: tuple[str, str] | None = None,
         required_product_config_target: tuple[str, str, str] | None = None,
+        expected_record: OdooInstanceOverrideRecord | None = None,
     ) -> None:
         row = LaunchplaneOdooInstanceOverrideRow(
             context=record.context,
@@ -37616,12 +37821,30 @@ class PostgresRecordStore(HumanSessionStore):
             updated_at=record.updated_at,
             payload=self._payload_dict(record),
         )
-        if required_context_owner is None and required_product_config_target is None:
+        if (
+            required_context_owner is None
+            and required_product_config_target is None
+            and expected_record is None
+        ):
             self._write_row(row)
             return
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            if expected_record is not None:
+                current = session.scalar(
+                    select(LaunchplaneOdooInstanceOverrideRow)
+                    .where(
+                        LaunchplaneOdooInstanceOverrideRow.context == record.context,
+                        LaunchplaneOdooInstanceOverrideRow.instance == record.instance,
+                    )
+                    .with_for_update()
+                )
+                if (
+                    current is None
+                    or OdooInstanceOverrideRecord.model_validate(current.payload) != expected_record
+                ):
+                    raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             require_bundle_context_owner(
                 ProductAuthorityBundle(
                     required_context_owner=required_context_owner,
@@ -37634,6 +37857,41 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.merge(row)
             session.commit()
+
+    def update_odoo_instance_override_apply_result(
+        self,
+        *,
+        context_name: str,
+        instance_name: str,
+        last_apply: OdooOverrideApplyResult,
+        updated_at: str,
+        source_label: str,
+    ) -> OdooInstanceOverrideRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            row = session.scalar(
+                select(LaunchplaneOdooInstanceOverrideRow)
+                .where(
+                    LaunchplaneOdooInstanceOverrideRow.context == context_name,
+                    LaunchplaneOdooInstanceOverrideRow.instance == instance_name,
+                )
+                .with_for_update()
+            )
+            if row is None:
+                raise FileNotFoundError("Odoo override record no longer exists")
+            current = OdooInstanceOverrideRecord.model_validate(row.payload)
+            updated = current.model_copy(
+                update={
+                    "last_apply": last_apply,
+                    "updated_at": updated_at,
+                    "source_label": source_label,
+                }
+            )
+            row.payload = self._payload_dict(updated)
+            row.updated_at = updated_at
+            session.commit()
+            return updated
 
     def read_odoo_instance_override_record(
         self, *, context_name: str, instance_name: str
@@ -37660,6 +37918,38 @@ class PostgresRecordStore(HumanSessionStore):
     def write_secret_record(self, record: SecretRecord) -> None:
         # Existing records are row-guarded; concurrent direct creates arbitrate by uniqueness.
         self._write_row(self._secret_row(record))
+
+    def disable_product_retirement_secret(
+        self, *, expected_record: SecretRecord, updated_at: str, updated_by: str
+    ) -> bool:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                select(LaunchplaneSecretRow)
+                .where(LaunchplaneSecretRow.secret_id == expected_record.secret_id)
+                .with_for_update()
+            )
+            if row is None:
+                return False
+            current = SecretRecord.model_validate(row.payload)
+            if product_retirement_secret_authority(current) != product_retirement_secret_authority(
+                expected_record
+            ):
+                return False
+            if current.status != "disabled":
+                session.merge(
+                    self._secret_row(
+                        current.model_copy(
+                            update={
+                                "status": "disabled",
+                                "updated_at": updated_at,
+                                "updated_by": updated_by,
+                            }
+                        )
+                    )
+                )
+                session.commit()
+            return True
 
     def _write_bundled_metadata_row(self, row: Base) -> None:
         with self._session_factory() as session:
