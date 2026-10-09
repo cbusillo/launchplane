@@ -1,4 +1,4 @@
-"""Ask the Client to accept a complete release, once per open review."""
+"""Ask the Client to review a release when there is something new to check."""
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from time import monotonic
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import (
@@ -17,6 +18,7 @@ from control_plane.contracts.release_review import (
     ReleaseReviewStatus,
     ReleaseVersion,
 )
+from control_plane.release_invitation_changes import client_invitation_changes
 from control_plane.release_review import (
     CLIENT_APPROVAL_REQUIRED,
     ReleaseReviewStore,
@@ -68,9 +70,73 @@ def _timestamp(value: object) -> datetime:
 
 
 def _change_link(item: ReleaseReviewItem) -> str:
-    # Titles are display text, never link syntax or a source of human mentions.
-    title = " ".join(item.title.splitlines()).replace("@", "@\u200b")
-    return f"- [#{item.pull_request_number}]({item.url}): {title}"
+    # Use the instructions written for the Client, rather than engineering titles.
+    notes = " ".join(item.owner_test_notes.splitlines()).replace("@", "@\u200b")
+    return f"- [#{item.pull_request_number}]({item.url}): {notes}"
+
+
+def _announced_changes(
+    request: dict[str, object] | None, changes: dict[str, ReleaseReviewItem]
+) -> set[str]:
+    if request is None:
+        return set()
+    lines = _comment_lines(request)
+    keys = {
+        match[1]
+        for line in lines
+        if (
+            match := re.fullmatch(
+                r"<!-- launchplane:release-client-change:([0-9a-f]{64}) -->", line
+            )
+        )
+    }
+    # Adopt existing invitations using their exact PR links. Subsequent receipts
+    # keep announcement history even when a candidate temporarily removes a PR.
+    if not keys:
+        links = set(re.findall(r"https://github\.com/[^\s)<>]+/pull/[0-9]+", "\n".join(lines)))
+        keys.update(key for key, item in changes.items() if item.url in links)
+    return keys
+
+
+REPLACED_MARKER = "<!-- launchplane:release-invitation-replaced -->"
+
+
+def _replace_older_invitations(
+    *, comments: list[dict[str, object]], current: dict[str, object], path: str, token: str
+) -> None:
+    current_id = current.get("id")
+    if not isinstance(current_id, int) or current_id < 1:
+        raise ValueError("Release invitation comment identity is unavailable.")
+    for comment in comments:
+        lines = _comment_lines(comment)
+        if comment.get("id") == current_id or REPLACED_MARKER in lines:
+            continue
+        if not any(
+            re.fullmatch(r"<!-- launchplane:release-(?:invitation|reminder):[0-9a-f]{64} -->", line)
+            for line in lines
+        ):
+            continue
+        comment_id = comment.get("id")
+        if not isinstance(comment_id, int) or comment_id < 1:
+            raise ValueError("Release invitation comment identity is unavailable.")
+        receipts = [
+            line
+            for line in lines
+            if re.fullmatch(r"<!-- launchplane:[a-z-]+:[0-9a-f]{64} -->", line)
+        ]
+        body = "\n".join(
+            receipts
+            + [
+                REPLACED_MARKER,
+                "",
+                "Replaced by the current release invitation below. No action is needed on this older invitation.",
+            ]
+        )
+        result = github_api_request(
+            path=f"{path}/comments/{comment_id}", token=token, method="PATCH", body={"body": body}
+        )
+        if not isinstance(result, dict) or result.get("id") != comment_id:
+            raise ValueError("Release invitation replacement was not confirmed.")
 
 
 def _comment_lines(comment: dict[str, object]) -> list[str]:
@@ -114,16 +180,22 @@ def _open_request(
     marker: str,
     decision: ReleaseReviewDecisionRecord | None,
 ) -> dict[str, object] | None:
-    matching = [comment for comment in comments if marker in _comment_lines(comment)]
-    if len(matching) > 1:
-        raise ValueError("Release invitation request is ambiguous.")
+    matching = [
+        comment
+        for comment in comments
+        if marker in _comment_lines(comment) and REPLACED_MARKER not in _comment_lines(comment)
+    ]
     if matching:
-        return matching[0]
+        # A lost post/replacement response may leave two current receipts. The
+        # newest is authoritative; the replacement pass repairs the older one.
+        return matching[-1]
     # Adopt the newest legacy/manual receipt still awaiting a Client decision.
     # Candidate markers alone cannot distinguish an open request from a decided one.
     legacy = []
     for comment in comments:
         lines = _comment_lines(comment)
+        if REPLACED_MARKER in lines:
+            continue
         if any(line.startswith("<!-- launchplane:release-request:") for line in lines):
             continue
         if not any(
@@ -331,35 +403,67 @@ def publish_release_invitation(
                 if request
                 else _now() + timedelta(days=3)
             )
-            if request and marker in _comment_lines(request):
+            client_changes = client_invitation_changes(store, profile, review.checklist)
+            announced = _announced_changes(request, client_changes)
+            added = {key: item for key, item in client_changes.items() if key not in announced}
+            # A matching candidate receipt still needs the one-time migration
+            # to plain wording and cleanup of older duplicate invitations.
+            formatted = request and any(
+                line.startswith("Updated at: ") for line in _comment_lines(request)
+            )
+            if request and marker in _comment_lines(request) and formatted and not added:
+                _replace_older_invitations(
+                    comments=comments, current=request, path=path, token=token
+                )
                 if reminded or _now() < due:
                     _remember_delivery(backoff, receipt, due, reminded)
                     return
                 # One durable reminder per open request. A lost response is
                 # recovered from this marker, including after replica restart.
-                body = f"{reminder_marker}\n\n@{profile.owner.github_login} a reminder to review this release:\n\n{review_link}\n\n{effect}"
+                body = f"{reminder_marker}\n" + str(request["body"]).replace(
+                    f"Hi {profile.owner.github_login},", f"Hi @{profile.owner.github_login},"
+                ).replace("Hi @", "A reminder: hi @")
                 result = github_api_request(
                     path=comments_path, token=token, method="POST", body={"body": body}
                 )
                 if not isinstance(result, dict) or not isinstance(result.get("id"), int):
                     raise ValueError("Release invitation reminder was not confirmed.")
+                _replace_older_invitations(
+                    comments=comments, current=result, path=path, token=token
+                )
                 _remember_delivery(backoff, receipt, due, True)
                 return
-            changes = [_change_link(item) for item in review.checklist.items]
-            for shared in review.checklist.shared_sources:
-                changes.extend(_change_link(item) for item in shared.items)
-            changes.extend(
-                f"- {change}".replace("@", "@\u200b")
-                for change in review.checklist.additional_changes
+            notify = not request or bool(added)
+            changes = [
+                _change_link(item)
+                for item in (added if request and added else client_changes).values()
+            ]
+            if not changes:
+                changes = ["- Engineering updates only; no new Client change needs checking."]
+            client = f"@{profile.owner.github_login}" if notify else profile.owner.github_login
+            heading = (
+                "Added to this release" if request and added else "What to check in this release"
             )
-            client = profile.owner.github_login if request else f"@{profile.owner.github_login}"
+            receipts = "\n".join(
+                f"<!-- launchplane:release-client-change:{key} -->"
+                for key in sorted(announced | client_changes.keys())
+            )
+            if reminded:
+                receipts += f"\n{reminder_marker}"
+            display_time = _now().astimezone(ZoneInfo("America/New_York")).strftime(
+                "%B %-d, %Y at %-I:%M %p ET"
+            )
             body = (
-                f"{request_marker}\n{marker}\n\n{client} this release is ready for you to review:\n\n"
-                f"{review_link}\n\nWhat changed:\n" + "\n".join(changes) + f"\n\n{effect}"
+                f"{request_marker}\n{marker}\n{receipts}\n\nHi {client},\n\n"
+                f"{heading}:\n"
+                + "\n".join(changes)
+                + f"\n\nStill one thing to do: [open the release page]({review_link}), "
+                "check the changes on the testing site, then press **Accept** or **Request changes**."
+                f"\n\n{effect}\n\nUpdated at: {display_time}"
             )
             destination = comments_path
             method = "POST"
-            if request:
+            if request and not notify:
                 comment_id = request.get("id")
                 if not isinstance(comment_id, int) or comment_id < 1:
                     raise ValueError("Release invitation comment identity is unavailable.")
@@ -370,6 +474,9 @@ def publish_release_invitation(
             )
             if not isinstance(result, dict) or not isinstance(result.get("id"), int):
                 raise ValueError("Release invitation publication was not confirmed.")
+            _replace_older_invitations(comments=comments, current=result, path=path, token=token)
+            if notify:
+                due = _timestamp(result.get("created_at")) + timedelta(days=3)
             _remember_delivery(backoff, receipt, due, reminded)
 
 
