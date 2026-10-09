@@ -7,6 +7,7 @@ from control_plane.contracts.merge_train_batch import build_merge_train_batch_la
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlan,
 )
+from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.merge_readiness import MergeReadinessCandidateEvidence
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_admission import (
@@ -95,6 +96,7 @@ class _StackRecoveryTransport(_RecoveryTransport):
         self.child_read_failure = False
         self.child_error: MergeTrainGitHubError | None = None
         self.child_contained = True
+        self.child_merge_contained = True
         self.interrupt_after_close = False
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
@@ -133,7 +135,10 @@ class _StackRecoveryTransport(_RecoveryTransport):
                 child["labels"] = [{"name": label} for label in labels]
                 return child["labels"]
         if "/compare/" in path and any(f"/{n * 40}..." in path for n in ("2", "3")):
-            return {"status": "ahead" if self.child_contained else "diverged"}
+            contained = self.child_contained and (
+                self.child_merge_contained or not path.endswith(f"...{OTHER_SHA}")
+            )
+            return {"status": "ahead" if contained else "diverged"}
         return super().request(method=method, path=path, body=body)
 
 
@@ -477,6 +482,43 @@ class MergeTrainPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             result["reason_code"], "completed_landing_stack_disposition_not_configured"
         )
         self.assertEqual(transport.effects, [])
+
+    def _assert_rewritten_root_recovery(self, method: MergeTrainMergeMethod) -> None:
+        transport = self._record_unfinished_stack()
+        transport.child_merge_contained = False
+        for record in self.store.list_merge_train_batch_landing_plan_records():
+            plan = record.landing_plan
+            updated_plan = type(plan).model_validate(
+                {
+                    **plan.model_dump(),
+                    "entries": [
+                        entry.model_copy(update={"merge_method": method}) for entry in plan.entries
+                    ],
+                    "landing_plan_sha256": "",
+                }
+            )
+            self.store.write_merge_train_batch_landing_plan_record(
+                record.model_copy(update={"landing_plan": updated_plan})
+            )
+        result = self._run().accepted_result
+        if method == "merge":
+            self.assertEqual(result["reason_code"], "completed_landing_stack_child_not_contained")
+            self.assertEqual(transport.effects, [])
+        else:
+            self.assertEqual(result["reason_code"], "completed_landing_policy_changed")
+            self.assertEqual(
+                self.store.list_merge_train_controller_state_records()[0].status, "idle"
+            )
+            self.assertEqual(transport.children[3]["state"], "closed")
+
+    def test_old_policy_squashed_root_recovers_from_exact_merged_head(self) -> None:
+        self._assert_rewritten_root_recovery("squash")
+
+    def test_old_policy_rebased_root_recovers_from_exact_merged_head(self) -> None:
+        self._assert_rewritten_root_recovery("rebase")
+
+    def test_old_policy_plain_merge_still_requires_child_in_merge_commit(self) -> None:
+        self._assert_rewritten_root_recovery("merge")
 
     def test_old_policy_child_read_keeps_transient_error_retry_evidence(self) -> None:
         transport = self._record_unfinished_stack()

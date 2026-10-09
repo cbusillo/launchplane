@@ -1853,6 +1853,13 @@ def _reconcile_completed_landing_after_policy_change(
             for entry in plan.entries
             if entry.pull_request_number == record.plan.root_pull_request_number
         )
+        # Squash/rebase rewrite ancestry; the provider's exact merged-root head
+        # plus child containment in that head proves their carried content.
+        root_refs = (
+            (root.expected_head_sha, root.merge_commit_sha)
+            if root.merge_method == "merge"
+            else (root.expected_head_sha,)
+        )
         for child in record.plan.child_dispositions:
             if child.status == "closed":
                 continue  # A completed disposition cannot close a later reopened head.
@@ -1868,7 +1875,7 @@ def _reconcile_completed_landing_after_policy_change(
                         branch_ref=root_ref,
                         commit_sha=child.expected_head_sha,
                     )
-                    for root_ref in (root.expected_head_sha, root.merge_commit_sha)
+                    for root_ref in root_refs
                 )
             except MergeTrainGitHubStaleHeadError:
                 return blocked(

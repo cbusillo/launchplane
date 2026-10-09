@@ -27,8 +27,10 @@ clears the completed fence with `reason_code=completed_landing_policy_changed`,
 preserving the landing history and retaining the old candidate ref. It never
 re-admits or re-merges the root or repeats a stack collapse. For unfinished
 legacy stack disposition, the same supported controller pass verifies every
-unfinished child head against its PR and confirms containment in both the landed
-root head and merge commit before any provider write. It then resumes the
+unfinished child head against its PR and confirms containment in the landed
+root head before any provider write. Plain merge landings also require child
+containment in the merge commit; squash and rebase rely on the provider's
+exact merged-root head because those methods rewrite commit ancestry. It then resumes the
 checkpointed comment, label and close effects using the current repository
 policy's disposition label; retries observe completed provider effects instead
 of repeating them. Completed non-stack history requires no provider writes.
