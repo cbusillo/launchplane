@@ -657,6 +657,11 @@ without a public route binding, including for private-only services. That record
 does not establish public ingress, TLS ownership, or verified runtime identity;
 missing public route authority still blocks public-lane qualification.
 
+Products sidebar lane dots and their accessible descriptions use
+`environmentOperationalTone`, the same signal as product views. Absent lanes
+are neutral and described as absent (not recorded); missing or unsupported
+evidence stays unknown, warnings are amber, and failures are red.
+
 Open product inventories, workspaces, and environment evidence views refresh
 their read resources once a minute after a completed read. Hidden tabs pause
 automatic reads and catch up on focus or visibility return when due. Pending
