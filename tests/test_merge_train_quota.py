@@ -23,7 +23,11 @@ from control_plane.merge_train_scheduler import (
 from control_plane.merge_train_controller_run_once import (
     _controller_exception_reconciliation_detail,
 )
-from control_plane.merge_train_github import MergeTrainGitHubError, UrllibMergeTrainGitHubTransport
+from control_plane.merge_train_github import (
+    MergeTrainGitHubError,
+    UrllibMergeTrainGitHubTransport,
+    _conversation_resolution_rule,
+)
 from tests.test_merge_train_admission import _RunHistoryStore, _run_record
 from tests.test_merge_train_github_failures import _failed_request
 from tests.test_merge_train_scheduler import _policy_record
@@ -86,7 +90,11 @@ class MergeTrainQuotaTests(TestCase):
         transport = UrllibMergeTrainGitHubTransport(token="secret-token")
         with patch("control_plane.merge_train_github.urlopen", side_effect=response):
             with self.assertRaises(MergeTrainGitHubError) as caught:
-                transport.request(method="POST", path="/graphql", body={"query": "private-query"})
+                _conversation_resolution_rule(
+                    transport=transport,
+                    repository_path="private-owner/private-repo",
+                    base_branch="private-branch",
+                )
         detail = _controller_exception_reconciliation_detail(caught.exception)
         self.assertNotIn("secret", detail)
         self.assertNotIn("private", detail)

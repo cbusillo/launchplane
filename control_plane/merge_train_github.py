@@ -213,6 +213,18 @@ class MergeTrainGitHubTransport(Protocol):
     ) -> object: ...
 
 
+class _GitHubQuotaResponse(dict[str, object]):
+    """Response-bound numeric timing; mapping/JSON consumers retain the same payload."""
+
+    def __init__(
+        self,
+        payload: dict[str, object],
+        quota_timing: tuple[int | None, int | None, bool | None],
+    ) -> None:
+        super().__init__(payload)
+        self.quota_timing = quota_timing
+
+
 class UrllibMergeTrainGitHubTransport:
     def __init__(
         self,
@@ -254,9 +266,9 @@ class UrllibMergeTrainGitHubTransport:
                     getattr(response, "headers", None),
                 )
                 payload = json.loads(response_text) if response_text.strip() else None
-                if path == "/graphql" and isinstance(payload, dict) and payload.get("errors"):
-                    raise _github_graphql_error(
-                        payload["errors"], headers=getattr(response, "headers", None)
+                if path == "/graphql" and isinstance(payload, dict):
+                    return _GitHubQuotaResponse(
+                        payload, _github_quota_timing(getattr(response, "headers", None))
                     )
                 return payload
         except HTTPError as error:
@@ -3489,7 +3501,12 @@ def _graphql_repository(
     )
     errors = payload.get("errors")
     if errors:
-        raise _github_graphql_error(errors)
+        raise _github_graphql_error(
+            errors,
+            quota_timing=payload.quota_timing
+            if isinstance(payload, _GitHubQuotaResponse)
+            else (None, None, None),
+        )
     data = _json_object(payload.get("data"), "GitHub GraphQL data")
     return _json_object(data.get("repository"), "GitHub GraphQL repository")
 
@@ -3958,13 +3975,17 @@ def _github_quota_timing(headers: object) -> tuple[int | None, int | None, bool 
     return reset, retry_after, remaining == 0 if remaining is not None else None
 
 
-def _github_graphql_error(errors: object, *, headers: object = None) -> MergeTrainGitHubError:
+def _github_graphql_error(
+    errors: object,
+    *,
+    quota_timing: tuple[int | None, int | None, bool | None] = (None, None, None),
+) -> MergeTrainGitHubError:
     rate_limited = (
         isinstance(errors, list)
         and bool(errors)
         and all(isinstance(error, dict) and error.get("type") == "RATE_LIMITED" for error in errors)
     )
-    reset, retry_after, primary_exhausted = _github_quota_timing(headers)
+    reset, retry_after, primary_exhausted = quota_timing
     return MergeTrainGitHubError(
         "GitHub GraphQL request returned errors.",
         rate_limited=rate_limited,
