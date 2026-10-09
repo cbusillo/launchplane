@@ -452,6 +452,7 @@ export type DokployTargetRecord = {
     instance: string;
     policies: DokployTargetPolicies;
     project_name: string;
+    public_hosts: Array<string>;
     require_prod_gate: boolean;
     require_test_gate: boolean;
     schema_version: number;
@@ -2659,6 +2660,7 @@ export type ProductConfigApplyResult = {
     next_actions: Array<ProductConfigLiveTargetRuntimeNextAction>;
     product: string;
     provider_key_adoption: Array<ProductConfigProviderKeyAdoptionResult>;
+    public_hosts?: ProductConfigPublicHostsResult | null;
     reason: string;
     runtime_environment: ProductConfigRuntimeEnvironmentResult;
     runtime_key_safety: ProductConfigRuntimeKeySafetyResult;
@@ -2721,6 +2723,22 @@ export type ProductConfigOperationAvailability = {
 export type ProductConfigProviderKeyAdoptionResult = {
     disposition: 'adopted' | 'template_default' | 'already_recorded' | 'refused_credential' | 'missing';
     key: string;
+};
+
+export type ProductConfigPublicHostsResult = {
+    added: Array<string>;
+    after: Array<string>;
+    before: Array<string>;
+    certificate_type: 'none';
+    https: true;
+    plan_digest: string;
+    read_back_hosts: Array<string>;
+    removed: Array<string>;
+    runtime_port: number;
+    service_name: 'web';
+    unchanged: Array<string>;
+    updated: Array<string>;
+    verified: boolean;
 };
 
 export type ProductConfigRuntimeEnvironmentRecordSummary = {

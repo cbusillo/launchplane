@@ -55,6 +55,8 @@ from control_plane.dokploy_target_setup_http import (
     execute_dokploy_target_setup,
 )
 from control_plane import product_config as control_plane_product_config
+from control_plane import product_public_hosts
+from control_plane.contracts.dokploy_target_record import DokployTargetRecordChanged
 from control_plane import product_config_service as control_plane_product_config_service
 from control_plane.provider_key_adoption import LaneProviderEnv
 from control_plane import product_health_monitoring as control_plane_product_health_monitoring
@@ -3536,6 +3538,7 @@ def product_config_dry_run_exists(
     identity: LaunchplaneIdentity,
     request_payload: dict[str, object],
     route_path: str = _PRODUCT_CONFIG_APPLY_ROUTE,
+    public_hosts_plan_digest: str = "",
 ) -> bool:
     idempotency_store = idempotency_capable_store(record_store)
     if idempotency_store is None:
@@ -3546,7 +3549,8 @@ def product_config_dry_run_exists(
     stored_record = idempotency_store.read_idempotency_record(
         scope=idempotency_scope(identity),
         route_path=route_path,
-        idempotency_key=product_config_dry_run_key(request_payload),
+        idempotency_key=product_config_dry_run_key(request_payload)
+        + (":" + public_hosts_plan_digest if public_hosts_plan_digest else ""),
     )
     return stored_record is not None and stored_record.request_fingerprint == continuity_fingerprint
 
@@ -3565,11 +3569,14 @@ def store_product_config_dry_run_record(
     trace_id: str,
     response: BaseModel,
     route_path: str = _PRODUCT_CONFIG_APPLY_ROUTE,
+    public_hosts_plan_digest: str = "",
 ) -> None:
     idempotency_store = idempotency_capable_store(record_store)
     if idempotency_store is None:
         return
-    dry_run_idempotency_key = product_config_dry_run_key(request_payload)
+    dry_run_idempotency_key = product_config_dry_run_key(request_payload) + (
+        ":" + public_hosts_plan_digest if public_hosts_plan_digest else ""
+    )
     dry_run_request_fingerprint = product_config_request_fingerprint(
         product_config_continuity_payload(request_payload)
     )
@@ -15376,7 +15383,7 @@ def create_launchplane_fastapi_app(
             )
         normalized_idempotency_key = idempotency_key.strip()
         if (
-            operator_identity
+            (operator_identity or product_config_request.public_hosts is not None)
             and product_config_request.mode == "apply"
             and not normalized_idempotency_key
         ):
@@ -15466,6 +15473,7 @@ def create_launchplane_fastapi_app(
         if (
             operator_identity
             and product_config_request.mode == "apply"
+            and product_config_request.public_hosts is None
             and not product_config_dry_run_exists(
                 record_store=database_store,
                 identity=identity,
@@ -15487,6 +15495,7 @@ def create_launchplane_fastapi_app(
         if (
             (copy_references or product_config_request.adopts_provider_secrets())
             and product_config_request.mode == "apply"
+            and product_config_request.public_hosts is None
             and not product_config_dry_run_exists(
                 record_store=database_store,
                 identity=identity,
@@ -15535,7 +15544,31 @@ def create_launchplane_fastapi_app(
                     message="The caller cannot read the secret copy source lane.",
                 )
         lane_provider_env_reader: control_plane_product_config.LaneProviderEnvReader | None = None
+        public_hosts_plan: product_public_hosts.PublicHostsPlan | None = None
         try:
+            if product_config_request.public_hosts is not None:
+                public_hosts_plan = await asyncio.to_thread(
+                    product_public_hosts.plan_public_hosts,
+                    record_store=database_store,
+                    control_plane_root=resolved_control_plane_root,
+                    context=product_config_request.context,
+                    instance=product_config_request.instance,
+                    hosts=product_config_request.public_hosts,
+                    mode=product_config_request.mode,
+                )
+                if product_config_request.mode == "apply" and not product_config_dry_run_exists(
+                    record_store=database_store,
+                    identity=identity,
+                    request_payload=request_payload,
+                    route_path=route_path,
+                    public_hosts_plan_digest=public_hosts_plan.result.plan_digest,
+                ):
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="matching_dry_run_required",
+                        message="Public-host apply requires a matching current target and provider dry-run.",
+                    )
             if product_config_request.reads_lane_provider_env() and product_config_request.instance:
                 # The service reads the provider values itself; they never reach the caller.
                 lane_provider_env = await asyncio.to_thread(
@@ -15558,7 +15591,11 @@ def create_launchplane_fastapi_app(
             planned_driver_result, authority_bundle = (
                 control_plane_product_config.plan_product_config_authority_bundle(
                     record_store=database_store,
-                    payload=product_config_request.product_config_payload(),
+                    payload={
+                        key: value
+                        for key, value in product_config_request.product_config_payload().items()
+                        if key != "public_hosts"
+                    },
                     mode=product_config_request.mode,
                     actor=launchplane_identity_actor(identity),
                     source_label=product_config_request.source_label,
@@ -15633,6 +15670,11 @@ def create_launchplane_fastapi_app(
             **planned_driver_result,
             "reason": product_config_request.reason,
         }
+        if public_hosts_plan is not None:
+            authority_bundle = authority_bundle.model_copy(
+                update={"dokploy_targets": (public_hosts_plan.replacement,)}
+            )
+            driver_result["public_hosts"] = public_hosts_plan.result.model_dump(mode="json")
         next_actions = product_config_live_target_next_actions(
             request=product_config_request,
             driver_result=driver_result,
@@ -15651,7 +15693,10 @@ def create_launchplane_fastapi_app(
             result=ProductConfigApplyResult.model_validate(driver_result),
         )
         if (
-            operator_identity or copy_references or product_config_request.adopts_provider_secrets()
+            operator_identity
+            or copy_references
+            or product_config_request.adopts_provider_secrets()
+            or public_hosts_plan is not None
         ) and product_config_request.mode == "dry-run":
             store_product_config_dry_run_record(
                 record_store=database_store,
@@ -15660,6 +15705,9 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 response=product_config_response,
                 route_path=route_path,
+                public_hosts_plan_digest=public_hosts_plan.result.plan_digest
+                if public_hosts_plan
+                else "",
             )
         if product_config_request.mode == "dry-run":
             store_apply_idempotency(
@@ -15683,17 +15731,40 @@ def create_launchplane_fastapi_app(
                     }
                 )
             try:
-                database_store.write_product_authority_bundle(
-                    authority_bundle_with_apply_idempotency(
-                        bundle=authority_bundle,
-                        identity=identity,
-                        route_path=route_path,
-                        idempotency_key=normalized_idempotency_key,
-                        request_fingerprint_value=payload_fingerprint,
-                        trace_id=trace_id,
-                        response=product_config_response,
-                    )
+                completed_bundle = authority_bundle_with_apply_idempotency(
+                    bundle=authority_bundle,
+                    identity=identity,
+                    route_path=route_path,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=product_config_response,
                 )
+                if public_hosts_plan is None:
+                    database_store.write_product_authority_bundle(completed_bundle)
+                else:
+                    await asyncio.to_thread(
+                        database_store.write_product_public_hosts_bundle,
+                        completed_bundle,
+                        expected_target=public_hosts_plan.target,
+                        expected_target_id=public_hosts_plan.target_id,
+                        expected_provider_target=public_hosts_plan.provider_target,
+                        apply_provider=public_hosts_plan.apply_provider,
+                    )
+            except product_public_hosts.PublicHostsProviderError as error:
+                raise _launchplane_http_error(
+                    status_code=502,
+                    trace_id=trace_id,
+                    code="public_hosts_provider_outcome_unknown",
+                    message=str(error),
+                ) from error
+            except DokployTargetRecordChanged as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="public_hosts_target_changed",
+                    message="The public-host target changed. Review a fresh dry-run.",
+                ) from error
             except ProductContextOwnershipError as error:
                 raise _launchplane_http_error(
                     status_code=403,
