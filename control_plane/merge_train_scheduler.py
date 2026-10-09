@@ -234,6 +234,7 @@ def _run_scheduled_target(
         requested_at=now(),
         current_policy_key=repository_policy.policy_key,
         current_policy_sha256=policy_record.policy_sha256,
+        policy_record=policy_record,
     )
     if admission.status != "admitted":
         return _target_result(
