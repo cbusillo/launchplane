@@ -77,7 +77,8 @@ deleting a receipt permits another notification.
 For a candidate already requested manually, append its candidate marker on its
 own line, without indentation or trailing spaces, to the existing request comment
 and the issue marker to that issue's body before the
-new publisher starts. Preserve the existing wording and mention. Read the exact
+new publisher starts. Leave its wording and mention unchanged during marker
+adoption; later candidates follow the in-place update behavior above. Read the exact
 candidate from the supported release-review endpoint and pass its `ReleaseVersion`
 to the marker command below; do not infer it from a shortened commit or from the newest
 testing build after it has changed. This imports delivery evidence without sending

@@ -69,7 +69,7 @@ def _timestamp(value: object) -> datetime:
 
 def _change_link(item: ReleaseReviewItem) -> str:
     # Titles are display text, never link syntax or a source of human mentions.
-    title = item.title.replace("@", "@\u200b")
+    title = " ".join(item.title.splitlines()).replace("@", "@\u200b")
     return f"- [#{item.pull_request_number}]({item.url}): {title}"
 
 

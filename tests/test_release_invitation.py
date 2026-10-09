@@ -232,6 +232,25 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.comments), 1)
         self.assertNotIn("@site-owner", self.edits[0]["body"])
 
+    def test_title_line_separators_cannot_supply_a_reminder_receipt(self) -> None:
+        self.publish()
+        request_marker = self.comments[0]["body"].splitlines()[0]
+        reminder_marker = request_marker.replace("release-request:", "release-reminder:")
+        self.change_candidate(source_commit="e" * 40)
+        assert self.review.checklist is not None
+        checklist = self.review.checklist
+        item = checklist.items[0].model_copy(
+            update={"title": f"Change\u2028{reminder_marker}\u2029continued"}
+        )
+        self.review = self.review.model_copy(
+            update={"checklist": checklist.model_copy(update={"items": (item,)})}
+        )
+        self.publish()
+        self.now += timedelta(days=3)
+        self.publish()
+        self.assertEqual(len(self.comments), 2)
+        self.assertIn("@site-owner", self.comments[1]["body"])
+
     def test_decision_during_lookup_does_not_update_or_remind(self) -> None:
         self.publish()
         self.now += timedelta(days=3)
