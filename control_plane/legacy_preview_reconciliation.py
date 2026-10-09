@@ -164,16 +164,31 @@ def bind_legacy_preview(
     if any(t.context == preview.context and t.instance == slug for t in scoped_targets):
         raise ValueError("Preview has tracked target authority; use tracked teardown first.")
     lane_scopes = {(lane.context, lane.instance) for lane in profile.lanes}
+    sibling_scopes = {
+        (
+            other.context,
+            resolve_generic_web_preview_slug(
+                profile=profile,
+                preview_slug="",
+                anchor_pr_number=other.anchor_pr_number,
+                label="Reconciliation",
+            ),
+        )
+        for other in previews
+        if other.preview_id != preview.preview_id
+        and other.state != "destroyed"
+        and other.anchor_repo in {profile.repository, profile.repository.partition("/")[2]}
+        and sum(p.anchor_pr_number == other.anchor_pr_number for p in previews) == 1
+    }
+    other_scopes = lane_scopes | sibling_scopes
     other_target_ids = frozenset(
         t.target_id
         for t in targets
-        if (t.context, t.instance) in lane_scopes and t.provider_id == "dokploy"
-    ) | frozenset(t.target_id for t in target_ids if (t.context, t.instance) in lane_scopes)
+        if (t.context, t.instance) in other_scopes and t.provider_id == "dokploy"
+    ) | frozenset(t.target_id for t in target_ids if (t.context, t.instance) in other_scopes)
     for target_id in other_target_ids:
-        if any(
-            t.target_id == target_id and (t.context, t.instance) not in lane_scopes
-            for t in physical_targets
-        ):
+        owners = {(t.context, t.instance) for t in physical_targets if t.target_id == target_id}
+        if len(owners) != 1 or not owners <= other_scopes:
             raise ValueError("Provider target ownership is shared.")
     digest = canonical_sha256(
         {
@@ -181,6 +196,7 @@ def bind_legacy_preview(
             "preview": preview.model_dump(mode="json"),
             "generations": [g.model_dump(mode="json") for g in generations],
             "deployments": deployment_evidence,
+            "known_other_target_ids": sorted(other_target_ids),
             "targets": [
                 t.model_dump(mode="json")
                 for t in targets

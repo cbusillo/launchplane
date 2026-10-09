@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import patch
 
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
@@ -184,6 +185,7 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
             expected_plan_digest="a" * 64,
         )
         self.assertEqual(response.status_code, 409)
+        self.search.assert_not_called()
         plan = await self.plan()
         response = await self.apply(plan, preview_id="missing-preview")
         self.assertEqual(response.status_code, 409)
@@ -395,6 +397,69 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
             response = await self.apply(plan)
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(self.store.read_preview_record(self.preview.preview_id).state, "destroyed")
+
+    async def test_tracked_sibling_preview_does_not_block_absent_legacy_preview(self) -> None:
+        sibling = self.preview.model_copy(
+            update={
+                "preview_id": "preview-sibling-7",
+                "anchor_pr_number": 7,
+                "canonical_url": "https://pr-7.example.test",
+            }
+        )
+        self.store.write_preview_record(sibling)
+        target = DokployTargetIdRecord(
+            context=sibling.context,
+            instance="pr-7",
+            target_id="sibling-app",
+            updated_at=sibling.updated_at,
+        )
+        self.store.write_dokploy_target_id_record(target)
+        self.search.return_value = ({"applicationId": target.target_id},)
+        with (
+            patch(
+                "control_plane.legacy_preview_reconciliation.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "applicationId": target.target_id,
+                    "name": "example-site-preview-pr-7",
+                    "appName": "example-site-pr-7-suffix",
+                    "dockerImage": self.profile.image.repository + ":current",
+                },
+            ),
+            patch(
+                "control_plane.legacy_preview_reconciliation.dokploy_api.fetch_dokploy_application_domains",
+                return_value=({"host": "pr-7.example.test"},),
+            ) as domains,
+        ):
+            plan = await self.plan()
+            domains.return_value = ({"host": "pr-1.example.test"},)
+            blocked = await self.apply(plan)
+            self.assertEqual(blocked.status_code, 409)
+            domains.return_value = ({"host": "pr-7.example.test"},)
+            applied = await self.apply(plan)
+            self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertEqual(self.store.read_preview_record(sibling.preview_id), sibling)
+        self.assertEqual(
+            self.store.read_dokploy_target_id_record(
+                context_name=sibling.context, instance_name="pr-7"
+            ),
+            target,
+        )
+
+    async def test_shared_sibling_target_refuses_absence(self) -> None:
+        sibling = self.preview.model_copy(update={"preview_id": "sibling", "anchor_pr_number": 7})
+        self.store.write_preview_record(sibling)
+        for context, instance in ((sibling.context, "pr-7"), ("other-context", "testing")):
+            self.store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context=context,
+                    instance=instance,
+                    target_id="shared-app",
+                    updated_at=sibling.updated_at,
+                )
+            )
+        response = await self.call("plan", key="shared-sibling")
+        self.assertEqual(response.status_code, 409)
+        self.search.assert_not_called()
 
     async def test_mixed_case_gitea_orphan_blocks_absence(self) -> None:
         self.search.return_value = ({"applicationId": "orphan"},)

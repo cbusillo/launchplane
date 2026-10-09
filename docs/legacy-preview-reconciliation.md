@@ -36,7 +36,7 @@ receipt. Active/serving generation pointers are cleared; historical generations
 and the latest-generation pointer remain. The product profile, lanes, provider
 targets, runtime values and secrets are unchanged.
 
-Repeat the same apply intent with the same key after an uncertain response;
+Repeat the same plan or apply intent with the same key after an uncertain response;
 never substitute a key, caller or payload. A successful replay proves the
 recorded result, not current provider state. After apply, independently run
 `inspect` again and require both `provider_absence_verified: true` and
@@ -48,7 +48,9 @@ Provider absence uses bounded, complete application search, per-application
 identity/configuration and domain reads, and a second inventory enumeration.
 Exact application names, generated app names, preview domains and historical
 provider IDs identify candidates. Renamed/unbound applications matching the
-product's repository, image or naming policy block reconciliation. Missing,
+product's repository, image or naming policy block reconciliation. Targets
+uniquely tracked to another live preview or stable lane are inspected and
+excluded unless this preview's exact identity or domain matches. Missing,
 malformed, truncated, duplicate, changing or uncertain inventory is not absence.
 Shared contexts, ambiguous anchors, running generations/reconciliation, missing
 generation pointers, and existing preview target authority fail closed.

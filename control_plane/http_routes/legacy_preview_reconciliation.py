@@ -102,15 +102,6 @@ def register_legacy_preview_reconciliation_route(
             with serialize_generic_web_preview_operation(
                 record_store=record_store, profile=profile, preview_slug=slug
             ):
-                bound, result = plan_legacy_preview(
-                    store=record_store,
-                    control_plane_root=dependencies.control_plane_root,
-                    request=reconciliation,
-                    caller_scope=idempotency_scope(identity),
-                )
-                # The scoped context used for authorization cannot drift while acquiring the lock.
-                if bound.profile.preview.context != profile.preview.context or bound.slug != slug:
-                    raise ValueError("Authorization context changed during inspection.")
                 if reconciliation.mode == "apply":
                     saved = record_store.read_idempotency_record(
                         scope=idempotency_scope(identity),
@@ -125,7 +116,20 @@ def register_legacy_preview_reconciliation_route(
                         or saved_result.get("mode") != "plan"
                         or saved_result.get("apply_eligible") is not True
                         or saved_result.get("plan_digest") != reconciliation.expected_plan_digest
-                        or result["plan_digest"] != reconciliation.expected_plan_digest
+                    ):
+                        raise ValueError("Reviewed plan is missing or bound to another caller.")
+                bound, result = plan_legacy_preview(
+                    store=record_store,
+                    control_plane_root=dependencies.control_plane_root,
+                    request=reconciliation,
+                    caller_scope=idempotency_scope(identity),
+                )
+                # The scoped context used for authorization cannot drift while acquiring the lock.
+                if bound.profile.preview.context != profile.preview.context or bound.slug != slug:
+                    raise ValueError("Authorization context changed during inspection.")
+                if reconciliation.mode == "apply":
+                    if (
+                        result["plan_digest"] != reconciliation.expected_plan_digest
                         or result["apply_eligible"] is not True
                     ):
                         raise ValueError(
