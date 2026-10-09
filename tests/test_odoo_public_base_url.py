@@ -175,8 +175,8 @@ class OdooPublicBaseUrlTests(unittest.TestCase):
             update={
                 "context": "cm_website",
                 "instance": "prod",
-                "base_url": f"https://{origin}",
-                "health_url": f"https://{origin}/web/health",
+                "base_url": "",
+                "health_url": "",
                 "odoo_stable_bootstrap": fixture.profile.lanes[0].odoo_stable_bootstrap.model_copy(
                     update={
                         "expected_domains": (origin,),
