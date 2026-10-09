@@ -1416,7 +1416,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     raise TimeoutError("retirement audit read synchronization timed out")
             return events
 
-        original_secret_write = store.write_secret_record
+        original_secret_write = store.disable_product_retirement_secret
         original_binding_write = store.write_secret_binding
         mutable_write_paused = False
 
@@ -1431,10 +1431,13 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 if not released.wait(30):
                     raise TimeoutError("retirement mutable write synchronization timed out")
 
-        def secret_write(record: SecretRecord) -> None:
-            if record.status == "disabled":
-                pause_mutable_write("secret")
-            original_secret_write(record)
+        def secret_write(
+            *, expected_record: SecretRecord, updated_at: str, updated_by: str
+        ) -> bool:
+            pause_mutable_write("secret")
+            return original_secret_write(
+                expected_record=expected_record, updated_at=updated_at, updated_by=updated_by
+            )
 
         def binding_write(binding: SecretBinding) -> None:
             if binding.status == "disabled":
@@ -1466,7 +1469,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch.object(store, "compare_and_write_product_profile_record", profile_write),
                 patch.object(store, "list_secret_audit_events", audit_read),
-                patch.object(store, "write_secret_record", secret_write),
+                patch.object(store, "disable_product_retirement_secret", secret_write),
                 patch.object(store, "write_secret_binding", binding_write),
                 patch.object(
                     store,

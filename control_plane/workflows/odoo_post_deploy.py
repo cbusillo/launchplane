@@ -179,6 +179,7 @@ def execute_odoo_post_deploy(
     hold_uncertain_effects: bool = False,
     provider_operation_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
+    allow_historical_sender_contract: bool = False,
 ) -> OdooPostDeployResult:
     typed_record_store = _require_record_store(record_store)
     odoo_override_record = _read_odoo_instance_override_record(
@@ -267,12 +268,22 @@ def execute_odoo_post_deploy(
                 before_provider_mutation=before_provider_effect,
                 deployment_title=provider_operation_title,
                 schedule_execution_timeout_seconds=schedule_execution_timeout_seconds,
+                allow_historical_sender_contract=allow_historical_sender_contract,
             )
             or {}
         )
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             post_deploy_readback_markers
         )
+        if (
+            override_payload
+            and override_payload.website_bootstrap
+            and override_payload.website_bootstrap.company_email
+        ):
+            dokploy_post_deploy.require_odoo_company_email_readback_evidence(
+                post_deploy_readback_markers,
+                allow_historical_contract=allow_historical_sender_contract,
+            )
     except (click.ClickException, OSError) as error:
         determinate_failure = isinstance(
             error,
@@ -331,7 +342,6 @@ def execute_odoo_post_deploy(
 
     override_status: OdooOverrideApplyStatus = "skipped"
     applied_at = ""
-    detail = "No Odoo instance override record matched this post-deploy request."
     if odoo_override_record is not None:
         if override_should_apply and (
             workflow_environment_overrides or required_workflow_environment_keys
@@ -344,6 +354,11 @@ def execute_odoo_post_deploy(
             detail = "No Odoo instance overrides were rendered for this post-deploy run."
         else:
             detail = f"Odoo instance override record is not configured for phase {request.phase}."
+        sender_skip_reason = post_deploy_readback_markers.get(
+            "website_bootstrap_company_email_skip_reason", ""
+        )
+        if sender_skip_reason:
+            detail += f" Website company sender was not verified: {sender_skip_reason}."
         updated_record = _write_odoo_instance_override_apply_result(
             record_store=typed_record_store,
             record=odoo_override_record,

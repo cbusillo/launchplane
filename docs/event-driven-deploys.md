@@ -72,9 +72,16 @@ reservation. The webhook request never waits on a deploy.
   build of an older commit is never desired while a newer one exists, so it
   cannot replace a newer deploy.
   - Selection refuses an incomplete read: the run list must include the running
-    commit and its recorded build run, and first-parent history must reach the
-    running commit. The saved plan includes run and history counts and rejected
-    builds. Missing evidence leaves the lane unchanged with a recorded reason.
+    commit and its recorded build run. A generic-web baseline deployed before
+    the Build contract may instead use its recorded source and immutable image
+    digest (including a digest-pinned artifact ID paired with a provider SHA
+    tag), only when the successful Build inventory is complete with distinct
+    run ids and no recorded build run is missing. First-parent history must
+    reach the running commit in either case. The candidate still needs verified
+    Build/manifest evidence and the forward-only movement checks below. The
+    saved plan includes run and history counts, rejected builds, and whether
+    recorded runtime identity supplied baseline evidence. Missing evidence
+    leaves the lane unchanged with a recorded reason.
   - If testing already runs the desired artifact, stop.
   - Otherwise, `record_verified_build_artifact` and queue the stable target
     replacement for the testing lane. Its idempotency key is the lane plus
@@ -89,6 +96,11 @@ reservation. The webhook request never waits on a deploy.
   - **Generic-web:** the reconcile deploys the verified image itself, in
     process, through the generic-web deploy route's durable provider
     operation, under reservation scope `launchplane-reconcile:<product>`.
+    The request keeps the verified digest as its artifact identity and supplies
+    the same repository's canonical `sha-<source_commit>` tag as the provider
+    deploy reference, as required by Dokploy application targets. Recovery uses
+    the exact retained request, including that reference; legacy saved-plan
+    reconstruction retains its original digest-only shape and fingerprint.
     Nothing goes to the artifact store; the deploy records the image as the
     lane's runtime identity. Its key is the desired digest, the stored lane
     authority, and the deployment record testing ran when the deploy
@@ -414,6 +426,26 @@ record, and of every open pull request, drafts included (one list of open pull
 requests per product, with the build-provenance token). A missed event is
 corrected within one sweep. Reconciling is idempotent, so the sweep runs the same code as
 the events, and a missed or out-of-order event is corrected within one sweep.
+
+For PRs with no live preview, the sweep also revisits recorded pending feedback
+and failed cleared-feedback delivery. It reads the PR through the normal reconcile
+path before clearing anything; a refused read never proves the PR is closed.
+Unresolved reads or terminal clear deliveries stop automatic recovery at
+`PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS` in
+[`product_reconcile.py`](../control_plane/product_reconcile.py), recorded as `feedback_recovery_failed_attempts` and
+`feedback_recovery_stop_reason` on the plan; supported reconciliation or remediation
+is required after exhaustion.
+The first successfully observed close gets a fresh cleanup budget, so read failures
+while open do not consume it. Further read failures retain that budget until the
+feedback is delivered or the PR is observed open again. An unreadable history skips
+only that product's supplemental recovery, leaving other sweep targets eligible.
+Successful delivery leaves the recovery set; a new event can retry an exhausted
+target with a fresh budget bound to its persisted delivery ID; duplicate deliveries
+do not refill it. Open PRs waiting for a build retain normal sweep coverage. Failed feedback
+and legacy entries without a status remain visible for supported observation rather
+than being assumed pending. Destroyed and teardown-pending preview records do not
+hide stale pending feedback; their reconciliation remains a no-op. Previews still
+requiring lifecycle work retain their existing sweep coverage and retry rules.
 
 ## Director steps
 
