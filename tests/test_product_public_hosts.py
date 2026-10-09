@@ -207,6 +207,20 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(noop.json()["result"]["public_hosts"]["unchanged"], HOSTS)
         self.assertEqual(self.provider.writes, writes)
 
+    async def test_reordering_hosts_changes_base_url_without_route_writes(self) -> None:
+        await self.config()
+        await self.config(mode="apply", key="add")
+        writes = list(self.provider.writes)
+        hosts = list(reversed(HOSTS))
+        dry = await self.config(hosts)
+        diff = dry.json()["result"]["public_hosts"]
+        self.assertEqual(diff["after"], hosts)
+        response = await self.config(hosts, mode="apply", key="reorder")
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(self.recorded().public_hosts, tuple(hosts))
+        self.assertEqual(response.json()["result"]["public_hosts"]["read_back_hosts"], hosts)
+        self.assertEqual(self.provider.writes, writes)
+
     async def test_drop_only_a_previously_managed_name_and_preserve_origin(self) -> None:
         await self.config()
         await self.config(mode="apply", key="add")
