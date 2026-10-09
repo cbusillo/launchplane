@@ -596,7 +596,7 @@ function EnvironmentOverview({
           value={humanize(observedPlacement.runtime_identity_status)}
         />
         <ConditionTile
-          detail={warningItems.some(warning => warning.severity !== "info") ? "Review recorded evidence" : "Information only"}
+          detail={warningItems.some(warning => warning.severity !== "info") ? "Review recorded evidence" : warningItems.length ? "Information only" : "No warnings listed"}
           label="Warnings"
           timestamp={evidenceTimestamp(detail.provenance)}
           tone={conditionTone(
@@ -720,7 +720,7 @@ function IngressEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
           value={detail.health_monitoring.public_incident_eligible ? "Eligible" : "Not eligible"}
         />
         <EvidenceFact label="Effective checks" value={checkSummary || "No effective checks"} />
-        <EvidenceFact label={detail.health_monitoring.monitoring_intent === "private" ? "Public ingress" : detail.topology.observed.ingress.probe_effective ? "Current public observation" : "Public observation history"} value={detail.public_ingress.status ? humanize(detail.public_ingress.status) : "No observation"} />
+        <EvidenceFact label={detail.health_monitoring.monitoring_intent === "private" ? "Public ingress" : detail.topology.observed.ingress.probe_effective ? "Current public observation" : detail.public_ingress.status ? "Public observation history" : "Public ingress"} value={detail.public_ingress.status ? humanize(detail.public_ingress.status) : "No observation"} />
         <EvidenceFact label="Summary" value={detail.public_ingress.summary || "No public ingress summary was returned."} />
         <EvidenceFact label="Desired endpoint" value={detail.topology.desired.base_url || "Not recorded"} />
         <EvidenceFact label="Recorded path" value={humanize(ingress.path)} />
@@ -1034,20 +1034,6 @@ function diagnosisFor(
     };
   }
   return null;
-}
-
-function statusTone(status: string): ConditionTone {
-  const normalized = status.toLowerCase();
-  if (["pass", "passed", "healthy", "ok", "success", "valid", "match"].includes(normalized)) {
-    return "pass";
-  }
-  if (["fail", "failed", "error", "unhealthy", "down", "blocked"].includes(normalized)) {
-    return "danger";
-  }
-  if (["pending", "degraded", "expiring", "warning"].includes(normalized)) {
-    return "warning";
-  }
-  return "unknown";
 }
 
 function conditionTone(tone: ConditionTone, trustState: TrustState): ConditionTone {

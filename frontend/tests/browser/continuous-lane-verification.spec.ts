@@ -8,6 +8,11 @@ test("declared no website stays reviewable and a failed private check still turn
     const products = fixtures.productsForFixture("products");
     const detail = fixtures.environmentForFixture("products", products[0].product, "testing");
     const lane = products[0].environments.find((lane: {environment: string}) => lane.environment === "testing");
+    products[0].warnings = [];
+    for (const environment of products[0].environments) {
+      environment.warnings = [];
+      environment.topology.warnings = [];
+    }
     for (const environment of [lane, detail]) {
       environment.warnings = [];
       environment.base_url = "";
@@ -38,6 +43,11 @@ test("declared no website stays reviewable and a failed private check still turn
   await page.goto(`/ui/products/${detail.product}`);
   const signal = page.locator(".signal-tile").filter({ hasText: /^Testing/i });
   await expect(signal).toHaveAttribute("data-tone", "verified");
+  const warningTile = page.locator(".signal-tile").filter({ hasText: /^Warnings/i });
+  await expect(warningTile).not.toHaveAttribute("data-tone", "warning");
+  await expect(warningTile).toContainText("0 recorded");
+  await expect(page.locator("#warning-summary h2")).toHaveText("Information only");
+  await expect(page.getByText("Review recorded warnings", { exact: true })).toHaveCount(0);
   await page.getByRole("link", { name: /Inspect environment/i }).first().click();
   await expect(page.getByText("None declared · public ingress not applicable", { exact: true })).toBeVisible();
   await expect(page.locator('#topology-warnings [data-severity="info"]')).toContainText("No public website declared");
@@ -56,7 +66,7 @@ test("declared no website stays reviewable and a failed private check still turn
   Object.assign(detail.public_ingress, { status: "fail", summary: "Historical invalid URL", incident_severity: "critical" });
   detail.topology.warnings = [
     { code: "public_ingress_failure", severity: "info", scope: "observation", detail: "Historical failure of a disabled check", domain_name: "" },
-    { code: "public_ingress_observation_missing", severity: "warning", scope: "observation", detail: "Website check required", domain_name: "" },
+    { code: "public_website_check_missing", severity: "warning", scope: "observation", detail: "Website check required", domain_name: "" },
   ];
   await page.goto(`/ui/products/${detail.product}/environments/testing`);
   await expect(page.locator(".condition-tile").filter({ hasText: /^Monitoring/i })).not.toHaveAttribute("data-tone", "danger");

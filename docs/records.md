@@ -893,7 +893,7 @@ No new grant or checked-in product list is involved. Monitoring changes still
 use their own reviewed health-monitoring apply endpoint.
 The declaration rejects public lane URLs, public monitoring intent and enabled
 public checks. It is persisted in the profile and projected in desired topology
-with profile provenance, and the lane diagnostics show the declaration.
+with profile provenance, and the environment overview shows the declaration.
 Provider placement, current health and runtime identity, open incidents and
 monitor cadence remain required. Missing placement or absent effective checks
 cannot become green. Existing products keep their public authority requirements.

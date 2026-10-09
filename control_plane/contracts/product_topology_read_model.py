@@ -72,6 +72,7 @@ ProductTopologyWarningSeverity = Literal["info", "warning", "error"]
 ProductTopologyWarningCode = Literal[
     "missing_route_authority",
     "public_website_not_applicable",
+    "public_website_check_missing",
     "route_authority_disabled",
     "stale_route_authority",
     "desired_domain_unknown",
@@ -1163,7 +1164,10 @@ def _topology_warnings(
     now: datetime,
 ) -> tuple[ProductTopologyWarning, ...]:
     warnings: list[ProductTopologyWarning] = []
-    public_monitoring_effective = lane.health_monitoring.monitoring_intent != "private"
+    public_monitoring_effective = (
+        desired.public_website == "required"
+        and lane.health_monitoring.monitoring_intent != "private"
+    )
     if desired.public_website == "required" and not (
         public_monitoring_effective
         and any(
@@ -1172,7 +1176,7 @@ def _topology_warnings(
     ):
         warnings.append(
             _warning(
-                code="public_ingress_observation_missing",
+                code="public_website_check_missing",
                 scope="observation",
                 severity="warning",
                 detail="A public website requires an effective public HTTP check; private or disabled monitoring cannot replace it.",

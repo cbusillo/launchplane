@@ -594,6 +594,38 @@ class ProductTopologyReadModelTests(unittest.TestCase):
                         all(warning.severity == "info" for warning in topology.warnings)
                     )
 
+    def test_no_website_prelaunch_retains_external_binding_without_public_probe_warnings(
+        self,
+    ) -> None:
+        payload = _profile().model_dump(mode="json")
+        payload["public_website"] = "none"
+        payload["lanes"][0]["base_url"] = ""
+        payload["lanes"][0]["health_url"] = ""
+        payload["lanes"][0]["health_monitoring"] = {
+            "monitoring_intent": "prelaunch",
+            "checks": [],
+        }
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=_route_binding(
+                    ingress_provider="external",
+                    tls_owner="external",
+                    source_kind="operator",
+                )
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=_lane_summary(freshness_status="verified"),
+            now=_NOW,
+        )
+        codes = {warning.code for warning in topology.warnings}
+        self.assertNotIn("public_ingress_observation_missing", codes)
+        self.assertNotIn("tls_observation_missing", codes)
+        self.assertNotIn("public_website_check_missing", codes)
+        self.assertIn("public_website_not_applicable", codes)
+        self.assertFalse(topology.observed.ingress.probe_effective)
+
     def test_no_website_rejects_conflicting_public_surface(self) -> None:
         payload = _strict_public_profile().model_dump(mode="json")
         payload["public_website"] = "none"
@@ -626,7 +658,7 @@ class ProductTopologyReadModelTests(unittest.TestCase):
         warning = next(
             warning
             for warning in topology.warnings
-            if warning.code == "public_ingress_observation_missing"
+            if warning.code == "public_website_check_missing"
         )
         self.assertEqual(warning.severity, "warning")
 

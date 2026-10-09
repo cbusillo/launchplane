@@ -30184,6 +30184,7 @@
             "enum": [
               "missing_route_authority",
               "public_website_not_applicable",
+              "public_website_check_missing",
               "route_authority_disabled",
               "stale_route_authority",
               "desired_domain_unknown",

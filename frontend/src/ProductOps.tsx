@@ -294,7 +294,7 @@ export function useEvidenceExpiry(environments: Pick<ProductEnvironmentSummary, 
 function ProductDirectoryRow({ product }: { product: ProductSiteOverview }) {
   const testing = environmentByName(product, "testing");
   const production = environmentByName(product, "prod");
-  const warnings = warningsForProduct(product);
+  const warnings = warningsForProduct(product).filter(warning => warning.severity !== "info");
 
   return (
     <li>
@@ -382,6 +382,7 @@ function ProductWorkspace({
     [product.environments],
   );
   const warnings = useMemo(() => warningsForProduct(product), [product]);
+  const applicableWarnings = warnings.filter(warning => warning.severity !== "info");
   const inspection = useMemo(() => nextSafeInspection(product, warnings), [product, warnings]);
   const testing = environmentByName(product, "testing");
   const production = environmentByName(product, "prod");
@@ -488,9 +489,9 @@ function ProductWorkspace({
         <SignalTile
           label="Warnings"
           state={product.trust_state}
-          tone={warnings.length ? "warning" : product.trust_state}
-          value={`${warnings.length} recorded`}
-          detail={warnings.length ? "Needs review" : trustLabel(product.trust_state)}
+          tone={applicableWarnings.length ? "warning" : product.trust_state}
+          value={`${applicableWarnings.length} recorded`}
+          detail={applicableWarnings.length ? "Needs review" : warnings.length ? "Information only" : trustLabel(product.trust_state)}
         />
       </section>
 
@@ -779,6 +780,7 @@ function WarningSummary({
   product: ProductSiteOverview;
   warnings: WarningItem[];
 }) {
+  const applicableCount = warnings.filter(warning => warning.severity !== "info").length;
   const trustworthyEmpty =
     (product.trust_state === "verified" || product.trust_state === "recorded") &&
     product.environments.every(
@@ -791,7 +793,7 @@ function WarningSummary({
       <div className="section-title-row">
         <div>
           <p className="eyebrow">Warnings</p>
-          <h2>{warnings.length ? `${warnings.length} need review` : "No warnings listed"}</h2>
+          <h2>{applicableCount ? `${applicableCount} need review` : warnings.length ? "Information only" : "No warnings listed"}</h2>
         </div>
         <EvidenceBadge compact state={product.trust_state} />
       </div>
@@ -1165,7 +1167,7 @@ function nextSafeInspection(
       targetId: `lane-${safeAnchor(incomplete.environment)}`,
     };
   }
-  if (warnings.length) {
+  if (warnings.some(warning => warning.severity !== "info")) {
     return {
       title: "Review recorded warnings",
       detail:
