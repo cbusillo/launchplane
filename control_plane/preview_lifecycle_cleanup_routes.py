@@ -277,10 +277,15 @@ def build_preview_lifecycle_sweep(
     record_store: PreviewLifecycleSweepStore,
     request: PreviewLifecycleSweepEnvelope,
     denied_actions_by_product: Mapping[str, str] | None = None,
+    requested_profiles: tuple[LaunchplaneProductProfileRecord, ...] | None = None,
 ) -> dict[str, object]:
-    profiles = preview_lifecycle_sweep_profiles(
-        record_store=record_store,
-        product=request.product,
+    profiles = (
+        requested_profiles
+        if requested_profiles is not None
+        else preview_lifecycle_sweep_profiles(
+            record_store=record_store,
+            product=request.product,
+        )
     )
     denied_actions = denied_actions_by_product or {}
     entries: list[dict[str, object]] = []

@@ -7,6 +7,9 @@ from typing import Any
 from unittest.mock import patch
 
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
+from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
+from control_plane import http_app as http_app_module
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.preview_generation_record import (
@@ -21,6 +24,7 @@ from control_plane.legacy_preview_reconciliation import (
     bind_legacy_preview,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.generic_web_preview import GenericWebPreviewInventoryResult
 from tests.http_app_test_support import _local_operator_bearer_config
 from tests.support.auth import _identity, _local_operator_policy, _StubVerifier
 from tests.support.http import request
@@ -569,3 +573,122 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(replay.status_code, 202, replay.text)
             self.assertTrue(replay.json()["replayed"])
             driver.assert_called_once()
+
+    async def test_lifecycle_completion_keeps_service_available_and_scope_does_not_expand(
+        self,
+    ) -> None:
+        self.app = self.build_app(
+            ("preview_inventory.read", "preview_lifecycle.plan", "preview_lifecycle.cleanup")
+        )
+        plan = PreviewLifecyclePlanRecord(
+            plan_id="lifecycle-plan",
+            product=self.profile.product,
+            context=self.profile.preview.context,
+            planned_at=self.preview.created_at,
+            source="fixture",
+            status="pass",
+            inventory_scan_id="fixture-inventory",
+            actual_slugs=("pr-1",),
+            orphaned_slugs=("pr-1",),
+        )
+        self.store.write_preview_lifecycle_plan_record(plan)
+        for operation in ("cleanup", "sweep"):
+            with self.subTest(operation=operation):
+                started = threading.Event()
+                release = threading.Event()
+                name = (
+                    "build_preview_lifecycle_cleanup_record"
+                    if operation == "cleanup"
+                    else "build_preview_lifecycle_sweep"
+                )
+                original = getattr(http_app_module, name)
+
+                def slow_work(**kwargs: Any) -> Any:
+                    started.set()
+                    if not release.wait(5):
+                        raise ValueError("fixture timed out")
+                    return original(**kwargs)
+
+                payload: dict[str, object] = {"source": "fixture", "apply": False}
+                if operation == "cleanup":
+                    payload.update(
+                        product=self.profile.product,
+                        context=self.profile.preview.context,
+                        plan_id=plan.plan_id,
+                    )
+
+                async def call() -> Any:
+                    return await request(
+                        self.app,
+                        "POST",
+                        f"/v1/previews/lifecycle-{operation}",
+                        headers={
+                            "Authorization": "Bearer local-operator-token",
+                            "Idempotency-Key": f"slow-lifecycle-{operation}",
+                        },
+                        payload=payload,
+                    )
+
+                with (
+                    patch.object(http_app_module, name, side_effect=slow_work) as work,
+                    patch(
+                        "control_plane.preview_lifecycle_cleanup_routes.execute_generic_web_preview_inventory",
+                        return_value=GenericWebPreviewInventoryResult(
+                            product=self.profile.product,
+                            context=self.profile.preview.context,
+                            source="fixture",
+                            app_name_prefix="fixture-preview",
+                            previews=(),
+                        ),
+                    ),
+                    patch(
+                        "control_plane.preview_lifecycle_cleanup_routes.discover_generic_web_preview_desired_state",
+                        return_value=PreviewDesiredStateRecord(
+                            desired_state_id="fixture-desired",
+                            product=self.profile.product,
+                            context=self.profile.preview.context,
+                            source="fixture",
+                            discovered_at=self.preview.created_at,
+                            repository=self.profile.repository,
+                            anchor_repo=self.preview.anchor_repo,
+                            preview_slug_prefix="pr-",
+                            status="pass",
+                            desired_count=0,
+                        ),
+                    ),
+                ):
+                    task = asyncio.create_task(call())
+                    try:
+                        self.assertTrue(await asyncio.to_thread(started.wait, 3))
+                        health = await asyncio.wait_for(request(self.app, "GET", "/v1/health"), 2)
+                        self.assertEqual(health.status_code, 200)
+                        if operation == "sweep":
+                            other = self.profile.model_copy(
+                                update={
+                                    "product": "later-site",
+                                    "repository": "cbusillo/later-site",
+                                    "preview": self.profile.preview.model_copy(
+                                        update={"context": "later-preview"}
+                                    ),
+                                }
+                            )
+                            self.store.write_product_profile_record(other)
+                    finally:
+                        release.set()
+                    response = await asyncio.wait_for(task, 5)
+                    self.assertEqual(response.status_code, 202, response.text)
+                    if operation == "sweep":
+                        self.assertEqual(
+                            [entry["product"] for entry in response.json()["result"]["profiles"]],
+                            [self.profile.product],
+                        )
+                        self.assertEqual(
+                            self.store.list_preview_lifecycle_plan_records(
+                                context_name="later-preview"
+                            ),
+                            (),
+                        )
+                    replay = await call()
+                    self.assertEqual(replay.status_code, 202, replay.text)
+                    self.assertTrue(replay.json()["replayed"])
+                    work.assert_called_once()

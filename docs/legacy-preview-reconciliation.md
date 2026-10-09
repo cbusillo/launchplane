@@ -67,7 +67,10 @@ Generic-web lock waits use separate unpooled database connections, preserving
 existing waiting behavior and keeping the shared record pool available. They
 use the same database/bootstrap identity and timeouts. Each active/waiting
 operation still consumes a database connection; deployments must qualify
-database capacity and connection lifetime for their workload.
+database/thread capacity and connection lifetime for their workload.
+Lifecycle cleanup/sweep completion also runs off the event loop and includes
+its idempotency receipt; sweep uses the product-profile scope checked before
+dispatch so later profile additions cannot expand the caller's operation.
 
 Inspection and planning use existing `preview_inventory.read` authorization
 for the recorded product/preview context. Apply additionally requires existing

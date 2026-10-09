@@ -21565,37 +21565,41 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             product=cleanup_request.product,
         )
-        cleanup_record = build_preview_lifecycle_cleanup_record(
-            plan=plan,
-            requested_at=utc_now_timestamp(),
-            source=cleanup_request.source,
-            apply=cleanup_request.apply,
-            destroy_reason=cleanup_request.destroy_reason,
-            control_plane_root=resolved_control_plane_root,
-            record_store=cleanup_mutation_store,
-            timeout_seconds=cleanup_request.timeout_seconds,
-            driver_id=cleanup_driver_id,
-            preview_slug_template=cleanup_slug_template,
-        )
-        preview_lifecycle_cleanup_id = write_preview_lifecycle_cleanup_apply_record(
-            record_store=cleanup_store,
-            record=cleanup_record,
-        )
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={"preview_lifecycle_cleanup_id": preview_lifecycle_cleanup_id},
-            result=cleanup_record.model_dump(mode="json"),
-        )
-        store_apply_idempotency(
-            record_store=record_store,
-            identity=identity,
-            route_path=_PREVIEW_LIFECYCLE_CLEANUP_ROUTE,
-            idempotency_key=normalized_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
-        return response
+
+        def execute_cleanup() -> AcceptedEvidenceResponse:
+            cleanup_record = build_preview_lifecycle_cleanup_record(
+                plan=plan,
+                requested_at=utc_now_timestamp(),
+                source=cleanup_request.source,
+                apply=cleanup_request.apply,
+                destroy_reason=cleanup_request.destroy_reason,
+                control_plane_root=resolved_control_plane_root,
+                record_store=cleanup_mutation_store,
+                timeout_seconds=cleanup_request.timeout_seconds,
+                driver_id=cleanup_driver_id,
+                preview_slug_template=cleanup_slug_template,
+            )
+            preview_lifecycle_cleanup_id = write_preview_lifecycle_cleanup_apply_record(
+                record_store=cleanup_store,
+                record=cleanup_record,
+            )
+            response = accepted_evidence_response(
+                trace_id=trace_id,
+                records={"preview_lifecycle_cleanup_id": preview_lifecycle_cleanup_id},
+                result=cleanup_record.model_dump(mode="json"),
+            )
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_PREVIEW_LIFECYCLE_CLEANUP_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+            return response
+
+        return await asyncio.shield(asyncio.to_thread(execute_cleanup))
 
     async def apply_preview_lifecycle_sweep(
         request: Request,
@@ -21680,27 +21684,32 @@ def create_launchplane_fastapi_app(
         )
         if replayed_response is not None:
             return replayed_response
-        sweep_result = build_preview_lifecycle_sweep(
-            control_plane_root=resolved_control_plane_root,
-            record_store=sweep_store,
-            request=sweep_request,
-            denied_actions_by_product=denied_actions_by_product,
-        )
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={},
-            result=sweep_result,
-        )
-        store_apply_idempotency(
-            record_store=record_store,
-            identity=identity,
-            route_path=_PREVIEW_LIFECYCLE_SWEEP_ROUTE,
-            idempotency_key=normalized_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
-        return response
+
+        def execute_sweep() -> AcceptedEvidenceResponse:
+            sweep_result = build_preview_lifecycle_sweep(
+                control_plane_root=resolved_control_plane_root,
+                record_store=sweep_store,
+                request=sweep_request,
+                denied_actions_by_product=denied_actions_by_product,
+                requested_profiles=requested_sweep_profiles,
+            )
+            response = accepted_evidence_response(
+                trace_id=trace_id,
+                records={},
+                result=sweep_result,
+            )
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_PREVIEW_LIFECYCLE_SWEEP_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+            return response
+
+        return await asyncio.shield(asyncio.to_thread(execute_sweep))
 
     async def execute_product_retirement(
         request: Request,
