@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
@@ -29,6 +30,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
+    launchplane_github_token,
     verify_github_webhook_signature,
 )
 
@@ -168,139 +170,143 @@ def handle_trusted_maintenance_github_webhook(
     dependencies: TrustedMaintenanceGitHubWebhookDependencies | None = None,
 ) -> TrustedMaintenanceGitHubWebhookResult:
     """Capture trusted-maintenance evidence after the caller verifies GitHub signature."""
+    with ExitStack() as credentials:
+        normalized_event_name = event_name.strip().lower()
+        normalized_delivery_id = delivery_id.strip()
+        normalized_signed_payload_sha256 = signed_payload_sha256.strip().lower()
+        if normalized_event_name != "pull_request":
+            return _skipped("unsupported_event")
+        if not normalized_delivery_id:
+            return _skipped("missing_delivery")
+        if not _valid_sha256(normalized_signed_payload_sha256):
+            return _skipped("missing_signed_payload_digest")
 
-    normalized_event_name = event_name.strip().lower()
-    normalized_delivery_id = delivery_id.strip()
-    normalized_signed_payload_sha256 = signed_payload_sha256.strip().lower()
-    if normalized_event_name != "pull_request":
-        return _skipped("unsupported_event")
-    if not normalized_delivery_id:
-        return _skipped("missing_delivery")
-    if not _valid_sha256(normalized_signed_payload_sha256):
-        return _skipped("missing_signed_payload_digest")
-
-    signed = _signed_pull_request_delivery(
-        payload=payload,
-        event_name=normalized_event_name,
-        delivery_id=normalized_delivery_id,
-        signed_payload_sha256=normalized_signed_payload_sha256,
-    )
-    if signed is None:
-        return _skipped("malformed_payload")
-    if signed.sender_type != "Bot" or signed.pr_author_type != "Bot":
-        return _skipped("non_bot_actor")
-    try:
-        authority = _preflight_current_authority(
-            record_store=record_store,
-            signed=signed,
+        signed = _signed_pull_request_delivery(
+            payload=payload,
+            event_name=normalized_event_name,
+            delivery_id=normalized_delivery_id,
+            signed_payload_sha256=normalized_signed_payload_sha256,
         )
-    except Exception:
-        return _retryable("database_unavailable")
-    if authority is None:
-        return _skipped("authority_not_available")
-    if (
-        _matching_rule_candidate_count(
-            policy_record=authority.policy_record,
-            signed=signed,
-        )
-        != 1
-    ):
-        return _skipped("rule_not_matched")
-    if (
-        not isinstance(record_store, PostgresRecordStore)
-        or record_store.database_dialect_name != "postgresql"
-    ):
-        return _retryable("database_storage_required")
+        if signed is None:
+            return _skipped("malformed_payload")
+        if signed.sender_type != "Bot" or signed.pr_author_type != "Bot":
+            return _skipped("non_bot_actor")
+        try:
+            authority = _preflight_current_authority(
+                record_store=record_store,
+                signed=signed,
+            )
+        except Exception:
+            return _retryable("database_unavailable")
+        if authority is None:
+            return _skipped("authority_not_available")
+        if (
+            _matching_rule_candidate_count(
+                policy_record=authority.policy_record,
+                signed=signed,
+            )
+            != 1
+        ):
+            return _skipped("rule_not_matched")
+        if (
+            not isinstance(record_store, PostgresRecordStore)
+            or record_store.database_dialect_name != "postgresql"
+        ):
+            return _retryable("database_storage_required")
 
-    resolved_dependencies = dependencies or TrustedMaintenanceGitHubWebhookDependencies()
-    try:
-        token = resolved_dependencies.github_token(
-            control_plane_root=control_plane_root,
-            context_name=authority.classification.context,
+        resolved_dependencies = dependencies or TrustedMaintenanceGitHubWebhookDependencies()
+        try:
+            token = credentials.enter_context(
+                launchplane_github_token(
+                    token_resolver=resolved_dependencies.github_token,
+                    api_request=resolved_dependencies.github_api,
+                    control_plane_root=control_plane_root,
+                    context_name=authority.classification.context,
+                    repository=signed.repository,
+                    purpose="repository_read",
+                )
+            )
+        except click.ClickException:
+            return _retryable("github_token_unavailable")
+        if not token.strip():
+            return _retryable("github_token_unavailable")
+        try:
+            pull_request = _fetch_github_pull_request(
+                api_request=resolved_dependencies.github_api,
+                token=token,
+                repository=signed.repository,
+                pr_number=signed.pull_request_number,
+            )
+        except click.ClickException:
+            return _retryable("github_api_unavailable")
+
+        current = _validated_current_pull_request_facts(signed=signed, pull_request=pull_request)
+        if current is None:
+            return _skipped("current_pull_request_not_matched")
+
+        candidate = TenantMergeCandidate(
+            product=authority.classification.product,
+            context=authority.classification.context,
+            repository_id=signed.repository_id,
+            repository_owner_id=signed.repository_owner_id,
             repository=signed.repository,
-            purpose="repository_read",
+            pull_request_number=signed.pull_request_number,
+            head_sha=signed.head_sha,
         )
-    except click.ClickException:
-        return _retryable("github_token_unavailable")
-    if not token.strip():
-        return _retryable("github_token_unavailable")
-    try:
-        pull_request = _fetch_github_pull_request(
-            api_request=resolved_dependencies.github_api,
-            token=token,
-            repository=signed.repository,
-            pr_number=signed.pull_request_number,
+        event_facts = TrustedMaintenanceGitHubEventFacts(
+            pr_author_github_id=current.pr_author_github_id,
+            pr_author_type=current.pr_author_type,
+            pr_author_login=current.pr_author_login,
+            sender_github_id=signed.sender_github_id,
+            sender_type=signed.sender_type,
+            sender_login=signed.sender_login,
+            head_repository_id=current.head_repository_id,
+            head_repository_owner_id=current.head_repository_owner_id,
+            head_repository=current.head_repository,
+            event_name=signed.event_name,
+            event_action=signed.action,
+            source=TRUSTED_MAINTENANCE_GITHUB_WEBHOOK_SOURCE,
+            delivery_id=signed.delivery_id,
+            signed_payload_sha256=signed.signed_payload_sha256,
         )
-    except click.ClickException:
-        return _retryable("github_api_unavailable")
-
-    current = _validated_current_pull_request_facts(signed=signed, pull_request=pull_request)
-    if current is None:
-        return _skipped("current_pull_request_not_matched")
-
-    candidate = TenantMergeCandidate(
-        product=authority.classification.product,
-        context=authority.classification.context,
-        repository_id=signed.repository_id,
-        repository_owner_id=signed.repository_owner_id,
-        repository=signed.repository,
-        pull_request_number=signed.pull_request_number,
-        head_sha=signed.head_sha,
-    )
-    event_facts = TrustedMaintenanceGitHubEventFacts(
-        pr_author_github_id=current.pr_author_github_id,
-        pr_author_type=current.pr_author_type,
-        pr_author_login=current.pr_author_login,
-        sender_github_id=signed.sender_github_id,
-        sender_type=signed.sender_type,
-        sender_login=signed.sender_login,
-        head_repository_id=current.head_repository_id,
-        head_repository_owner_id=current.head_repository_owner_id,
-        head_repository=current.head_repository,
-        event_name=signed.event_name,
-        event_action=signed.action,
-        source=TRUSTED_MAINTENANCE_GITHUB_WEBHOOK_SOURCE,
-        delivery_id=signed.delivery_id,
-        signed_payload_sha256=signed.signed_payload_sha256,
-    )
-    expected_authority = TrustedMaintenanceExpectedAuthority(
-        classification_record_id=authority.classification.record_id,
-        classification_revision=authority.classification.classification_revision,
-        classification_digest=authority.classification.classification_digest,
-        policy_record_id=authority.policy_record.record_id,
-        policy_revision=authority.policy_record.policy_revision,
-        policy_digest=authority.policy_record.policy_digest,
-    )
-    try:
-        evidence_status = record_store.capture_trusted_maintenance_evidence_transactionally(
-            candidate=candidate,
-            expected_authority=expected_authority,
-            event_facts=event_facts,
+        expected_authority = TrustedMaintenanceExpectedAuthority(
+            classification_record_id=authority.classification.record_id,
+            classification_revision=authority.classification.classification_revision,
+            classification_digest=authority.classification.classification_digest,
+            policy_record_id=authority.policy_record.record_id,
+            policy_revision=authority.policy_record.policy_revision,
+            policy_digest=authority.policy_record.policy_digest,
         )
-    except TrustedMaintenanceRuleMatchError:
-        return _skipped("rule_not_matched")
-    except TrustedMaintenanceEvidenceConflictError:
+        try:
+            evidence_status = record_store.capture_trusted_maintenance_evidence_transactionally(
+                candidate=candidate,
+                expected_authority=expected_authority,
+                event_facts=event_facts,
+            )
+        except TrustedMaintenanceRuleMatchError:
+            return _skipped("rule_not_matched")
+        except TrustedMaintenanceEvidenceConflictError:
+            return TrustedMaintenanceGitHubWebhookResult(
+                status="conflict",
+                reason="evidence_conflict",
+            )
+        except TrustedMaintenanceAuthorityError:
+            return _retryable("authority_drift")
+        except ValueError:
+            return _retryable("database_unavailable")
+        except Exception:
+            return _retryable("database_unavailable")
+        if evidence_status == "replayed":
+            return TrustedMaintenanceGitHubWebhookResult(
+                status="replayed",
+                reason="evidence_replayed",
+                evidence_status="replayed",
+            )
         return TrustedMaintenanceGitHubWebhookResult(
-            status="conflict",
-            reason="evidence_conflict",
+            status="captured",
+            reason="evidence_captured",
+            evidence_status="written",
         )
-    except TrustedMaintenanceAuthorityError:
-        return _retryable("authority_drift")
-    except ValueError:
-        return _retryable("database_unavailable")
-    except Exception:
-        return _retryable("database_unavailable")
-    if evidence_status == "replayed":
-        return TrustedMaintenanceGitHubWebhookResult(
-            status="replayed",
-            reason="evidence_replayed",
-            evidence_status="replayed",
-        )
-    return TrustedMaintenanceGitHubWebhookResult(
-        status="captured",
-        reason="evidence_captured",
-        evidence_status="written",
-    )
 
 
 @dataclass(frozen=True)

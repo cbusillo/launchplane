@@ -1,7 +1,7 @@
 """Compile and evaluate release review from current Launchplane lane records."""
 
 import hashlib
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, ExitStack
 import json
 import logging
 from dataclasses import dataclass
@@ -30,7 +30,11 @@ from control_plane.release_review_github import (
     read_release_changes,
 )
 from control_plane.release_review_shared import read_shared_source_changes, repository_key
-from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
+from control_plane.workflows.launchplane import (
+    github_api_request,
+    resolve_launchplane_github_token,
+    launchplane_github_token,
+)
 
 
 class ReleaseReviewStore(Protocol):
@@ -323,44 +327,49 @@ def current_release_review(
     include_prelaunch: bool = False,
     trace_id: str = "",
 ) -> ReleaseReviewStatus:
-    if profile.production_use == "prelaunch" and not include_prelaunch:
-        return ReleaseReviewStatus(required=False, approved=True)
-    try:
-        lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
-        if lane is None:
-            raise ReleaseEvidenceUnavailable("testing_lane_missing")
-        tokens: dict[str, str] = {}
+    with ExitStack() as credentials:
+        if profile.production_use == "prelaunch" and not include_prelaunch:
+            return ReleaseReviewStatus(required=False, approved=True)
+        try:
+            lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
+            if lane is None:
+                raise ReleaseEvidenceUnavailable("testing_lane_missing")
+            tokens: dict[str, str] = {}
 
-        def read(path: str) -> object:
-            # Each repository uses its existing scoped App access, including shared sources.
-            parts = path.split("/")
-            repository = unquote("/".join(parts[2:4]))
-            if repository not in tokens:
-                tokens[repository] = resolve_launchplane_github_token(
-                    control_plane_root=control_plane_root,
-                    context_name=lane.context,
-                    repository=repository,
-                )
-            if not tokens[repository]:
-                raise ReleaseEvidenceUnavailable("source_control_access_unavailable")
-            return github_api_request(path=path, token=tokens[repository])
+            def read(path: str) -> object:
+                # Each repository uses its existing scoped App access, including shared sources.
+                parts = path.split("/")
+                repository = unquote("/".join(parts[2:4]))
+                if repository not in tokens:
+                    tokens[repository] = credentials.enter_context(
+                        launchplane_github_token(
+                            token_resolver=resolve_launchplane_github_token,
+                            api_request=github_api_request,
+                            control_plane_root=control_plane_root,
+                            context_name=lane.context,
+                            repository=repository,
+                        )
+                    )
+                if not tokens[repository]:
+                    raise ReleaseEvidenceUnavailable("source_control_access_unavailable")
+                return github_api_request(path=path, token=tokens[repository])
 
-        return build_release_review(
-            store=cast(ReleaseReviewStore, record_store),
-            profile=profile,
-            read=read,
-        )
-    # Provider errors may contain private URLs: log and return only the fixed code.
-    except ReleaseEvidenceUnavailable as error:
-        return _unavailable(profile=profile, code=error.code, trace_id=trace_id, error=error)
-    except click.ClickException as error:
-        return _unavailable(
-            profile=profile, code="github_read_failed", trace_id=trace_id, error=error
-        )
-    except (AttributeError, FileNotFoundError, ValueError) as error:
-        return _unavailable(
-            profile=profile, code="release_record_missing", trace_id=trace_id, error=error
-        )
+            return build_release_review(
+                store=cast(ReleaseReviewStore, record_store),
+                profile=profile,
+                read=read,
+            )
+        # Provider errors may contain private URLs: log and return only the fixed code.
+        except ReleaseEvidenceUnavailable as error:
+            return _unavailable(profile=profile, code=error.code, trace_id=trace_id, error=error)
+        except click.ClickException as error:
+            return _unavailable(
+                profile=profile, code="github_read_failed", trace_id=trace_id, error=error
+            )
+        except (AttributeError, FileNotFoundError, ValueError) as error:
+            return _unavailable(
+                profile=profile, code="release_record_missing", trace_id=trace_id, error=error
+            )
 
 
 def _unavailable(

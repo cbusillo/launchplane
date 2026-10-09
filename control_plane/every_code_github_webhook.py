@@ -38,6 +38,7 @@ from control_plane.workflows.launchplane import (
     github_api_request,
     launchplane_anchor_repo_context,
     resolve_launchplane_github_token,
+    launchplane_github_token,
     verify_github_webhook_signature,
 )
 from control_plane.workflows.preview_pr_feedback import (
@@ -939,28 +940,30 @@ def _handle_every_code_preview_validation_webhook(
     if not context_name:
         context_name = f"{repo}-preview"
     try:
-        token = dependencies.github_token(
+        with launchplane_github_token(
+            token_resolver=dependencies.github_token,
+            api_request=dependencies.github_api,
             control_plane_root=control_plane_root_path,
             context_name=context_name,
             repository=f"{owner}/{repo}",
             purpose="source_issue_feedback",
-        )
-        result = handle_every_code_preview_validation_comment(
-            record_store=every_code_store,
-            owner=owner,
-            repo=repo,
-            issue_number=issue_number_value,
-            issue_url=_github_webhook_string(issue_payload, "html_url"),
-            issue_author=issue_author,
-            actor=actor,
-            comment_body=comment_body,
-            comment_id=str(comment_payload.get("id") or ""),
-            comment_node_id=_github_webhook_string(comment_payload, "node_id"),
-            comment_url=_github_webhook_string(comment_payload, "html_url"),
-            delivery_id=delivery_id,
-            token=token,
-            received_at=dependencies.now_timestamp(),
-        )
+        ) as token:
+            result = handle_every_code_preview_validation_comment(
+                record_store=every_code_store,
+                owner=owner,
+                repo=repo,
+                issue_number=issue_number_value,
+                issue_url=_github_webhook_string(issue_payload, "html_url"),
+                issue_author=issue_author,
+                actor=actor,
+                comment_body=comment_body,
+                comment_id=str(comment_payload.get("id") or ""),
+                comment_node_id=_github_webhook_string(comment_payload, "node_id"),
+                comment_url=_github_webhook_string(comment_payload, "html_url"),
+                delivery_id=delivery_id,
+                token=token,
+                received_at=dependencies.now_timestamp(),
+            )
     except click.ClickException:
         return (
             202,

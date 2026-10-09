@@ -25,6 +25,7 @@ from control_plane.workflows.launchplane import (
     github_api_request,
     github_pull_request_reference,
     resolve_launchplane_github_token,
+    launchplane_github_token,
     update_github_issue_comment,
 )
 
@@ -319,31 +320,33 @@ def pull_request_has_label(
 
     normalized_label = label.strip().casefold()
     github_reference = github_pull_request_reference(pr_url=anchor_pr_url)
-    github_token = resolve_launchplane_github_token(
+    with launchplane_github_token(
+        token_resolver=resolve_launchplane_github_token,
+        api_request=github_api_request,
         control_plane_root=control_plane_root,
         context_name=context,
         repository=f"{github_reference['owner']}/{github_reference['repo']}"
         if github_reference
         else "",
         purpose="repository_read",
-    )
-    if not normalized_label or github_reference is None or not github_token:
-        return False
-    payload = github_api_request(
-        path=(
-            f"/repos/{github_reference['owner']}/{github_reference['repo']}"
-            f"/issues/{github_reference['pr_number']}/labels"
-        ),
-        token=github_token,
-    )
-    if not isinstance(payload, list):
-        return False
-    return any(
-        isinstance(item, dict)
-        and isinstance(item.get("name"), str)
-        and item["name"].strip().casefold() == normalized_label
-        for item in payload
-    )
+    ) as github_token:
+        if not normalized_label or github_reference is None or not github_token:
+            return False
+        payload = github_api_request(
+            path=(
+                f"/repos/{github_reference['owner']}/{github_reference['repo']}"
+                f"/issues/{github_reference['pr_number']}/labels"
+            ),
+            token=github_token,
+        )
+        if not isinstance(payload, list):
+            return False
+        return any(
+            isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and item["name"].strip().casefold() == normalized_label
+            for item in payload
+        )
 
 
 def _github_add_labels(
@@ -425,88 +428,90 @@ def _notify_every_code_preview_ready_source_issue(
     if record is None:
         return "skipped_no_every_code_request"
 
-    token = resolve_launchplane_github_token(
+    with launchplane_github_token(
+        token_resolver=resolve_launchplane_github_token,
+        api_request=github_api_request,
         control_plane_root=control_plane_root,
         context_name=context,
         repository=f"{owner}/{repo}",
         purpose="source_issue_feedback",
-    )
-    if not token:
-        raise click.ClickException(
-            "Source-issue feedback Delivery App credentials are unavailable."
-        )
-
-    issue_author = _github_issue_author_login(
-        owner=owner,
-        repo=repo,
-        issue_number=record.issue_number,
-        token=token,
-    )
-    if not issue_author:
-        return "skipped_no_issue_author"
-
-    merge_owner = _github_repository_user_owner_login(owner=owner, repo=repo, token=token)
-    _github_add_labels(
-        owner=owner,
-        repo=repo,
-        issue_number=record.issue_number,
-        labels=[EVERY_CODE_PREVIEW_READY_LABEL],
-        token=token,
-    )
-    _github_remove_label(
-        owner=owner,
-        repo=repo,
-        issue_number=record.issue_number,
-        label=EVERY_CODE_PREVIEW_APPROVED_LABEL,
-        token=token,
-    )
-    _github_remove_label(
-        owner=owner,
-        repo=repo,
-        issue_number=record.issue_number,
-        label=EVERY_CODE_PREVIEW_CHANGES_REQUESTED_LABEL,
-        token=token,
-    )
-
-    marker = _every_code_preview_ready_marker(repository=repository, pr_number=pr_number)
-    comment_markdown = _render_every_code_preview_ready_issue_comment(
-        marker=marker,
-        issue_author=issue_author,
-        record=record,
-        pr_number=pr_number,
-        anchor_pr_url=anchor_pr_url,
-        preview_url=preview_url.strip(),
-        merge_owner=merge_owner,
-    )
-    existing_comment = find_github_issue_comment_by_marker(
-        owner=owner,
-        repo=repo,
-        issue_number=record.issue_number,
-        token=token,
-        marker=marker,
-    )
-    if existing_comment is not None:
-        existing_comment_id = existing_comment.get("id")
-        if not isinstance(existing_comment_id, int):
+    ) as token:
+        if not token:
             raise click.ClickException(
-                "Existing Every Code preview ready comment is missing a numeric id."
+                "Source-issue feedback Delivery App credentials are unavailable."
             )
-        update_github_issue_comment(
+
+        issue_author = _github_issue_author_login(
             owner=owner,
             repo=repo,
-            comment_id=existing_comment_id,
+            issue_number=record.issue_number,
+            token=token,
+        )
+        if not issue_author:
+            return "skipped_no_issue_author"
+
+        merge_owner = _github_repository_user_owner_login(owner=owner, repo=repo, token=token)
+        _github_add_labels(
+            owner=owner,
+            repo=repo,
+            issue_number=record.issue_number,
+            labels=[EVERY_CODE_PREVIEW_READY_LABEL],
+            token=token,
+        )
+        _github_remove_label(
+            owner=owner,
+            repo=repo,
+            issue_number=record.issue_number,
+            label=EVERY_CODE_PREVIEW_APPROVED_LABEL,
+            token=token,
+        )
+        _github_remove_label(
+            owner=owner,
+            repo=repo,
+            issue_number=record.issue_number,
+            label=EVERY_CODE_PREVIEW_CHANGES_REQUESTED_LABEL,
+            token=token,
+        )
+
+        marker = _every_code_preview_ready_marker(repository=repository, pr_number=pr_number)
+        comment_markdown = _render_every_code_preview_ready_issue_comment(
+            marker=marker,
+            issue_author=issue_author,
+            record=record,
+            pr_number=pr_number,
+            anchor_pr_url=anchor_pr_url,
+            preview_url=preview_url.strip(),
+            merge_owner=merge_owner,
+        )
+        existing_comment = find_github_issue_comment_by_marker(
+            owner=owner,
+            repo=repo,
+            issue_number=record.issue_number,
+            token=token,
+            marker=marker,
+        )
+        if existing_comment is not None:
+            existing_comment_id = existing_comment.get("id")
+            if not isinstance(existing_comment_id, int):
+                raise click.ClickException(
+                    "Existing Every Code preview ready comment is missing a numeric id."
+                )
+            update_github_issue_comment(
+                owner=owner,
+                repo=repo,
+                comment_id=existing_comment_id,
+                token=token,
+                body=comment_markdown,
+            )
+            return "updated_source_issue_comment"
+        create_github_issue_comment(
+            owner=owner,
+            repo=repo,
+            issue_number=record.issue_number,
             token=token,
             body=comment_markdown,
         )
-        return "updated_source_issue_comment"
-    create_github_issue_comment(
-        owner=owner,
-        repo=repo,
-        issue_number=record.issue_number,
-        token=token,
-        body=comment_markdown,
-    )
-    return "created_source_issue_comment"
+        return "created_source_issue_comment"
 
 
 def _parse_preview_validation_command(body: str) -> tuple[str, str] | None:
@@ -1085,115 +1090,119 @@ def build_preview_pr_feedback_record(
     comment_url = ""
     error_message = ""
     github_reference = github_pull_request_reference(pr_url=anchor_pr_url)
-    github_token = resolve_launchplane_github_token(
+    with launchplane_github_token(
+        token_resolver=resolve_launchplane_github_token,
+        api_request=github_api_request,
         control_plane_root=control_plane_root,
         context_name=context,
         repository=f"{github_reference['owner']}/{github_reference['repo']}"
         if github_reference
         else "",
         purpose="pull_request_feedback",
-    )
-    if github_reference is None:
-        error_message = "anchor_pr_url must be a GitHub pull request URL"
-    elif not github_token:
-        error_message = "Launchplane Delivery App credentials are unavailable for this repository"
-    else:
-        try:
-            existing_comment = _find_preview_pr_feedback_comment(
-                owner=github_reference["owner"],
-                repo=github_reference["repo"],
-                issue_number=github_reference["pr_number"],
-                token=github_token,
-                marker=marker,
+    ) as github_token:
+        if github_reference is None:
+            error_message = "anchor_pr_url must be a GitHub pull request URL"
+        elif not github_token:
+            error_message = (
+                "Launchplane Delivery App credentials are unavailable for this repository"
             )
-            if existing_comment is not None:
-                existing_comment_id = existing_comment.get("id")
-                if not isinstance(existing_comment_id, int):
-                    raise click.ClickException(
-                        "Existing preview feedback comment is missing a numeric id."
-                    )
-                if status == "cleared":
-                    delete_github_issue_comment(
-                        owner=github_reference["owner"],
-                        repo=github_reference["repo"],
-                        comment_id=existing_comment_id,
-                        token=github_token,
-                    )
-                    delivery_status = "delivered"
-                    delivery_action = "deleted_comment"
-                    comment_id = existing_comment_id
-                else:
-                    updated_comment = update_github_issue_comment(
-                        owner=github_reference["owner"],
-                        repo=github_reference["repo"],
-                        comment_id=existing_comment_id,
-                        token=github_token,
-                        body=comment_markdown,
-                    )
-                    delivery_status = "delivered"
-                    delivery_action = "updated_comment"
-                    comment_id = existing_comment_id
-                    comment_url = _comment_url(updated_comment)
-            elif status == "cleared":
-                delivery_action = "no_existing_comment"
-            else:
-                created_comment = create_github_issue_comment(
+        else:
+            try:
+                existing_comment = _find_preview_pr_feedback_comment(
                     owner=github_reference["owner"],
                     repo=github_reference["repo"],
                     issue_number=github_reference["pr_number"],
                     token=github_token,
-                    body=comment_markdown,
+                    marker=marker,
                 )
-                created_comment_id = created_comment.get("id")
-                delivery_status = "delivered"
-                delivery_action = "created_comment"
-                comment_id = created_comment_id if isinstance(created_comment_id, int) else 0
-                comment_url = _comment_url(created_comment)
-            if status == "ready" and resolved_preview_url:
-                source_issue_action = _notify_every_code_preview_ready_source_issue(
-                    control_plane_root=control_plane_root,
-                    context=context,
-                    record_store=every_code_record_store,
-                    owner=github_reference["owner"],
-                    repo=github_reference["repo"],
-                    pr_number=github_reference["pr_number"],
-                    anchor_pr_url=anchor_pr_url,
-                    repository=repository,
-                    preview_url=resolved_preview_url,
-                    token=github_token,
-                )
-                if not delivery_action:
-                    delivery_action = source_issue_action
-        except click.ClickException as exc:
-            delivery_status = "failed"
-            error_message = str(exc)
+                if existing_comment is not None:
+                    existing_comment_id = existing_comment.get("id")
+                    if not isinstance(existing_comment_id, int):
+                        raise click.ClickException(
+                            "Existing preview feedback comment is missing a numeric id."
+                        )
+                    if status == "cleared":
+                        delete_github_issue_comment(
+                            owner=github_reference["owner"],
+                            repo=github_reference["repo"],
+                            comment_id=existing_comment_id,
+                            token=github_token,
+                        )
+                        delivery_status = "delivered"
+                        delivery_action = "deleted_comment"
+                        comment_id = existing_comment_id
+                    else:
+                        updated_comment = update_github_issue_comment(
+                            owner=github_reference["owner"],
+                            repo=github_reference["repo"],
+                            comment_id=existing_comment_id,
+                            token=github_token,
+                            body=comment_markdown,
+                        )
+                        delivery_status = "delivered"
+                        delivery_action = "updated_comment"
+                        comment_id = existing_comment_id
+                        comment_url = _comment_url(updated_comment)
+                elif status == "cleared":
+                    delivery_action = "no_existing_comment"
+                else:
+                    created_comment = create_github_issue_comment(
+                        owner=github_reference["owner"],
+                        repo=github_reference["repo"],
+                        issue_number=github_reference["pr_number"],
+                        token=github_token,
+                        body=comment_markdown,
+                    )
+                    created_comment_id = created_comment.get("id")
+                    delivery_status = "delivered"
+                    delivery_action = "created_comment"
+                    comment_id = created_comment_id if isinstance(created_comment_id, int) else 0
+                    comment_url = _comment_url(created_comment)
+                if status == "ready" and resolved_preview_url:
+                    source_issue_action = _notify_every_code_preview_ready_source_issue(
+                        control_plane_root=control_plane_root,
+                        context=context,
+                        record_store=every_code_record_store,
+                        owner=github_reference["owner"],
+                        repo=github_reference["repo"],
+                        pr_number=github_reference["pr_number"],
+                        anchor_pr_url=anchor_pr_url,
+                        repository=repository,
+                        preview_url=resolved_preview_url,
+                        token=github_token,
+                    )
+                    if not delivery_action:
+                        delivery_action = source_issue_action
+            except click.ClickException as exc:
+                delivery_status = "failed"
+                error_message = str(exc)
 
-    return PreviewPrFeedbackRecord(
-        feedback_id=build_preview_pr_feedback_id(
-            context_name=context,
-            anchor_pr_number=anchor_pr_number,
+        return PreviewPrFeedbackRecord(
+            feedback_id=build_preview_pr_feedback_id(
+                context_name=context,
+                anchor_pr_number=anchor_pr_number,
+                requested_at=requested_at,
+            ),
+            product=product,
+            context=context,
+            source=source,
             requested_at=requested_at,
-        ),
-        product=product,
-        context=context,
-        source=source,
-        requested_at=requested_at,
-        repository=repository,
-        anchor_repo=anchor_repo,
-        anchor_pr_number=anchor_pr_number,
-        anchor_pr_url=anchor_pr_url,
-        status=status,
-        marker=marker,
-        comment_markdown=comment_markdown,
-        preview_url=resolved_preview_url,
-        immutable_image_reference=immutable_image_reference,
-        refresh_image_reference=refresh_image_reference,
-        revision=revision,
-        run_url=run_url,
-        failure_summary=failure_summary,
-        delivery_status=delivery_status,
-        delivery_action=delivery_action,
-        comment_id=comment_id,
-        comment_url=comment_url,
-        error_message=error_message,
-    )
+            repository=repository,
+            anchor_repo=anchor_repo,
+            anchor_pr_number=anchor_pr_number,
+            anchor_pr_url=anchor_pr_url,
+            status=status,
+            marker=marker,
+            comment_markdown=comment_markdown,
+            preview_url=resolved_preview_url,
+            immutable_image_reference=immutable_image_reference,
+            refresh_image_reference=refresh_image_reference,
+            revision=revision,
+            run_url=run_url,
+            failure_summary=failure_summary,
+            delivery_status=delivery_status,
+            delivery_action=delivery_action,
+            comment_id=comment_id,
+            comment_url=comment_url,
+            error_message=error_message,
+        )

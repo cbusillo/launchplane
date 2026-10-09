@@ -175,7 +175,7 @@ class OutboxWorkerTests(unittest.TestCase):
 
         self.assertEqual(loaded.state, "pending")
         self.assertEqual(worker_result.status, "delivered")
-        self.assertEqual([method for method, _path in requests], ["POST", "GET"])
+        self.assertEqual([method for method, _path in requests], ["POST", "GET", "DELETE"])
 
     def test_crash_after_send_reconciles_existing_workflow_run_before_resend(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -257,7 +257,7 @@ class OutboxWorkerTests(unittest.TestCase):
         self.assertEqual(loaded.external_id, "101")
         self.assertEqual(loaded.payload["run_status"], "queued")
         self.assertEqual(loaded.payload["run_conclusion"], "")
-        self.assertEqual([method for method, _path in requests], ["GET"])
+        self.assertEqual([method for method, _path in requests], ["GET", "DELETE"])
 
     def test_fresh_dispatch_mint_failure_retries_before_any_provider_effect(self) -> None:
         from control_plane.launchplane_github_delivery import DeliveryGitHubTokenUnavailable
@@ -343,8 +343,11 @@ class OutboxWorkerTests(unittest.TestCase):
                     )
                 self.assertEqual(reconciled.state, "delivered")
                 self.assertEqual(reconciled.external_id, "101")
-                self.assertEqual(provider.call_count, 1)
-                self.assertEqual(provider.call_args.kwargs.get("method", "GET"), "GET")
+                self.assertEqual(
+                    [call.kwargs.get("method", "GET") for call in provider.call_args_list],
+                    ["GET", "DELETE"],
+                )
+                self.assertEqual(provider.call_args_list[0].kwargs.get("method", "GET"), "GET")
 
     def test_provider_marker_without_visible_run_never_resends_dispatch(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -418,7 +421,7 @@ class OutboxWorkerTests(unittest.TestCase):
         self.assertEqual(loaded.state, "reconcile_required")
         self.assertEqual(loaded.action, "workflow_dispatch_in_doubt")
         self.assertEqual(loaded.error_code, "workflow_run_not_observed")
-        self.assertEqual([method for method, _path in requests], ["GET"])
+        self.assertEqual([method for method, _path in requests], ["GET", "DELETE"])
 
     def test_authorization_recovery_alert_is_completed_without_provider_access(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
