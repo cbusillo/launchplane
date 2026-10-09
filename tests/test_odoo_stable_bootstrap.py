@@ -273,6 +273,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
         self.assertEqual(post_deploy_mock.call_args.kwargs["request"].phase, "deploy")
         verify_readiness.assert_called_once_with(
             base_url="https://cm-testing.shinycomputers.com",
+            probe_base_url="",
             health_url="https://cm-testing.shinycomputers.com/launchplane/health",
             verify_health=True,
             verify_canonical=True,

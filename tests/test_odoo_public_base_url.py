@@ -274,6 +274,12 @@ class OdooPublicBaseUrlTests(unittest.TestCase):
                 payload["config_parameters"][0]["value"]["value"], f"https://{hosts[0]}"
             )
             self.assertEqual(verify.call_args.kwargs["base_url"], f"https://{hosts[0]}")
+            self.assertEqual(verify.call_args.kwargs["probe_base_url"], f"https://{origin}")
+            persisted = store.read_odoo_instance_override_record(
+                context_name=lane.context, instance_name="prod"
+            )
+            assert persisted.website_bootstrap is not None
+            self.assertEqual(persisted.website_bootstrap.canonical_url, f"https://{origin}")
             self.assertEqual(
                 verify.call_args.kwargs["health_url"], f"https://{origin}/launchplane/health"
             )

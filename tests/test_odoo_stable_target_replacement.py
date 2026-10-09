@@ -1985,6 +1985,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         verify_readiness.assert_called_once_with(
             base_url="https://cm-testing.shinycomputers.com",
+            probe_base_url="",
             health_url="https://cm-testing.shinycomputers.com/launchplane/health",
             verify_health=True,
             verify_canonical=True,

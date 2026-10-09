@@ -33,6 +33,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     _domains_for_target,
     _read_lane,
     _target_base_url,
+    _target_origin_base_url,
     _target_health_url,
 )
 from control_plane.workflows.odoo_verification import (
@@ -405,7 +406,11 @@ def execute_odoo_stable_bootstrap(
     started_at = utc_now_timestamp()
     normalized_override_record = _record_with_stable_bootstrap_canonical(
         record=odoo_override_record,
-        canonical_url=base_url,
+        canonical_url=_target_origin_base_url(
+            lane=lane, domains=target_record.domains, public_hosts=target_record.public_hosts
+        )
+        if target_record.public_hosts
+        else base_url,
         updated_at=started_at,
     )
     if (
@@ -632,6 +637,11 @@ def execute_odoo_stable_bootstrap(
     )
     verification = verify_odoo_stable_readiness(
         base_url=base_url,
+        probe_base_url=_target_origin_base_url(
+            lane=lane, domains=target_record.domains, public_hosts=target_record.public_hosts
+        )
+        if target_record.public_hosts
+        else "",
         health_url=health_url,
         verify_health=request.verify_health,
         verify_canonical=request.verify_canonical,

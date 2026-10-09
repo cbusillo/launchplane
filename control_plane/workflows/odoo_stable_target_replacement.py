@@ -816,6 +816,17 @@ def _target_base_url(
     return ""
 
 
+def _target_origin_base_url(
+    *, lane: ProductLaneProfile, domains: tuple[str, ...], public_hosts: tuple[str, ...] = ()
+) -> str:
+    origin_lane = (
+        lane.model_copy(update={"base_url": ""})
+        if public_hosts and lane.instance == "prod"
+        else lane
+    )
+    return _target_base_url(lane=origin_lane, domains=domains)
+
+
 def _target_health_url(
     *,
     profile: LaunchplaneProductProfileRecord,
@@ -823,12 +834,7 @@ def _target_health_url(
     domains: tuple[str, ...],
     public_hosts: tuple[str, ...] = (),
 ) -> str:
-    origin_lane = (
-        lane.model_copy(update={"base_url": ""})
-        if public_hosts and lane.instance == "prod"
-        else lane
-    )
-    base_url = _target_base_url(lane=origin_lane, domains=domains)
+    base_url = _target_origin_base_url(lane=lane, domains=domains, public_hosts=public_hosts)
     lane_health_url = lane.health_url.strip()
     if lane_health_url and not is_legacy_derived_odoo_health_url(
         health_url=lane_health_url,
@@ -1773,7 +1779,11 @@ def execute_odoo_stable_target_replacement_apply(
     )
     normalized_override_record = _record_with_target_replacement_canonical(
         record=odoo_override_record,
-        canonical_url=base_url,
+        canonical_url=_target_origin_base_url(
+            lane=lane, domains=target_record.domains, public_hosts=target_record.public_hosts
+        )
+        if target_record.public_hosts
+        else base_url,
         updated_at=started_at,
     )
     if (
@@ -2483,6 +2493,11 @@ def execute_odoo_stable_target_replacement_apply(
 
     verification = verify_odoo_stable_readiness(
         base_url=base_url,
+        probe_base_url=_target_origin_base_url(
+            lane=lane, domains=target_record.domains, public_hosts=target_record.public_hosts
+        )
+        if target_record.public_hosts
+        else "",
         health_url=health_url,
         verify_health=request.verify_health,
         verify_canonical=request.verify_canonical,
