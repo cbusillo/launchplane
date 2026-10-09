@@ -651,8 +651,8 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
                             discovered_at=self.preview.created_at,
                             repository=self.profile.repository,
                             anchor_repo=self.preview.anchor_repo,
-                            preview_slug_prefix="pr-",
                             status="pass",
+                            desired_count=0,
                         ),
                     ),
                 ):
