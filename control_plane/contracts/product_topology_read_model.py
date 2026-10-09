@@ -13,6 +13,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneMonitoringIntent,
     ProductLaneProfile,
+    ProductPublicWebsite,
     product_lane_monitoring_incident_eligible,
 )
 from control_plane.contracts.product_health_monitoring_migration import (
@@ -67,9 +68,10 @@ ProductTopologyWarningScope = Literal[
     "tls",
     "observation",
 ]
-ProductTopologyWarningSeverity = Literal["warning", "error"]
+ProductTopologyWarningSeverity = Literal["info", "warning", "error"]
 ProductTopologyWarningCode = Literal[
     "missing_route_authority",
+    "public_website_not_applicable",
     "route_authority_disabled",
     "stale_route_authority",
     "desired_domain_unknown",
@@ -160,6 +162,7 @@ class ProductTopologyTlsOwnership(BaseModel):
 class ProductDesiredTopology(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    public_website: ProductPublicWebsite = "required"
     base_url: str = ""
     health_url: str = ""
     domains: tuple[ProductTopologyDomain, ...] = ()
@@ -206,6 +209,7 @@ class ProductObservedIngress(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     monitoring_intent: ProductLaneMonitoringIntent = "prelaunch"
+    probe_effective: bool = False
     incident_eligible: bool = False
     status: str = "missing"
     failure_code: str = ""
@@ -369,7 +373,11 @@ def build_product_environment_topology(
         trust_state=_combine_trust_states(
             (
                 desired.trust_state,
-                provider_recorded.trust_state,
+                (
+                    provider_recorded.placement.trust_state
+                    if profile.public_website == "none" and route_binding is None
+                    else provider_recorded.trust_state
+                ),
                 observed.trust_state,
             ),
             fallback="missing",
@@ -381,8 +389,13 @@ def _desired_topology(
     *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
 ) -> ProductDesiredTopology:
     domains = _desired_domains(lane)
-    trust_state: FreshnessStatus = "recorded" if lane.base_url or lane.health_url else "missing"
+    trust_state: FreshnessStatus = (
+        "recorded"
+        if profile.public_website == "none" or lane.base_url or lane.health_url
+        else "missing"
+    )
     return ProductDesiredTopology(
+        public_website=profile.public_website,
         base_url=lane.base_url,
         health_url=lane.health_url,
         domains=domains,
@@ -393,7 +406,7 @@ def _desired_topology(
             recorded_at=profile.updated_at,
             refreshed_at=profile.updated_at,
             freshness_status=trust_state,
-            detail="Launchplane product-profile URL intent for this environment.",
+            detail="Launchplane product-profile public website and URL intent for this environment.",
         ),
     )
 
@@ -912,6 +925,13 @@ def _observed_ingress(
     projection = ProductObservedIngress(
         monitoring_intent=monitoring_intent,
         incident_eligible=incident_eligible,
+        probe_effective=any(
+            check.enabled
+            and check.kind == "public_http"
+            and canonical_health_check_record_token(check.name)
+            == canonical_health_check_record_token(latest.check_name)
+            for check in lane.health_monitoring.checks
+        ),
         status=latest.status,
         failure_code=latest.failure_code or "",
         observed_at=latest.observed_at,
@@ -1144,6 +1164,20 @@ def _topology_warnings(
 ) -> tuple[ProductTopologyWarning, ...]:
     warnings: list[ProductTopologyWarning] = []
     public_monitoring_effective = lane.health_monitoring.monitoring_intent != "private"
+    if desired.public_website == "required" and not (
+        public_monitoring_effective
+        and any(
+            check.enabled and check.kind == "public_http" for check in lane.health_monitoring.checks
+        )
+    ):
+        warnings.append(
+            _warning(
+                code="public_ingress_observation_missing",
+                scope="observation",
+                severity="warning",
+                detail="A public website requires an effective public HTTP check; private or disabled monitoring cannot replace it.",
+            )
+        )
     if (lane.base_url or lane.health_url) and not desired.domains:
         warnings.append(
             _warning(
@@ -1153,7 +1187,16 @@ def _topology_warnings(
                 detail="The product profile declares URLs whose public domain could not be parsed.",
             )
         )
-    if route_binding is None:
+    if desired.public_website == "none":
+        warnings.append(
+            _warning(
+                code="public_website_not_applicable",
+                scope="authority",
+                severity="info",
+                detail="The product profile declares no public website; public route, ingress and TLS authority are not applicable.",
+            )
+        )
+    if route_binding is None and desired.public_website != "none":
         warnings.extend(
             (
                 _warning(
@@ -1179,7 +1222,7 @@ def _topology_warnings(
                 ),
             )
         )
-    else:
+    elif route_binding is not None:
         if route_binding.status == "disabled":
             warnings.append(
                 _warning(
@@ -1249,7 +1292,7 @@ def _topology_warnings(
                 _warning(
                     code="external_ingress_internals_unsupported",
                     scope="ingress",
-                    severity="warning",
+                    severity="info",
                     detail=(
                         "Ingress is externally managed; Launchplane verifies public behavior "
                         "but does not claim access to the proxy's internal configuration."
@@ -1333,8 +1376,12 @@ def _topology_warnings(
             _warning(
                 code="public_ingress_failure",
                 scope="observation",
-                severity="error",
-                detail="The latest public ingress observation failed.",
+                severity="error" if observed.ingress.probe_effective else "info",
+                detail=(
+                    "The latest public ingress observation failed."
+                    if observed.ingress.probe_effective
+                    else "Historical public ingress failure; that check is not effective and this is not a current effective-check failure."
+                ),
             )
         )
     return _deduplicated_warnings(warnings)

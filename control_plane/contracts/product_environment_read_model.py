@@ -699,7 +699,11 @@ def build_product_environment_detail(
         warning
         for warning in (
             descriptor_warning,
-            *(topology_warning.detail for topology_warning in topology.warnings),
+            *(
+                topology_warning.detail
+                for topology_warning in topology.warnings
+                if topology_warning.severity != "info"
+            ),
         )
         if warning
     )
@@ -2012,7 +2016,9 @@ def _build_environment_summary(
             fallback=provenance.freshness_status,
         ),
         provenance=provenance,
-        warnings=tuple(warning.detail for warning in topology.warnings),
+        warnings=tuple(
+            warning.detail for warning in topology.warnings if warning.severity != "info"
+        ),
         available_actions=_action_availability(
             descriptor=descriptor,
             profile=profile,

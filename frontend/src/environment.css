@@ -1009,6 +1009,14 @@
   background: var(--danger-soft);
 }
 
+.environment-warning-panel li[data-severity="info"] {
+  background: var(--surface-raised);
+}
+
+.environment-warning-panel li[data-severity="info"] > span {
+  color: var(--muted);
+}
+
 .environment-warning-panel li > span {
   color: var(--warning);
   font-size: 9px;

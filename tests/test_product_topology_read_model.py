@@ -548,6 +548,121 @@ class _TopologyStore:
 
 
 class ProductTopologyReadModelTests(unittest.TestCase):
+    def test_no_website_requires_a_stored_declaration_not_private_monitoring_alone(self) -> None:
+        payload = _profile().model_dump(mode="json")
+        payload["lanes"][0].update(
+            {
+                "base_url": "",
+                "health_url": "",
+                "health_monitoring": {
+                    "monitoring_intent": "private",
+                    "checks": [
+                        {
+                            "name": "private-runtime",
+                            "kind": "private_http",
+                            "private_endpoint_key": "private-runtime",
+                        }
+                    ],
+                },
+            }
+        )
+        for declared in (False, True):
+            with self.subTest(declared=declared):
+                if declared:
+                    payload["public_website"] = "none"
+                profile = LaunchplaneProductProfileRecord.model_validate(payload)
+                # The declaration survives the same JSON contract persisted by record stores.
+                profile = LaunchplaneProductProfileRecord.model_validate_json(
+                    profile.model_dump_json()
+                )
+                topology = build_product_environment_topology(
+                    record_store=_TopologyStore(route_binding=None),
+                    profile=profile,
+                    lane=profile.lanes[0],
+                    lane_summary=_lane_summary(freshness_status="verified"),
+                    now=_NOW,
+                )
+                codes = {warning.code for warning in topology.warnings}
+                self.assertEqual("missing_route_authority" in codes, not declared)
+                self.assertEqual(
+                    topology.desired.public_website, "none" if declared else "required"
+                )
+                self.assertEqual(topology.provider_recorded.ingress.trust_state, "missing")
+                self.assertEqual(topology.trust_state, "recorded" if declared else "missing")
+                if declared:
+                    self.assertTrue(
+                        all(warning.severity == "info" for warning in topology.warnings)
+                    )
+
+    def test_no_website_rejects_conflicting_public_surface(self) -> None:
+        payload = _strict_public_profile().model_dump(mode="json")
+        payload["public_website"] = "none"
+        with self.assertRaisesRegex(ValueError, "no public website"):
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        payload["public_website"] = "unknown"
+        with self.assertRaises(ValueError):
+            LaunchplaneProductProfileRecord.model_validate(payload)
+
+    def test_private_monitoring_cannot_replace_a_required_website_check(self) -> None:
+        payload = _profile().model_dump(mode="json")
+        payload["lanes"][0]["health_monitoring"] = {
+            "monitoring_intent": "private",
+            "checks": [
+                {
+                    "name": "private-runtime",
+                    "kind": "private_http",
+                    "private_endpoint_key": "private-runtime",
+                }
+            ],
+        }
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(route_binding=_route_binding()),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=_lane_summary(freshness_status="verified"),
+            now=_NOW,
+        )
+        warning = next(
+            warning
+            for warning in topology.warnings
+            if warning.code == "public_ingress_observation_missing"
+        )
+        self.assertEqual(warning.severity, "warning")
+
+    def test_disabled_public_failure_is_history_and_enabled_failure_still_blocks(self) -> None:
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                payload = _profile().model_dump(mode="json")
+                payload["lanes"][0]["health_monitoring"] = {
+                    "monitoring_intent": "prelaunch",
+                    "checks": [
+                        {"name": "public-ingress", "kind": "public_http", "enabled": enabled}
+                    ],
+                }
+                profile = LaunchplaneProductProfileRecord.model_validate(payload)
+                topology = build_product_environment_topology(
+                    record_store=_TopologyStore(
+                        route_binding=None,
+                        observations=(_http_observation(runtime_identity_status="unverifiable"),),
+                    ),
+                    profile=profile,
+                    lane=profile.lanes[0],
+                    lane_summary=None,
+                    now=_NOW,
+                )
+                failure = next(
+                    warning
+                    for warning in topology.warnings
+                    if warning.code == "public_ingress_failure"
+                )
+                self.assertEqual(failure.severity, "error" if enabled else "info")
+                self.assertEqual(topology.observed.ingress.status, "fail")
+                self.assertEqual(topology.observed.ingress.probe_effective, enabled)
+                self.assertIn(
+                    "missing_route_authority", {warning.code for warning in topology.warnings}
+                )
+
     def test_private_monitoring_intent_suppresses_public_and_tls_observation_warnings(
         self,
     ) -> None:
@@ -594,7 +709,7 @@ class ProductTopologyReadModelTests(unittest.TestCase):
         self.assertNotIn("tls_observation_missing", warning_codes)
 
     def test_external_ingress_projects_fresh_public_runtime_proof(self) -> None:
-        profile = _profile()
+        profile = _strict_public_profile()
         route_binding = _route_binding(
             ingress_provider="external",
             tls_owner="external",
@@ -640,7 +755,7 @@ class ProductTopologyReadModelTests(unittest.TestCase):
             for warning in topology.warnings
             if warning.code == "external_ingress_internals_unsupported"
         )
-        self.assertEqual(external_visibility_warning.severity, "warning")
+        self.assertEqual(external_visibility_warning.severity, "info")
         self.assertNotIn("public_ingress_observation_missing", warning_codes)
         self.assertNotIn("stale_public_ingress_observation", warning_codes)
         self.assertNotIn("public_runtime_identity_unverified", warning_codes)

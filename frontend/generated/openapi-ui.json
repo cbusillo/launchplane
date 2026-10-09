@@ -12505,6 +12505,15 @@
           "promotion_workflow": {
             "$ref": "#/components/schemas/ProductPromotionWorkflowProfile"
           },
+          "public_website": {
+            "default": "required",
+            "enum": [
+              "required",
+              "none"
+            ],
+            "title": "Public Website",
+            "type": "string"
+          },
           "release_on_acceptance": {
             "default": "held",
             "enum": [
@@ -12567,6 +12576,7 @@
           "product",
           "production_use",
           "promotion_workflow",
+          "public_website",
           "release_on_acceptance",
           "repository",
           "repository_id",
@@ -23984,6 +23994,15 @@
           "provenance": {
             "$ref": "#/components/schemas/DataProvenance"
           },
+          "public_website": {
+            "default": "required",
+            "enum": [
+              "required",
+              "none"
+            ],
+            "title": "Public Website",
+            "type": "string"
+          },
           "trust_state": {
             "default": "missing",
             "enum": [
@@ -24004,6 +24023,7 @@
           "domains",
           "health_url",
           "provenance",
+          "public_website",
           "trust_state"
         ]
       },
@@ -26232,6 +26252,11 @@
               }
             ]
           },
+          "probe_effective": {
+            "default": false,
+            "title": "Probe Effective",
+            "type": "boolean"
+          },
           "provenance": {
             "$ref": "#/components/schemas/DataProvenance"
           },
@@ -26304,6 +26329,7 @@
           "monitoring_intent",
           "observed_at",
           "observed_runtime_identity",
+          "probe_effective",
           "provenance",
           "record_id",
           "runtime_identity_detail",
@@ -30157,6 +30183,7 @@
           "code": {
             "enum": [
               "missing_route_authority",
+              "public_website_not_applicable",
               "route_authority_disabled",
               "stale_route_authority",
               "desired_domain_unknown",
@@ -30207,6 +30234,7 @@
           },
           "severity": {
             "enum": [
+              "info",
               "warning",
               "error"
             ],

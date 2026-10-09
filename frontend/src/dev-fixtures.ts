@@ -2471,6 +2471,7 @@ function environmentFixture({
           ]
         : [],
       desired: {
+        public_website: "required",
         base_url: baseUrl,
         health_url: `${baseUrl}/health`,
         domains: [{ domain_name: host, role: "primary", tls_expected: true }],
@@ -2509,6 +2510,7 @@ function environmentFixture({
       },
       observed: {
         ingress: {
+          probe_effective: true,
           monitoring_intent: "public",
           incident_eligible: true,
           failure_code: warning ? "tls_hostname_mismatch" : "",
@@ -2728,6 +2730,7 @@ function missingEnvironmentFixture(
         },
       ],
       desired: {
+        public_website: "required",
         base_url: `https://${host}`,
         health_url: `https://${host}/health`,
         domains: [{ domain_name: host, role: "primary", tls_expected: true }],
@@ -2766,6 +2769,7 @@ function missingEnvironmentFixture(
       },
       observed: {
         ingress: {
+          probe_effective: false,
           monitoring_intent: "prelaunch",
           incident_eligible: false,
           failure_code: "",

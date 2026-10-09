@@ -46,7 +46,7 @@ interface WarningItem {
   id: string;
   scope: string;
   detail: string;
-  severity: "warning" | "error";
+  severity: ProductTopologyWarning["severity"];
 }
 
 interface InspectionStep {
@@ -801,6 +801,8 @@ function WarningSummary({
             <li data-severity={warning.severity} key={warning.id}>
               {warning.severity === "error" ? (
                 <AlertCircle size={16} aria-hidden="true" />
+              ) : warning.severity === "info" ? (
+                <Radar size={16} aria-hidden="true" />
               ) : (
                 <AlertTriangle size={16} aria-hidden="true" />
               )}

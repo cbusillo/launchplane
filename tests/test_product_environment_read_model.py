@@ -31,6 +31,7 @@ from control_plane.contracts.product_environment_read_model import (
     build_product_site_overview,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import (
@@ -1830,6 +1831,129 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                 self.assertEqual(detail.topology.provider_recorded.tls.trust_state, "missing")
                 self.assertNotIn(target.target_id, detail.model_dump_json())
                 self.assertNotIn("private-host-id", detail.model_dump_json())
+
+    def test_declared_no_website_projects_current_private_proof_without_blocking_warnings(
+        self,
+    ) -> None:
+        payload = _site_profile_payload(preview_enabled=False, preview_context="")
+        lane = cast(tuple[dict[str, object], ...], payload["lanes"])[1]
+        lane.update(
+            {
+                "base_url": "",
+                "health_url": "",
+                "health_monitoring": {
+                    "monitoring_intent": "private",
+                    "checks": [
+                        {
+                            "name": "private-runtime",
+                            "kind": "private_http",
+                            "private_endpoint_key": "private-runtime",
+                            "require_runtime_identity": True,
+                        }
+                    ],
+                },
+            }
+        )
+        payload["lanes"] = (lane,)
+        checked = datetime.now(timezone.utc)
+        old = (checked - timedelta(days=7)).isoformat()
+        identity = RuntimeIdentity(
+            context="example-site-prod",
+            instance="prod",
+            deployment_record_id="deployment-prod-1",
+            artifact_id="artifact-1",
+            source_git_ref="abc123",
+        )
+        summary = LaunchplaneLaneSummary(
+            context=identity.context,
+            instance=identity.instance,
+            provider_target=ProviderTargetRecord(
+                context=identity.context,
+                instance=identity.instance,
+                provider_id="dokploy",
+                target_category="application",
+                target_id="private-id",
+                display_name="example-service",
+                provider_target_type="application",
+                updated_at=old,
+            ),
+            inventory=EnvironmentInventory(
+                context=identity.context,
+                instance=identity.instance,
+                runtime_identity=identity,
+                deployment_record_id=identity.deployment_record_id,
+                updated_at=old,
+                source_git_ref=identity.source_git_ref,
+                deploy=DeploymentEvidence(
+                    target_name="example-service",
+                    target_type="application",
+                    deploy_mode="image",
+                    status="pass",
+                ),
+            ),
+        )
+        observation = PublicIngressObservationRecord(
+            record_id="private-current",
+            product="example-site",
+            context=identity.context,
+            instance=identity.instance,
+            check_name="private-runtime",
+            check_kind="private_http",
+            monitoring_intent="private",
+            observed_at=checked.isoformat(),
+            status="pass",
+            summary="Connected",
+            expected_runtime_identity=identity,
+            targets=(
+                PublicIngressTargetObservation(
+                    target="private_health_url",
+                    url="private-endpoint://private-runtime",
+                    status="pass",
+                    runtime_identity_status="match",
+                    observed_runtime_identity=identity,
+                    summary="Verified",
+                ),
+            ),
+        )
+        endpoint = PrivateHealthEndpointRecord(
+            endpoint_key="private-runtime",
+            product="example-site",
+            context=identity.context,
+            instance=identity.instance,
+            url="http://127.0.0.1:3000/health",
+            updated_at=old,
+        )
+        for declaration in ("required", "none"):
+            payload["public_website"] = declaration
+            profile = LaunchplaneProductProfileRecord.model_validate(payload)
+            store = _ContinuouslyVerifiedLaneStore(profile, summary, (observation,))
+            with patch.object(
+                store, "read_private_health_endpoint_record", return_value=endpoint, create=True
+            ):
+                detail = build_product_environment_detail(
+                    record_store=store,
+                    product=profile.product,
+                    environment="prod",
+                    action_allowed=lambda *_: False,
+                )
+                overview = build_product_site_overview(
+                    record_store=store, product=profile.product, action_allowed=lambda *_: False
+                )
+            for projected in (detail, overview.environments[0]):
+                self.assertEqual(projected.provenance.freshness_status, "verified")
+                self.assertEqual(projected.health_monitoring.checks[0].status, "pass")
+                self.assertEqual(
+                    projected.topology.observed.placement.runtime_identity_status, "match"
+                )
+                self.assertEqual(
+                    projected.trust_state, "recorded" if declaration == "none" else "missing"
+                )
+                self.assertEqual(bool(projected.warnings), declaration != "none")
+                if declaration == "none":
+                    self.assertTrue(projected.topology.warnings)
+                    self.assertTrue(
+                        all(warning.severity == "info" for warning in projected.topology.warnings)
+                    )
 
     def test_product_environment_detail_exposes_physical_provider_target(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
