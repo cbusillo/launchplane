@@ -494,8 +494,7 @@ class MergeTrainSchedulerPassTests(TestCase):
                 self.assertNotIn("candidate", request.message)
                 if queue.intended_next_action == "update_branch":
                     self.assertIn("updated", request.message.lower())
-                else:
-                    self.assertEqual(request.event, "waiting")
+                self.assertEqual(request.event, "waiting")
                 self.record_store.write_merge_train_pr_feedback_record.assert_called_once()
 
                 # The same candidate-less result must never deliver in a dry run.

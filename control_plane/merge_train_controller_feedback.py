@@ -230,6 +230,11 @@ def _feedback_event(*, controller_action: str, result: dict[str, Any]) -> str:
         return "waiting"
     if controller_action in WAITING_ACTIONS:
         return "waiting"
+    if (
+        controller_action == "update_branch"
+        and _as_dict(result.get("branch_update_result")).get("status") == "updated"
+    ):
+        return "waiting"
     if controller_action in ATTENTION_ACTIONS:
         return "blocked"
     if controller_action in BUILDING_ACTIONS:
