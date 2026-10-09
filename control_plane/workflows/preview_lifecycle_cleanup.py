@@ -93,14 +93,17 @@ def _build_generic_web_cleanup_record(
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> PreviewLifecycleCleanupRecord:
     if profile is not None and (
-        profile.product != plan.product or profile.preview.context != plan.context
+        profile.product != plan.product
+        or profile.preview.context != plan.context
+        or not profile.preview.enabled
+        or not profile.preview.context.strip()
     ):
         return _blocked_record(
             plan=plan,
             requested_at=requested_at,
             source=source,
             apply=True,
-            error_message="Cleanup plan does not match its product/preview context; generate a fresh plan within the caller's existing authority.",
+            error_message="Cleanup requires enabled previews and a plan matching its product/preview context; generate a fresh plan within the caller's existing authority.",
         )
     parsed_previews: list[tuple[str, int]] = []
     anchor_repo = plan.product

@@ -567,8 +567,12 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await asyncio.to_thread(started.wait, 3))
                 health = await asyncio.wait_for(request(self.app, "GET", "/v1/health"), 2)
                 self.assertEqual(health.status_code, 200)
+                duplicate = await asyncio.wait_for(destroy(), 2)
+                self.assertEqual(duplicate.status_code, 409, duplicate.text)
                 task.cancel()
                 await asyncio.sleep(0)
+                duplicate = await asyncio.wait_for(destroy(), 2)
+                self.assertEqual(duplicate.status_code, 409, duplicate.text)
             finally:
                 release.set()
             with self.assertRaises(asyncio.CancelledError):
@@ -791,6 +795,14 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
             "control_plane.workflows.generic_web_preview._execute_generic_web_preview_destroy_unserialized"
         ) as provider:
             response = await call("wrong-context-cleanup")
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(response.json()["result"]["status"], "blocked")
+            provider.assert_not_called()
+            disabled = self.profile.model_copy(
+                update={"preview": self.profile.preview.model_copy(update={"enabled": False})}
+            )
+            self.store.write_product_profile_record(disabled)
+            response = await call("disabled-preview-cleanup")
             self.assertEqual(response.status_code, 202, response.text)
             self.assertEqual(response.json()["result"]["status"], "blocked")
             provider.assert_not_called()
