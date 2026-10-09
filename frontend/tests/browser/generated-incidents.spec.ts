@@ -47,7 +47,7 @@ test("canonical generated incidents render once and disappear after resolution",
   } }));
   await page.goto("/ui/products");
   const overview = page.getByRole("region", { name: "Active public ingress incidents" });
-  await expect(overview.getByRole("heading", { name: "3 open incidents" })).toBeVisible();
+  await expect(overview.getByRole("heading", { name: `${fixtures.incidents.length} open incidents` })).toBeVisible();
   await expect(overview.locator("li")).toHaveCount(fixtures.incidents.length);
   for (const incident of fixtures.incidents) {
     const row = overview.locator("li").filter({ hasText: incident.summary });
