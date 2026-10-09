@@ -24,11 +24,22 @@ If a policy digest changes under the same policy key while a fully merged legacy
 landing is still awaiting controller reconciliation, the controller verifies each recorded PR head and merge commit
 against the provider and confirms containment in the target branch. It then
 clears the completed fence with `reason_code=completed_landing_policy_changed`,
-preserving the landing history and retaining the old candidate ref. This recovery
-performs no provider writes and does not authorize another merge under the old
-policy. Incomplete stack disposition remains fenced with
-`completed_landing_stack_reconciliation_required` and the relevant record IDs;
-conflicting or unavailable provider evidence also preserves reconciliation.
+preserving the landing history and retaining the old candidate ref. It never
+re-admits or re-merges the root or repeats a stack collapse. For unfinished
+legacy stack disposition, the same supported controller pass verifies every
+recorded child head against its PR and confirms containment in both the landed
+root head and merge commit before any provider write. It then resumes the
+checkpointed comment, label and close effects using the current repository
+policy's disposition label; retries observe completed provider effects instead
+of repeating them. Completed non-stack history requires no provider writes.
+
+Missing or incompatible recorded stack history stays fenced with
+`completed_landing_stack_reconciliation_required`. Missing current disposition
+configuration, changed child heads, unavailable child evidence and missing
+containment return explicit `completed_landing_stack_*` reasons with the relevant
+record IDs. Conflicting or unavailable root evidence also preserves
+reconciliation. Diagnose through controller/status and resume through the
+controller's normal run-once route; do not edit database records or merge by hand.
 
 Use the controller phase when diagnosing a failed landing. An active
 `admit_pull_request` phase means the failure occurred while reconciling or
