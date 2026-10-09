@@ -1,6 +1,29 @@
 import { expect, test } from "@playwright/test";
 import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
 
+test("Preview-era note markers identify each PR only in the engineering view", async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("products");
+  });
+  response.review.checklist.items[0].preview_era_notes = true;
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "engineer", github_id: 9002, role: "admin", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: { ...response, viewer_is_owner: false, can_override: true } }));
+  await page.goto("/ui/owner-review?product=example-site");
+  const marker = page.getByText("PR #42: preview-era test links replaced with testing-site instructions.", { exact: true });
+  await expect(marker).toBeVisible();
+  await expect(page.getByText("PR #45: preview-era test links replaced with testing-site instructions.", { exact: true })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("preview-era-admin.png"), fullPage: true });
+  await page.unroute("**/v1/release-review?*");
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.reload();
+  await expect(page.getByText("Reviewing as the Client", { exact: true })).toBeVisible();
+  await expect(marker).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("preview-era-client.png"), fullPage: true });
+});
+
 test("Failed releases distinguish automatic recovery from the rollback drill", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();

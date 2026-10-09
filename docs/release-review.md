@@ -8,6 +8,16 @@ testing site and the **`Client test notes`** from every merged pull request in t
 commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
 
+Checklist compilation replaces links to preview hostnames (including hosts in
+the product's retained preview records) and per-PR `/ui/owner-review` pages with
+the fixed line `Check this on the testing site.`. Other notes and links remain;
+the source PR body is never edited. Affected items carry `preview_era_notes: true`
+in the response, and the admin/read-only view identifies their PR numbers.
+The digest includes the displayed notes and this marker: sanitizing old notes
+changes the digest and requires review of the displayed checklist. Unaffected
+items omit the false marker, preserving historical digests. Prior preview
+acceptance annotations still do not change the digest.
+
 When the checklist is complete and only the Client's approval remains, the
 stable worker posts a release-review request mentioning the recorded Client,
 through the existing Launchplane Delivery App's release-record access. It links

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -2837,7 +2838,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list_response.status_code, 200, list_response.text)
         self.assertEqual(list_response.json()["total"], 1)
 
-    async def test_human_projection_reads_do_not_reconcile_expiry_or_write_events(self) -> None:
+    async def test_human_reads_remain_active_after_legacy_deadline_without_writes(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory,
             patch.dict(
@@ -2899,11 +2900,11 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("expired", {event.action for event in after_events})
         self.assertEqual(
             list_response.json()["reviews"][0]["lifecycle"]["expiry_state"],
-            "past_expiry_unreconciled",
+            "active",
         )
-        self.assertFalse(list_response.json()["reviews"][0]["can_approve"])
+        self.assertTrue(list_response.json()["reviews"][0]["can_approve"])
         self.assertFalse(review_response.json()["review"]["persists_state"])
-        self.assertIn("expired", {event.action for event in after_detail_events})
+        self.assertEqual(after_detail_events, before_events)
 
     async def test_postgres_projection_reads_leave_operation_and_event_rows_unchanged(
         self,
@@ -3020,7 +3021,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(revoked.json()["record"]["status"], "revoked")
         self.assertEqual(revocation_replay.json()["write_status"], "replayed")
 
-    async def test_managed_authz_approval_rejects_stale_and_accepts_current_exact_plan(
+    async def test_old_managed_authz_approval_rejects_stale_and_accepts_current_exact_plan(
         self,
     ) -> None:
         with TemporaryDirectory() as directory:
@@ -3039,10 +3040,16 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             try:
                 async with lifespan_client(app) as client:
-                    planned = await client.post(
-                        "/v1/privileged-operations/plans",
-                        json=_managed_authz_plan_payload("managed-policy-plan-1"),
+                    planned_at = datetime.fromisoformat(current_record.updated_at) - timedelta(
+                        days=3650
                     )
+                    with patch("control_plane.privileged_operation_service.datetime") as clock:
+                        clock.now.return_value = planned_at
+                        clock.fromisoformat.side_effect = datetime.fromisoformat
+                        planned = await client.post(
+                            "/v1/privileged-operations/plans",
+                            json=_managed_authz_plan_payload("managed-policy-plan-1"),
+                        )
                     self.assertEqual(planned.status_code, 200, planned.text)
                     operation_id = planned.json()["record"]["operation_id"]
                     revised_policy = policy.model_copy(update={"administrator_quorum": 2})
