@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,6 +24,15 @@ from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLife
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
+from control_plane.contracts.product_health_monitoring_migration import (
+    canonical_health_check_record_token,
+)
+from control_plane.contracts.product_incident_read_model import (
+    ProductIncidentEnvironmentScope,
+    ProductIncidentReadStore,
+    ProductIncidentSummary,
+    build_product_incident_summary,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneHealthCheckKind,
@@ -385,6 +394,7 @@ class ProductHealthMonitoringSummary(BaseModel):
     monitoring_intent: ProductLaneMonitoringIntent
     public_incident_eligible: bool
     checks: tuple[ProductHealthMonitoringCheckSummary, ...] = ()
+    open_incidents: tuple[ProductIncidentSummary, ...] = ()
     trust_state: FreshnessStatus = "recorded"
     provenance: DataProvenance
 
@@ -2128,6 +2138,27 @@ def _health_monitoring_summary(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
 ) -> ProductHealthMonitoringSummary:
+    incidents = tuple(
+        incident
+        for incident in _required_records(
+            record_store,
+            "list_public_ingress_incident_records",
+            product=profile.product,
+            context_name=lane.context,
+            instance_name=lane.instance,
+            status="open",
+            limit=None,
+        )
+        if isinstance(incident, PublicIngressIncidentRecord)
+    )
+    incident_scope = ProductIncidentEnvironmentScope(
+        product=profile.product,
+        display_name=profile.display_name,
+        environment=lane.instance,
+        context=lane.context,
+        instance=lane.instance,
+        recorded_at=profile.updated_at,
+    )
     check_summaries: list[ProductHealthMonitoringCheckSummary] = []
     for check in lane.health_monitoring.checks:
         probe_effective = check.enabled and product_lane_monitoring_probe_effective(
@@ -2159,22 +2190,13 @@ def _health_monitoring_summary(
                 ),
                 None,
             )
-        incidents = _required_records(
-            record_store,
-            "list_public_ingress_incident_records",
-            product=profile.product,
-            context_name=lane.context,
-            instance_name=lane.instance,
-            check_name=check.name,
-            check_kind=check.kind,
-            status="open",
-            limit=1,
-        )
         open_incident = next(
             (
                 incident
                 for incident in incidents
-                if isinstance(incident, PublicIngressIncidentRecord)
+                if canonical_health_check_record_token(incident.check_name)
+                == canonical_health_check_record_token(check.name)
+                and incident.check_kind == check.kind
             ),
             None,
         )
@@ -2248,6 +2270,14 @@ def _health_monitoring_summary(
         monitoring_intent=lane.health_monitoring.monitoring_intent,
         public_incident_eligible=lane.health_monitoring.monitoring_intent == "public",
         checks=tuple(check_summaries),
+        open_incidents=tuple(
+            build_product_incident_summary(
+                record_store=cast(ProductIncidentReadStore, record_store),
+                scope=incident_scope,
+                incident=incident,
+            )
+            for incident in incidents
+        ),
         provenance=_monitoring_intent_provenance(profile=profile, lane=lane),
     )
 

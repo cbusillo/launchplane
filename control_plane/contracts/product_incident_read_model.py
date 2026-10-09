@@ -341,7 +341,7 @@ def build_product_environment_incident_list(
         )
         incidents = _sort_open_incidents(records)[:limit] if status == "open" else records
     summaries = tuple(
-        _incident_summary(
+        build_product_incident_summary(
             record_store=record_store,
             scope=incident_scope,
             incident=incident,
@@ -424,7 +424,7 @@ def build_product_environment_incident_detail(
         limit=200,
     )
     return ProductIncidentDetail(
-        incident=_incident_summary(
+        incident=build_product_incident_summary(
             record_store=record_store,
             scope=incident_scope,
             incident=incident,
@@ -547,7 +547,7 @@ def _resolve_scope(
     )
 
 
-def _incident_summary(
+def build_product_incident_summary(
     *,
     record_store: ProductIncidentReadStore,
     scope: ProductIncidentEnvironmentScope,

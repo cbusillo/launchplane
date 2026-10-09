@@ -183,6 +183,19 @@ class _PreviewRecordStore:
             raise FileNotFoundError(product)
         return self._profile
 
+    def list_public_ingress_incident_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentRecord, ...]:
+        return ()
+
     def list_product_profile_records(
         self, *, driver_id: str = ""
     ) -> tuple[LaunchplaneProductProfileRecord, ...]:
@@ -1653,9 +1666,12 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         )
         store = _PublicIngressObservationsOnlyStore(profile, (observation,))
 
-        with self.assertRaisesRegex(
-            ProductEnvironmentReadModelCapabilityError,
-            r"missing store method\(s\): list_public_ingress_incident_records",
+        with (
+            self.assertRaisesRegex(
+                ProductEnvironmentReadModelCapabilityError,
+                r"missing store method\(s\): list_public_ingress_incident_records",
+            ),
+            patch.object(store, "list_public_ingress_incident_records", None),
         ):
             build_product_environment_detail(
                 record_store=store,

@@ -524,13 +524,12 @@ function EnvironmentOverview({
   const effectiveChecks = detail.health_monitoring.checks.filter(
     (check) => check.probe_effective,
   );
-  const openIncidentCheck = effectiveChecks.find(
-    (check) => check.incident_eligible && check.incident_status === "open",
-  );
+  const openIncidents = detail.health_monitoring.open_incidents;
+  const openIncident = openIncidents.find((incident) => incident.severity === "critical") ?? openIncidents[0];
   const openIncidentSeverity =
-    openIncidentCheck?.incident_severity || detail.public_ingress.incident_severity;
+    openIncident?.severity;
   const currentIncidentId =
-    openIncidentCheck?.incident_id || detail.public_ingress.incident_id;
+    openIncident?.incident_id || "";
   const actionableMonitoringFailure = effectiveChecks.some(
     (check) => check.incident_eligible && check.status === "fail",
   );
@@ -978,17 +977,14 @@ function diagnosisFor(
   warnings: WarningItem[],
 ): Diagnosis | null {
   const errorWarning = warnings.find((warning) => warning.severity === "error");
-  const openIncident = detail.health_monitoring.checks.find(
-    (check) => check.incident_eligible && check.incident_status === "open",
-  );
-  if (openIncident) {
+  for (const openIncident of detail.health_monitoring.open_incidents) {
     return {
-      title: openIncident.summary || `${humanize(openIncident.name)} incident open`,
+      title: openIncident.summary,
       detail: openIncident.failure_code
         ? `Failure code: ${humanize(openIncident.failure_code)}.`
         : "Launchplane recorded an open material incident for this health check.",
       targetId: "incident-history",
-      severity: openIncident.incident_severity === "warning" ? "warning" : "error",
+      severity: openIncident.severity === "warning" ? "warning" : "error",
     };
   }
   if (primaryTls && tlsTone(primaryTls) === "danger") {

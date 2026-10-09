@@ -1008,6 +1008,125 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
 
 
 class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_product_incident_inventory_includes_generated_checks_and_resolution(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "incidents.sqlite3"
+            )
+            _seed_product_environment_read_records(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            profile = store.read_product_profile_record("example-site")
+            lane = next(lane for lane in profile.lanes if lane.instance == "prod")
+            cases = (
+                ("public-ingress", "public_http", "http_error", "critical", "active"),
+                ("tls-alias.example.test", "tls", "tls_expired", "critical", "acknowledged"),
+                (
+                    "monitor-cadence:public_http:public-ingress",
+                    "provider",
+                    "monitor_run_missed",
+                    "critical",
+                    "silenced",
+                ),
+                ("launchplane-deploy-fence", "provider", "deploy_fence_held", "warning", "active"),
+            )
+            records = tuple(
+                PublicIngressIncidentRecord.model_validate(
+                    {
+                        "incident_id": f"incident-{index}",
+                        "product": profile.product,
+                        "context": lane.context,
+                        "instance": lane.instance,
+                        "check_name": name,
+                        "check_kind": kind,
+                        "status": "open",
+                        "opened_at": "2026-10-09T20:00:00Z",
+                        "opened_observation_id": f"observation-{index}",
+                        "latest_observation_id": f"observation-{index}",
+                        "latest_observed_at": "2026-10-09T20:00:00Z",
+                        "failure_code": failure,
+                        "severity": severity,
+                        "notification_state": notification,
+                        "silenced_until": "2026-10-10T20:00:00Z"
+                        if notification == "silenced"
+                        else "",
+                        "summary": name,
+                    }
+                )
+                for index, (name, kind, failure, severity, notification) in enumerate(cases)
+            )
+            for record in records:
+                store.write_public_ingress_incident_record(record)
+            records = store.list_public_ingress_incident_records(
+                product=profile.product,
+                context_name=lane.context,
+                instance_name=lane.instance,
+                status="open",
+            )
+            store.write_public_ingress_incident_record(
+                records[0].model_copy(
+                    update={
+                        "incident_id": "other-lane",
+                        "context": profile.lanes[0].context,
+                        "instance": "testing",
+                    }
+                )
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(
+                    contexts=("launchplane", lane.context), products=("launchplane", "example-site")
+                ),
+                record_store_factory=lambda: store,
+            )
+            for read in (_get_products, _get_product, _get_product_environment):
+                response = await read(app)
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                if "products" in payload:
+                    environments = payload["products"][0]["environments"]
+                elif "product" in payload:
+                    environments = payload["product"]["environments"]
+                else:
+                    environments = [payload["environment"]]
+                summary = next(item for item in environments if item["environment"] == "prod")
+                projected = {
+                    item["incident_id"]: item
+                    for item in summary["health_monitoring"]["open_incidents"]
+                }
+                self.assertEqual(set(projected), {record.incident_id for record in records})
+                for record in records:
+                    self.assertEqual(projected[record.incident_id]["check_name"], record.check_name)
+                    self.assertEqual(projected[record.incident_id]["severity"], record.severity)
+                    self.assertEqual(
+                        projected[record.incident_id]["notification_state"],
+                        record.notification_state,
+                    )
+            for record in records:
+                resolved = PublicIngressIncidentRecord.model_validate(
+                    record.model_dump()
+                    | {
+                        "status": "resolved",
+                        "resolved_at": "2026-10-09T21:00:00Z",
+                        "resolved_observation_id": "recovery",
+                        "resolution_reason": "recovered",
+                    }
+                )
+                store.write_public_ingress_incident_record(resolved)
+            response = await _get_product_environment(app)
+            self.assertEqual(
+                response.json()["environment"]["health_monitoring"]["open_incidents"], []
+            )
+            history = store.list_public_ingress_incident_records(
+                product=profile.product, instance_name="prod"
+            )
+            self.assertEqual(
+                {item.incident_id for item in history}, {item.incident_id for item in records}
+            )
+            self.assertTrue(all(item.status == "resolved" for item in history))
+            store.close()
+
     async def test_administrator_evidence_candidate_reads_product_resource_context(self) -> None:
         human = _github_human_identity()
         _, request = compile_administrator_product_evidence_read_candidate(
