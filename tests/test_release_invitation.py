@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
+from datetime import UTC, datetime, timedelta
 import io
 import json
 from pathlib import Path
@@ -40,9 +41,13 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.issues: list[dict[str, Any]] = []
         self.comments: list[dict[str, Any]] = []
         self.posts: list[dict[str, Any]] = []
+        self.edits: list[dict[str, Any]] = []
         self.lose_response = False
         self.read_count = 0
+        self.now = datetime.now(UTC)
         for target, replacement in (
+            ("_now", lambda: self.now),
+            ("monotonic", lambda: self.now.timestamp()),
             ("launchplane_public_origin_from_env", lambda: "https://launchplane.example.invalid"),
             ("current_release_review", self.read_review),
             ("resolve_launchplane_github_token", lambda **kwargs: "delivery-token"),
@@ -61,11 +66,20 @@ class ReleaseInvitationTests(unittest.TestCase):
         if path == "/installation/token" and kwargs.get("method") == "DELETE":
             return None
         self.assertTrue(path.startswith("/repos/example/site/issues"))
+        if kwargs.get("method") == "PATCH":
+            comment_id = int(path.rsplit("/", 1)[1])
+            comment = next(comment for comment in self.comments if comment["id"] == comment_id)
+            comment.update(kwargs["body"], updated_at=self.now.isoformat())
+            self.edits.append(kwargs["body"])
+            if self.lose_response:
+                self.lose_response = False
+                raise TimeoutError("response lost after edit")
+            return comment.copy()
         if kwargs.get("method") == "POST":
             body = kwargs["body"]
             self.posts.append(body)
             if path.endswith("/comments"):
-                result = {"id": len(self.comments) + 1, **body}
+                result = {"id": len(self.comments) + 1, "created_at": self.now.isoformat(), **body}
                 self.comments.append(result)
                 if self.lose_response:
                     self.lose_response = False
@@ -84,6 +98,27 @@ class ReleaseInvitationTests(unittest.TestCase):
             backoff=backoff,
         )
 
+    def change_candidate(self, **update: str) -> None:
+        assert self.review.checklist is not None
+        checklist = self.review.checklist
+        release = self.store.read_release_tuple_record(
+            context_name="example-site", channel_name="testing"
+        )
+        artifact = self.store.read_artifact_manifest(release.artifact_id).model_copy(
+            update={key: value for key, value in update.items() if key != "shared_addons_digest"}
+        )
+        self.store.write_artifact_manifest(artifact)
+        self.store.write_release_tuple_record(
+            release.model_copy(update={"artifact_id": artifact.artifact_id})
+        )
+        self.review = self.review.model_copy(
+            update={
+                "checklist": checklist.model_copy(
+                    update={"candidate": checklist.candidate.model_copy(update=update)}
+                )
+            }
+        )
+
     def test_complete_release_mentions_client_and_links_review_with_effect(self) -> None:
         self.publish()
         self.assertEqual(len(self.comments), 1)
@@ -98,34 +133,146 @@ class ReleaseInvitationTests(unittest.TestCase):
             self.store.list_release_review_decision_records(product="example-site"), ()
         )
 
-    def test_only_once_per_candidate_even_after_notes_change_or_worker_restart(self) -> None:
+    def test_only_once_even_after_notes_change_or_worker_restart(self) -> None:
         self.publish()
         self.review = self.review.model_copy(update={"checklist_digest": "f" * 64})
         self.publish()
         self.assertEqual(len(self.comments), 1)
         self.assertEqual(len(self.issues), 1)
 
-    def test_new_artifact_commit_or_shared_inputs_get_one_new_invitation(self) -> None:
+    def test_new_artifact_commit_or_shared_inputs_update_open_request_without_mention(self) -> None:
         self.publish()
-        assert self.review.checklist is not None
         for update in (
             {"artifact_id": "replacement-artifact"},
             {"source_commit": "e" * 40},
             {"shared_addons_digest": "changed-shared-inputs"},
         ):
-            checklist = self.review.checklist
-            assert checklist is not None
-            self.review = self.review.model_copy(
-                update={
-                    "checklist": checklist.model_copy(
-                        update={"candidate": checklist.candidate.model_copy(update=update)}
-                    )
-                }
-            )
+            self.change_candidate(**update)
             self.publish()
             self.publish()
-        self.assertEqual(len(self.comments), 4)
+        self.assertEqual(len(self.comments), 1)
+        self.assertEqual(len(self.edits), 3)
+        self.assertEqual(sum("@site-owner" in post.get("body", "") for post in self.posts), 1)
+        self.assertTrue(all("@site-owner" not in edit["body"] for edit in self.edits))
+        assert self.review.checklist is not None
+        self.assertIn(
+            release_invitation_marker(self.profile.product, self.review.checklist.candidate),
+            self.comments[0]["body"],
+        )
+        self.assertIn(self.review.checklist.candidate.source_commit, self.comments[0]["body"])
+        self.assertIn(self.review.checklist.items[0].title, self.comments[0]["body"])
         self.assertEqual(len(self.issues), 1)
+
+    def test_client_decision_then_new_candidate_opens_new_request(self) -> None:
+        self.publish()
+        for index, outcome in enumerate(("accepted", "changes_requested")):
+            with self.subTest(outcome=outcome):
+                assert self.review.checklist is not None
+                record = decision(
+                    self.store, outcome=outcome, date=self.now.isoformat()
+                ).model_copy(update={"checklist": self.review.checklist})
+                self.store.write_release_review_decision_record(record)
+                self.now += timedelta(seconds=1)
+                self.change_candidate(source_commit=str(index + 4) * 40)
+                self.publish()
+                self.publish()
+                self.assertEqual(len(self.comments), index + 2)
+                self.assertEqual(
+                    sum("@site-owner" in post.get("body", "") for post in self.posts), index + 2
+                )
+
+    def test_lost_edit_response_and_restart_do_not_post_again(self) -> None:
+        self.publish()
+        self.change_candidate(source_commit="e" * 40)
+        self.lose_response = True
+        with self.assertRaises(TimeoutError):
+            self.publish()
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 1)
+        self.assertEqual(len(self.edits), 1)
+
+    def test_returning_to_earlier_candidate_updates_cached_open_request(self) -> None:
+        assert self.review.checklist is not None
+        original = self.review.checklist.candidate.source_commit
+        backoff = ReleaseInvitationBackoff()
+        self.publish(backoff)
+        self.change_candidate(source_commit="e" * 40)
+        self.publish(backoff)
+        self.change_candidate(source_commit=original)
+        self.publish(backoff)
+        self.assertEqual(len(self.comments), 1)
+        self.assertEqual(len(self.edits), 2)
+        self.assertIn(original, self.comments[0]["body"])
+
+    def test_decision_during_lookup_does_not_update_or_remind(self) -> None:
+        self.publish()
+        self.now += timedelta(days=3)
+        original = self.github
+
+        def record_decision(**kwargs: Any) -> object:
+            if "/comments?" in kwargs["path"]:
+                self.store.write_release_review_decision_record(
+                    decision(self.store, date=self.now.isoformat())
+                )
+            return original(**kwargs)
+
+        with patch("control_plane.release_invitation.github_api_request", record_decision):
+            self.publish()
+        self.assertEqual(len(self.comments), 1)
+        self.assertEqual(self.edits, [])
+
+    def test_one_reminder_after_three_days_even_across_candidates_and_restarts(self) -> None:
+        self.publish()
+        backoff = ReleaseInvitationBackoff()
+        self.now += timedelta(days=3) - timedelta(seconds=1)
+        self.change_candidate(source_commit="e" * 40)
+        self.publish(backoff)
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 1)
+        self.now += timedelta(seconds=1)
+        # The cached receipt expires at the original request's deadline.
+        self.publish(backoff)
+        self.assertEqual(len(self.comments), 2)
+        self.assertIn("@site-owner", self.comments[1]["body"])
+        self.now += timedelta(days=10)
+        self.change_candidate(source_commit="f" * 40)
+        self.publish(ReleaseInvitationBackoff())
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 2)
+
+    def test_lost_reminder_response_is_recovered_without_duplicate(self) -> None:
+        self.publish()
+        self.now += timedelta(days=3)
+        self.lose_response = True
+        with self.assertRaises(TimeoutError):
+            self.publish()
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 2)
+
+    def test_newest_legacy_open_request_is_updated_without_mention(self) -> None:
+        assert self.review.checklist is not None
+        candidate = self.review.checklist.candidate
+        self.issues = [{"number": 91, "body": release_request_issue_marker(self.profile.product)}]
+        self.comments = [
+            {
+                "id": index + 1,
+                "created_at": self.now.isoformat(),
+                "body": release_invitation_marker(
+                    self.profile.product,
+                    candidate.model_copy(update={"source_commit": str(index) * 40}),
+                )
+                + "\n\n@site-owner old request",
+            }
+            for index in range(3)
+        ]
+        self.publish()
+        self.publish()
+        self.assertEqual(len(self.comments), 3)
+        self.assertEqual(len(self.edits), 1)
+        self.assertEqual(self.posts, [])
+        self.assertIn(
+            release_invitation_marker(self.profile.product, candidate), self.comments[-1]["body"]
+        )
 
     def test_no_invitation_when_more_than_client_approval_is_left(self) -> None:
         ready = self.review
@@ -165,6 +312,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.comments = [
             {
                 "id": 1,
+                "created_at": self.now.isoformat(),
                 "body": "Existing manual request\n"
                 + release_invitation_marker(self.profile.product, self.review.checklist.candidate),
             }
@@ -268,8 +416,8 @@ class ReleaseInvitationTests(unittest.TestCase):
         backoff = ReleaseInvitationBackoff()
         self.publish(backoff)
         reads = self.read_count
-        with patch("control_plane.release_invitation.monotonic", return_value=10**12):
-            self.publish(backoff)
+        self.now += timedelta(seconds=301)
+        self.publish(backoff)
         self.assertEqual(self.read_count, reads)
         original = self.store.read_artifact_manifest("artifact-testing")
         changed = original.model_copy(
@@ -300,7 +448,8 @@ class ReleaseInvitationTests(unittest.TestCase):
         )
         self.publish(backoff)
         self.assertGreater(self.read_count, reads)
-        self.assertEqual(len(self.comments), 2)
+        self.assertEqual(len(self.comments), 1)
+        self.assertEqual(len(self.edits), 1)
 
     def test_settled_candidate_needs_no_github_read(self) -> None:
         self.store.create_release_review_decision_record_if_absent(decision(self.store))

@@ -28,8 +28,9 @@ with a recorded decision receive no request. Missing access is reported; no gran
 or credential is created. The worker uses Launchplane's own bootstrap
 `LAUNCHPLANE_PUBLIC_URL` for the review link and checks at most every five minutes
 per unchanged profile and lane versions until delivery. After a confirmed receipt,
-the worker remembers delivery in memory and does no GitHub reads for that candidate;
-a replica restart reads the durable receipt again. Settled versions also need no
+the worker remembers delivery in memory until the reminder is due or the candidate
+changes; a replica restart reads the durable receipt again. Once the single
+reminder is delivered, unchanged candidates need no further GitHub reads. Settled versions also need no
 GitHub read. This cache never supplies acceptance or bypasses release checks.
 
 The product repository keeps one issue for these requests. Launchplane finds it
@@ -49,12 +50,26 @@ not a reason to grant access automatically.
 The marker functions live in `control_plane/release_invitation.py`; there is no
 checked-in destination catalog.
 
-Each comment includes `release_invitation_marker(product, candidate)`, derived
+Each request includes `release_invitation_marker(product, candidate)`, derived
 from the candidate's artifact, commit and shared-input identity. The worker
 serializes publication across replicas using the existing release-publication
 lock and checks for that receipt before posting. A retry after a lost response
 adopts the existing comment; edits to checklist notes do not notify again.
-A different candidate gets a new request on the same issue. Markers are delivery
+Before the Client accepts or requests changes, newer candidates update the same
+request comment's review link, change list, candidate identity and marker, without
+another mention or comment. The request also carries a `release-request` marker
+bound to the product, repository, Client identity and latest Client decision.
+A new candidate after a decision opens a new request and mentions the Client.
+The worker adopts the newest legacy candidate-marked request created after that
+decision (or the newest one if there has been no decision); older receipts are
+left in place. Missing timestamps or ambiguous request markers refuse publication.
+
+An undecided request gets at most one reminder, no sooner than three days after
+its original creation. Updating its candidate does not reset that clock or send
+a reminder during the update. A separate `release-reminder` marker binds the
+reminder to the open request, so retries and worker restarts cannot send it twice,
+even when another candidate arrives. A decided or incomplete review gets no
+reminder. Markers are delivery
 receipts only and never supply release acceptance. Preserve them during edits;
 deleting a receipt permits another notification.
 
