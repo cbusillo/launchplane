@@ -35,6 +35,14 @@ class _ProductOnboardingStore:
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
         self.dokploy_targets.append(record)
 
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord:
+        for record in reversed(self.dokploy_targets):
+            if (record.context, record.instance) == (context_name, instance_name):
+                return record
+        raise FileNotFoundError(context_name)
+
     def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None:
         self.dokploy_target_ids.append(record)
 

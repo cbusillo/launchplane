@@ -20,6 +20,32 @@ Contradictory or incomplete evidence remains `reconcile_required` and needs
 admin investigation. Candidate-ref cleanup failures are separate from
 landing truth and may be retried without changing the outcome record.
 
+If a policy digest changes under the same policy key while a fully merged legacy
+landing is still awaiting controller reconciliation, the controller verifies each recorded PR head and merge commit
+against the provider and confirms containment in the target branch. It then
+clears the completed fence with `reason_code=completed_landing_policy_changed`,
+preserving the landing history and retaining the old candidate ref. It never
+re-admits or re-merges the root or repeats a stack collapse. For unfinished
+legacy stack disposition, the same supported controller pass verifies every
+unfinished child head against its PR and confirms containment in the landed
+root head before any provider write. Plain merge landings also require child
+containment in the merge commit; squash and rebase rely on the provider's
+exact merged-root head because those methods rewrite commit ancestry. It then resumes the
+checkpointed comment, label and close effects using the current repository
+policy's disposition label; retries observe completed provider effects instead
+of repeating them. Completed non-stack history requires no provider writes.
+Persisted completed child dispositions are skipped, preserving any later work
+on a reopened child. Transient provider failures retain the controller's
+retry classification and rate-limit reset evidence.
+
+Missing or incompatible recorded stack history stays fenced with
+`completed_landing_stack_reconciliation_required`. Missing current disposition
+configuration, changed child heads, unavailable child evidence and missing
+containment return explicit `completed_landing_stack_*` reasons with the relevant
+record IDs. Conflicting or unavailable root evidence also preserves
+reconciliation. Diagnose through controller/status and resume through the
+controller's normal run-once route; do not edit database records or merge by hand.
+
 Use the controller phase when diagnosing a failed landing. An active
 `admit_pull_request` phase means the failure occurred while reconciling or
 evaluating Launchplane admission, before a GitHub merge request. An active
@@ -2638,6 +2664,47 @@ context only, and `context_instance` has both context and instance.
   Service-written `web.base.url` records are always marked for `deploy` and
   `promotion` application so Odoo post-deploy and stable-bootstrap drivers can
   apply the canonical URL before verification.
+- To reconcile duplicated non-secret Odoo import overrides on a testing lane,
+  use GET and POST on
+  `/v1/products/{product}/environments/{environment}/odoo-import-overrides/reconcile`.
+  GET reviews all supported entries present in the lane record. POST with
+  `{"mode":"dry-run","keys":["cm_data.db.user","repairshopr.sync_db.user","repairshopr.sync_db.host"]}`
+  reviews exactly those entries. Both return only parameter/runtime key names,
+  stale-literal flags and a `review_digest`; neither writes records or calls a
+  provider. The values must already exist in the lane's runtime authority;
+  missing, retired, secret-bound or credential-looking settings are refused.
+  Apply is a separate POST with the same keys, `mode: "apply"`, the current
+  digest and `confirmation: "APPLY {product}/{environment}"`. It checks fresh
+  `product_config.apply` authority for the exact lane and commits the override
+  replacement under the existing authority-bundle transaction. `local_operator`
+  applies follow the existing [context ownership boundary](authorization-authority.md).
+  Changed runtime,
+  profile or override evidence requires another review. Reads use
+  `product_environment.read`; dry runs use `product_config.plan`.
+  The record stores `source: "runtime_environment"` without duplicating a value;
+  post-deploy renders the current runtime value into the existing v1 payload.
+  Apply changes only selected override sources, preserving unrelated settings,
+  secret references, application phases, source choice and allowances. It does
+  not synchronize the target or apply database parameters: the response says
+  `live_sync_required`. If all selected entries are already referenced, apply
+  writes nothing and returns `applied: false` and `live_sync_required: false`.
+  These flags describe this request's record changes, not current Odoo or
+  provider state. Runtime sync and post-deploy verification remain separate;
+  a no-op response does not prove delivery or clear an outstanding sync.
+  Production is outside this capability. Client-system
+  approval and activation follow [DIRECTION.md](../DIRECTION.md) and the
+  [overall stop boundaries](https://github.com/cbusillo/direction/blob/main/DIRECTION.md).
+  Deployed review/apply must wait until both the API and workers support
+  runtime references. Once a record uses that source, older Launchplane builds
+  cannot read it; qualify a compatible rollback build before any Client-system
+  apply. A compatible rollback or reviewed forward fix keeps runtime authority
+  intact. The existing `web.base.url` writer cannot convert these import keys
+  back to literals. Late post-deploy completions update only apply metadata;
+  automatic canonical-URL and service setting writes refuse stale record
+  snapshots instead of restoring old import literals. Conflicting tracked-target
+  env overlays refuse planning and later rendering, so the runtime record remains
+  the single source for reconciled import values. Changed records identify the
+  reconciliation writer; stale setting writes return HTTP 409 for a fresh review.
 - For shared/live Shopify addon settings, use
   `POST /v1/product-config/odoo-addon-settings/apply` (contract operation
   `apply_odoo_addon_settings`) through the Launchplane helper or service API.

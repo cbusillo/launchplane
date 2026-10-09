@@ -7,6 +7,7 @@ from typing import Protocol, TypedDict
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -44,6 +45,26 @@ class RuntimeEnvironmentDelete(BaseModel):
 
 class RuntimeEnvironmentConflictError(ValueError):
     """Raised when runtime configuration changed after bundle planning."""
+
+
+class OdooInstanceOverrideConflictError(ValueError):
+    """The reviewed override record changed before its reconciliation committed."""
+
+
+class OdooInstanceOverrideWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record: OdooInstanceOverrideRecord
+    expected_record: OdooInstanceOverrideRecord
+
+    @model_validator(mode="after")
+    def validate_route(self) -> "OdooInstanceOverrideWrite":
+        if (self.record.context, self.record.instance) != (
+            self.expected_record.context,
+            self.expected_record.instance,
+        ):
+            raise ValueError("Override reconciliation must preserve its lane")
+        return self
 
 
 class ProductProfileConflictError(ValueError):
@@ -102,12 +123,15 @@ class RuntimeEnvironmentSetExpectation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     contexts: tuple[str, ...]
+    instances: tuple[tuple[str, str], ...] = ()
     include_global: bool = False
     records: tuple[RuntimeEnvironmentRecord, ...]
 
     def includes(self, record: RuntimeEnvironmentRecord) -> bool:
-        return (self.include_global and record.scope == "global") or (
-            record.scope == "context" and record.context in self.contexts
+        return (
+            (self.include_global and record.scope == "global")
+            or (record.scope == "context" and record.context in self.contexts)
+            or (record.scope == "instance" and (record.context, record.instance) in self.instances)
         )
 
     def matches(self, current: Iterable[RuntimeEnvironmentRecord]) -> bool:
@@ -169,6 +193,7 @@ class ProductAuthorityBundle(BaseModel):
     runtime_environments: tuple[RuntimeEnvironmentRecord, ...] = ()
     runtime_environment_writes: tuple[RuntimeEnvironmentWrite, ...] = ()
     runtime_environment_read_sets: tuple[RuntimeEnvironmentSetExpectation, ...] = ()
+    odoo_instance_override_writes: tuple[OdooInstanceOverrideWrite, ...] = ()
     secret_records: tuple[SecretRecord, ...] = ()
     expected_secret_records: tuple[SecretRecord, ...] = ()
     secret_versions: tuple[SecretVersion, ...] = ()
@@ -231,6 +256,7 @@ class ProductAuthorityBundle(BaseModel):
                 self.provider_target_writes,
                 self.runtime_environments,
                 self.runtime_environment_writes,
+                self.odoo_instance_override_writes,
                 self.secret_records,
                 self.secret_versions,
                 self.secret_bindings,

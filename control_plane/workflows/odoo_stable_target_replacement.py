@@ -25,6 +25,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.promotion_record import RecordFailure
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.public_hosts import resolve_public_base_url
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyPhase
@@ -155,7 +156,12 @@ class OdooStableTargetReplacementStore(
 
     def write_environment_inventory(self, record: EnvironmentInventory) -> object: ...
 
-    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> object: ...
+    def write_odoo_instance_override_record(
+        self,
+        record: OdooInstanceOverrideRecord,
+        *,
+        expected_record: OdooInstanceOverrideRecord | None = None,
+    ) -> object: ...
 
     def write_release_tuple_record(self, record: ReleaseTupleRecord) -> object: ...
 
@@ -336,6 +342,7 @@ class OdooStableTargetReplacementPlan(BaseModel):
     current_target: OdooStableTargetRuntimeSnapshot | None = None
     expected_next_target_name: str
     expected_domain_hosts: tuple[str, ...] = ()
+    base_url: str = ""
     expected_artifact_id: str = ""
     expected_source_git_ref: str = ""
     allow_empty_data: bool = False
@@ -801,7 +808,12 @@ def _artifact_image_reference(manifest: ArtifactIdentityManifest) -> str:
     return f"{manifest.image.repository}@{manifest.image.digest}"
 
 
-def _target_base_url(*, lane: ProductLaneProfile, domains: tuple[str, ...]) -> str:
+def _target_base_url(
+    *, lane: ProductLaneProfile, domains: tuple[str, ...], public_hosts: tuple[str, ...] = ()
+) -> str:
+    public_base_url = resolve_public_base_url(instance=lane.instance, public_hosts=public_hosts)
+    if public_base_url:
+        return public_base_url
     if lane.base_url.strip():
         return lane.base_url.strip().rstrip("/")
     if domains:
@@ -809,10 +821,25 @@ def _target_base_url(*, lane: ProductLaneProfile, domains: tuple[str, ...]) -> s
     return ""
 
 
-def _target_health_url(
-    *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile, domains: tuple[str, ...]
+def _target_origin_base_url(
+    *, lane: ProductLaneProfile, domains: tuple[str, ...], public_hosts: tuple[str, ...] = ()
 ) -> str:
-    base_url = _target_base_url(lane=lane, domains=domains)
+    origin_lane = (
+        lane.model_copy(update={"base_url": ""})
+        if public_hosts and lane.instance == "prod"
+        else lane
+    )
+    return _target_base_url(lane=origin_lane, domains=domains)
+
+
+def _target_health_url(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    domains: tuple[str, ...],
+    public_hosts: tuple[str, ...] = (),
+) -> str:
+    base_url = _target_origin_base_url(lane=lane, domains=domains, public_hosts=public_hosts)
     lane_health_url = lane.health_url.strip()
     if lane_health_url and not is_legacy_derived_odoo_health_url(
         health_url=lane_health_url,
@@ -1352,6 +1379,7 @@ def build_odoo_stable_target_replacement_plan(
             if override_record is not None and "deploy" in override_record.apply_on:
                 override = control_plane_odoo_instance_overrides.build_post_deploy_environment(
                     override_record,
+                    record_store=record_store,
                     protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
                 )
                 driver_owned_keys.update(override.payload.required_container_environment_keys)
@@ -1517,6 +1545,15 @@ def build_odoo_stable_target_replacement_plan(
         current_target=current_target,
         expected_next_target_name=expected_target_name,
         expected_domain_hosts=current_target.domain_hosts if current_target else (),
+        base_url=_target_base_url(
+            lane=lane,
+            domains=current_target.domain_hosts
+            if current_target
+            else (target_record.domains if isinstance(target_record, DokployTargetRecord) else ()),
+            public_hosts=target_record.public_hosts
+            if isinstance(target_record, DokployTargetRecord)
+            else (),
+        ),
         expected_artifact_id=expected_artifact_id,
         expected_source_git_ref=expected_source_git_ref,
         allow_empty_data=request.allow_empty_data,
@@ -1693,11 +1730,14 @@ def execute_odoo_stable_target_replacement_apply(
         source_git_ref=source_git_ref,
         image_reference=image_reference,
     )
-    base_url = _target_base_url(lane=lane, domains=plan.expected_domain_hosts)
+    base_url = _target_base_url(
+        lane=lane, domains=plan.expected_domain_hosts, public_hosts=target_record.public_hosts
+    )
     health_url = _target_health_url(
         profile=profile,
         lane=lane,
-        domains=plan.expected_domain_hosts,
+        domains=target_record.domains if target_record.public_hosts else plan.expected_domain_hosts,
+        public_hosts=target_record.public_hosts,
     )
     if lane.odoo_data_policy.requires_runtime_identity:
         if not request.verify_health:
@@ -1745,19 +1785,36 @@ def execute_odoo_stable_target_replacement_apply(
     )
     normalized_override_record = _record_with_target_replacement_canonical(
         record=odoo_override_record,
-        canonical_url=base_url,
+        canonical_url=_target_origin_base_url(
+            lane=lane, domains=target_record.domains, public_hosts=target_record.public_hosts
+        )
+        if target_record.public_hosts
+        else base_url,
         updated_at=started_at,
     )
     if (
         normalized_override_record is not None
         and normalized_override_record is not odoo_override_record
     ):
-        record_store.write_odoo_instance_override_record(normalized_override_record)
+        record_store.write_odoo_instance_override_record(
+            normalized_override_record, expected_record=odoo_override_record
+        )
     runtime_override_environment: dict[str, str] = {}
     runtime_override_payload = None
-    if normalized_override_record is not None and "deploy" in normalized_override_record.apply_on:
+    rendering_record = control_plane_odoo_instance_overrides.record_with_public_base_url(
+        normalized_override_record
+        if normalized_override_record is not None
+        and "deploy" in normalized_override_record.apply_on
+        else None,
+        context=plan.context,
+        instance=plan.instance,
+        public_hosts=target_record.public_hosts,
+        updated_at=started_at,
+    )
+    if rendering_record is not None:
         runtime_override = control_plane_odoo_instance_overrides.build_post_deploy_environment(
-            normalized_override_record,
+            rendering_record,
+            record_store=record_store,
             workflow_intent="deploy",
             protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
         )
@@ -1885,6 +1942,34 @@ def execute_odoo_stable_target_replacement_apply(
             runtime_port=profile.runtime_port,
         )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+        current_identity = _runtime_identity_map(current_env_map)
+        try:
+            inventory = record_store.read_environment_inventory(
+                context_name=plan.context, instance_name=plan.instance
+            )
+        except FileNotFoundError:
+            inventory = None
+        # Provider identity is written before post-deploy succeeds. A failed
+        # forward attempt must not grant its own retry a historical exception.
+        allow_historical_sender_contract = rollback or (
+            inventory is not None
+            and inventory.deploy.status == "pass"
+            and inventory.post_deploy_update.status != "fail"
+            and inventory.artifact_identity is not None
+            and inventory.artifact_identity.artifact_id == artifact_id
+            and inventory.source_git_ref == source_git_ref
+            and all(
+                current_identity.get(key) == value
+                for key, value in {
+                    "product": profile.product,
+                    "context": plan.context,
+                    "instance": plan.instance,
+                    "artifact_id": artifact_id,
+                    "source_git_ref": source_git_ref,
+                    "image_reference": image_reference,
+                }.items()
+            )
+        )
         if (
             ODOO_VERSION_ENV_KEY in current_env_map
             and ODOO_VERSION_ENV_KEY not in retired_provider_keys
@@ -2308,6 +2393,7 @@ def execute_odoo_stable_target_replacement_apply(
                 run_destructive_restore=plan.data_source_mode == "upstream_restore",
                 provider_effect_checkpoint=provider_effect_checkpoint,
                 hold_uncertain_effects=hold_uncertain_effects,
+                allow_historical_sender_contract=allow_historical_sender_contract,
                 schedule_execution_timeout_seconds=(
                     request.timeout_seconds if plan.data_source_mode == "upstream_restore" else None
                 ),
@@ -2372,6 +2458,7 @@ def execute_odoo_stable_target_replacement_apply(
                     phase="deploy",
                 ),
                 run_destructive_restore=False,
+                allow_historical_sender_contract=allow_historical_sender_contract,
                 provider_effect_checkpoint=provider_effect_checkpoint,
             )
         post_deploy_evidence = PostDeployUpdateEvidence(
@@ -2415,6 +2502,11 @@ def execute_odoo_stable_target_replacement_apply(
 
     verification = verify_odoo_stable_readiness(
         base_url=base_url,
+        probe_base_url=_target_origin_base_url(
+            lane=lane, domains=target_record.domains, public_hosts=target_record.public_hosts
+        )
+        if target_record.public_hosts
+        else "",
         health_url=health_url,
         verify_health=request.verify_health,
         verify_canonical=request.verify_canonical,

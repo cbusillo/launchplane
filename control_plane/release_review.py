@@ -77,6 +77,10 @@ class ReleaseReviewStore(Protocol):
         self, *, product: str, limit: int | None = None
     ) -> tuple[ReleaseReviewDecisionRecord, ...]: ...
 
+    def read_release_review_decision_record(
+        self, *, product: str, record_id: str
+    ) -> ReleaseReviewDecisionRecord: ...
+
 
 RELEASE_RECORD_PENDING = (
     "The decision is saved, but the release record could not be published. Try recording it again."

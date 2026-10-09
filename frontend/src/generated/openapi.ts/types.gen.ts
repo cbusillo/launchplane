@@ -264,7 +264,7 @@ export type AuthzManagedPolicyDiff = {
 };
 
 export type AuthzManagedPolicySafetyBlocker = {
-    code: 'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_strict_human_admin_unreachable' | 'authz_policy_administrator_quorum_unsatisfied';
+    code: 'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_strict_human_admin_unreachable' | 'authz_policy_administrator_quorum_unsatisfied' | 'authz_policy_delivery_activation_active';
     message: string;
 };
 
@@ -452,6 +452,7 @@ export type DokployTargetRecord = {
     instance: string;
     policies: DokployTargetPolicies;
     project_name: string;
+    public_hosts: Array<string>;
     require_prod_gate: boolean;
     require_test_gate: boolean;
     schema_version: number;
@@ -1556,7 +1557,7 @@ export type OdooOverrideApplyResult = {
 
 export type OdooOverrideValue = {
     secret_binding_id: string;
-    source: 'literal' | 'secret_binding';
+    source: 'literal' | 'secret_binding' | 'runtime_environment';
     value: string | number | number | boolean | null;
 };
 
@@ -2533,7 +2534,7 @@ export type PrivilegedOperationSemanticReviewBlastRadius = {
 };
 
 export type PrivilegedOperationSemanticReviewBlocker = {
-    codes: Array<'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_strict_human_admin_unreachable' | 'authz_policy_administrator_quorum_unsatisfied' | 'repository_not_exact' | 'workflow_refs_not_singleton' | 'workflow_ref_not_exact' | 'job_workflow_refs_not_singleton' | 'job_workflow_ref_not_immutable' | 'actions_not_singleton' | 'action_not_exact' | 'products_not_singleton' | 'product_not_exact' | 'contexts_not_singleton' | 'context_not_exact' | 'instances_not_singleton' | 'instance_not_exact' | 'secret_unreadable' | 'operation_past_expiry' | 'operation_expired' | 'execution_failed' | 'reconciliation_required' | 'database_revision_incompatible' | 'activation_schema_incompatible' | 'activation_storage_unavailable' | 'activation_cas_unavailable' | 'activation_recovery_unavailable' | 'activation_rollback_reader_unavailable'>;
+    codes: Array<'authz_policy_admin_unreachable' | 'authz_policy_applying_admin_removed' | 'authz_policy_strict_human_admin_unreachable' | 'authz_policy_administrator_quorum_unsatisfied' | 'authz_policy_delivery_activation_active' | 'repository_not_exact' | 'workflow_refs_not_singleton' | 'workflow_ref_not_exact' | 'job_workflow_refs_not_singleton' | 'job_workflow_ref_not_immutable' | 'actions_not_singleton' | 'action_not_exact' | 'products_not_singleton' | 'product_not_exact' | 'contexts_not_singleton' | 'context_not_exact' | 'instances_not_singleton' | 'instance_not_exact' | 'secret_unreadable' | 'operation_past_expiry' | 'operation_expired' | 'execution_failed' | 'reconciliation_required' | 'database_revision_incompatible' | 'activation_schema_incompatible' | 'activation_storage_unavailable' | 'activation_cas_unavailable' | 'activation_recovery_unavailable' | 'activation_rollback_reader_unavailable'>;
     operational_readiness_blocker_count: number;
     policy_safety_blocker_count: number;
     state: 'clear' | 'blocked' | 'error';
@@ -2659,6 +2660,7 @@ export type ProductConfigApplyResult = {
     next_actions: Array<ProductConfigLiveTargetRuntimeNextAction>;
     product: string;
     provider_key_adoption: Array<ProductConfigProviderKeyAdoptionResult>;
+    public_hosts?: ProductConfigPublicHostsResult | null;
     reason: string;
     runtime_environment: ProductConfigRuntimeEnvironmentResult;
     runtime_key_safety: ProductConfigRuntimeKeySafetyResult;
@@ -2721,6 +2723,22 @@ export type ProductConfigOperationAvailability = {
 export type ProductConfigProviderKeyAdoptionResult = {
     disposition: 'adopted' | 'template_default' | 'already_recorded' | 'refused_credential' | 'missing';
     key: string;
+};
+
+export type ProductConfigPublicHostsResult = {
+    added: Array<string>;
+    after: Array<string>;
+    before: Array<string>;
+    certificate_type: 'none';
+    https: true;
+    plan_digest: string;
+    read_back_hosts: Array<string>;
+    removed: Array<string>;
+    runtime_port: number;
+    service_name: 'web';
+    unchanged: Array<string>;
+    updated: Array<string>;
+    verified: boolean;
 };
 
 export type ProductConfigRuntimeEnvironmentRecordSummary = {

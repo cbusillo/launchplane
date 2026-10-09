@@ -1635,6 +1635,22 @@ def _finish_landed_merge_train_batch(
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object]:
     landed_plan = landed_record.landing_plan
+    if (
+        landed_record.ordinary_job_binding is None
+        and landed_plan.policy_key == repository_policy.policy_key
+        and landed_plan.policy_sha256 != policy_sha256
+        and _landing_cleanup_allowed(landed_record)
+    ):
+        return _reconcile_completed_landing_after_policy_change(
+            request=request,
+            repository_policy=repository_policy,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
+            github_client=github_client,
+            stack_collapse_store=stack_collapse_store,
+            landed_record=landed_record,
+            lease=lease,
+        )
     try:
         validate_merge_train_landing_record_for_controller(
             landing_record=landed_record,
@@ -1739,6 +1755,158 @@ def _finish_landed_merge_train_batch(
         stack_collapse_store=stack_collapse_store,
         lease=lease,
     )
+    return result
+
+
+def _reconcile_completed_landing_after_policy_change(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    repository_policy: MergeTrainRepositoryPolicy,
+    trace_id: str,
+    recorded_at: str,
+    github_client: GitHubMergeTrainClient,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    landed_record: MergeTrainBatchLandingPlanRecord,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object]:
+    """Verify completed history and finish child disposition under current policy."""
+    plan = landed_record.landing_plan
+    for entry in plan.entries:
+        observed_merge = github_client.pull_request_is_merged(
+            repository=request.repository,
+            pull_request_number=entry.pull_request_number,
+            expected_head_sha=entry.expected_head_sha,
+        )
+        if observed_merge != entry.merge_commit_sha or not github_client.branch_contains_commit(
+            repository=request.repository,
+            branch_ref=request.base_branch,
+            commit_sha=entry.merge_commit_sha,
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Completed landing no longer matches the merged PR and target branch.",
+                status_code=409,
+            )
+    collapse_records = stack_collapse_records_for_completed_landing(
+        record_store=stack_collapse_store,
+        github_client=github_client,
+        repository=request.repository,
+        base_branch=request.base_branch,
+        landing_plan=plan,
+        policy_sha256=plan.policy_sha256,
+    )
+    result: dict[str, object] = {
+        "repository": request.repository,
+        "base_branch": request.base_branch,
+        "mode": "land",
+        "controller_action": "land_batch",
+        "merge_train_batch_landing_plan_record_id": landed_record.record_id,
+        "landing_plan": plan.model_dump(mode="json"),
+        "candidate_ref_cleanup_status": "retained",
+        "reason_code": "completed_landing_policy_changed",
+    }
+    missing_stack_record = bool(
+        lease.record.step_payload.get("stack_collapse_plan_record_id") and not collapse_records
+    )
+
+    def blocked(reason: str, message: str) -> dict[str, object]:
+        result.update(
+            mode="blocked",
+            reason_code=reason,
+            controller_reconciliation_status="required",
+            controller_reconciliation_detail=reason,
+            blocking_reason={
+                "code": reason,
+                "message": message,
+            },
+            details={
+                "stack_collapse_plan_record_ids": [record.record_id for record in collapse_records],
+                "expected_stack_collapse_plan_record_id": lease.record.step_payload.get(
+                    "stack_collapse_plan_record_id", ""
+                ),
+            },
+        )
+        return result
+
+    if missing_stack_record:
+        return blocked(
+            "completed_landing_stack_reconciliation_required",
+            "Recorded stack collapse history is missing or incompatible.",
+        )
+    unfinished = tuple(
+        record for record in collapse_records if record.plan.status != "ready_for_train"
+    )
+    if unfinished and not repository_policy.stack_child_disposition_label:
+        return blocked(
+            "completed_landing_stack_disposition_not_configured",
+            "Current policy has no stack child disposition label.",
+        )
+    # Historical plans are evidence of an already-landed effect, never authority
+    # for another collapse or merge. Verify every child before any provider write.
+    for record in unfinished:
+        if record.ordinary_job_binding is not None:
+            return blocked(
+                "completed_landing_stack_binding_unsupported",
+                "Completed legacy landing cannot reconcile ordinary-job stack history.",
+            )
+        root = next(
+            entry
+            for entry in plan.entries
+            if entry.pull_request_number == record.plan.root_pull_request_number
+        )
+        # Squash/rebase rewrite ancestry; the provider's exact merged-root head
+        # plus child containment in that head proves their carried content.
+        root_refs = (
+            (root.expected_head_sha, root.merge_commit_sha)
+            if root.merge_method == "merge"
+            else (root.expected_head_sha,)
+        )
+        for child in record.plan.child_dispositions:
+            if child.status == "closed":
+                continue  # A completed disposition cannot close a later reopened head.
+            try:
+                github_client.pull_request_is_closed(
+                    repository=request.repository,
+                    pull_request_number=child.pull_request_number,
+                    expected_head_sha=child.expected_head_sha,
+                )
+                contained = all(
+                    github_client.branch_contains_commit(
+                        repository=request.repository,
+                        branch_ref=root_ref,
+                        commit_sha=child.expected_head_sha,
+                    )
+                    for root_ref in root_refs
+                )
+            except MergeTrainGitHubStaleHeadError:
+                return blocked(
+                    "completed_landing_stack_child_head_changed",
+                    f"Stack child PR #{child.pull_request_number} no longer matches recorded history.",
+                )
+            except MergeTrainGitHubError as error:
+                if error.rate_limited or error.status_code is None or error.status_code >= 500:
+                    raise  # Preserve the controller's retry classification and reset evidence.
+                return blocked(
+                    "completed_landing_stack_child_evidence_unavailable",
+                    f"Stack child PR #{child.pull_request_number} evidence is unavailable.",
+                )
+            if not contained:
+                return blocked(
+                    "completed_landing_stack_child_not_contained",
+                    f"Stack child PR #{child.pull_request_number} is not contained in the landed root.",
+                )
+    for record in unfinished:
+        reconciled = _reconcile_landed_stack_children(
+            collapse_record=record,
+            landed_record=landed_record,
+            repository_policy=repository_policy,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
+            github_client=github_client,
+            stack_collapse_store=stack_collapse_store,
+            lease=lease,
+        )
+        result["merge_train_stack_collapse_plan_record_id"] = reconciled.record_id
+        result["stack_collapse_plan"] = reconciled.plan.model_dump(mode="json")
     return result
 
 

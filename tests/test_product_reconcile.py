@@ -30,6 +30,8 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetStaffTestingHold,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimePlan
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -91,6 +93,7 @@ from control_plane.product_reconcile import (
     PreviewProviderHooks,
     ProductReconcileError,
     TestingProviderHooks,
+    _plan_testing_target,
     request_product_reconcile_sweep,
     reconcile_reservation_scope,
     resolve_build_provenance_transport,
@@ -122,6 +125,7 @@ from tests.merge_train_policy_fixtures import build_test_merge_train_policy_reco
 from tests.support.durable_operations import durable_operation_authorization_payload
 from tests.support.artifact_manifests import artifact_manifest_v2
 from control_plane.workflows.generic_web_deploy_provider import (
+    DokployGenericWebDeployProvider,
     GenericWebProviderDeploymentObservation,
 )
 from control_plane.workflows.generic_web_preview import (
@@ -1307,6 +1311,16 @@ class ProductReconcileStaffTestingHoldTests(ProductReconcileTestCase):
 class FakeGenericWebGitHub(FakeGitHub):
     """example/site as a generic-web product: its build uploads the generic-web manifest."""
 
+    def get_json(self, path: str) -> object:
+        if "/attempts/" in path:
+            run_id = int(path.split("/actions/runs/")[1].split("/")[0])
+            return self.runs[run_id]
+        payload = super().get_json(path)
+        if "/actions/workflows/build.yml/runs?" in path:
+            assert isinstance(payload, dict)
+            payload["total_count"] = len(cast(list[object], payload["workflow_runs"]))
+        return payload
+
     def get_bytes(self, path: str) -> bytes:
         run_id = int(path.split("/actions/artifacts/")[1].split("/")[0]) // 10
         commit = cast(str, self.runs[run_id]["head_sha"])
@@ -1361,6 +1375,193 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             target_name="site-testing-app",
         )
         self.testing_hooks = TestingProviderHooks(generic_web_deploy_provider=lambda: self.deploys)
+
+    def record_legacy_baseline(self, commit: str = OLDER, *, sha_tagged: bool = False) -> None:
+        identity = RuntimeIdentity(
+            context="cm",
+            instance="testing",
+            deployment_record_id="deployment-legacy",
+            artifact_id=f"{IMAGE_REPOSITORY}@{_digest(commit)}" if sha_tagged else f"sha-{commit}",
+            source_git_ref=commit,
+            image_reference=(
+                f"{IMAGE_REPOSITORY}:sha-{commit}"
+                if sha_tagged
+                else f"{IMAGE_REPOSITORY}@{_digest(commit)}"
+            ),
+        )
+        self.store.write_environment_inventory(
+            EnvironmentInventory(
+                context=identity.context,
+                instance=identity.instance,
+                deployment_record_id=identity.deployment_record_id,
+                source_git_ref=commit,
+                runtime_identity=identity,
+                deploy=DeploymentEvidence(
+                    target_name="site-testing-app",
+                    target_type="application",
+                    deploy_mode="image",
+                    status="pass",
+                ),
+                updated_at="2026-10-05T12:00:00Z",
+            )
+        )
+
+    def test_sellyouroutboard_legacy_baseline_moves_to_verified_forward_build(self) -> None:
+        # #3141: the deployed baseline predates push Build/manifest adoption.
+        baseline = "206aff0581fa6fc817a30666094af4c738881a01"
+        candidate = "50e779ca85ab6812a82dcd476fbb02cfccca9ec1"
+        self.github.first_parents = {candidate: baseline, baseline: ""}
+        self.record_legacy_baseline(baseline, sha_tagged=True)
+        self.github.add_run(37825455941, candidate)
+        self.github.runs[37825455941]["run_started_at"] = "2026-10-08T18:35:20Z"
+        self.request()
+
+        provider = DokployGenericWebDeployProvider()
+        with (
+            patch.object(
+                provider, "_read_provider_config", return_value=("https://provider.test", "test")
+            ),
+            patch.object(
+                self.deploys, "execute_artifact_deploy", wraps=provider.execute_artifact_deploy
+            ),
+            patch("control_plane.dokploy.api.latest_deployment_for_target", return_value={}),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload", return_value={"env": ""}
+            ),
+            patch("control_plane.dokploy.api.update_dokploy_target_env"),
+            patch("control_plane.dokploy.api.dokploy_request") as provider_write,
+            patch("control_plane.dokploy.api.trigger_deployment"),
+            patch("control_plane.dokploy.api.wait_for_target_deployment"),
+        ):
+            plan = self.reconcile()
+
+        self.assertEqual(plan["action"], "deploy", plan)
+        self.assertEqual(plan["deploy_status"], "pass")
+        self.assertEqual(plan["desired_commit"], candidate)
+        self.assertTrue(plan["current_commit_seen"])
+        self.assertEqual(
+            provider_write.call_args.kwargs["payload"]["dockerImage"],
+            f"{IMAGE_REPOSITORY}:sha-{candidate}",
+        )
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        assert inventory.runtime_identity is not None
+        self.assertEqual(inventory.runtime_identity.source_git_ref, candidate)
+        self.assertEqual(
+            inventory.runtime_identity.artifact_id, f"{IMAGE_REPOSITORY}@{_digest(candidate)}"
+        )
+        self.assertEqual(
+            inventory.runtime_identity.image_reference, f"{IMAGE_REPOSITORY}:sha-{candidate}"
+        )
+
+    def test_legacy_baseline_selection_covers_native_verireel_and_generic_web(self) -> None:
+        self.record_legacy_baseline()
+        self.github.add_run(20, DEPLOYABLE)
+        self.github.runs[20]["run_started_at"] = "2026-10-08T12:00:00Z"
+        for driver_id in ("generic-web", "verireel"):
+            with self.subTest(driver_id=driver_id):
+                plan, desired = _plan_testing_target(
+                    record_store=self.store,
+                    profile=_generic_web_profile().model_copy(update={"driver_id": driver_id}),
+                    repository_id=REPOSITORY_ID,
+                    transport=self.github,
+                )
+                self.assertEqual(plan["action"], "deploy", plan)
+                self.assertIsNotNone(desired)
+        self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_legacy_baseline_still_requires_a_complete_build_inventory(self) -> None:
+        self.record_legacy_baseline()
+        self.github.add_run(20, DEPLOYABLE)
+        self.github.runs[20]["run_started_at"] = "2026-10-08T12:00:00Z"
+        get_json = self.github.get_json
+        for total, runs in (
+            (2, [self.github.runs[20]]),
+            (None, [self.github.runs[20]]),
+            (True, [self.github.runs[20]]),
+            (2, [self.github.runs[20], self.github.runs[20]]),
+        ):
+            with self.subTest(total=total, returned=len(runs)):
+
+                def incomplete(path: str) -> object:
+                    if "/actions/workflows/build.yml/runs?" in path:
+                        return {"total_count": total, "workflow_runs": runs}
+                    return get_json(path)
+
+                self.request()
+                with patch.object(self.github, "get_json", incomplete):
+                    plan = self.reconcile()
+                self.assertEqual(
+                    (plan["action"], plan["reason"]), ("none", "incomplete_build_runs")
+                )
+                self.assertTrue(plan["held"])
+                self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_legacy_baseline_still_requires_first_parent_history_to_reach_it(self) -> None:
+        self.record_legacy_baseline()
+        self.github.add_run(20, DEPLOYABLE)
+        self.github.runs[20]["run_started_at"] = "2026-10-08T12:00:00Z"
+        self.github.first_parents = {NEWEST: DEPLOYABLE, DEPLOYABLE: OLDER}
+        self.request()
+
+        plan = self.reconcile()
+
+        self.assertEqual((plan["action"], plan["reason"]), ("none", "incomplete_commit_history"))
+        self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_legacy_baseline_does_not_admit_an_unverified_candidate_manifest(self) -> None:
+        self.record_legacy_baseline()
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with patch.object(
+            self.github, "get_bytes", side_effect=BuildProvenanceError("Manifest unavailable")
+        ):
+            plan = self.reconcile()
+        self.assertEqual((plan["action"], plan["reason"]), ("none", "no_verified_build"))
+        self.assertTrue(plan["rejected_builds"])
+        self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_legacy_baseline_does_not_admit_older_source_or_builds(self) -> None:
+        for current, candidate, started, reason in (
+            (DEPLOYABLE, OLDER, "2026-10-08T12:00:00Z", "ancestor_build"),
+            (OLDER, DEPLOYABLE, "2026-10-04T12:00:00Z", "build_order_unverified"),
+        ):
+            with self.subTest(reason=reason):
+                self.record_legacy_baseline(current)
+                self.github.runs.clear()
+                self.github.add_run(20, candidate)
+                self.github.runs[20]["run_started_at"] = started
+                self.request()
+
+                plan = self.reconcile()
+
+                self.assertEqual((plan["action"], plan["reason"]), ("none", reason))
+                self.assertTrue(plan["held"])
+                self.assertEqual(self.deploys.runtime_identities, [])
+
+    def test_legacy_baseline_without_a_recorded_digest_stays_held(self) -> None:
+        self.record_legacy_baseline()
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        assert inventory.runtime_identity is not None
+        self.store.write_environment_inventory(
+            inventory.model_copy(
+                update={
+                    "runtime_identity": inventory.runtime_identity.model_copy(
+                        update={"image_reference": ""}
+                    )
+                }
+            )
+        )
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+
+        plan = self.reconcile()
+
+        self.assertEqual((plan["action"], plan["reason"]), ("none", "incomplete_build_runs"))
+        self.assertEqual(self.deploys.runtime_identities, [])
 
     def failed_deploy(self) -> ProductReconcileRequestRecord:
         self.github.add_run(20, DEPLOYABLE)
@@ -1587,7 +1788,9 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             context_name="cm", instance_name="testing"
         )
         assert inventory.runtime_identity is not None
-        self.assertEqual(inventory.runtime_identity.image_reference, image)
+        self.assertEqual(
+            inventory.runtime_identity.image_reference, f"{IMAGE_REPOSITORY}:sha-{DEPLOYABLE}"
+        )
         # Nothing went to the Odoo artifact store or its operation queue.
         self.assertEqual(self.store.list_artifact_manifests(), ())
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
