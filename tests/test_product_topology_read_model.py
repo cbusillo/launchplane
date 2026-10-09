@@ -626,6 +626,43 @@ class ProductTopologyReadModelTests(unittest.TestCase):
         self.assertIn("public_website_not_applicable", codes)
         self.assertFalse(topology.observed.ingress.probe_effective)
 
+    def test_no_website_binding_does_not_require_a_public_ingress_owner(self) -> None:
+        binding_payload = _route_binding().model_dump(mode="json")
+        binding_payload["ingress"] = {"provider": "none", "termination_kind": "none"}
+        binding_payload["tls"] = {"owner": "none"}
+        binding_payload["domains"] = []
+        binding = EnvironmentRouteBindingRecord.model_validate(binding_payload)
+        for website in ("required", "none"):
+            with self.subTest(website=website):
+                payload = _profile().model_dump(mode="json")
+                payload["public_website"] = website
+                payload["lanes"][0]["base_url"] = ""
+                payload["lanes"][0]["health_url"] = ""
+                payload["lanes"][0]["health_monitoring"] = {
+                    "monitoring_intent": "private",
+                    "checks": [
+                        {
+                            "name": "runtime",
+                            "kind": "private_http",
+                            "private_endpoint_key": "runtime",
+                        }
+                    ],
+                }
+                profile = LaunchplaneProductProfileRecord.model_validate(payload)
+                topology = build_product_environment_topology(
+                    record_store=_TopologyStore(route_binding=binding),
+                    profile=profile,
+                    lane=profile.lanes[0],
+                    lane_summary=_lane_summary(freshness_status="verified"),
+                    now=_NOW,
+                )
+                codes = {warning.code for warning in topology.warnings}
+                self.assertEqual("ingress_ownership_unknown" in codes, website == "required")
+                if website == "none":
+                    self.assertTrue(
+                        all(warning.severity == "info" for warning in topology.warnings)
+                    )
+
     def test_disabled_strict_history_cannot_mask_replacement_public_check(self) -> None:
         payload = _strict_public_profile().model_dump(mode="json")
         payload["lanes"][0]["health_monitoring"] = {

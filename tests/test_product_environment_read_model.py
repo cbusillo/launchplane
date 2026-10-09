@@ -29,6 +29,7 @@ from control_plane.contracts.product_environment_read_model import (
     build_product_environment_config_status,
     build_product_environment_detail,
     build_product_site_overview,
+    _public_ingress_summary,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
@@ -1263,6 +1264,64 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertTrue(detail_odoo.requires_backup_before_destroy)
         self.assertTrue(detail_odoo.requires_restore_proof)
         self.assertTrue(detail_odoo.requires_runtime_identity)
+
+    def test_public_summary_and_topology_choose_replacement_check_and_its_incident(self) -> None:
+        from tests.test_product_topology_read_model import (
+            _http_observation,
+            _profile,
+            _NOW,
+        )
+
+        payload = _profile().model_dump(mode="json")
+        payload["lanes"][0]["health_monitoring"] = {
+            "monitoring_intent": "public",
+            "checks": [
+                {"name": "public-ingress", "kind": "public_http", "enabled": False},
+                {"name": "replacement", "kind": "public_http", "enabled": True},
+            ],
+        }
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        history = _http_observation(runtime_identity_status="unverifiable")
+        replacement = _http_observation(runtime_identity_status="unchecked").model_copy(
+            update={
+                "record_id": "replacement-observation",
+                "check_name": "replacement",
+                "observed_at": "2026-07-14T10:59:00Z",
+            }
+        )
+        incident = PublicIngressIncidentRecord(
+            incident_id="disabled-check-incident",
+            product=history.product,
+            context=history.context,
+            instance=history.instance,
+            check_name=history.check_name,
+            check_kind=history.check_kind,
+            status="open",
+            opened_at=history.observed_at,
+            opened_observation_id=history.record_id,
+            latest_observation_id=history.record_id,
+            latest_observed_at=history.observed_at,
+            failure_code=history.failure_code or "http_error",
+            state_version=1,
+            severity="critical",
+            summary=history.summary,
+        )
+        store = _PublicIngressReadModelStore(profile, (history, replacement), (incident,))
+        summary = _public_ingress_summary(
+            record_store=store, profile=profile, lane=profile.lanes[0]
+        )
+        from control_plane.contracts.product_topology_read_model import (
+            build_product_environment_topology,
+        )
+
+        topology = build_product_environment_topology(
+            record_store=store, profile=profile, lane=profile.lanes[0], lane_summary=None, now=_NOW
+        )
+        self.assertEqual(summary.record_id, replacement.record_id)
+        self.assertEqual(topology.observed.ingress.provenance.source_record_id, summary.record_id)
+        self.assertEqual(summary.status, replacement.status)
+        self.assertEqual(summary.incident_id, "")
+        self.assertTrue(topology.observed.ingress.probe_effective)
 
     def test_product_read_model_exposes_public_ingress_observation(self) -> None:
         profile_payload = _site_profile_payload(preview_enabled=False)

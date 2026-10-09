@@ -826,6 +826,34 @@ def _strict_public_ingress_confirms_placement(
     )
 
 
+def select_public_probe_observations(
+    *, lane: ProductLaneProfile, records: tuple[object, ...]
+) -> tuple[PublicIngressObservationRecord | None, PublicIngressObservationRecord | None]:
+    """Select current effective public evidence, retaining history as a fallback."""
+    observations = tuple(
+        record
+        for record in records
+        if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
+    )
+    effective_names = {
+        canonical_health_check_record_token(check.name)
+        for check in lane.health_monitoring.checks
+        if check.enabled and check.kind == "public_http"
+    }
+    effective_observations = tuple(
+        record
+        for record in observations
+        if canonical_health_check_record_token(record.check_name) in effective_names
+    )
+    candidates = effective_observations or observations
+    newest_observation = candidates[0] if candidates else None
+    latest = next(
+        (record for record in candidates if _public_runtime_identity_target(record) is not None),
+        newest_observation,
+    )
+    return latest, newest_observation
+
+
 def _observed_ingress(
     *,
     record_store: object,
@@ -864,27 +892,7 @@ def _observed_ingress(
         check_kind="public_http",
         limit=50,
     )
-    observations = tuple(
-        record
-        for record in records
-        if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
-    )
-    effective_names = {
-        canonical_health_check_record_token(check.name)
-        for check in lane.health_monitoring.checks
-        if check.enabled and check.kind == "public_http"
-    }
-    effective_observations = tuple(
-        record
-        for record in observations
-        if canonical_health_check_record_token(record.check_name) in effective_names
-    )
-    candidates = effective_observations or observations
-    newest_observation = candidates[0] if candidates else None
-    latest = next(
-        (record for record in candidates if _public_runtime_identity_target(record) is not None),
-        newest_observation,
-    )
+    latest, newest_observation = select_public_probe_observations(lane=lane, records=records)
     if latest is None:
         projection = ProductObservedIngress(
             monitoring_intent=monitoring_intent,
@@ -1276,7 +1284,7 @@ def _topology_warnings(
                     ),
                 )
             )
-        if route_binding.ingress.provider == "none":
+        if route_binding.ingress.provider == "none" and desired.public_website != "none":
             warnings.append(
                 _warning(
                     code="ingress_ownership_unknown",

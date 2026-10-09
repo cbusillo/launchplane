@@ -3517,6 +3517,54 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_health_monitoring_target")
 
+    async def test_no_website_monitoring_conflict_returns_400_without_profile_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            payload = _product_health_monitoring_profile().model_dump(mode="json")
+            payload["public_website"] = "none"
+            for lane in payload["lanes"]:
+                lane["base_url"] = ""
+                lane["health_url"] = ""
+                lane["health_monitoring"] = {
+                    "monitoring_intent": "prelaunch",
+                    "checks": [
+                        {
+                            "name": "public-ingress",
+                            "kind": "public_http",
+                            "enabled": False,
+                            "url": "https://retired.example.test/health",
+                        }
+                    ],
+                }
+            profile = LaunchplaneProductProfileRecord.model_validate(payload)
+            store.write_product_profile_record(profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_health_monitoring_identity()),
+                authz_policy=_product_health_monitoring_policy(),
+                record_store_factory=lambda: store,
+            )
+            for mode in ("dry-run", "apply"):
+                with self.subTest(mode=mode):
+                    request = {
+                        **_product_health_monitoring_payload(),
+                        "mode": mode,
+                        "monitoring_intent": "prelaunch",
+                        "require_runtime_identity": False,
+                        "reviewed_plan_sha256": "a" * 64 if mode == "apply" else "",
+                    }
+                    response = await _post_product_health_monitoring(
+                        app, request, idempotency_key="invalid-no-website-" + mode
+                    )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.json()["error"]["code"], "invalid_product_profile")
+                    self.assertEqual(store.read_product_profile_record(profile.product), profile)
+            store.close()
+
     async def test_apply_product_health_monitoring_persists_and_replays_reviewed_plan(
         self,
     ) -> None:
