@@ -60,6 +60,10 @@ reviewed or were asked to review on preview, and asks them to open the release
 page, check the testing site, and press Accept or Request changes. It explains
 what Accept does and displays the update time in Eastern time. Engineering-only
 titles are omitted; the complete checklist remains on the release page.
+Its first visible line names **Release review** and asks whether the site is
+working with these changes so they can go live. This is the site's release
+decision, separate from the one-change preview decision described in
+[Client review](owner-acceptance.md).
 
 Before the Client decides, a candidate containing new Client-facing changes posts
 one new invitation mentioning the Client and naming only the additions. A batch
@@ -76,12 +80,14 @@ do not notify again. The `release-request` marker binds the open review to the
 product, repository, Client identity and latest Client decision. A new candidate
 after acceptance or a request for changes opens a new review and mentions the Client.
 The worker adopts the newest legacy candidate-marked request created after that
-decision (or the newest one if there has been no decision). Legacy PR links seed
-the announcement history. The publisher updates the wording and marks older
-invitations replaced once, collapsing the earlier wording and neutralizing its
+decision (or the newest one if there has been no decision). Legacy PR links,
+including batch links bound to their constituents, seed the announcement history.
+The publisher updates the wording and marks older invitations in the same open
+review replaced once, collapsing the earlier wording and neutralizing its
 mentions while retaining delivery receipts and historical text. Release decision
-records remain the authority for accepted releases. After every publication, exactly one invitation is
-current. Lost post or replacement responses are recovered from those receipts;
+records remain the authority for accepted releases. Invitations from already
+decided reviews stay unchanged. After every publication, exactly one invitation
+in the open review is current. Lost post or replacement responses are recovered from those receipts;
 cleanup is completed before delivery is cached. Missing timestamps or identities
 refuse publication. No manual live-thread cleanup is needed.
 

@@ -18,7 +18,7 @@ from control_plane.contracts.release_review import (
     ReleaseReviewStatus,
     ReleaseVersion,
 )
-from control_plane.release_invitation_changes import client_invitation_changes
+from control_plane.release_invitation_changes import InvitationChange, client_invitation_changes
 from control_plane.release_review import (
     CLIENT_APPROVAL_REQUIRED,
     ReleaseReviewStore,
@@ -80,7 +80,7 @@ def _change_link(item: ReleaseReviewItem) -> str:
 
 
 def _announced_changes(
-    request: dict[str, object] | None, changes: dict[str, ReleaseReviewItem]
+    request: dict[str, object] | None, changes: dict[str, InvitationChange]
 ) -> set[str]:
     if request is None:
         return set()
@@ -98,7 +98,11 @@ def _announced_changes(
     # keep announcement history even when a candidate temporarily removes a PR.
     if not keys:
         links = set(re.findall(r"https://github\.com/[^\s)<>]+/pull/[0-9]+", "\n".join(lines)))
-        keys.update(key for key, item in changes.items() if item.url in links)
+        keys.update(
+            key
+            for key, change in changes.items()
+            if change.item.url in links or change.legacy_url in links
+        )
     return keys
 
 
@@ -106,7 +110,13 @@ REPLACED_MARKER = "<!-- launchplane:release-invitation-replaced -->"
 
 
 def _replace_older_invitations(
-    *, comments: list[dict[str, object]], current: dict[str, object], path: str, token: str
+    *,
+    comments: list[dict[str, object]],
+    current: dict[str, object],
+    path: str,
+    token: str,
+    request_marker: str,
+    last_decision: ReleaseReviewDecisionRecord | None,
 ) -> None:
     current_id = current.get("id")
     if not isinstance(current_id, int) or current_id < 1:
@@ -118,6 +128,17 @@ def _replace_older_invitations(
         if not any(
             re.fullmatch(r"<!-- launchplane:release-(?:invitation|reminder):[0-9a-f]{64} -->", line)
             for line in lines
+        ):
+            continue
+        # Completed reviews keep their historical invitations. Only the current
+        # request and its undecided legacy duplicates are replacement targets.
+        if (
+            any(line.startswith("<!-- launchplane:release-request:") for line in lines)
+            and request_marker not in lines
+        ):
+            continue
+        if last_decision and _timestamp(comment.get("created_at")) <= _timestamp(
+            last_decision.decided_at
         ):
             continue
         comment_id = comment.get("id")
@@ -420,12 +441,19 @@ def publish_release_invitation(
             added = {key: item for key, item in client_changes.items() if key not in announced}
             # A matching candidate receipt still needs the one-time migration
             # to plain wording and cleanup of older duplicate invitations.
-            formatted = request and any(
-                line.startswith("Updated at: ") for line in _comment_lines(request)
+            formatted = (
+                request
+                and any(line.startswith("Updated at: ") for line in _comment_lines(request))
+                and any(line.startswith("**Release review**") for line in _comment_lines(request))
             )
             if request and marker in _comment_lines(request) and formatted and not added:
                 _replace_older_invitations(
-                    comments=comments, current=request, path=path, token=token
+                    comments=comments,
+                    current=request,
+                    path=path,
+                    token=token,
+                    request_marker=request_marker,
+                    last_decision=last_decision,
                 )
                 if reminded or _now() < due:
                     _remember_delivery(backoff, receipt, due, reminded)
@@ -442,14 +470,19 @@ def publish_release_invitation(
                 if not isinstance(result, dict) or not isinstance(result.get("id"), int):
                     raise ValueError("Release invitation reminder was not confirmed.")
                 _replace_older_invitations(
-                    comments=comments, current=result, path=path, token=token
+                    comments=comments,
+                    current=result,
+                    path=path,
+                    token=token,
+                    request_marker=request_marker,
+                    last_decision=last_decision,
                 )
                 _remember_delivery(backoff, receipt, due, True)
                 return
             notify = not request or bool(added)
             changes = [
-                _change_link(item)
-                for item in (added if request and added else client_changes).values()
+                _change_link(change.item)
+                for change in (added if request and added else client_changes).values()
             ]
             if not changes:
                 changes = ["- Engineering updates only; no new Client change needs checking."]
@@ -470,7 +503,9 @@ def publish_release_invitation(
                 else "there is nothing new to test. Read the release summary, then press **Accept** or **Request changes**."
             )
             body = (
-                f"{request_marker}\n{marker}\n{receipts}\n\nHi {client},\n\n"
+                f"{request_marker}\n{marker}\n{receipts}\n\n"
+                "**Release review** — is the site working with these changes, so they can go live?\n\n"
+                f"Hi {client},\n\n"
                 f"{heading}:\n"
                 + "\n".join(changes)
                 + f"\n\nStill one thing to do: [open the release page]({review_link}), "
@@ -490,7 +525,14 @@ def publish_release_invitation(
             )
             if not isinstance(result, dict) or not isinstance(result.get("id"), int):
                 raise ValueError("Release invitation publication was not confirmed.")
-            _replace_older_invitations(comments=comments, current=result, path=path, token=token)
+            _replace_older_invitations(
+                comments=comments,
+                current=result,
+                path=path,
+                token=token,
+                request_marker=request_marker,
+                last_decision=last_decision,
+            )
             if notify:
                 due = _timestamp(result.get("created_at")) + timedelta(days=3)
             _remember_delivery(backoff, receipt, due, reminded)

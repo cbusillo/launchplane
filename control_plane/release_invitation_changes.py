@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+from dataclasses import dataclass
 from typing import Protocol, cast
 from urllib.parse import parse_qs, urlsplit
 
@@ -33,9 +34,15 @@ class ReleaseInvitationNotesUnavailable(ValueError):
     """A Client-facing constituent is missing its recorded batch test notes."""
 
 
+@dataclass(frozen=True, slots=True)
+class InvitationChange:
+    item: ReleaseReviewItem
+    legacy_url: str
+
+
 def _release_items(
     store: InvitationEvidenceStore, checklist: ReleaseChecklist
-) -> list[tuple[str, ReleaseReviewItem]]:
+) -> list[tuple[str, InvitationChange]]:
     groups = [(checklist.repository, checklist.items)] + [
         (source.repository, source.items) for source in checklist.shared_sources
     ]
@@ -56,7 +63,7 @@ def _release_items(
                 None,
             )
             if batch is None:
-                result.append((repository, item))
+                result.append((repository, InvitationChange(item, item.url)))
                 continue
             # The train's batch notes have one generated ### #number section per
             # constituent. Classification still comes from that PR's records.
@@ -67,16 +74,19 @@ def _release_items(
                 result.append(
                     (
                         repository,
-                        item.model_copy(
-                            update={
-                                "pull_request_number": entry.pull_request_number,
-                                "url": source_control_pull_request_url(
-                                    repository=repository,
-                                    pull_request_number=entry.pull_request_number,
-                                ),
-                                "head_sha": entry.expected_head_sha,
-                                "owner_test_notes": note,
-                            }
+                        InvitationChange(
+                            item.model_copy(
+                                update={
+                                    "pull_request_number": entry.pull_request_number,
+                                    "url": source_control_pull_request_url(
+                                        repository=repository,
+                                        pull_request_number=entry.pull_request_number,
+                                    ),
+                                    "head_sha": entry.expected_head_sha,
+                                    "owner_test_notes": note,
+                                }
+                            ),
+                            item.url,
                         ),
                     )
                 )
@@ -87,7 +97,7 @@ def client_invitation_changes(
     store: ReleaseReviewStore,
     profile: LaunchplaneProductProfileRecord,
     checklist: ReleaseChecklist,
-) -> dict[str, ReleaseReviewItem]:
+) -> dict[str, InvitationChange]:
     evidence = cast(InvitationEvidenceStore, store)
     # Historical feedback persists the rendered request, not a separate flag.
     # Its bound per-PR review URL is request evidence; a preview alone is not.
@@ -105,7 +115,8 @@ def client_invitation_changes(
             ):
                 requested.add((feedback.repository, feedback.anchor_pr_number))
     changes = {}
-    for repository, item in _release_items(evidence, checklist):
+    for repository, change in _release_items(evidence, checklist):
+        item = change.item
         decisions = store.list_product_review_decision_records(
             repository=repository, pull_request_number=item.pull_request_number
         )
@@ -119,5 +130,5 @@ def client_invitation_changes(
                     f"Release invitation batch Client notes are unavailable for {repository}#{item.pull_request_number}."
                 )
             key = hashlib.sha256(f"{repository}:{item.pull_request_number}".encode()).hexdigest()
-            changes[key] = item
+            changes[key] = change
     return changes

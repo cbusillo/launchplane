@@ -9,7 +9,7 @@ from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
-from control_plane.contracts.release_review import ReleaseReviewStatus
+from control_plane.contracts.release_review import ReleaseReviewItem, ReleaseReviewStatus
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.merge_train_batch import (
@@ -189,8 +189,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.comments), 2)
         self.assertIn("change 43", self.comments[-1]["body"])
 
-    def test_train_batch_uses_constituent_review_evidence_and_only_its_notes(self) -> None:
-        self.publish()
+    def seed_train_batch(self) -> ReleaseReviewItem:
         self.add_client_change(43)
         assert self.review.checklist is not None
         batch = self.review.checklist.items[0].model_copy(
@@ -235,6 +234,32 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.review = self.review.model_copy(
             update={"checklist": self.review.checklist.model_copy(update={"items": (batch,)})}
         )
+        return batch
+
+    def test_legacy_batch_receipt_is_adopted_without_another_ping(self) -> None:
+        batch = self.seed_train_batch()
+        assert self.review.checklist is not None
+        self.issues = [{"number": 91, "body": release_request_issue_marker(self.profile.product)}]
+        self.comments = [
+            {
+                "id": 1,
+                "created_at": self.now.isoformat(),
+                "body": release_invitation_marker(
+                    self.profile.product, self.review.checklist.candidate
+                )
+                + f"\n\n@site-owner [#99]({batch.url}): Prices",
+            }
+        ]
+        self.publish()
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 1)
+        self.assertEqual(self.posts, [])
+        self.assertIn("pull/43", self.comments[0]["body"])
+        self.assertNotIn("@site-owner", self.comments[0]["body"])
+
+    def test_train_batch_uses_constituent_review_evidence_and_only_its_notes(self) -> None:
+        self.publish()
+        batch = self.seed_train_batch()
         self.change_candidate(source_commit="e" * 40)
         self.publish()
         self.assertEqual(len(self.comments), 2)
@@ -358,6 +383,10 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.publish()
         self.assertEqual(len(self.comments), 1)
         body = self.comments[0]["body"]
+        visible_lines = [line for line in body.splitlines() if line and not line.startswith("<!--")]
+        self.assertIn("Release review", visible_lines[0])
+        self.assertIn("is the site working with these changes", visible_lines[0])
+        self.assertNotIn("Change review (preview)", body)
         self.assertIn("@site-owner", body)
         self.assertIn(
             "https://launchplane.example.invalid/ui/owner-review?product=example-site", body
@@ -406,12 +435,14 @@ class ReleaseInvitationTests(unittest.TestCase):
                 record = decision(
                     self.store, outcome=outcome, date=self.now.isoformat()
                 ).model_copy(update={"checklist": self.review.checklist})
+                decided_invitation = self.comments[index]["body"]
                 self.store.write_release_review_decision_record(record)
                 self.now += timedelta(seconds=1)
                 self.change_candidate(source_commit=str(index + 4) * 40)
                 self.publish()
                 self.publish()
                 self.assertEqual(len(self.comments), index + 2)
+                self.assertEqual(self.comments[index]["body"], decided_invitation)
                 self.assertEqual(
                     sum("@site-owner" in post.get("body", "") for post in self.posts), index + 2
                 )
@@ -640,7 +671,10 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.profile = profile()
         self.store.write_product_profile_record(self.profile)
         self.publish()
-        self.assertIn("an admin starts the release", self.comments[0]["body"])
+        body = self.comments[0]["body"]
+        self.assertIn("**Release review**", body)
+        self.assertIn("Accepting records your approval; an admin starts the release", body)
+        self.assertNotIn("Accepting starts the release", body)
 
     def test_effect_matches_review_for_unsupported_driver_and_drill(self) -> None:
         self.profile = self.profile.model_copy(update={"driver_id": "verireel"})
