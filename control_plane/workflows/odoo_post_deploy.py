@@ -394,11 +394,7 @@ def execute_odoo_post_deploy(
         workflow_intent=workflow_intent,
         required_container_environment_keys=required_workflow_environment_keys,
         override_evidence={
-            **(
-                {"resolved_base_url": public_base_url, "public_base_url_status": "pass"}
-                if public_base_url
-                else {}
-            ),
+            **({"resolved_base_url": public_base_url} if public_base_url else {}),
             **(override_payload.redacted_evidence() if override_payload else {}),
             **_prefix_post_deploy_readback_evidence(post_deploy_readback_markers),
         },
