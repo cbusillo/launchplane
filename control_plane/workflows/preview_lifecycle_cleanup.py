@@ -10,6 +10,7 @@ from control_plane.contracts.preview_lifecycle_cleanup_record import (
     build_preview_lifecycle_cleanup_id,
 )
 from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_mutation_request import PreviewDestroyMutationRequest
 from control_plane.launchplane_mutations import apply_launchplane_destroy_preview
 from control_plane.workflows.launchplane import find_preview_record
@@ -89,7 +90,18 @@ def _build_generic_web_cleanup_record(
     record_store: Any,
     timeout_seconds: int,
     preview_slug_template: str,
+    profile: LaunchplaneProductProfileRecord | None = None,
 ) -> PreviewLifecycleCleanupRecord:
+    if profile is not None and (
+        profile.product != plan.product or profile.preview.context != plan.context
+    ):
+        return _blocked_record(
+            plan=plan,
+            requested_at=requested_at,
+            source=source,
+            apply=True,
+            error_message="Cleanup plan does not match its product/preview context; generate a fresh plan within the caller's existing authority.",
+        )
     parsed_previews: list[tuple[str, int]] = []
     anchor_repo = plan.product
     for preview_slug in plan.orphaned_slugs:
@@ -140,6 +152,7 @@ def _build_generic_web_cleanup_record(
                 destroy_reason=destroy_reason,
                 timeout_seconds=timeout_seconds,
             ),
+            profile=profile,
         )
         if destroy_result.destroy_status == "pass":
             try:
@@ -221,6 +234,7 @@ def build_preview_lifecycle_cleanup_record(
     timeout_seconds: int,
     driver_id: str = "",
     preview_slug_template: str = "pr-{number}",
+    profile: LaunchplaneProductProfileRecord | None = None,
 ) -> PreviewLifecycleCleanupRecord:
     cleanup_id = build_preview_lifecycle_cleanup_id(
         context_name=plan.context,
@@ -271,6 +285,7 @@ def build_preview_lifecycle_cleanup_record(
             record_store=record_store,
             timeout_seconds=timeout_seconds,
             preview_slug_template=preview_slug_template,
+            profile=profile,
         )
 
     anchor_repo = plan.product

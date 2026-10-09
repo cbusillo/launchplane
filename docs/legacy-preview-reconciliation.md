@@ -71,6 +71,12 @@ database/thread capacity and connection lifetime for their workload.
 Lifecycle cleanup/sweep completion also runs off the event loop and includes
 its idempotency receipt; sweep uses the product-profile scope checked before
 dispatch so later profile additions cannot expand the caller's operation.
+Concurrent retries of a running lifecycle intent return `409 mutation_in_progress`
+within the same service process. Wait for completion, then repeat the identical
+intent and key to recover its receipt. This guard remains held after HTTP
+cancellation. Cleanup carries the checked profile into teardown; a saved plan
+whose product/context no longer matches is blocked and needs a fresh plan
+within the caller's existing authority.
 
 Inspection and planning use existing `preview_inventory.read` authorization
 for the recorded product/preview context. Apply additionally requires existing

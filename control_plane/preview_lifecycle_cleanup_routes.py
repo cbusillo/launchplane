@@ -238,17 +238,17 @@ def preview_lifecycle_cleanup_driver_id(
 
 def preview_lifecycle_cleanup_profile_settings(
     *, record_store: object, product: str
-) -> tuple[str, str]:
+) -> tuple[str, str, LaunchplaneProductProfileRecord | None]:
     cleanup_driver_id = "verireel" if product == "verireel" else ""
     cleanup_slug_template = "pr-{number}"
     read_profile = getattr(record_store, "read_product_profile_record", None)
     if not callable(read_profile):
-        return cleanup_driver_id, cleanup_slug_template
+        return cleanup_driver_id, cleanup_slug_template, None
     try:
         profile = LaunchplaneProductProfileRecord.model_validate(read_profile(product))
     except FileNotFoundError:
-        return cleanup_driver_id, cleanup_slug_template
-    return preview_lifecycle_cleanup_driver_id(profile), profile.preview.slug_template
+        return cleanup_driver_id, cleanup_slug_template, None
+    return preview_lifecycle_cleanup_driver_id(profile), profile.preview.slug_template, profile
 
 
 def preview_lifecycle_sweep_profiles(
@@ -392,6 +392,7 @@ def build_preview_lifecycle_sweep(
             timeout_seconds=request.timeout_seconds,
             driver_id=cleanup_driver_id,
             preview_slug_template=profile.preview.slug_template,
+            profile=profile,
         )
         cleanup_id = write_preview_lifecycle_sweep_cleanup_record(
             record_store=record_store,

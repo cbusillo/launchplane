@@ -21495,6 +21495,43 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def run_lifecycle_completion(
+        *,
+        request: Request,
+        identity: LaunchplaneIdentity,
+        key: str,
+        fingerprint: str,
+        route: str,
+        trace_id: str,
+        operation: Callable[[], AcceptedEvidenceResponse],
+    ) -> AcceptedEvidenceResponse:
+        locks = getattr(request.app.state, "preview_lifecycle_mutation_locks", None)
+        if locks is None:
+            locks = {}
+            request.app.state.preview_lifecycle_mutation_locks = locks
+        lock_key = (idempotency_scope(identity), route, key or fingerprint)
+        lock = locks.setdefault(lock_key, asyncio.Lock())
+        if lock.locked():
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="mutation_in_progress",
+                message="This lifecycle intent is running; retry the identical intent/key after completion.",
+            )
+        await lock.acquire()
+        task = asyncio.create_task(asyncio.to_thread(operation))
+
+        def completed(finished: asyncio.Task[AcceptedEvidenceResponse]) -> None:
+            if not finished.cancelled():
+                if finished.exception() is not None:
+                    logging.error("Preview lifecycle completion failed; trace_id=%s", trace_id)
+            lock.release()
+            if locks.get(lock_key) is lock:
+                locks.pop(lock_key)
+
+        task.add_done_callback(completed)
+        return await asyncio.shield(task)
+
     async def apply_preview_lifecycle_cleanup(
         request: Request,
         cleanup_request: PreviewLifecycleCleanupEnvelope,
@@ -21561,9 +21598,11 @@ def create_launchplane_fastapi_app(
                     " product/context."
                 ),
             )
-        cleanup_driver_id, cleanup_slug_template = preview_lifecycle_cleanup_profile_settings(
-            record_store=record_store,
-            product=cleanup_request.product,
+        cleanup_driver_id, cleanup_slug_template, cleanup_profile = (
+            preview_lifecycle_cleanup_profile_settings(
+                record_store=record_store,
+                product=cleanup_request.product,
+            )
         )
 
         def execute_cleanup() -> AcceptedEvidenceResponse:
@@ -21578,6 +21617,7 @@ def create_launchplane_fastapi_app(
                 timeout_seconds=cleanup_request.timeout_seconds,
                 driver_id=cleanup_driver_id,
                 preview_slug_template=cleanup_slug_template,
+                profile=cleanup_profile,
             )
             preview_lifecycle_cleanup_id = write_preview_lifecycle_cleanup_apply_record(
                 record_store=cleanup_store,
@@ -21599,7 +21639,15 @@ def create_launchplane_fastapi_app(
             )
             return response
 
-        return await asyncio.shield(asyncio.to_thread(execute_cleanup))
+        return await run_lifecycle_completion(
+            request=request,
+            identity=identity,
+            key=normalized_key,
+            fingerprint=payload_fingerprint,
+            route=_PREVIEW_LIFECYCLE_CLEANUP_ROUTE,
+            trace_id=trace_id,
+            operation=execute_cleanup,
+        )
 
     async def apply_preview_lifecycle_sweep(
         request: Request,
@@ -21709,7 +21757,15 @@ def create_launchplane_fastapi_app(
             )
             return response
 
-        return await asyncio.shield(asyncio.to_thread(execute_sweep))
+        return await run_lifecycle_completion(
+            request=request,
+            identity=identity,
+            key=normalized_key,
+            fingerprint=payload_fingerprint,
+            route=_PREVIEW_LIFECYCLE_SWEEP_ROUTE,
+            trace_id=trace_id,
+            operation=execute_sweep,
+        )
 
     async def execute_product_retirement(
         request: Request,
