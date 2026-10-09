@@ -226,7 +226,7 @@ dispatches a workflow, and only a Client's acceptance starts a release.
 ## Acceptance starts the release
 
 Each product profile records `release_on_acceptance`: `held` (the default for
-every product), `promote`, `promote_with_rollback_drill` (Odoo), or
+every product), `promote`, `promote_with_rollback_drill` (Odoo or generic web), or
 `director_standing` (generic web). An admin with
 `product_profile.write` changes it in the product's Client settings, through
 `POST /v1/product-profiles/{product}/production-use` with the optional
@@ -345,6 +345,28 @@ The rollback restores the checklist's production version, so the checklist
 recompiles to the digest the Client accepted, and that acceptance covers the
 second promotion and nothing else. A product drills once. After a release's
 drill passes, `promote_with_rollback_drill` behaves as `promote`.
+
+Odoo and generic-web products use this same sequence and acceptance checks.
+Generic web redeploys the explicitly selected passing production deployment's
+recorded image, verifies its runtime identity and health, and restores that
+version's inventory before the second backup and promotion. Its drill uses the
+same provider fence and durable step reservation as promotion; an unknown
+rollback outcome stops the run for reconciliation. A failed drill or second
+backup never starts re-promotion. Automatic rollback after a failed promotion
+remains permitted even when the Client's forward release authority is revoked.
+
+Before the first backup, a generic-web drill requires a deployable passing
+production record for the checklist's exact artifact and source commit. A
+missing target is shown as a release blocker without changing production.
+For an interrupted drill, use the same scoped admin recovery route above with
+`?step=rollback` on selection, dry-run and Apply. It binds the original target
+through the original deployment and reservation fingerprint, verifies the exact
+recorded rollback deployment against the provider's configured/running image,
+deployment ID and current health, then adopts the existing result atomically.
+It starts no provider effect and grants no access. Active leases, no-effect
+reservations, missing or changed records, failed health and unproven runtime
+stay held; a completed adoption replays. Normal acceptance and hold checks
+still gate the second backup and re-promotion.
 
 Each step runs under a `client_release_acceptance` grant that names the
 decision. Before a step is queued, the worker checks all of the following:
