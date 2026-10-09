@@ -153,7 +153,12 @@ approval; the saved Launchplane decision remains authoritative.
 Publishers of the same saved decision serialize lookup, issue creation and the
 stored URL acknowledgement with a per-decision storage lock. After waiting, a
 publisher reads the saved decision again and reuses its authoritative URL. The
-PostgreSQL transaction lock and local file lock release when their worker exits;
+PostgreSQL holder reads and acknowledges that exact decision using its lock
+transaction's connection, so waiting publishers cannot exhaust the pool it
+needs to finish. The URL commits with that transaction before publication
+returns. Lock waits are bounded to five seconds (or an earlier configured
+statement timeout); storage failures leave the saved decision pending for retry.
+The PostgreSQL transaction lock and local file lock release when their worker exits;
 an interrupted acknowledgement recovers the existing issue by its marker before
 any new creation. Local SQLite publication requires a file-backed database so
 separate processes share the file lock.
@@ -252,9 +257,6 @@ rewrite the checklist and audit fields.
 The Client's decision route uses the same creation and publication operations,
 so a Client retry cannot upsert a stale unpublished snapshot over the worker's
 publication. An already published winner needs no further source-control lookup.
-The first stored issue URL is authoritative. Concurrent external issue creation
-can still produce a duplicate issue with that decision's marker; publication
-serialization is tracked separately in [#3030](https://github.com/cbusillo/launchplane/issues/3030).
 Missing notes, missing lane identities or a Client, a held or prelaunch product,
 and a request for changes or admin override on that checklist start nothing. A failed
 release is not automatically retried with another acceptance of the same
