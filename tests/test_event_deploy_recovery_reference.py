@@ -58,7 +58,7 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             source_commit="abc123",
             enterprise_base_digest="",
             image=ArtifactImageReference(
-                repository="ghcr.io/cbusillo/sellyouroutboard", digest="sha256:abc123"
+                repository="ghcr.io/cbusillo/sellyouroutboard", digest=f"sha256:{'a' * 64}"
             ),
         )
         self.store.write_artifact_manifest(self.manifest)
@@ -66,6 +66,11 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             product=self.product,
             image_reference=f"{self.manifest.image.repository}@{self.manifest.image.digest}",
             source_commit=self.manifest.source_commit,
+            deploy_reference=(
+                ""
+                if self._testMethodName == "test_legacy_saved_plan_requires_exact_fingerprint"
+                else f"{self.manifest.image.repository}:sha-{self.manifest.source_commit}"
+            ),
         ).model_dump(mode="json")
         if self._testMethodName == "test_request_model_normalization_drift_refuses_reference_read":
             default_field = next(
@@ -424,6 +429,9 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             self.assertEqual(code, 202, applied)
             self.assertEqual(applied["recovery_action"], "retry_original_operation")
             execute.assert_called_once()
+            self.assertEqual(
+                execute.call_args.kwargs["request"].model_dump(mode="json"), self.original
+            )
         stored = self.store.read_idempotency_record(
             scope=self.reservation.scope,
             route_path=self.reservation.route_path,

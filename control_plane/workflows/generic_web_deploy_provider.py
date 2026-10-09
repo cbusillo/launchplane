@@ -1062,6 +1062,7 @@ def _dokploy_target_definition_for_lane(
         healthcheck_timeout_seconds=target_record.healthcheck_timeout_seconds,
         env=target_record.env,
         domains=target_record.domains,
+        public_hosts=target_record.public_hosts,
         policies=target_record.policies,
     )
 

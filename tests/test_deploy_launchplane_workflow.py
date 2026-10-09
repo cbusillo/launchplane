@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import time
 from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
@@ -56,6 +57,53 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 line.split("=", 1) for line in output.read_text().splitlines() if "=" in line
             )
             return cast(dict[str, object], json.loads(Path(values["payload_file"]).read_text()))
+
+    def test_rollback_reuses_prepared_budget_without_resolving_dependencies(self) -> None:
+        with TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            budget = 77
+            result = self._run_step(
+                "deploy",
+                "Resolve Launchplane rollback wait timeout",
+                {"WAIT_TIMEOUT_SECONDS": str(budget)},
+                directory,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(
+                line.split("=", 1) for line in (directory / "output").read_text().splitlines()
+            )
+            self.assertEqual(int(values["timeout_seconds"]), budget)
+            self.assertEqual(int(values["timeout_ms"]), budget * 1000)
+
+    def test_later_waits_consume_remaining_deadline_without_resetting_budget(self) -> None:
+        for step in (
+            "Resolve deploy_runtime_wait remaining wait",
+            "Resolve deploy_marker_wait remaining wait",
+            "Resolve rollback_runtime_wait remaining wait",
+        ):
+            for remaining in (60, -60):
+                with (
+                    self.subTest(step=step, remaining=remaining),
+                    TemporaryDirectory() as directory_name,
+                ):
+                    directory = Path(directory_name)
+                    result = self._run_step(
+                        "deploy",
+                        step,
+                        {"WAIT_DEADLINE_EPOCH": str(int(time.time()) + remaining)},
+                        directory,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    values = dict(
+                        line.split("=", 1)
+                        for line in (directory / "output").read_text().splitlines()
+                    )
+                    actual = int(values["timeout_ms"])
+                    if remaining > 0:
+                        self.assertLessEqual(actual, remaining * 1000)
+                        self.assertGreater(actual, (remaining - 10) * 1000)
+                    else:
+                        self.assertEqual(actual, 1)
 
     def test_rendered_worker_changes_and_same_image_rollback_are_exact(self) -> None:
         base = {

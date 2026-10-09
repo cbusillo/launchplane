@@ -359,6 +359,204 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                         "fail",
                     )
 
+    def test_cm_legacy_sender_contract_passes_but_current_missing_marker_fails(self) -> None:
+        override = OdooInstanceOverrideRecord(
+            context="cm_website",
+            instance="prod",
+            apply_on=("deploy",),
+            website_bootstrap=OdooWebsiteBootstrapPayload(
+                tenant="example", name="Example", company_email="support@example.test"
+            ),
+            updated_at="2026-10-08T12:00:00Z",
+            source_label="test",
+        )
+        environment = build_post_deploy_environment(override)
+        cases = (
+            ("false", None, True, True, "pass"),  # Pre-marker rollback / re-deploy.
+            ("false", None, True, False, "fail"),  # Forward deploy stays strict.
+            ("true", None, True, False, "fail"),  # Current forward deploy lost its proof.
+            (None, None, True, True, "fail"),  # Missing logs never prove an old contract.
+            ("false", "false", True, True, "fail"),  # Explicit mismatch cannot be skipped.
+            ("false", None, False, True, "fail"),  # Old bootstrap must still complete.
+            ("true", "true", True, False, "pass"),
+        )
+        for supported, sender, bootstrap_complete, replay, expected_status in cases:
+            with self.subTest(
+                supported=supported, sender=sender, bootstrap=bootstrap_complete, replay=replay
+            ):
+                logs = [f"{key}={value}" for key, value in _module_update_evidence().items()]
+                if bootstrap_complete:
+                    logs.extend(
+                        f"{key}=true"
+                        for key in dokploy_post_deploy.ODOO_WEBSITE_BOOTSTRAP_REQUIRED_READBACK_MARKERS
+                    )
+                if supported is not None:
+                    logs.append(
+                        f"{dokploy_post_deploy.ODOO_COMPANY_EMAIL_CONTRACT_MARKER}={supported}"
+                    )
+                if sender is not None:
+                    logs.append(f"{dokploy_post_deploy.ODOO_COMPANY_EMAIL_MATCH_MARKER}={sender}")
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    store = FilesystemRecordStore(state_dir=root / "state")
+                    store.write_odoo_instance_override_record(override)
+                    with (
+                        patch(
+                            "control_plane.workflows.odoo_post_deploy.dokploy_source.read_control_plane_dokploy_source_of_truth",
+                            return_value=DokploySourceOfTruth(
+                                schema_version=1,
+                                targets=(
+                                    DokployTargetDefinition(
+                                        context="cm_website",
+                                        instance="prod",
+                                        target_id="cm-compose",
+                                        target_name="cm-prod",
+                                    ),
+                                ),
+                            ),
+                        ),
+                        patch(
+                            "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
+                            return_value=("https://dokploy.example.test", "private-token"),
+                        ),
+                        patch.multiple(
+                            dokploy_api,
+                            fetch_dokploy_target_payload=Mock(
+                                return_value={
+                                    "env": dokploy_api.serialize_dokploy_env_text(
+                                        {
+                                            "ODOO_DB_NAME": "example",
+                                            **environment.inline_environment,
+                                        }
+                                    ),
+                                    "appName": "example-app",
+                                    "serverId": "example-server",
+                                }
+                            ),
+                            find_matching_dokploy_schedule=Mock(return_value=None),
+                            upsert_dokploy_schedule=Mock(
+                                return_value={"scheduleId": "maintenance"}
+                            ),
+                            latest_deployment_for_schedule=Mock(
+                                side_effect=[
+                                    {"deploymentId": "previous"},
+                                    {"deploymentId": "current", "status": "done", "logs": logs},
+                                ]
+                            ),
+                            wait_for_dokploy_schedule_deployment=Mock(
+                                return_value="deployment=current status=done"
+                            ),
+                            dokploy_request=Mock(return_value={"ok": True}),
+                        ),
+                    ):
+                        result = execute_odoo_post_deploy(
+                            control_plane_root=root,
+                            record_store=store,
+                            request=OdooPostDeployRequest(context="cm_website", instance="prod"),
+                            allow_historical_sender_contract=replay,
+                            hold_uncertain_effects=True,
+                        )
+                    self.assertEqual(result.post_deploy_status, expected_status)
+                    evidence = post_deploy_evidence_from_odoo_result(result)
+                    reason_key = "post_deploy_readback_website_bootstrap_company_email_skip_reason"
+                    if supported == "false" and expected_status == "pass":
+                        self.assertEqual(
+                            evidence.evidence[reason_key],
+                            dokploy_post_deploy.ODOO_COMPANY_EMAIL_SKIP_REASON,
+                        )
+                        self.assertIn(
+                            dokploy_post_deploy.ODOO_COMPANY_EMAIL_SKIP_REASON,
+                            store.read_odoo_instance_override_record(
+                                context_name="cm_website", instance_name="prod"
+                            ).last_apply.detail,
+                        )
+                        self.assertNotIn(
+                            "post_deploy_readback_"
+                            + dokploy_post_deploy.ODOO_COMPANY_EMAIL_MATCH_MARKER,
+                            evidence.evidence,
+                        )
+                    else:
+                        self.assertNotIn(reason_key, evidence.evidence)
+                    self.assertNotIn("support@example.test", evidence.model_dump_json())
+                    self.assertEqual(
+                        store.read_odoo_instance_override_record(
+                            context_name="cm_website", instance_name="prod"
+                        ).last_apply.status,
+                        expected_status,
+                    )
+
+    def test_existing_artifact_maintenance_and_http_use_its_historical_contract(self) -> None:
+        from control_plane.workflows.odoo_app_maintenance import (
+            OdooAppMaintenanceRequest,
+            execute_odoo_app_maintenance,
+        )
+        from control_plane.odoo_post_deploy_http import (
+            OdooPostDeployEnvelope,
+            execute_odoo_post_deploy_result,
+        )
+
+        def historical_post_deploy(**kwargs: object) -> object:
+            evidence = _module_update_evidence(
+                **dict.fromkeys(
+                    dokploy_post_deploy.ODOO_WEBSITE_BOOTSTRAP_REQUIRED_READBACK_MARKERS, "true"
+                )
+            )
+            evidence[dokploy_post_deploy.ODOO_COMPANY_EMAIL_CONTRACT_MARKER] = "false"
+            dokploy_post_deploy.require_odoo_company_email_readback_evidence(
+                evidence,
+                allow_historical_contract=bool(kwargs.get("allow_historical_sender_contract")),
+            )
+            from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
+
+            return OdooPostDeployResult(
+                context="cm_website",
+                instance="prod",
+                phase="deploy",
+                post_deploy_status="pass",
+                override_evidence=evidence,
+            )
+
+        with patch(
+            "control_plane.workflows.odoo_app_maintenance.execute_odoo_post_deploy",
+            side_effect=historical_post_deploy,
+        ):
+            maintenance = execute_odoo_app_maintenance(
+                control_plane_root=Path("."),
+                record_store=object(),
+                request=OdooAppMaintenanceRequest(
+                    context="cm_website",
+                    instance="prod",
+                    action="post-deploy",
+                    intent="stable-post-deploy",
+                ),
+            )
+        self.assertEqual(maintenance.post_deploy_status, "pass")
+        with patch(
+            "control_plane.odoo_post_deploy_http.execute_odoo_post_deploy",
+            side_effect=historical_post_deploy,
+        ):
+            _records, payload = execute_odoo_post_deploy_result(
+                control_plane_root=Path("."),
+                record_store=object(),
+                request=OdooPostDeployEnvelope(
+                    product="odoo-tenant-example",
+                    post_deploy=OdooPostDeployRequest(context="cm_website", instance="prod"),
+                ),
+            )
+        self.assertEqual(payload["post_deploy_status"], "pass")
+
+    def test_log_output_cannot_inject_launchplane_sender_skip_reason(self) -> None:
+        key = "website_bootstrap_company_email_skip_reason"
+        markers = dokploy_post_deploy.extract_odoo_post_deploy_readback_markers(
+            {
+                "logs": f"{key}={dokploy_post_deploy.ODOO_COMPANY_EMAIL_SKIP_REASON}\n"
+                f"{dokploy_post_deploy.ODOO_COMPANY_EMAIL_MATCH_MARKER}=true"
+            }
+        )
+        self.assertNotIn(key, markers)
+        dokploy_post_deploy.require_odoo_company_email_readback_evidence(markers)
+        self.assertNotIn(key, markers)
+
     def test_readback_failure_keeps_only_bounded_allowlisted_evidence(self) -> None:
         failure = dokploy_post_deploy.OdooPostDeployReadbackFailure(
             "Module proof missing",

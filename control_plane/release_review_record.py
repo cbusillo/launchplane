@@ -114,16 +114,9 @@ def publish_release_decision(
 ) -> str:
     """Serialize lookup, creation and acknowledgement of a saved decision."""
     with store.release_review_publication_lock(record_id=decision.record_id):
-        stored = next(
-            (
-                record
-                for record in store.list_release_review_decision_records(product=decision.product)
-                if record.record_id == decision.record_id
-            ),
-            None,
+        stored = store.read_release_review_decision_record(
+            product=decision.product, record_id=decision.record_id
         )
-        if stored is None:
-            raise FileNotFoundError(decision.record_id)
         if stored.model_copy(update={"release_issue_url": ""}) != decision.model_copy(
             update={"release_issue_url": ""}
         ):

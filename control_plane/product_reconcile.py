@@ -663,6 +663,7 @@ def _deploy_generic_web_testing(
         product=profile.product,
         image_reference=desired.image_reference,
         source_commit=desired.manifest.source_commit,
+        deploy_reference=f"{desired.manifest.image.repository}:sha-{desired.manifest.source_commit}",
     )
     # The deployment testing ran when this deploy was decided is part of its key:
     # every deploy and rollback records a new one, so a lane changed since gets the
@@ -1195,6 +1196,7 @@ def _plan_testing_target(
         lane=lane,
         current_commit=current_commit,
         current_run_id=current_run_id,
+        current_image_digest=current_digest,
         selection=selection,
     )
     plan: dict[str, object] = {
@@ -2312,6 +2314,7 @@ def _desired_release(
     lane: ProductLaneProfile,
     current_commit: str = "",
     current_run_id: int = 0,
+    current_image_digest: str = "",
     selection: dict[str, object] | None = None,
 ) -> tuple[VerifiedBuildArtifact | VerifiedGenericWebBuild | None, list[dict[str, str]], str]:
     default_branch = profile.default_branch
@@ -2381,6 +2384,7 @@ def _desired_release(
         and run.get("conclusion") == "success"
         and run.get("head_sha")
     }
+    generic_web = reconciles_as_generic_web(profile)
     if current_commit and (
         current_commit not in built_commits
         or (
@@ -2388,7 +2392,22 @@ def _desired_release(
             and not any(isinstance(run, dict) and run.get("id") == current_run_id for run in runs)
         )
     ):
-        return None, [], "incomplete_build_runs"
+        # Before product-owned Build adoption, a recorded generic-web deployment
+        # has a source/digest but no contract Build. Only a complete run inventory
+        # may substitute that identity; missing recorded runs still refuse.
+        total = payload.get("total_count")
+        run_ids = {
+            run["id"] for run in runs if isinstance(run, dict) and type(run.get("id")) is int
+        }
+        if not (
+            generic_web
+            and not current_run_id
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", current_image_digest)
+            and type(total) is int
+            and total == len(runs) == len(run_ids)
+        ):
+            return None, [], "incomplete_build_runs"
+        audit["current_build_evidence"] = "recorded_runtime_identity"
     ordered: list[str] = []
     history_seen = 0
     current_seen = not current_commit
@@ -2403,8 +2422,8 @@ def _desired_release(
             current_seen = current_seen or sha == current_commit
             if sha in built_commits:
                 ordered.append(sha)
-                if len(ordered) == len(built_commits):
-                    break
+            if current_seen and len(ordered) == len(built_commits):
+                break
     audit.update(
         commit_history_seen=history_seen,
         current_commit_seen=current_seen,
@@ -2414,7 +2433,6 @@ def _desired_release(
     if not current_seen:
         return None, [], "incomplete_commit_history"
     rejected: list[dict[str, str]] = []
-    generic_web = reconciles_as_generic_web(profile)
     for commit in ordered[:TESTING_VERIFY_LIMIT]:
         try:
             verified: VerifiedBuildArtifact | VerifiedGenericWebBuild = (
@@ -2467,8 +2485,10 @@ def _current_testing_release(
     identity = inventory.runtime_identity
     if identity is None:
         return "", ""
-    digest = _image_reference_digest(identity.image_reference) or _artifact_digest(
-        record_store, identity.artifact_id
+    digest = (
+        _image_reference_digest(identity.image_reference)
+        or _image_reference_digest(identity.artifact_id)
+        or _artifact_digest(record_store, identity.artifact_id)
     )
     return identity.artifact_id, digest.lower()
 

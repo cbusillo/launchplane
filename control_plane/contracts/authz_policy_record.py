@@ -81,6 +81,7 @@ AuthzPolicyCompareWriteStatus = Literal[
     "idempotency_conflict",
     "reservation_in_progress",
     "reconciliation_required",
+    "authz_policy_delivery_activation_active",
 ]
 
 

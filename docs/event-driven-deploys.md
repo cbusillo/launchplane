@@ -72,9 +72,16 @@ reservation. The webhook request never waits on a deploy.
   build of an older commit is never desired while a newer one exists, so it
   cannot replace a newer deploy.
   - Selection refuses an incomplete read: the run list must include the running
-    commit and its recorded build run, and first-parent history must reach the
-    running commit. The saved plan includes run and history counts and rejected
-    builds. Missing evidence leaves the lane unchanged with a recorded reason.
+    commit and its recorded build run. A generic-web baseline deployed before
+    the Build contract may instead use its recorded source and immutable image
+    digest (including a digest-pinned artifact ID paired with a provider SHA
+    tag), only when the successful Build inventory is complete with distinct
+    run ids and no recorded build run is missing. First-parent history must
+    reach the running commit in either case. The candidate still needs verified
+    Build/manifest evidence and the forward-only movement checks below. The
+    saved plan includes run and history counts, rejected builds, and whether
+    recorded runtime identity supplied baseline evidence. Missing evidence
+    leaves the lane unchanged with a recorded reason.
   - If testing already runs the desired artifact, stop.
   - Otherwise, `record_verified_build_artifact` and queue the stable target
     replacement for the testing lane. Its idempotency key is the lane plus
@@ -89,6 +96,11 @@ reservation. The webhook request never waits on a deploy.
   - **Generic-web:** the reconcile deploys the verified image itself, in
     process, through the generic-web deploy route's durable provider
     operation, under reservation scope `launchplane-reconcile:<product>`.
+    The request keeps the verified digest as its artifact identity and supplies
+    the same repository's canonical `sha-<source_commit>` tag as the provider
+    deploy reference, as required by Dokploy application targets. Recovery uses
+    the exact retained request, including that reference; legacy saved-plan
+    reconstruction retains its original digest-only shape and fingerprint.
     Nothing goes to the artifact store; the deploy records the image as the
     lane's runtime identity. Its key is the desired digest, the stored lane
     authority, and the deployment record testing ran when the deploy
