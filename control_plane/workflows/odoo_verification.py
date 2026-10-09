@@ -100,6 +100,7 @@ def _normalized_health_url(raw_url: str) -> str:
 def verify_odoo_stable_readiness(
     *,
     base_url: str,
+    probe_base_url: str = "",
     health_url: str = "",
     verify_health: bool = True,
     verify_canonical: bool = True,
@@ -108,8 +109,9 @@ def verify_odoo_stable_readiness(
     retry_interval_seconds: int = ODOO_VERIFY_RETRY_INTERVAL_SECONDS,
 ) -> OdooVerificationResult:
     normalized_base_url = base_url.strip().rstrip("/")
+    normalized_probe_base_url = probe_base_url.strip().rstrip("/") or normalized_base_url
     normalized_health_url = health_url.strip() or default_odoo_health_url(
-        base_url=normalized_base_url
+        base_url=normalized_probe_base_url
     )
     probes: list[OdooVerificationProbeEvidence] = []
     health_status: OdooReadinessStatus = "skipped"
@@ -136,7 +138,7 @@ def verify_odoo_stable_readiness(
                 raise click.ClickException("Odoo canonical verification has no base URL.")
             evidence = _run_probe_with_retry(
                 lambda: _verify_canonical_url(
-                    base_url=normalized_base_url,
+                    base_url=normalized_probe_base_url,
                     expected_base_url=normalized_base_url,
                     timeout_seconds=timeout_seconds,
                 ),
@@ -150,7 +152,7 @@ def verify_odoo_stable_readiness(
                 raise click.ClickException("Odoo logo verification has no base URL.")
             evidence, logo_urls = _run_logo_probe_with_retry(
                 lambda: _verify_logo_route(
-                    base_url=normalized_base_url,
+                    base_url=normalized_probe_base_url,
                     timeout_seconds=timeout_seconds,
                 ),
                 timeout_seconds=timeout_seconds,

@@ -33,6 +33,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     _domains_for_target,
     _read_lane,
     _target_base_url,
+    _target_origin_base_url,
     _target_health_url,
 )
 from control_plane.workflows.odoo_verification import (
@@ -400,7 +401,9 @@ def execute_odoo_stable_bootstrap(
         target_record=target_record,
         domain_hosts=resolved_domains,
     )
-    base_url = _target_base_url(lane=lane, domains=resolved_domains)
+    base_url = _target_base_url(
+        lane=lane, domains=resolved_domains, public_hosts=target_record.public_hosts
+    )
 
     deployment_record_id = generate_deployment_record_id(
         context_name=request.context, instance_name=request.instance
@@ -408,7 +411,11 @@ def execute_odoo_stable_bootstrap(
     started_at = utc_now_timestamp()
     normalized_override_record = _record_with_stable_bootstrap_canonical(
         record=odoo_override_record,
-        canonical_url=base_url,
+        canonical_url=_target_origin_base_url(
+            lane=lane, domains=target_record.domains, public_hosts=target_record.public_hosts
+        )
+        if target_record.public_hosts
+        else base_url,
         updated_at=started_at,
     )
     if (
@@ -470,10 +477,19 @@ def execute_odoo_stable_bootstrap(
         )
         workflow_environment_overrides: dict[str, str] = {}
         required_workflow_environment_keys: tuple[str, ...] = ()
-        if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
+        rendering_record = control_plane_odoo_instance_overrides.record_with_public_base_url(
+            odoo_override_record
+            if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on
+            else None,
+            context=request.context,
+            instance=request.instance,
+            public_hosts=target_record.public_hosts,
+            updated_at=started_at,
+        )
+        if rendering_record is not None:
             post_deploy_environment = (
                 control_plane_odoo_instance_overrides.build_post_deploy_environment(
-                    odoo_override_record,
+                    rendering_record,
                     record_store=record_store,
                     protected_shopify_store_keys=protected_shopify_store_keys,
                 )
@@ -616,7 +632,12 @@ def execute_odoo_stable_bootstrap(
             error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
         )
 
-    health_url = _target_health_url(profile=profile, lane=lane, domains=resolved_domains)
+    health_url = _target_health_url(
+        profile=profile,
+        lane=lane,
+        domains=target_record.domains if target_record.public_hosts else resolved_domains,
+        public_hosts=target_record.public_hosts,
+    )
     health_timeout_seconds = (
         request.health_timeout_seconds
         or target_record.healthcheck_timeout_seconds
@@ -624,6 +645,11 @@ def execute_odoo_stable_bootstrap(
     )
     verification = verify_odoo_stable_readiness(
         base_url=base_url,
+        probe_base_url=_target_origin_base_url(
+            lane=lane, domains=target_record.domains, public_hosts=target_record.public_hosts
+        )
+        if target_record.public_hosts
+        else "",
         health_url=health_url,
         verify_health=request.verify_health,
         verify_canonical=request.verify_canonical,

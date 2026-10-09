@@ -429,7 +429,14 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
         return evidence
 
     def test_apply_runs_durable_phases_and_switches_only_database_volume(self) -> None:
+        self._assert_apply_runs_durable_phases()
+
+    def test_public_canonical_restore_keeps_origin_probes(self) -> None:
+        self._assert_apply_runs_durable_phases(("cellmechanic.com", "www.cellmechanic.com"))
+
+    def _assert_apply_runs_durable_phases(self, public_hosts: tuple[str, ...] = ()) -> None:
         store = _Store()
+        store.target_record = store.target_record.model_copy(update={"public_hosts": public_hosts})
         live_env = _live_env()
 
         def fetch_target_payload(**_: object) -> dict[str, str]:
@@ -577,7 +584,7 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_prod_backup_restore.verify_odoo_stable_readiness",
                 return_value=verification,
-            ),
+            ) as verify_readiness,
             patch(
                 "control_plane.workflows.odoo_prod_backup_restore._verify_runtime_identity",
                 return_value=HealthcheckEvidence(
@@ -603,6 +610,12 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
             )
 
         self.assertEqual(result.restore_status, "pass")
+        self.assertEqual(
+            verify_readiness.call_args.kwargs["base_url"],
+            f"https://{public_hosts[0]}" if public_hosts else BASE_URL,
+        )
+        self.assertEqual(verify_readiness.call_args.kwargs["probe_base_url"], BASE_URL)
+        self.assertEqual(verify_readiness.call_args.kwargs["health_url"], HEALTH_URL)
         self.assertEqual(live_env["ODOO_DB_VOLUME"], NEW_DB_VOLUME)
         self.assertEqual(live_env["ODOO_DATA_VOLUME"], DATA_VOLUME)
         self.assertEqual(live_env["ODOO_LOG_VOLUME"], LOG_VOLUME)
@@ -614,7 +627,14 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
         self.assertTrue(store.environment_inventories)
 
     def test_verification_replay_reruns_only_post_deploy_and_checks(self) -> None:
+        self._assert_verification_replay()
+
+    def test_public_canonical_restore_replay_keeps_origin_probes(self) -> None:
+        self._assert_verification_replay(("cellmechanic.com", "www.cellmechanic.com"))
+
+    def _assert_verification_replay(self, public_hosts: tuple[str, ...] = ()) -> None:
         store = _Store()
+        store.target_record = store.target_record.model_copy(update={"public_hosts": public_hosts})
         live_env = _live_env()
 
         def fetch_target_payload(**_: object) -> dict[str, str]:
@@ -952,7 +972,7 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_prod_backup_restore.verify_odoo_stable_readiness",
                 return_value=replay_verification,
-            ),
+            ) as verify_readiness,
             patch(
                 "control_plane.workflows.odoo_prod_backup_restore._verify_runtime_identity",
                 return_value=HealthcheckEvidence(
@@ -983,6 +1003,12 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
         self.assertEqual(replay_result.web_quiesce_status, "pass")
         self.assertEqual(replay_result.filestore_activation_status, "pass")
         self.assertEqual(replay_result.deployment_status, "pass")
+        self.assertEqual(
+            verify_readiness.call_args.kwargs["base_url"],
+            f"https://{public_hosts[0]}" if public_hosts else BASE_URL,
+        )
+        self.assertEqual(verify_readiness.call_args.kwargs["probe_base_url"], BASE_URL)
+        self.assertEqual(verify_readiness.call_args.kwargs["health_url"], HEALTH_URL)
         self.assertEqual(replay_result.canonical_status, "pass")
         self.assertEqual(replay_result.runtime_identity_status, "match")
         self.assertEqual(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import asyncio
 import base64
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -3451,6 +3452,275 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 )
             finally:
                 store.close()
+
+    def test_release_publisher_progresses_when_waiters_fill_its_pool(self) -> None:
+        from control_plane.release_review_record import publish_release_decision
+        from tests.test_release_review import decision, profile, seed
+        from tests.test_release_review_record import FakeReleaseIssues
+
+        for phase in ("read", "acknowledgement"):
+            with self.subTest(phase=phase), _head_postgres_database() as url:
+                engine = create_engine(url, pool_size=3, max_overflow=0, pool_timeout=0.2)
+                with patch("control_plane.storage.postgres._build_engine", return_value=engine):
+                    store = PostgresRecordStore(database_url=url)
+                observer = create_engine(url, isolation_level="AUTOCOMMIT")
+                try:
+                    seed(store)
+                    saved = decision(store).model_copy(update={"release_issue_url": ""})
+                    store.create_release_review_decision_record_if_absent(saved)
+                    github = FakeReleaseIssues()
+                    holder_ready, resume_holder = threading.Event(), threading.Event()
+                    original_read = store.read_release_review_decision_record
+
+                    def read(**kwargs: Any) -> ReleaseReviewDecisionRecord:
+                        if phase == "read" and not holder_ready.is_set():
+                            holder_ready.set()
+                            if not resume_holder.wait(10):
+                                raise AssertionError("Lock holder was not resumed")
+                        return original_read(**kwargs)
+
+                    def request(**kwargs: Any) -> object:
+                        if kwargs.get("method", "GET") == "GET" and phase == "acknowledgement":
+                            holder_ready.set()
+                            if not resume_holder.wait(10):
+                                raise AssertionError("Lock holder was not resumed")
+                        return github.request(**kwargs)
+
+                    def publish() -> str:
+                        return publish_release_decision(
+                            store=store,
+                            control_plane_root=Path("."),
+                            profile=profile(),
+                            decision=saved,
+                        )
+
+                    with (
+                        patch.object(
+                            store, "read_release_review_decision_record", side_effect=read
+                        ),
+                        patch(
+                            "control_plane.release_review_record.github_api_request",
+                            side_effect=request,
+                        ),
+                        patch(
+                            "control_plane.release_review_record.resolve_launchplane_github_token",
+                            return_value="test-token",
+                        ),
+                        ThreadPoolExecutor(max_workers=3) as workers,
+                    ):
+                        holder = workers.submit(publish)
+                        try:
+                            self.assertTrue(holder_ready.wait(10))
+                            waiters = [workers.submit(publish) for _ in range(2)]
+                            deadline = time.monotonic() + 10
+                            with observer.connect() as connection:
+                                while time.monotonic() < deadline:
+                                    waiting = connection.scalar(
+                                        text(
+                                            "SELECT count(*) FROM pg_stat_activity "
+                                            "WHERE datname = current_database() AND wait_event = 'advisory'"
+                                        )
+                                    )
+                                    if waiting == 2:
+                                        break
+                                    time.sleep(0.01)
+                                else:
+                                    self.fail(
+                                        "Independent publishers did not fill the pool with lock waits"
+                                    )
+                            self.assertEqual(engine.pool.checkedout(), 3)  # type: ignore[attr-defined]
+                        finally:
+                            resume_holder.set()
+                        urls = [holder.result(timeout=10)] + [
+                            waiter.result(timeout=10) for waiter in waiters
+                        ]
+                    self.assertEqual(len(set(urls)), 1)
+                    self.assertEqual(len(github.issues), 1)
+                    published = original_read(product=saved.product, record_id=saved.record_id)
+                    self.assertEqual(published.release_issue_url, urls[0])
+                    self.assertEqual(published.model_copy(update={"release_issue_url": ""}), saved)
+                    self.assertEqual(store.list_deployment_records(), ())
+                finally:
+                    store.close()
+                    observer.dispose()
+
+    def test_single_connection_publication_recovers_lost_response_and_commit(self) -> None:
+        from control_plane.release_review_record import publish_release_decision
+        from tests.test_release_review import decision, profile, seed
+        from tests.test_release_review_record import FakeReleaseIssues
+
+        with _head_postgres_database() as url:
+            engine = create_engine(url, pool_size=1, max_overflow=0, pool_timeout=0.2)
+            with patch("control_plane.storage.postgres._build_engine", return_value=engine):
+                store = PostgresRecordStore(database_url=url)
+            try:
+                seed(store)
+                for failure in ("response", "commit"):
+                    with self.subTest(failure=failure):
+                        saved = decision(store).model_copy(
+                            update={"record_id": f"lost-{failure}", "release_issue_url": ""}
+                        )
+                        store.create_release_review_decision_record_if_absent(saved)
+                        github = FakeReleaseIssues()
+                        github.lose_response = failure == "response"
+                        fail_commit = failure == "commit"
+
+                        def commit(connection: Any) -> None:
+                            nonlocal fail_commit
+                            if fail_commit:
+                                fail_commit = False
+                                raise OperationalError(
+                                    "COMMIT", {}, Exception("Commit interrupted")
+                                )
+
+                        event.listen(engine, "commit", commit)
+                        try:
+                            with (
+                                patch(
+                                    "control_plane.release_review_record.github_api_request",
+                                    side_effect=github.request,
+                                ),
+                                patch(
+                                    "control_plane.release_review_record.resolve_launchplane_github_token",
+                                    return_value="test-token",
+                                ),
+                            ):
+                                with self.assertRaises(ValueError):
+                                    publish_release_decision(
+                                        store=store,
+                                        control_plane_root=Path("."),
+                                        profile=profile(),
+                                        decision=saved,
+                                    )
+                                self.assertEqual(
+                                    store.read_release_review_decision_record(
+                                        product=saved.product, record_id=saved.record_id
+                                    ),
+                                    saved,
+                                )
+                                url = publish_release_decision(
+                                    store=store,
+                                    control_plane_root=Path("."),
+                                    profile=profile(),
+                                    decision=saved,
+                                )
+                                self.assertEqual(
+                                    publish_release_decision(
+                                        store=store,
+                                        control_plane_root=Path("."),
+                                        profile=profile(),
+                                        decision=saved,
+                                    ),
+                                    url,
+                                )
+                            self.assertEqual(len(github.issues), 1)
+                            stored = store.read_release_review_decision_record(
+                                product=saved.product, record_id=saved.record_id
+                            )
+                            self.assertEqual(stored.release_issue_url, url)
+                            self.assertEqual(
+                                stored.model_copy(update={"release_issue_url": ""}), saved
+                            )
+                        finally:
+                            event.remove(engine, "commit", commit)
+                self.assertEqual(store.list_deployment_records(), ())
+            finally:
+                store.close()
+
+    def test_release_publication_lock_timeout_returns_pending_and_retry_recovers(self) -> None:
+        from control_plane.release_review import RELEASE_RECORD_PENDING
+        from control_plane.release_review_record import publish_release_decision
+        from tests.test_release_review import decision, profile, seed
+        from tests.test_release_review_http import ReleaseReviewHttpTests
+        from tests.test_release_review_record import FakeReleaseIssues
+
+        with _head_postgres_database() as url:
+            holder_store = PostgresRecordStore(database_url=url)
+            waiter_store = PostgresRecordStore(
+                database_url=url, postgres_statement_timeout_milliseconds=100
+            )
+            http = ReleaseReviewHttpTests()
+            http.setUp()
+            http.store = waiter_store  # type: ignore[assignment]
+            try:
+                seed(holder_store)
+                holder_store.seed_authz_policy_if_absent(
+                    LaunchplaneAuthzPolicyRecord(
+                        record_id="release-publication-test-policy",
+                        source="test",
+                        updated_at="2026-10-07T00:00:00Z",
+                        policy=LaunchplaneAuthzPolicy(
+                            github_humans=(
+                                GitHubHumanPolicyRule(
+                                    logins=("site-owner",),
+                                    roles=("read_only",),
+                                    products=("example-site",),
+                                    contexts=("launchplane",),
+                                    actions=("product_profile.read",),
+                                ),
+                            )
+                        ),
+                    )
+                )
+                saved = decision(holder_store).model_copy(update={"release_issue_url": ""})
+                holder_store.create_release_review_decision_record_if_absent(saved)
+                github = FakeReleaseIssues()
+                github.continue_lookup.clear()
+                with (
+                    patch(
+                        "control_plane.release_review_record.github_api_request",
+                        side_effect=github.request,
+                    ),
+                    patch(
+                        "control_plane.release_review_record.resolve_launchplane_github_token",
+                        return_value="test-token",
+                    ),
+                    patch(
+                        "control_plane.http_app.publish_release_decision",
+                        wraps=publish_release_decision,
+                    ),
+                    ThreadPoolExecutor(max_workers=1) as workers,
+                ):
+                    holder = workers.submit(
+                        publish_release_decision,
+                        store=holder_store,
+                        control_plane_root=Path("."),
+                        profile=profile(),
+                        decision=saved,
+                    )
+                    try:
+                        self.assertTrue(github.lookup_started.wait(10))
+                        pending = asyncio.run(http.post())
+                        self.assertEqual(pending.status_code, 200, pending.text)
+                        self.assertIn(RELEASE_RECORD_PENDING, pending.json()["review"]["blockers"])
+                        self.assertFalse(pending.json()["review"]["approved"])
+                        self.assertEqual(
+                            waiter_store.read_release_review_decision_record(
+                                product=saved.product, record_id=saved.record_id
+                            ),
+                            saved,
+                        )
+                    finally:
+                        github.continue_lookup.set()
+                    published_url = holder.result(timeout=10)
+                    retry = asyncio.run(http.post())
+                self.assertEqual(retry.status_code, 200, retry.text)
+                self.assertTrue(retry.json()["review"]["approved"])
+                self.assertEqual(len(github.issues), 1)
+                self.assertEqual(
+                    retry.json()["review"]["latest_decision"]["release_issue_url"], published_url
+                )
+                self.assertEqual(
+                    waiter_store.list_release_review_decision_records(product=saved.product)[
+                        0
+                    ].record_id,
+                    saved.record_id,
+                )
+                self.assertEqual(waiter_store.list_deployment_records(), ())
+            finally:
+                http.doCleanups()
+                holder_store.close()
+                waiter_store.close()
 
     def test_source_scan_delivery_has_one_lease_and_recovers_without_stale_publication(
         self,
