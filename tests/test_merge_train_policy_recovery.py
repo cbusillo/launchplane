@@ -3,7 +3,9 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan_record
 from control_plane.contracts.merge_readiness import MergeReadinessCandidateEvidence
+from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_admission import (
     GuardedMergeAdmission,
     MergeAdmissionDeniedError,
@@ -21,9 +23,13 @@ from control_plane.merge_train_controller_run_once import (
 from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from tests.http_app_test_support import _post_merge_train_controller_run_once
+from tests.support.auth import _StubVerifier
+from tests.support.merge_train import _merge_train_service_identity, _merge_train_service_policy
 from tests.test_merge_admission_live import _queued_pull_request
 from tests.test_merge_admission_records import _StaticEvaluator, _guard_records
 from tests.test_merge_train_github import _landing_plan
+from tests.test_merge_train_controller import _stack_collapse_record
 from tests.test_merge_readiness import (
     BASE_SHA,
     HEAD_SHA,
@@ -42,6 +48,8 @@ class _RecoveryTransport:
         self.head_sha = HEAD_SHA
         self.pr_state = "open"
         self.unavailable = False
+        self.merge_sha = ""
+        self.contained = True
         self.calls: list[str] = []
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
@@ -57,9 +65,13 @@ class _RecoveryTransport:
         if path.endswith("/pulls/2083"):
             return {
                 "state": self.pr_state,
+                "merged": bool(self.merge_sha),
+                "merge_commit_sha": self.merge_sha,
                 "head": {"sha": self.head_sha},
                 "base": {"ref": "main", "sha": self.base_sha},
             }
+        if "/compare/" in path:
+            return {"status": "ahead" if self.contained else "diverged"}
         raise AssertionError(f"Unexpected recovery read: {path}")
 
 
@@ -68,7 +80,7 @@ class _NoAdmissionEvaluator:
         raise AssertionError("Retirement must not admit a merge under the old policy")
 
 
-class MergeTrainPolicyRecoveryTests(unittest.TestCase):
+class MergeTrainPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -148,6 +160,115 @@ class MergeTrainPolicyRecoveryTests(unittest.TestCase):
             admission=self.admission,
             error=MergeTrainGitHubError("Provider refused merge", status_code=status),
             observed_at="2026-08-11T03:02:00Z",
+        )
+
+    def _record_completed_landing(self) -> None:
+        plan = self.landing.landing_plan
+        completed = build_merge_train_batch_landing_plan_record(
+            landing_plan=plan.model_copy(
+                update={
+                    "entries": tuple(
+                        entry.model_copy(update={"status": "merged", "merge_commit_sha": OTHER_SHA})
+                        for entry in plan.entries
+                    )
+                }
+            ),
+            source="test:completed-landing",
+            updated_at=self.landing.updated_at,
+        )
+        self.store.write_merge_train_batch_landing_plan_record(completed)
+        controller = self.store.list_merge_train_controller_state_records()[0]
+        self.store.write_merge_train_controller_state_record(
+            controller.model_copy(update={"active_phase": "landing_entry_merged"})
+        )
+        self.transport.pr_state = "closed"
+        self.transport.merge_sha = OTHER_SHA
+
+    async def test_landing_entry_merged_resumes_after_policy_change_without_provider_writes(
+        self,
+    ) -> None:
+        self._record_completed_landing()
+        self.store.write_merge_train_policy_record(self.policy)
+        original_landings = self.store.list_merge_train_batch_landing_plan_records()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: self.store,
+        )
+        payload = {"repository": REPOSITORY, "base_branch": "main", "mutate": False}
+        with (
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
+            patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                return_value=self.client,
+            ),
+        ):
+            dry_run = await _post_merge_train_controller_run_once(app, payload)
+            self.assertEqual(dry_run.status_code, 202, dry_run.text)
+            self.assertEqual(dry_run.json()["result"]["controller_action"], "resume_reconciliation")
+            self.assertEqual(self.transport.calls, [])
+            resumed = await _post_merge_train_controller_run_once(app, {**payload, "mutate": True})
+
+        self.assertEqual(resumed.status_code, 202, resumed.text)
+        result = resumed.json()["result"]
+        self.assertEqual(result["reason_code"], "completed_landing_policy_changed")
+        self.assertEqual(result["candidate_ref_cleanup_status"], "retained")
+        self.assertEqual(result["landing_plan"]["entries"][0]["merge_commit_sha"], OTHER_SHA)
+        self.assertEqual(
+            self.store.list_merge_train_batch_landing_plan_records(), original_landings
+        )
+        self.assertEqual(self.store.list_merge_admission_records(), (self.admission,))
+        state = self.store.list_merge_train_controller_state_records()[0]
+        self.assertEqual((state.status, state.reconciliation_status), ("idle", "clean"))
+        snapshot = MergeTrainDryRunSnapshot(
+            repository=REPOSITORY, base_branch="main", base_sha=OTHER_SHA, pull_requests=()
+        )
+        with patch.object(self.client, "read_merge_train_snapshot", return_value=snapshot):
+            next_read = self._run(mutate=False)
+        self.assertEqual(next_read.accepted_result["controller_action"], "idle")
+
+    def test_completed_old_policy_landing_keeps_fence_when_live_merge_disagrees(self) -> None:
+        self._record_completed_landing()
+        for field, value in (("merge_sha", BASE_SHA), ("contained", False), ("unavailable", True)):
+            with self.subTest(field=field):
+                previous = getattr(self.transport, field)
+                setattr(self.transport, field, value)
+                with self.assertRaises(MergeTrainGitHubError):
+                    self._run()
+                setattr(self.transport, field, previous)
+                state = self.store.list_merge_train_controller_state_records()[0]
+                self.assertEqual(state.status, "reconcile_required")
+                self.assertEqual(state.active_phase, "landing_entry_merged")
+
+    def test_completed_old_policy_landing_reports_unfinished_stack_record(self) -> None:
+        self._record_completed_landing()
+        collapse = _stack_collapse_record(status="waiting_for_root_checks")
+        plan = self.landing.landing_plan
+        collapse = collapse.model_copy(
+            update={
+                "plan": collapse.plan.model_copy(
+                    update={
+                        "repository": REPOSITORY,
+                        "policy_key": plan.policy_key,
+                        "policy_sha256": plan.policy_sha256,
+                        "root_pull_request_number": plan.entries[0].pull_request_number,
+                        "root_initial_head_sha": HEAD_SHA,
+                    }
+                )
+            }
+        )
+        self.store.write_merge_train_stack_collapse_plan_record(collapse)
+        result = self._run().accepted_result
+        self.assertEqual(result["reason_code"], "completed_landing_stack_reconciliation_required")
+        self.assertEqual(
+            result["details"],
+            {
+                "stack_collapse_plan_record_ids": [collapse.record_id],
+                "expected_stack_collapse_plan_record_id": "",
+            },
+        )
+        self.assertEqual(
+            self.store.list_merge_train_controller_state_records()[0].status, "reconcile_required"
         )
 
     def test_rejected_old_policy_plan_retires_and_requires_a_fresh_candidate(self) -> None:

@@ -29,6 +29,14 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.odoo_import_overrides import plan_import_override_reconciliation
+from control_plane.workflows.odoo_post_deploy import _write_odoo_instance_override_apply_result
+from tests.test_odoo_import_override_reconciliation import (
+    KEYS as IMPORT_KEYS,
+    override_record as _import_override_record,
+    runtime_record as _import_runtime_record,
+)
+from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from tests.test_odoo_addon_settings_override import _existing_record as _addon_override_record
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -1339,6 +1347,59 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     target,
                 )
                 self.assertEqual(store.list_odoo_instance_override_records(), ())
+
+    def test_import_override_reconciliation_refuses_a_changed_runtime_snapshot(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_profile_payload_with_prod_lane()
+            )
+            store.write_product_profile_record(profile)
+            store.write_runtime_environment_record(_import_runtime_record())
+            store.write_odoo_instance_override_record(_import_override_record())
+            _plan, bundle = plan_import_override_reconciliation(
+                record_store=store,
+                profile=profile,
+                record=_import_override_record(),
+                keys=IMPORT_KEYS,
+            )
+            other = PostgresRecordStore(database_url=store.database_url)
+            try:
+                other.write_runtime_environment_record(
+                    _import_runtime_record().model_copy(update={"updated_at": "changed"})
+                )
+            finally:
+                other.close()
+            with self.assertRaises(RuntimeEnvironmentConflictError):
+                store.write_product_authority_bundle(bundle)
+            self.assertEqual(
+                store.read_odoo_instance_override_record(
+                    context_name="cm", instance_name="testing"
+                ),
+                _import_override_record(),
+            )
+            _plan, fresh_bundle = plan_import_override_reconciliation(
+                record_store=store,
+                profile=profile,
+                record=_import_override_record(),
+                keys=IMPORT_KEYS,
+            )
+            store.write_product_authority_bundle(fresh_bundle)
+            _write_odoo_instance_override_apply_result(
+                record_store=store,
+                record=_import_override_record(),
+                status="pass",
+                detail="Late completion of the pre-reconciliation payload",
+            )
+            after = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            )
+            self.assertTrue(
+                all(
+                    item.value.source == "runtime_environment"
+                    for item in after.config_parameters
+                    if item.key in IMPORT_KEYS
+                )
+            )
 
     def test_profile_guard_rejects_a_bundle_after_another_connection_changes_the_owner(
         self,
