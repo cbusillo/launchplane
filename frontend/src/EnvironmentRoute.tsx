@@ -608,7 +608,7 @@ function EnvironmentOverview({
             detail.trust_state,
           )}
           trustState={detail.trust_state}
-          value={`${warningItems.length} recorded`}
+          value={`${warningItems.filter(warning => warning.severity !== "info").length} recorded`}
         />
       </section>
 

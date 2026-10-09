@@ -665,7 +665,7 @@ def _observed_topology(
     states: list[FreshnessStatus] = []
     if placement.runtime_identity_status != "unchecked":
         states.append(placement.trust_state)
-    if ingress.status != "missing":
+    if ingress.probe_effective and ingress.status != "missing":
         states.append(ingress.trust_state)
     observed_tls_by_domain = {
         evidence.projection.domain_name: evidence.projection for evidence in tls_evidence
@@ -673,7 +673,10 @@ def _observed_topology(
     if lane.health_monitoring.monitoring_intent != "private":
         for domain_name in expected_tls_domains:
             observation = observed_tls_by_domain.get(domain_name)
-            states.append(observation.trust_state if observation is not None else "missing")
+            if observation is not None:
+                states.append(observation.trust_state)
+            elif profile.public_website != "none":
+                states.append("missing")
     return (
         ProductObservedTopology(
             placement=placement,
@@ -1315,7 +1318,11 @@ def _topology_warnings(
                         ),
                     )
                 )
-            elif public_monitoring_effective and observed.ingress.trust_state == "stale":
+            elif (
+                public_monitoring_effective
+                and observed.ingress.probe_effective
+                and observed.ingress.trust_state == "stale"
+            ):
                 warnings.append(
                     _warning(
                         code="stale_public_ingress_observation",
@@ -1329,6 +1336,7 @@ def _topology_warnings(
                 )
             if (
                 public_monitoring_effective
+                and observed.ingress.probe_effective
                 and observed.ingress.status != "missing"
                 and observed.ingress.runtime_identity_status != "match"
             ):
@@ -1367,6 +1375,7 @@ def _topology_warnings(
                         detail="No TLS certificate observation is recorded for the expected domain.",
                     )
                 )
+    if public_monitoring_effective or desired.public_website == "none":
         for evidence in tls_evidence:
             warnings.extend(
                 _tls_warnings(

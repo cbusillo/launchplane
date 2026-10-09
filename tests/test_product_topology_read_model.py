@@ -626,6 +626,83 @@ class ProductTopologyReadModelTests(unittest.TestCase):
         self.assertIn("public_website_not_applicable", codes)
         self.assertFalse(topology.observed.ingress.probe_effective)
 
+    def test_disabled_public_history_does_not_age_current_placement(self) -> None:
+        for website in ("required", "none"):
+            with self.subTest(website=website):
+                payload = _profile().model_dump(mode="json")
+                payload["public_website"] = website
+                if website == "none":
+                    payload["lanes"][0]["base_url"] = ""
+                    payload["lanes"][0]["health_url"] = ""
+                payload["lanes"][0]["health_monitoring"] = {
+                    "monitoring_intent": "prelaunch",
+                    "checks": [{"name": "public-ingress", "kind": "public_http", "enabled": False}],
+                }
+                profile = LaunchplaneProductProfileRecord.model_validate(payload)
+                topology = build_product_environment_topology(
+                    record_store=_TopologyStore(
+                        route_binding=_route_binding(
+                            ingress_provider="external",
+                            tls_owner="external",
+                            source_kind="operator",
+                        ),
+                        observations=(
+                            _http_observation(
+                                observed_at="2026-07-14T08:00:00Z",
+                                runtime_identity_status="unverifiable",
+                            ),
+                            _tls_observation(status="valid"),
+                        ),
+                    ),
+                    profile=profile,
+                    lane=profile.lanes[0],
+                    lane_summary=_lane_summary(freshness_status="verified"),
+                    now=_NOW,
+                )
+                codes = {warning.code for warning in topology.warnings}
+                self.assertNotIn("stale_public_ingress_observation", codes)
+                self.assertNotIn("public_runtime_identity_unverified", codes)
+                self.assertNotEqual(topology.observed.trust_state, "stale")
+                self.assertNotEqual(topology.trust_state, "stale")
+                self.assertEqual(topology.observed.ingress.trust_state, "stale")
+                self.assertFalse(topology.observed.ingress.probe_effective)
+                self.assertEqual("public_website_check_missing" in codes, website == "required")
+
+    def test_no_website_keeps_recorded_negative_tls_blocking(self) -> None:
+        payload = _profile().model_dump(mode="json")
+        payload["public_website"] = "none"
+        payload["lanes"][0]["base_url"] = ""
+        payload["lanes"][0]["health_url"] = ""
+        payload["lanes"][0]["health_monitoring"] = {
+            "monitoring_intent": "prelaunch",
+            "checks": [
+                {
+                    "name": "runtime",
+                    "kind": "private_http",
+                    "private_endpoint_key": "runtime",
+                }
+            ],
+        }
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(
+                route_binding=_route_binding(
+                    ingress_provider="external",
+                    tls_owner="external",
+                    source_kind="operator",
+                ),
+                observations=(_tls_observation(status="hostname_mismatch"),),
+            ),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=_lane_summary(freshness_status="verified"),
+            now=_NOW,
+        )
+        mismatch = next(warning for warning in topology.warnings if warning.code == "tls_mismatch")
+        self.assertEqual(mismatch.severity, "error")
+        self.assertEqual(topology.observed.tls_domains[0].status, "hostname_mismatch")
+        self.assertNotIn("tls_observation_missing", {warning.code for warning in topology.warnings})
+
     def test_no_website_rejects_conflicting_public_surface(self) -> None:
         payload = _strict_public_profile().model_dump(mode="json")
         payload["public_website"] = "none"
@@ -795,7 +872,7 @@ class ProductTopologyReadModelTests(unittest.TestCase):
     def test_external_ingress_fails_closed_for_missing_stale_or_unverified_public_proof(
         self,
     ) -> None:
-        profile = _profile()
+        profile = _strict_public_profile()
         route_binding = _route_binding(
             ingress_provider="external",
             tls_owner="external",

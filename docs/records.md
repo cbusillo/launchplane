@@ -890,7 +890,8 @@ authority inapplicable. Private monitoring intent alone is not an exemption.
 Declare it through the existing `POST /v1/product-profiles` service write under
 `product_profile.write`, preserving the rest of the profile, then read it back.
 No new grant or checked-in product list is involved. Monitoring changes still
-use their own reviewed health-monitoring apply endpoint.
+use their own reviewed health-monitoring apply endpoint; its dry-run validates
+the same complete candidate profile as apply, including the website declaration.
 The declaration rejects public lane URLs, public monitoring intent and enabled
 public checks. It is persisted in the profile and projected in desired topology
 with profile provenance, and the environment overview shows the declaration.
@@ -902,6 +903,9 @@ Topology records distinguish `info` from blocking `warning` and `error`.
 No-website applicability and external proxy-internals visibility remain visible
 as information. A disabled public check's failed observation remains history,
 with `probe_effective=false`, rather than a current topology error. Applicable
+public history does not age current placement evidence or imply a current
+public runtime-identity failure when its check is disabled. Retained negative
+TLS observations remain diagnostic errors even for a no-website declaration.
 missing/stale public authority, enabled-check failures and negative TLS still
 block green. Environment warning strings contain only blocking warnings;
 structured topology retains the informational evidence for review.
