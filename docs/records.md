@@ -902,11 +902,11 @@ cannot become green. Existing products keep their public authority requirements.
 Topology records distinguish `info` from blocking `warning` and `error`.
 No-website applicability and external proxy-internals visibility remain visible
 as information. A disabled public check's failed observation remains history,
-with `probe_effective=false`, rather than a current topology error. Applicable
+with `probe_effective=false`, rather than a current topology error. Disabled
 public history does not age current placement evidence or imply a current
-public runtime-identity failure when its check is disabled. Retained negative
+public runtime-identity failure when its check is disabled. Projected negative
 TLS observations remain diagnostic errors even for a no-website declaration.
-missing/stale public authority, enabled-check failures and negative TLS still
+Applicable missing/stale public authority, enabled-check failures and negative TLS still
 block green. Environment warning strings contain only blocking warnings;
 structured topology retains the informational evidence for review.
 
