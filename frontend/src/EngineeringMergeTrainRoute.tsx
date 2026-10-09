@@ -14,6 +14,8 @@ import {
 } from "./api";
 import {
   MERGE_TRAIN_BROWSER_BOUNDARY,
+  mergeTrainActiveRecordIds,
+  mergeTrainActiveStaleRecords,
   mergeTrainControllerTone,
   mergeTrainStatusScopeKey,
   mergeTrainTargetSelection,
@@ -326,6 +328,8 @@ function ControllerStatus({
   const staleRecords = status.controller_records.filter(
     (record) => record.policy_status === "stale",
   );
+  const activeIds = mergeTrainActiveRecordIds(status);
+  const activeStaleRecords = mergeTrainActiveStaleRecords(status);
   return (
     <div className="engineering-controller-status">
       <section className="engineering-metric-grid" aria-label="Controller summary">
@@ -337,9 +341,9 @@ function ControllerStatus({
         />
         <Metric label="Current records" value={String(currentRecords.length)} />
         <Metric
-          label="Stale records"
-          value={String(staleRecords.length)}
-          tone={staleRecords.length ? "blocked" : "pass"}
+          label="Historical policy records"
+          value={String(staleRecords.length - activeStaleRecords.length)}
+          tone="unknown"
         />
         <Metric
           label="Lease"
@@ -348,7 +352,7 @@ function ControllerStatus({
         />
       </section>
 
-      {policyDigestMismatch || reconciliationRequired || staleRecords.length ? (
+      {policyDigestMismatch || reconciliationRequired || activeStaleRecords.length ? (
         <div className="engineering-controller-blocker" role="alert">
           <ShieldAlert size={18} aria-hidden="true" />
           <div>
@@ -360,7 +364,7 @@ function ControllerStatus({
                   ? status.controller_state?.reconciliation_detail ||
                     status.controller_diagnostics?.reconciliation_detail ||
                     "Controller reconciliation is required."
-                  : `${staleRecords.length} durable record${staleRecords.length === 1 ? " is" : "s are"} stale under the active policy.`}
+                  : `${activeStaleRecords.length} active record${activeStaleRecords.length === 1 ? " is" : "s are"} stale under the active policy.`}
             </p>
           </div>
         </div>
@@ -381,7 +385,13 @@ function ControllerStatus({
           data-status={controllerTone}
         >
           <StatusIcon status={controllerTone} />
-          {status.controller_state?.reconciliation_status ?? "no state"}
+          {controllerTone === "blocked"
+            ? "Attention required"
+            : controllerTone === "pending"
+              ? "Running"
+              : controllerTone === "pass"
+                ? "Clean"
+                : "Unknown"}
         </span>
       </section>
 
@@ -527,7 +537,11 @@ function ControllerStatus({
         ) : (
           <ul>
             {status.controller_records.map((record) => (
-              <ControllerRecord key={record.record_id} record={record} />
+              <ControllerRecord
+                key={record.record_id}
+                record={record}
+                active={activeIds.has(record.record_id)}
+              />
             ))}
           </ul>
         )}
@@ -536,8 +550,9 @@ function ControllerStatus({
   );
 }
 
-function ControllerRecord({ record }: { record: MergeTrainControllerRecordSummary }) {
-  const tone = record.policy_status === "stale" ? "blocked" : "pending";
+function ControllerRecord({ record, active }: { record: MergeTrainControllerRecordSummary; active: boolean }) {
+  const historical = record.policy_status === "stale" && !active;
+  const tone = historical ? "unknown" : record.policy_status === "stale" ? "blocked" : "pending";
   return (
     <li className="engineering-controller-record" data-policy={record.policy_status}>
       <StatusIcon status={tone} />
@@ -547,7 +562,7 @@ function ControllerRecord({ record }: { record: MergeTrainControllerRecordSummar
       </div>
       <div className="engineering-chip-row">
         <span>{record.status}</span>
-        <span>{record.policy_status} policy</span>
+        <span>{historical ? "historical policy" : `${record.policy_status} policy`}</span>
         {record.pull_request_numbers.length ? (
           <span>PR {record.pull_request_numbers.join(", ")}</span>
         ) : null}
