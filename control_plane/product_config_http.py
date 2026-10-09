@@ -29,6 +29,8 @@ from control_plane.contracts.product_profile_record import (
 )
 
 
+from control_plane.contracts.public_hosts import normalize_public_hosts
+
 ProductConfigMode = Literal["dry-run", "apply"]
 
 _ENV_KEY_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
@@ -287,6 +289,24 @@ class ProductConfigLiveTargetRuntimeNextAction(BaseModel):
     instruction: str
 
 
+class ProductConfigPublicHostsResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    before: list[str]
+    plan_digest: str
+    after: list[str]
+    added: list[str]
+    updated: list[str]
+    removed: list[str]
+    unchanged: list[str]
+    runtime_port: int = Field(ge=1, le=65535)
+    https: Literal[True] = True
+    service_name: Literal["web"] = "web"
+    certificate_type: Literal["none"] = "none"
+    verified: bool
+    read_back_hosts: list[str]
+
+
 class ProductConfigApplyResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -306,6 +326,11 @@ class ProductConfigApplyResult(BaseModel):
     )
     summary: ProductConfigApplySummary
     next_actions: list[ProductConfigLiveTargetRuntimeNextAction] = Field(default_factory=list)
+    public_hosts: ProductConfigPublicHostsResult | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class ProductConfigApplyResponse(BaseModel):
@@ -345,6 +370,12 @@ class ProductConfigApplyEnvelope(BaseModel):
         union_mode="left_to_right",
     )
     secrets: list[ProductConfigSecretInput] = Field(default_factory=list)
+    public_hosts: tuple[str, ...] | None = None
+
+    @field_validator("public_hosts", mode="before")
+    @classmethod
+    def _validate_public_hosts(cls, value: object) -> tuple[str, ...]:
+        return normalize_public_hosts(value)
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -364,6 +395,8 @@ class ProductConfigApplyEnvelope(BaseModel):
         self.confirmation = self.confirmation.strip()
         if not self.product:
             raise ValueError("Product config apply requires product.")
+        if self.public_hosts is not None and (self.instance != "prod" or not self.context):
+            raise ValueError("Public hosts require an exact prod lane.")
         return self
 
     def adopts_provider_keys(self) -> bool:
@@ -391,6 +424,8 @@ class ProductConfigApplyEnvelope(BaseModel):
             payload["runtime_env"] = _runtime_input_payload(self.runtime_env)
         if self.runtime_environment is not None:
             payload["runtime_environment"] = _runtime_input_payload(self.runtime_environment)
+        if self.public_hosts is not None:
+            payload["public_hosts"] = list(self.public_hosts)
         return payload
 
 
