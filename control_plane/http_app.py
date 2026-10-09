@@ -1190,6 +1190,7 @@ _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
 _EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE = "/v1/route-bindings/external/reconcile"
 _ROUTE_BINDING_RECONCILE_ROUTE = "/v1/route-bindings/reconcile"
 _ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE = "/v1/route-bindings/odoo-testing/controller/run-once"
+_ODOO_STABLE_ROUTE_BINDING_REFRESH_ROUTE = "/v1/route-bindings/odoo-stable/controller/run-once"
 _ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT = 25
 _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/apply"
@@ -2638,6 +2639,33 @@ class OdooTestingRouteBindingRefreshEnvelope(BaseModel):
             )
         if self.mode == "dry-run" and self.confirmation:
             raise ValueError("Odoo testing route binding refresh dry-run rejects confirmation")
+        return self
+
+
+class OdooStableRouteBindingRefreshEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    reason: str = ""
+    confirmation: str = ""
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "OdooStableRouteBindingRefreshEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported Odoo stable route binding refresh schema version")
+        self.reason = self.reason.strip()
+        self.confirmation = self.confirmation.strip()
+        if not self.reason:
+            raise ValueError("Odoo stable route binding refresh requires a reason")
+        if self.mode == "apply" and (
+            self.confirmation != "APPLY ODOO STABLE ROUTE BINDING REFRESH"
+        ):
+            raise ValueError(
+                "Odoo stable route binding refresh apply requires exact confirmation text"
+            )
+        if self.mode == "dry-run" and self.confirmation:
+            raise ValueError("Odoo stable route binding refresh dry-run rejects confirmation")
         return self
 
 
@@ -20760,18 +20788,29 @@ def create_launchplane_fastapi_app(
             ),
         )
 
-    async def run_odoo_testing_route_binding_refresh(
+    async def run_odoo_route_binding_refresh(
         request: Request,
-        refresh_request: OdooTestingRouteBindingRefreshEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+        refresh_request: OdooTestingRouteBindingRefreshEnvelope
+        | OdooStableRouteBindingRefreshEnvelope,
+        identity: LaunchplaneIdentity,
+        record_store: object,
+        idempotency_key: str,
+        *,
+        remaining: bool,
     ) -> AcceptedEvidenceResponse:
+        route_path = (
+            _ODOO_STABLE_ROUTE_BINDING_REFRESH_ROUTE
+            if remaining
+            else _ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE
+        )
+        action_prefix = (
+            "route_binding.odoo_stable_refresh"
+            if remaining
+            else "route_binding.odoo_testing_refresh"
+        )
         trace_id = next_trace_id()
         controller_action = (
-            "route_binding.odoo_testing_refresh.apply"
-            if refresh_request.mode == "apply"
-            else "route_binding.odoo_testing_refresh.plan"
+            f"{action_prefix}.apply" if refresh_request.mode == "apply" else f"{action_prefix}.plan"
         )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
@@ -20783,16 +20822,14 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Workflow cannot run the Odoo testing route binding refresh controller.",
+                message="Workflow cannot run the Odoo route binding refresh controller.",
             )
         if refresh_request.mode == "apply" and not idempotency_key.strip():
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,
                 code="idempotency_key_required",
-                message=(
-                    "Odoo testing route binding refresh apply requires an Idempotency-Key header."
-                ),
+                message=("Odoo route binding refresh apply requires an Idempotency-Key header."),
             )
         (
             normalized_key,
@@ -20802,13 +20839,15 @@ def create_launchplane_fastapi_app(
             request=request,
             record_store=record_store,
             identity=identity,
-            route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+            route_path=route_path,
             idempotency_key=idempotency_key,
             trace_id=trace_id,
             check_replay=False,
         )
         try:
             controller_store = require_route_binding_refresh_controller_read_store(record_store)
+            if remaining:
+                require_external_route_binding_reconcile_store(record_store)
             mutation_store = (
                 require_route_binding_refresh_controller_store(record_store)
                 if refresh_request.mode == "apply"
@@ -20823,11 +20862,22 @@ def create_launchplane_fastapi_app(
             ) from error
 
         try:
-            controller_plan = control_plane_route_binding_refresh_controller.plan_odoo_testing_route_binding_refresh(
-                record_store=controller_store,
-                evaluated_at=utc_now_timestamp(),
-                target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
-            )
+            if remaining:
+                stable_store = cast(
+                    control_plane_route_binding_refresh_controller.StableRouteBindingRefreshControllerStore,
+                    controller_store,
+                )
+                controller_plan = control_plane_route_binding_refresh_controller.plan_remaining_odoo_stable_route_binding_refresh(
+                    record_store=stable_store,
+                    evaluated_at=utc_now_timestamp(),
+                    target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
+                )
+            else:
+                controller_plan = control_plane_route_binding_refresh_controller.plan_odoo_testing_route_binding_refresh(
+                    record_store=controller_store,
+                    evaluated_at=utc_now_timestamp(),
+                    target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
+                )
         except (
             control_plane_route_binding_refresh_controller.RouteBindingRefreshTargetLimitExceeded
         ) as error:
@@ -20850,38 +20900,44 @@ def create_launchplane_fastapi_app(
             "route_binding.apply" if refresh_request.mode == "apply" else "route_binding.read"
         )
         for outcome in controller_plan.outcomes:
+            outcome_action = binding_action
+            if isinstance(
+                outcome.reconcile_plan,
+                control_plane_route_binding_external_reconcile.ExternalRouteBindingReconcilePlan,
+            ):
+                outcome_action = (
+                    "route_binding.external.apply"
+                    if refresh_request.mode == "apply"
+                    else "route_binding.external.plan"
+                )
             ensure_route_binding_allowed(
                 identity=identity,
                 trace_id=trace_id,
-                action=binding_action,
+                action=outcome_action,
                 product=outcome.product,
                 context_name=outcome.context,
                 instance_name=outcome.instance,
-                message="Workflow cannot refresh a discovered Odoo testing route binding.",
+                message="Workflow cannot refresh a discovered Odoo route binding.",
             )
 
         controller_reservation: LaunchplaneIdempotencyRecord | None = None
         if refresh_request.mode == "apply":
             if mutation_store is None:
-                raise RuntimeError(
-                    "Odoo testing route binding refresh apply requires a mutation store."
-                )
+                raise RuntimeError("Odoo route binding refresh apply requires a mutation store.")
             preflight = mutation_store.prepare_db_only_mutation(
                 scope=idempotency_scope(identity),
-                route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                route_path=route_path,
                 idempotency_key=normalized_key,
                 request_fingerprint=payload_fingerprint,
             )
             if preflight.status not in {"missing", "released"}:
                 if preflight.record is None:
-                    raise RuntimeError(
-                        "Odoo testing route binding refresh preflight requires evidence."
-                    )
+                    raise RuntimeError("Odoo route binding refresh preflight requires evidence.")
                 if preflight.status == "replayed":
                     return replay_idempotent_response(
                         trace_id=trace_id,
                         stored_record=preflight.record,
-                        route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                        route_path=route_path,
                     )
                 if preflight.status == "conflict":
                     raise _launchplane_http_error(
@@ -20899,7 +20955,7 @@ def create_launchplane_fastapi_app(
                         trace_id=trace_id,
                         code="mutation_in_progress",
                         message=(
-                            "A matching Odoo testing route-binding refresh is already "
+                            "A matching Odoo route-binding refresh is already "
                             "running. Retry with the same Idempotency-Key."
                         ),
                     )
@@ -20909,17 +20965,16 @@ def create_launchplane_fastapi_app(
                         trace_id=trace_id,
                         code="mutation_reconciliation_required",
                         message=(
-                            "The prior Odoo testing route-binding refresh requires "
+                            "The prior Odoo route-binding refresh requires "
                             "reconciliation before retry."
                         ),
                     )
                 raise RuntimeError(
-                    "Unsupported Odoo testing route-binding refresh preflight status: "
-                    f"{preflight.status}"
+                    f"Unsupported Odoo route-binding refresh preflight status: {preflight.status}"
                 )
             reservation_result = mutation_store.reserve_mutation(
                 scope=idempotency_scope(identity),
-                route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                route_path=route_path,
                 idempotency_key=normalized_key,
                 request_fingerprint=payload_fingerprint,
                 lease_owner=f"{trace_id}:controller",
@@ -20931,7 +20986,7 @@ def create_launchplane_fastapi_app(
                 return replay_idempotent_response(
                     trace_id=trace_id,
                     stored_record=reservation_result.record,
-                    route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                    route_path=route_path,
                 )
             elif reservation_result.status == "conflict":
                 raise _launchplane_http_error(
@@ -20949,7 +21004,7 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     code="mutation_in_progress",
                     message=(
-                        "A matching Odoo testing route-binding refresh is already running. "
+                        "A matching Odoo route-binding refresh is already running. "
                         "Retry with the same Idempotency-Key."
                     ),
                 )
@@ -20959,13 +21014,12 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     code="mutation_reconciliation_required",
                     message=(
-                        "The prior Odoo testing route-binding refresh requires "
-                        "reconciliation before retry."
+                        "The prior Odoo route-binding refresh requires reconciliation before retry."
                     ),
                 )
             else:
                 raise RuntimeError(
-                    "Unsupported Odoo testing route-binding refresh reservation status: "
+                    "Unsupported Odoo route-binding refresh reservation status: "
                     f"{reservation_result.status}"
                 )
 
@@ -20988,7 +21042,7 @@ def create_launchplane_fastapi_app(
                     {
                         "code": "route_binding_refresh_plan_invalid",
                         "detail": (
-                            "Odoo testing refresh controller received a non-refresh plan for "
+                            "Odoo refresh controller received a non-refresh plan for "
                             "an enrolled binding."
                         ),
                     }
@@ -20996,9 +21050,7 @@ def create_launchplane_fastapi_app(
                 result_outcomes.append(outcome_payload)
                 continue
             if mutation_store is None:
-                raise RuntimeError(
-                    "Odoo testing route binding refresh apply requires a mutation store."
-                )
+                raise RuntimeError("Odoo route binding refresh apply requires a mutation store.")
             binding_key = reconcile_plan.current_record.binding_key
             binding_token = hashlib.sha256(binding_key.encode()).hexdigest()[:16]
             binding_idempotency_key = f"{normalized_key}:{binding_token}"
@@ -21018,10 +21070,10 @@ def create_launchplane_fastapi_app(
                 replacement_record=reconcile_plan.record,
                 mutation=DbOnlyMutationRequest(
                     scope=idempotency_scope(identity),
-                    route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                    route_path=route_path,
                     idempotency_key=binding_idempotency_key,
                     request_fingerprint=idempotency_request_fingerprint(
-                        route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                        route_path=route_path,
                         payload={
                             "controller_request_fingerprint": payload_fingerprint,
                             "binding_key": binding_key,
@@ -21104,7 +21156,7 @@ def create_launchplane_fastapi_app(
         if refresh_request.mode == "apply":
             if mutation_store is None or controller_reservation is None:
                 raise RuntimeError(
-                    "Odoo testing route binding refresh apply requires a parent reservation."
+                    "Odoo route binding refresh apply requires a parent reservation."
                 )
             completion_result = mutation_store.complete_mutation_reservation(
                 completion=complete_launchplane_mutation_reservation(
@@ -21119,13 +21171,11 @@ def create_launchplane_fastapi_app(
                 return response
             if completion_result.status == "replayed":
                 if completion_result.record is None:
-                    raise RuntimeError(
-                        "Replayed Odoo testing route-binding refresh requires evidence."
-                    )
+                    raise RuntimeError("Replayed Odoo route-binding refresh requires evidence.")
                 return replay_idempotent_response(
                     trace_id=trace_id,
                     stored_record=completion_result.record,
-                    route_path=_ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE,
+                    route_path=route_path,
                 )
             if completion_result.status == "conflict":
                 raise _launchplane_http_error(
@@ -21143,8 +21193,7 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     code="mutation_reconciliation_required",
                     message=(
-                        "The Odoo testing route-binding refresh requires reconciliation "
-                        "before retry."
+                        "The Odoo route-binding refresh requires reconciliation before retry."
                     ),
                 )
             raise _launchplane_http_error(
@@ -21152,11 +21201,43 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="mutation_completion_conflict",
                 message=(
-                    "The Odoo testing route-binding refresh could not complete its parent "
+                    "The Odoo route-binding refresh could not complete its parent "
                     "reservation. Retry with the same Idempotency-Key."
                 ),
             )
         return response
+
+    async def run_odoo_testing_route_binding_refresh(
+        request: Request,
+        refresh_request: OdooTestingRouteBindingRefreshEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        return await run_odoo_route_binding_refresh(
+            request,
+            refresh_request,
+            identity,
+            record_store,
+            idempotency_key,
+            remaining=False,
+        )
+
+    async def run_odoo_stable_route_binding_refresh(
+        request: Request,
+        refresh_request: OdooStableRouteBindingRefreshEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        return await run_odoo_route_binding_refresh(
+            request,
+            refresh_request,
+            identity,
+            record_store,
+            idempotency_key,
+            remaining=True,
+        )
 
     async def apply_ingress_route(
         request: Request,
@@ -26591,6 +26672,24 @@ def create_launchplane_fastapi_app(
         status_code=202,
         operation_id="run_odoo_testing_route_binding_refresh",
         summary="Plan or apply bounded Odoo testing route-binding evidence refresh",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _ODOO_STABLE_ROUTE_BINDING_REFRESH_ROUTE,
+        run_odoo_stable_route_binding_refresh,
+        methods=["POST"],
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        status_code=202,
+        operation_id="run_odoo_stable_route_binding_refresh",
+        summary="Plan or apply bounded remaining Odoo stable route-binding evidence refresh",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

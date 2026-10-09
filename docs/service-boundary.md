@@ -2981,6 +2981,17 @@ half-life or when source versions change, and reports an explicit conflict if
 provider target, domains, ingress, TLS ownership, lifecycle status, admin
 ownership, or the expected-current digest differs.
 
+`POST /v1/route-bindings/odoo-stable/controller/run-once` plans or applies a
+bounded refresh-only batch for active Odoo stable bindings outside the existing
+service-owned testing controller. Its body accepts only schema version, mode,
+reason and confirmation; targets come from product/binding records. Apply
+requires `APPLY ODOO STABLE ROUTE BINDING REFRESH` and an Idempotency-Key. The
+dedicated controller capability and every exact managed/external target action
+are checked before writes. Managed and external planners keep their independent
+freshness and ownership contracts. A changed external authority requiring
+replacement remains a conflict. This capability starts no clock and grants no
+access; source landing alone proves neither activation nor sustained cadence.
+
 Product/site reads use action `product_environment.read`. They are native
 FastAPI routes backed by DB-owned product environment read-model composition.
 They compose Launchplane-owned product profiles, driver descriptors, stable lane
