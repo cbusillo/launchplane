@@ -1,4 +1,5 @@
 import unittest
+from collections.abc import Mapping
 from typing import cast
 
 from fastapi import FastAPI
@@ -93,7 +94,7 @@ def _steps(check: object) -> dict[str, tuple[str, str, str]]:
     return {step.step_id: (step.state, step.code, step.fix) for step in getattr(check, "steps")}
 
 
-def _completed_noop_plan() -> dict[str, object]:
+def _completed_noop_plan() -> dict[str, JsonValue]:
     return {
         "reconcile_state": "done",
         "action": "none",
@@ -109,11 +110,12 @@ def _completed_noop_plan() -> dict[str, object]:
 
 
 class ProductPathCheckTests(unittest.TestCase):
-    def _testing_check(self, plan: dict[str, object]) -> ProductPathCheck:
+    @staticmethod
+    def _testing_check(plan: Mapping[str, object]) -> ProductPathCheck:
         return build_product_path_check(
             product="example-site",
             path="testing",
-            inputs=PathCheckInputs(profile=_profile(), testing_reconcile_plan=plan),
+            inputs=PathCheckInputs(profile=_profile(), testing_reconcile_plan=dict(plan)),
         )
 
     def test_completed_testing_noop_is_clear_without_operation_id(self) -> None:
@@ -155,7 +157,8 @@ class ProductPathCheckTests(unittest.TestCase):
                 )
 
     def test_testing_reader_preserves_only_valid_matching_artifact_provenance(self) -> None:
-        odoo_id = str(_completed_noop_plan()["current_artifact_id"])
+        odoo_id = _completed_noop_plan()["current_artifact_id"]
+        assert isinstance(odoo_id, str)
         image_id = "ghcr.io/example/example-site@sha256:" + "b" * 64
         for current, desired, expected in (
             (odoo_id, odoo_id, "clear"),
@@ -179,14 +182,11 @@ class ProductPathCheckTests(unittest.TestCase):
                     requested_at="2026-10-09T00:00:00Z",
                     updated_at="2026-10-09T00:00:00Z",
                     request_count=1,
-                    last_plan=cast(
-                        dict[str, JsonValue],
-                        {
-                            **_completed_noop_plan(),
-                            "current_artifact_id": current,
-                            "desired_artifact_id": desired,
-                        },
-                    ),
+                    last_plan={
+                        **_completed_noop_plan(),
+                        "current_artifact_id": current,
+                        "desired_artifact_id": desired,
+                    },
                 )
                 store = Mock()
                 store.list_product_reconcile_requests.return_value = (record,)
@@ -217,7 +217,7 @@ class ProductPathCheckTests(unittest.TestCase):
             requested_at="2026-10-09T00:00:00Z",
             updated_at="2026-10-09T00:00:00Z",
             request_count=2,
-            last_plan=cast(dict[str, JsonValue], _completed_noop_plan()),
+            last_plan=_completed_noop_plan(),
         )
         store = Mock()
         for state, expected in (
@@ -827,7 +827,7 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
             claimed = store.claim_next_product_reconcile_request("test-worker", 60)
             assert claimed is not None
             completed = store.complete_product_reconcile_request(
-                claimed.target_key, "test-worker", "done", _completed_noop_plan()
+                claimed.target_key, "test-worker", "done", dict(_completed_noop_plan())
             )
             reconciled = await _asgi_request(
                 app_with(("product_environment.read",)), "GET", route, headers=headers

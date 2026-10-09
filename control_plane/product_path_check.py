@@ -243,7 +243,7 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
             "clear",
             "already_deployed",
             "The completed reconcile records matching current and desired testing build provenance.",
-            record_ids=(str(plan["current_artifact_id"]),),
+            record_ids=(_testing_artifact_id(plan["current_artifact_id"]),),
         )
     return _step(
         step_id,
@@ -281,8 +281,8 @@ def _completed_testing_noop(plan: dict[str, object]) -> bool:
 
 def _testing_artifact_id(value: object) -> str:
     if isinstance(value, str) and re.fullmatch(
-        r"(?:artifact-[A-Za-z0-9][A-Za-z0-9_.-]*-run-[0-9]+-[0-9]+"
-        r"|[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64})",
+        r"artifact-[A-Za-z0-9][A-Za-z0-9_.-]*-run-[0-9]+-[0-9]+"
+        r"|[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64}",
         value,
     ):
         return value
