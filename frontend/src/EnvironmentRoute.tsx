@@ -625,7 +625,7 @@ function EnvironmentOverview({
         currentIncidentId={currentIncidentId}
         environment={detail.environment}
         fixtureMode={fixtureMode}
-        monitoringTrustState={monitoringEvidenceTrust(detail.health_monitoring.checks)}
+        monitoringTrustState={monitoringEvidenceTrust(detail.health_monitoring.checks.filter(check => check.incident_eligible))}
         product={detail.product}
       />
 

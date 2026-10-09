@@ -259,12 +259,6 @@ lookup rows before taking safe action.
 
 Incidents remain children of product environments rather than a separate raw
 record browser. Product summaries surface active incident count and severity;
-Monitoring completeness comes from each effective, incident-eligible check's
-observation and deadline. An absent, stale or unsupported observation is
-disclosed even when the active incident set is empty. Disabled and inapplicable
-probes do not imply missing evidence. `health_monitoring.provenance` describes
-the recorded monitoring intent; the retired aggregate `trust_state` is omitted
-so consumers use the checks instead of treating configuration as probe proof.
 the environment view owns lifecycle state, material evidence, observation
 history, and delivery evidence for one occurrence. GitHub, email, and Discord
 notifications are sinks, not authority. Incident surfaces are `inspect` actions
@@ -273,6 +267,13 @@ confirmation, authorization, idempotency, replay, and result states. The read
 model may show provider-safe external links and bounded delivery failures, but
 must not expose destination or policy identities, raw outbox payloads, provider
 operation internals, raw target URLs, secret references, or provider error text.
+
+Monitoring completeness comes from each effective, incident-eligible check's
+observation and deadline. An absent, stale or unsupported observation is
+disclosed even when the active incident set is empty. Disabled and inapplicable
+probes do not imply missing evidence. `health_monitoring.provenance` describes
+the recorded monitoring intent; the retired aggregate `trust_state` is omitted
+so consumers use the checks instead of treating configuration as probe proof.
 
 The first product/site read endpoints are:
 

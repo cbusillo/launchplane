@@ -44,3 +44,31 @@ for (const mode of ["missing", "stale", "fresh", "disabled", "inapplicable"] as 
     await expect(overview).not.toContainText("incomplete");
   });
 }
+
+for (const incidentEligible of [true, false]) {
+  test(`environment incident empty state respects unsupported and eligibility ${incidentEligible}`, async ({ page }) => {
+    await page.goto("/ui/products?fixture=products");
+    const fixture = await page.evaluate(async () => {
+      const modulePath = "/ui/src/dev-fixtures.ts";
+      const module = await import(modulePath);
+      const product = module.productsForFixture("products")[0];
+      const detail = module.environmentForFixture("products", product.product, "testing");
+      const incidents = module.incidentsForFixture("products", product.product, "testing");
+      incidents.incidents = [];
+      return { product, detail, incidents, identity: module.fixtureIdentity };
+    });
+    fixture.detail.health_monitoring.checks = [fixture.detail.health_monitoring.checks[0]];
+    fixture.detail.health_monitoring.checks[0].trust_state = "unsupported";
+    fixture.detail.health_monitoring.checks[0].incident_eligible = incidentEligible;
+    await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { error: { code: "authorization_denied" } } }));
+    await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", identity: fixture.identity, csrf_token: "fixture" } }));
+    await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", products: [fixture.product] } }));
+    await page.route(`**/v1/products/${fixture.product.product}`, route => route.fulfill({ json: { status: "ok", product: fixture.product } }));
+    await page.route(`**/v1/products/${fixture.product.product}/environments/testing`, route => route.fulfill({ json: { status: "ok", environment: fixture.detail } }));
+    await page.route(`**/v1/products/${fixture.product.product}/environments/testing/public-ingress/incidents`, route => route.fulfill({ json: { status: "ok", incident_list: fixture.incidents } }));
+    await page.goto(`/ui/products/${fixture.product.product}/environments/testing`);
+    const empty = page.locator(".incident-empty-state");
+    await expect(empty).toHaveAttribute("data-incomplete", String(incidentEligible));
+    await expect(empty).toContainText(incidentEligible ? "Incident evidence is incomplete" : "No incidents recorded");
+  });
+}
