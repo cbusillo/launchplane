@@ -18,6 +18,7 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
+import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
@@ -578,11 +579,10 @@ function ProductIncidentOverview({
         })),
     ),
   );
-  const evidenceIncomplete = products.some((product) =>
-    product.environments.some((environment) =>
-      ["missing", "stale"].includes(environment.health_monitoring.trust_state),
-    ),
-  );
+  const expectedChecks = products.flatMap(product => product.environments.flatMap(environment =>
+    environment.health_monitoring.checks.filter(check => check.probe_effective && check.incident_eligible),
+  ));
+  const evidenceIncomplete = ["missing", "stale", "unsupported"].includes(monitoringEvidenceTrust(expectedChecks));
 
   return (
     <section
@@ -604,10 +604,12 @@ function ProductIncidentOverview({
           </h2>
           <p>
             {incidents.length
-              ? "Launchplane material incident records require admin attention."
+              ? `Launchplane material incident records require admin attention.${evidenceIncomplete ? " Monitoring evidence is incomplete." : ""}`
               : evidenceIncomplete
                 ? "No open incident records were returned, but monitoring evidence is incomplete."
-                : "All incident-eligible health checks returned without an open incident record."}
+                : expectedChecks.length
+                  ? "All incident-eligible health checks returned without an open incident record."
+                  : "No incident-eligible health checks are effective for these lanes."}
           </p>
         </div>
       </div>

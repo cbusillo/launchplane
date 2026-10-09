@@ -259,6 +259,12 @@ lookup rows before taking safe action.
 
 Incidents remain children of product environments rather than a separate raw
 record browser. Product summaries surface active incident count and severity;
+Monitoring completeness comes from each effective, incident-eligible check's
+observation and deadline. An absent, stale or unsupported observation is
+disclosed even when the active incident set is empty. Disabled and inapplicable
+probes do not imply missing evidence. `health_monitoring.provenance` describes
+the recorded monitoring intent; the retired aggregate `trust_state` is omitted
+so consumers use the checks instead of treating configuration as probe proof.
 the environment view owns lifecycle state, material evidence, observation
 history, and delivery evidence for one occurrence. GitHub, email, and Discord
 notifications are sinks, not authority. Incident surfaces are `inspect` actions

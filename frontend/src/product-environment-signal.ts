@@ -19,8 +19,6 @@ export function expireEnvironmentEvidence<T extends ProductEnvironmentSummary | 
     health_monitoring: {
       ...environment.health_monitoring,
       checks,
-      trust_state: checks.some(check => check.probe_effective && check.trust_state === "stale")
-        ? "stale" : environment.health_monitoring.trust_state,
     },
     topology: {
       ...environment.topology,
