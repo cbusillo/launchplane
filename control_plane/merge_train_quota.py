@@ -62,6 +62,8 @@ def defer_for_recorded_github_quota(
     deadline = max(deadlines)
     if _timestamp(decision.requested_at) >= deadline:
         return decision
+    if decision.status == "deferred" and _timestamp(decision.next_allowed_at) >= deadline:
+        return decision
     next_allowed = max(deadline, _timestamp(decision.next_allowed_at))
     return decision.model_copy(
         update={

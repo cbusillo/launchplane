@@ -1,4 +1,8 @@
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
+from io import BytesIO
+from collections.abc import Iterator
+from email.message import Message
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
@@ -19,6 +23,7 @@ from control_plane.merge_train_scheduler import (
 from control_plane.merge_train_controller_run_once import (
     _controller_exception_reconciliation_detail,
 )
+from control_plane.merge_train_github import MergeTrainGitHubError, UrllibMergeTrainGitHubTransport
 from tests.test_merge_train_admission import _RunHistoryStore, _run_record
 from tests.test_merge_train_github_failures import _failed_request
 from tests.test_merge_train_scheduler import _policy_record
@@ -64,6 +69,38 @@ class _QuotaStore(_RunHistoryStore):
 
 
 class MergeTrainQuotaTests(TestCase):
+    def test_graphql_body_quota_preserves_the_response_deadline_for_admission(self) -> None:
+        reset = _FAILED_AT + timedelta(minutes=30)
+        headers = Message()
+        headers["X-RateLimit-Reset"] = str(int(reset.timestamp()))
+        headers["X-RateLimit-Remaining"] = "0"
+
+        @contextmanager
+        def response(*args: object, **kwargs: object) -> Iterator[BytesIO]:
+            with BytesIO(
+                b'{"data":null,"errors":[{"type":"RATE_LIMITED","message":"secret-provider-message"}]}'
+            ) as body:
+                body.headers = headers  # type: ignore[attr-defined]
+                yield body
+
+        transport = UrllibMergeTrainGitHubTransport(token="secret-token")
+        with patch("control_plane.merge_train_github.urlopen", side_effect=response):
+            with self.assertRaises(MergeTrainGitHubError) as caught:
+                transport.request(method="POST", path="/graphql", body={"query": "private-query"})
+        detail = _controller_exception_reconciliation_detail(caught.exception)
+        self.assertNotIn("secret", detail)
+        self.assertNotIn("private", detail)
+        state = _failure("cbusillo/alpha", detail)
+        store = _QuotaStore(None, controller_state_records=(state,))
+        decision = evaluate_merge_train_admission_from_store(
+            store=store,
+            repository=state.repository,
+            base_branch=state.base_branch,
+            requested_at=_stamp(_FAILED_AT + timedelta(minutes=5)),
+        )
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.next_allowed_at, _stamp(reset))
+
     def test_secondary_limit_with_primary_quota_left_recovers_after_retry_after(self) -> None:
         reset_at = int((_FAILED_AT + timedelta(minutes=59)).timestamp())
         for remaining, minutes in (("100", 1), ("0", 59)):
@@ -160,6 +197,7 @@ class MergeTrainQuotaTests(TestCase):
             requested_at=_stamp(_FAILED_AT + timedelta(seconds=1)),
         )
         self.assertEqual(decision.next_allowed_at, _stamp(_FAILED_AT + timedelta(seconds=300)))
+        self.assertEqual(decision.reason_code, "backoff_pending")
 
     def test_real_refusals_and_uncertain_effects_do_not_become_quota_deferrals(self) -> None:
         for detail in (
