@@ -305,10 +305,13 @@ testing controller remains testing-only. Both controllers share the bounded
 batch, per-binding CAS, parent replay and partial-progress recovery implementation.
 
 The stable controller requires its own `route_binding.odoo_stable_refresh.plan`
-or `.apply` capability plus the exact target's managed `route_binding.read` /
-`.apply` or external `route_binding.external.plan` / `.apply` authority. Every
-target is authorized before the first binding write. The new route grants no
-access and starts no schedule; a service-owned clock, its existing-authority
+or `.apply` capability in the Launchplane service context plus the exact target's
+managed `route_binding.read` / `.apply` or external
+`route_binding.external.plan` / `.apply` authority. Every
+target is authorized before the first binding write. Its request accepts only
+schema version, mode, reason and confirmation. Apply requires
+`APPLY ODOO STABLE ROUTE BINDING REFRESH` and an Idempotency-Key. The new route
+grants no access and starts no schedule; a service-owned clock, its existing-authority
 execution path, consecutive completion proof and subsequent TLS read-back must
 be qualified separately before claiming recurring renewal.
 

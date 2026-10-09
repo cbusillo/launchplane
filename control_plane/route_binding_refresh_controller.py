@@ -118,9 +118,10 @@ def _discover_route_bindings(
         if not profile.is_active:
             continue
         for lane in profile.lanes:
-            if lane.instance not in {"testing", "prod"}:
+            instance = lane.instance.strip().lower()
+            if instance not in {"testing", "prod"}:
                 continue
-            if not remaining and lane.instance != "testing":
+            if not remaining and instance != "testing":
                 continue
             try:
                 record = record_store.read_route_binding_record(
@@ -130,7 +131,7 @@ def _discover_route_bindings(
                 )
             except FileNotFoundError:
                 continue
-            expected_identity = (profile.product, lane.context, lane.instance)
+            expected_identity = (profile.product, lane.context, instance)
             observed_identity = (record.product, record.context, record.instance)
             if observed_identity != expected_identity:
                 raise RouteBindingRefreshTargetInvariantError(
@@ -150,7 +151,7 @@ def _discover_route_bindings(
             targets[key] = RouteBindingRefreshTarget(
                 product=record.product,
                 context=record.context,
-                instance="testing" if lane.instance == "testing" else "prod",
+                instance="testing" if instance == "testing" else "prod",
                 current_record_sha256=route_binding_record_sha256(record),
                 record=record,
             )
@@ -245,6 +246,17 @@ def _plan_refresh(
             status = "blocked"
         else:
             status = "conflict"
+        findings = reconcile_plan.findings
+        if reconcile_plan.status == "ready" and reconcile_plan.operation != "refresh":
+            findings = (
+                RouteBindingReconcileFinding(
+                    code="route_binding_refresh_requires_manual_reconcile",
+                    detail=(
+                        f"The refresh-only controller refuses {reconcile_plan.operation}. "
+                        "Use separately reviewed exact-lane reconciliation to change authority."
+                    ),
+                ),
+            )
         outcomes.append(
             RouteBindingRefreshOutcome(
                 product=target.product,
@@ -252,7 +264,7 @@ def _plan_refresh(
                 instance=target.instance,
                 status=status,
                 operation=operation,
-                findings=reconcile_plan.findings,
+                findings=findings,
                 current_record_sha256=reconcile_plan.current_record_sha256,
                 candidate_record_sha256=reconcile_plan.candidate_record_sha256,
                 stale_after=(

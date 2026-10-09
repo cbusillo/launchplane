@@ -3195,7 +3195,7 @@ def require_route_binding_refresh_controller_read_store(
     route_binding_store = require_route_binding_reconcile_store(record_store)
     if not callable(getattr(route_binding_store, "list_product_profile_records", None)):
         raise TypeError(
-            "Launchplane record store does not support Odoo testing route binding refresh "
+            "Launchplane record store does not support Odoo route binding refresh "
             "target discovery: list_product_profile_records"
         )
     return cast(_RouteBindingRefreshControllerReadStore, route_binding_store)
@@ -3219,7 +3219,7 @@ def require_route_binding_refresh_controller_store(
     if missing_methods:
         missing_summary = ", ".join(missing_methods)
         raise TypeError(
-            "Launchplane record store does not support atomic Odoo testing route binding "
+            "Launchplane record store does not support atomic Odoo route binding "
             f"refresh: {missing_summary}"
         )
     return cast(_RouteBindingRefreshControllerStore, route_binding_store)

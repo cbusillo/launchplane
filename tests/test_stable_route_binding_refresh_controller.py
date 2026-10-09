@@ -20,6 +20,7 @@ from control_plane.route_binding_refresh_controller import (
     RouteBindingRefreshTargetInvariantError,
     RouteBindingRefreshTargetLimitExceeded,
     discover_remaining_odoo_stable_route_bindings,
+    discover_active_odoo_testing_route_bindings,
     plan_remaining_odoo_stable_route_binding_refresh,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -29,6 +30,8 @@ from tests.support.auth import _StubVerifier, _identity
 from tests.test_external_route_binding_reconcile import _profile as external_profile
 from tests.test_external_route_binding_reconcile import _provider_target as external_target
 from tests.test_route_binding_refresh_controller import (
+    _Store,
+    _profile,
     _sqlite_database_url,
     _write_refresh_fixture,
 )
@@ -317,3 +320,19 @@ class StableRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.store, "read_route_binding_record", return_value=wrong):
             with self.assertRaises(RouteBindingRefreshTargetInvariantError):
                 discover_remaining_odoo_stable_route_bindings(self.store, target_limit=25)
+
+    def test_noncanonical_instances_report_identity_conflict_instead_of_empty_success(self) -> None:
+        from control_plane.contracts.product_profile_record import ProductLaneProfile
+
+        for instance, discover in [
+            ("Testing", discover_active_odoo_testing_route_bindings),
+            ("Prod", discover_remaining_odoo_stable_route_bindings),
+        ]:
+            with self.subTest(instance=instance):
+                binding = _binding(self.store).model_copy(update={"instance": instance})
+                profile = _profile(
+                    lanes=(ProductLaneProfile(instance=instance, context=binding.context),)
+                )
+                store = _Store(profiles=(profile,), bindings=(binding,))
+                with self.assertRaises(RouteBindingRefreshTargetInvariantError):
+                    discover(store, target_limit=25)

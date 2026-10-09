@@ -221,6 +221,8 @@ governed expectation, custody and currentness contract.
     boundary, and compare-and-completes the parent response after the child loop.
     Dry-run is stateless. Apply requires an `Idempotency-Key` and exact
     confirmation text.
+  - The separate [remaining-stable controller contract](records.md) covers
+    active bindings outside the testing controller's slice.
   - `POST /v1/route-bindings/external/reconcile`, requiring exclusively
     instance-scoped `route_binding.external.plan` for `dry-run` and
     `route_binding.external.apply` for `apply`. The request supplies only the
@@ -2981,16 +2983,8 @@ half-life or when source versions change, and reports an explicit conflict if
 provider target, domains, ingress, TLS ownership, lifecycle status, admin
 ownership, or the expected-current digest differs.
 
-`POST /v1/route-bindings/odoo-stable/controller/run-once` plans or applies a
-bounded refresh-only batch for active Odoo stable bindings outside the existing
-service-owned testing controller. Its body accepts only schema version, mode,
-reason and confirmation; targets come from product/binding records. Apply
-requires `APPLY ODOO STABLE ROUTE BINDING REFRESH` and an Idempotency-Key. The
-dedicated controller capability and every exact managed/external target action
-are checked before writes. Managed and external planners keep their independent
-freshness and ownership contracts. A changed external authority requiring
-replacement remains a conflict. This capability starts no clock and grants no
-access; source landing alone proves neither activation nor sustained cadence.
+The [record contract](records.md) owns the separate remaining-stable controller's
+scope, request, authorization and refresh-only behavior.
 
 Product/site reads use action `product_environment.read`. They are native
 FastAPI routes backed by DB-owned product environment read-model composition.
