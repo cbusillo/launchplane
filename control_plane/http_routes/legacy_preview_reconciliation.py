@@ -90,9 +90,10 @@ def register_legacy_preview_reconciliation_route(
         key, fingerprint, replay = await dependencies.replay_apply_idempotency(**replay_args)
         if reconciliation.mode != "inspect" and replay is not None:
             return replay
+        store: PostgresRecordStore = record_store
 
         def execute() -> AcceptedEvidenceResponse:
-            preview = record_store.read_preview_record(reconciliation.preview_id)
+            preview = store.read_preview_record(reconciliation.preview_id)
             slug = resolve_generic_web_preview_slug(
                 profile=profile,
                 preview_slug="",
@@ -100,10 +101,10 @@ def register_legacy_preview_reconciliation_route(
                 label="Reconciliation",
             )
             with serialize_generic_web_preview_operation(
-                record_store=record_store, profile=profile, preview_slug=slug
+                record_store=store, profile=profile, preview_slug=slug
             ):
                 if reconciliation.mode == "apply":
-                    saved = record_store.read_idempotency_record(
+                    saved = store.read_idempotency_record(
                         scope=idempotency_scope(identity),
                         route_path=LEGACY_PREVIEW_RECONCILIATION_ROUTE,
                         idempotency_key=reconciliation.plan_idempotency_key,
@@ -119,7 +120,7 @@ def register_legacy_preview_reconciliation_route(
                     ):
                         raise ValueError("Reviewed plan is missing or bound to another caller.")
                 bound, result = plan_legacy_preview(
-                    store=record_store,
+                    store=store,
                     control_plane_root=dependencies.control_plane_root,
                     request=reconciliation,
                     caller_scope=idempotency_scope(identity),
@@ -135,8 +136,9 @@ def register_legacy_preview_reconciliation_route(
                         raise ValueError(
                             "Reviewed plan is missing, blocked, changed or bound to another caller."
                         )
+                    destroyed_at = utc_now_timestamp()
                     result.update(
-                        mode="apply", preview_state="destroyed", destroyed_at=utc_now_timestamp()
+                        mode="apply", preview_state="destroyed", destroyed_at=destroyed_at
                     )
                 else:
                     result["mode"] = reconciliation.mode
@@ -155,14 +157,14 @@ def register_legacy_preview_reconciliation_route(
                         response=response,
                     )
                     if reconciliation.mode == "apply":
-                        record_store.commit_legacy_preview_reconciliation(
+                        store.commit_legacy_preview_reconciliation(
                             reconciliation=reconciliation,
                             expected_authority_digest=bound.digest,
-                            destroyed_at=str(result["destroyed_at"]),
+                            destroyed_at=destroyed_at,
                             completion=completion,
                         )
                     else:
-                        record_store.write_legacy_preview_plan(completion)
+                        store.write_legacy_preview_plan(completion)
                 return response
 
         try:

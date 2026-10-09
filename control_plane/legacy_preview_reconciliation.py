@@ -232,7 +232,7 @@ def observe_legacy_preview(
     """Enumerate twice; inspect payloads and domains, including renamed candidates."""
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     applications = dokploy_api.search_dokploy_applications(host=host, token=token)
-    seen: list[dict[str, object]] = []
+    seen: dict[str, dict[str, object]] = {}
     present = False
     domain_host = urlsplit(bound.preview.canonical_url).hostname
     if not domain_host:
@@ -295,16 +295,14 @@ def observe_legacy_preview(
             present = True
         elif potential_product and target_id not in bound.known_other_target_ids:
             raise ValueError("Provider has an unbound or renamed product candidate.")
-        seen.append(
-            {
-                "id": target_id,
-                "name": name,
-                "app_name": app_name,
-                "domains": domain_names,
-                "image": image,
-                "repositories": repository_values,
-            }
-        )
+        seen[target_id] = {
+            "id": target_id,
+            "name": name,
+            "app_name": app_name,
+            "domains": domain_names,
+            "image": image,
+            "repositories": repository_values,
+        }
     final = dokploy_api.search_dokploy_applications(host=host, token=token)
     if sorted(str(a.get("applicationId") or a.get("id")) for a in applications) != sorted(
         str(a.get("applicationId") or a.get("id")) for a in final
@@ -313,7 +311,7 @@ def observe_legacy_preview(
     return {
         "provider_state": "present" if present else "absent",
         "provider_absence_verified": not present,
-        "inventory_digest": canonical_sha256(sorted(seen, key=lambda a: str(a["id"]))),
+        "inventory_digest": canonical_sha256(seen),
         "provider_writes": False,
     }
 

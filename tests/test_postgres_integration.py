@@ -987,14 +987,14 @@ class RealPostgresLegacyPreviewReconciliationTests(
         release_writer = threading.Event()
 
         def pause_generation_writer(
-            connection: Any,
-            cursor: Any,
+            _connection: Any,
+            _cursor: Any,
             statement: str,
-            parameters: Any,
+            _parameters: Any,
             context: Any,
-            executemany: bool,
+            _executemany: bool,
         ) -> None:
-            if statement.startswith("INSERT INTO launchplane_preview_generations"):
+            if context.isinsert and "launchplane_preview_generations" in statement:
                 generation_written.set()
                 if not release_writer.wait(10):
                     raise ValueError("fixture writer timed out")
@@ -1003,13 +1003,13 @@ class RealPostgresLegacyPreviewReconciliationTests(
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 writer = executor.submit(
-                    self.store.write_preview_generation_evidence_records,
-                    preview_record=sibling.model_copy(
-                        update={"latest_generation_id": generation.generation_id}
-                    ),
-                    generation_record=generation,
+                    lambda: self.store.write_preview_generation_evidence_records(
+                        preview_record=sibling.model_copy(
+                            update={"latest_generation_id": generation.generation_id}
+                        ),
+                        generation_record=generation,
+                    )
                 )
-                apply = None
                 try:
                     self.assertTrue(await asyncio.to_thread(generation_written.wait, 5))
                     apply = asyncio.create_task(self.apply(plan))
@@ -1021,8 +1021,9 @@ class RealPostgresLegacyPreviewReconciliationTests(
                                 connection.scalar(
                                     text(
                                         "SELECT count(*) FROM pg_locks WHERE NOT granted "
-                                        "AND relation = 'launchplane_preview_generations'::regclass"
-                                    )
+                                        "AND relation = to_regclass(:table_name)"
+                                    ),
+                                    {"table_name": "launchplane_preview_generations"},
                                 )
                             )
                         if blocked:
@@ -1031,8 +1032,7 @@ class RealPostgresLegacyPreviewReconciliationTests(
                     self.assertTrue(blocked, "Reconciliation never waited on generation evidence")
                 finally:
                     release_writer.set()
-                await asyncio.to_thread(writer.result, 5)
-                assert apply is not None
+                await asyncio.to_thread(lambda: writer.result(timeout=5))
                 response = await asyncio.wait_for(apply, 5)
                 self.assertEqual(response.status_code, 202, response.text)
                 self.assertEqual(
