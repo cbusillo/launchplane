@@ -96,6 +96,11 @@ reservation. The webhook request never waits on a deploy.
   - **Generic-web:** the reconcile deploys the verified image itself, in
     process, through the generic-web deploy route's durable provider
     operation, under reservation scope `launchplane-reconcile:<product>`.
+    The request keeps the verified digest as its artifact identity and supplies
+    the same repository's canonical `sha-<source_commit>` tag as the provider
+    deploy reference, as required by Dokploy application targets. Recovery uses
+    the exact retained request, including that reference; legacy saved-plan
+    reconstruction retains its original digest-only shape and fingerprint.
     Nothing goes to the artifact store; the deploy records the image as the
     lane's runtime identity. Its key is the desired digest, the stored lane
     authority, and the deployment record testing ran when the deploy

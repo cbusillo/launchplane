@@ -125,6 +125,7 @@ from tests.merge_train_policy_fixtures import build_test_merge_train_policy_reco
 from tests.support.durable_operations import durable_operation_authorization_payload
 from tests.support.artifact_manifests import artifact_manifest_v2
 from control_plane.workflows.generic_web_deploy_provider import (
+    DokployGenericWebDeployProvider,
     GenericWebProviderDeploymentObservation,
 )
 from control_plane.workflows.generic_web_preview import (
@@ -1415,19 +1416,44 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.github.runs[37825455941]["run_started_at"] = "2026-10-08T18:35:20Z"
         self.request()
 
-        plan = self.reconcile()
+        provider = DokployGenericWebDeployProvider()
+        with (
+            patch.object(
+                provider, "_read_provider_config", return_value=("https://provider.test", "test")
+            ),
+            patch.object(
+                self.deploys, "execute_artifact_deploy", wraps=provider.execute_artifact_deploy
+            ),
+            patch("control_plane.dokploy.api.latest_deployment_for_target", return_value={}),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload", return_value={"env": ""}
+            ),
+            patch("control_plane.dokploy.api.update_dokploy_target_env"),
+            patch("control_plane.dokploy.api.dokploy_request") as provider_write,
+            patch("control_plane.dokploy.api.trigger_deployment"),
+            patch("control_plane.dokploy.api.wait_for_target_deployment"),
+        ):
+            plan = self.reconcile()
 
         self.assertEqual(plan["action"], "deploy", plan)
         self.assertEqual(plan["deploy_status"], "pass")
         self.assertEqual(plan["desired_commit"], candidate)
         self.assertTrue(plan["current_commit_seen"])
-        (deployed,) = self.deploys.runtime_identities
-        self.assertEqual(deployed.source_git_ref, candidate)
+        self.assertEqual(
+            provider_write.call_args.kwargs["payload"]["dockerImage"],
+            f"{IMAGE_REPOSITORY}:sha-{candidate}",
+        )
         inventory = self.store.read_environment_inventory(
             context_name="cm", instance_name="testing"
         )
         assert inventory.runtime_identity is not None
-        self.assertEqual(inventory.runtime_identity.image_reference, deployed.image_reference)
+        self.assertEqual(inventory.runtime_identity.source_git_ref, candidate)
+        self.assertEqual(
+            inventory.runtime_identity.artifact_id, f"{IMAGE_REPOSITORY}@{_digest(candidate)}"
+        )
+        self.assertEqual(
+            inventory.runtime_identity.image_reference, f"{IMAGE_REPOSITORY}:sha-{candidate}"
+        )
 
     def test_legacy_baseline_selection_covers_native_verireel_and_generic_web(self) -> None:
         self.record_legacy_baseline()
@@ -1762,7 +1788,9 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             context_name="cm", instance_name="testing"
         )
         assert inventory.runtime_identity is not None
-        self.assertEqual(inventory.runtime_identity.image_reference, image)
+        self.assertEqual(
+            inventory.runtime_identity.image_reference, f"{IMAGE_REPOSITORY}:sha-{DEPLOYABLE}"
+        )
         # Nothing went to the Odoo artifact store or its operation queue.
         self.assertEqual(self.store.list_artifact_manifests(), ())
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
