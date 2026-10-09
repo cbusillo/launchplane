@@ -158,24 +158,51 @@ class ProductProductionUseHttpTests(unittest.IsolatedAsyncioTestCase):
                 "director_standing",
             )
 
-    async def test_standing_acceptance_without_client_and_generic_web_drill_are_refused(
+    async def test_standing_acceptance_without_client_is_refused(
         self,
     ) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
             self.addCleanup(store.close)
-            for mode in ("director_standing", "promote_with_rollback_drill"):
-                response = await _post(
-                    _app(store),
-                    {
-                        "production_use": _OLD,
-                        "release_on_acceptance": mode,
-                        "reason": "Configure releases.",
-                    },
-                )
-                self.assertEqual(response.status_code, 400, response.text)
+            response = await _post(
+                _app(store),
+                {
+                    "production_use": _OLD,
+                    "release_on_acceptance": "director_standing",
+                    "reason": "Configure releases.",
+                },
+            )
+            self.assertEqual(response.status_code, 400, response.text)
             self.assertEqual(
                 store.read_product_profile_record(_PRODUCT).release_on_acceptance, "held"
+            )
+
+    async def test_generic_web_drill_dry_run_and_reviewed_apply(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            self.addCleanup(store.close)
+            app = _app(store)
+            payload: dict[str, object] = {
+                "production_use": _NEW,
+                "release_on_acceptance": "promote_with_rollback_drill",
+                "reason": "Prove rollback before the first Client release.",
+            }
+            dry_run = await _post(app, payload)
+            self.assertEqual(dry_run.status_code, 202, dry_run.text)
+            plan = dry_run.json()["result"]
+            self.assertEqual(plan["release_on_acceptance_after"], payload["release_on_acceptance"])
+            self.assertEqual(
+                store.read_product_profile_record(_PRODUCT).release_on_acceptance, "held"
+            )
+            applied = await _post(
+                app,
+                {**payload, "mode": "apply", "reviewed_plan_sha256": plan["plan_sha256"]},
+                "enable-drill",
+            )
+            self.assertEqual(applied.status_code, 202, applied.text)
+            self.assertEqual(
+                store.read_product_profile_record(_PRODUCT).release_on_acceptance,
+                payload["release_on_acceptance"],
             )
 
     async def test_dry_run_shows_the_change_and_writes_nothing(self) -> None:

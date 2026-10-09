@@ -221,11 +221,13 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             profile.model_copy(update={"release_on_acceptance": mode})
         )
 
-    def accept(self, outcome: ReleaseDecision = "accepted") -> ReleaseReviewDecisionRecord:
+    def accept(
+        self, outcome: ReleaseDecision = "accepted", *, suffix: str = ""
+    ) -> ReleaseReviewDecisionRecord:
         review = self.review()
         assert review.checklist is not None
         record = ReleaseReviewDecisionRecord(
-            record_id=f"decision-{outcome}",
+            record_id=f"decision-{outcome}{suffix}",
             product=self.profile.product,
             checklist=review.checklist,
             checklist_digest=review.checklist_digest,
@@ -250,6 +252,12 @@ class GenericWebClientReleaseTests(unittest.TestCase):
 
     def capture(self) -> None:
         with (
+            # Real backup captures take longer than a second. Preserve ordering
+            # for the two fast stub captures without a wall-clock sleep.
+            patch(
+                "control_plane.workflows.verireel_prod_backup_gate_operation_worker._utc_now_timestamp",
+                side_effect=lambda: datetime.now(UTC).isoformat(),
+            ),
             patch(
                 "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
                 return_value={
@@ -284,7 +292,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.assertEqual(len(self.advance()), 1)
         run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
         assert run is not None
-        self.assertEqual(run.state, "passed")
+        self.assertEqual(run.state, "passed", run.model_dump())
         self.assertEqual(self.advance(), ())
         self.assertEqual(
             self.provider.deployed_artifacts, [accepted.checklist.candidate.artifact_id]
@@ -292,6 +300,318 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         promotions = self.store.list_promotion_records()
         self.assertEqual(promotions[0].backup_record_id, backup.backup_record_id)
         self.assertEqual(promotions[0].destination_health.status, "pass")
+
+    def test_generic_web_drills_once_with_two_backups_and_the_reviewed_passing_target(self) -> None:
+        from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
+
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        self.assertEqual(accepted.release_start, "promote_with_rollback_drill")
+        baseline = self.store.list_deployment_records(
+            context_name=self.context, instance_name="prod"
+        )[0]
+        assert baseline.artifact_identity is not None
+        assert baseline.runtime_identity is not None
+        baseline = baseline.model_copy(
+            update={
+                "record_id": "newest-passing-reviewed-version",
+                "runtime_identity": baseline.runtime_identity.model_copy(
+                    update={"deployment_record_id": "newest-passing-reviewed-version"}
+                ),
+                "deploy": baseline.deploy.model_copy(
+                    update={"finished_at": (datetime.now(UTC) - timedelta(seconds=2)).isoformat()}
+                ),
+            }
+        )
+        self.store.write_deployment_record(baseline)
+        assert baseline.artifact_identity is not None
+        # The newest passing deployment may be a different artifact; a newer
+        # failed record of the reviewed artifact must not be selected either.
+        for record_id, artifact_id, status in (
+            ("newer-other-artifact", accepted.checklist.candidate.artifact_id, "pass"),
+            ("newer-failed-baseline", accepted.checklist.production.artifact_id, "fail"),
+        ):
+            self.store.write_deployment_record(
+                baseline.model_copy(
+                    update={
+                        "record_id": record_id,
+                        "artifact_identity": baseline.artifact_identity.model_copy(
+                            update={"artifact_id": artifact_id}
+                        ),
+                        "deploy": baseline.deploy.model_copy(
+                            update={"status": status, "finished_at": datetime.now(UTC).isoformat()}
+                        ),
+                    }
+                )
+            )
+        (backup_id,) = self.advance()
+        self.capture()
+        self.assertEqual(len(self.advance()), 1)
+        self.assertEqual(
+            self.provider.deployed_artifacts, [accepted.checklist.candidate.artifact_id]
+        )
+        (rollback_id,) = self.advance()
+        reservation = self.store.read_idempotency_record(
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_ROLLBACK_ROUTE,
+            idempotency_key=f"{accepted.record_id}:rollback-1",
+        )
+        assert reservation is not None
+        self.assertEqual(reservation.record_id, rollback_id)
+        self.assertEqual(
+            reservation.response_payload["result"]["rollback_target_deployment_record_id"],
+            baseline.record_id,
+        )
+        self.assertEqual(reservation.response_payload["result"]["rollback_health_status"], "pass")
+        self.assertEqual(self.review().checklist_digest, accepted.checklist_digest)
+        assert self.provider.running is not None
+        self.assertEqual(
+            self.provider.running.artifact_id, accepted.checklist.production.artifact_id
+        )
+        (second_backup_id,) = self.advance()
+        self.assertNotEqual(second_backup_id, backup_id)
+        self.assertEqual(self.advance(), ())
+        self.capture()
+        self.assertEqual(len(self.advance()), 1)
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.state, "passed", run.model_dump())
+        self.assertTrue(all(step.status == "pass" for step in run.steps))
+        self.assertEqual(self.advance(), ())
+        self.assertEqual(
+            self.provider.deployed_artifacts,
+            [
+                accepted.checklist.candidate.artifact_id,
+                accepted.checklist.production.artifact_id,
+                accepted.checklist.candidate.artifact_id,
+            ],
+        )
+        promotions = self.store.list_promotion_records()
+        self.assertEqual(len({record.backup_record_id for record in promotions}), 2)
+        later = self.accept(suffix="-later")
+        self.assertEqual(later.release_start, "promote")
+
+    def test_each_drill_failure_stops_remaining_steps_and_does_not_count_as_passed(self) -> None:
+        for failure_step in ("backup-1", "promote-1", "rollback-1", "backup-2", "promote-2"):
+            with self.subTest(failure_step=failure_step):
+                self.setUp()
+                self.switch("promote_with_rollback_drill")
+                accepted = self.accept()
+                (backup_id,) = self.advance()
+                if failure_step == "backup-1":
+                    backup = self.store.read_verireel_prod_backup_gate_operation_record(backup_id)
+                    self.store.write_verireel_prod_backup_gate_operation_record(
+                        backup.model_copy(
+                            update={
+                                "status": "fail",
+                                "error_message": "Backup capture failed.",
+                                "finished_at": datetime.now(UTC).isoformat(),
+                            }
+                        )
+                    )
+                else:
+                    self.capture()
+                    if failure_step == "promote-1":
+                        self.provider.fail_artifact = accepted.checklist.candidate.artifact_id
+                    self.advance()
+                    if failure_step != "promote-1":
+                        if failure_step == "rollback-1":
+                            self.provider.fail_artifact = accepted.checklist.production.artifact_id
+                        self.advance()
+                        if failure_step != "rollback-1":
+                            (second_backup_id,) = self.advance()
+                            if failure_step == "backup-2":
+                                backup = self.store.read_verireel_prod_backup_gate_operation_record(
+                                    second_backup_id
+                                )
+                                self.store.write_verireel_prod_backup_gate_operation_record(
+                                    backup.model_copy(
+                                        update={
+                                            "status": "fail",
+                                            "error_message": "Backup capture failed.",
+                                            "finished_at": datetime.now(UTC).isoformat(),
+                                        }
+                                    )
+                                )
+                            else:
+                                self.capture()
+                                self.provider.fail_artifact = (
+                                    accepted.checklist.candidate.artifact_id
+                                )
+                                self.advance()
+                run = read_client_release_run(
+                    store=self.store, profile=self.profile, decision=accepted
+                )
+                assert run is not None
+                self.assertEqual(run.state, "stopped")
+                failed_index = next(
+                    index for index, step in enumerate(run.steps) if step.step == failure_step
+                )
+                self.assertEqual(run.steps[failed_index].status, "fail")
+                self.assertTrue(
+                    all(step.status == "not_started" for step in run.steps[failed_index + 1 :])
+                )
+                deployed = list(self.provider.deployed_artifacts)
+                self.assertEqual(self.advance(), ())
+                self.assertEqual(self.provider.deployed_artifacts, deployed)
+                self.assertEqual(
+                    release_start_for_acceptance(
+                        store=self.store,
+                        profile=self.store.read_product_profile_record(self.profile.product),
+                    ),
+                    "promote_with_rollback_drill",
+                )
+                if failure_step in {"promote-1", "promote-2"}:
+                    self.assertTrue(
+                        any(
+                            record.rollback.status == "pass"
+                            for record in self.store.list_promotion_records()
+                        )
+                    )
+                    assert self.provider.running is not None
+                    self.assertEqual(
+                        self.provider.running.artifact_id, accepted.checklist.production.artifact_id
+                    )
+
+    def test_hold_before_drill_provider_write_stops_forward_effects(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        self.advance()
+        resolve = self.provider.resolve_deploy_target
+
+        def revoke(**kwargs: Any) -> GenericWebResolvedDeployTarget:
+            target = resolve(**kwargs)
+            self.switch("held")
+            return target
+
+        with patch.object(self.provider, "resolve_deploy_target", side_effect=revoke):
+            self.advance()
+        self.assertEqual(
+            self.provider.deployed_artifacts, [accepted.checklist.candidate.artifact_id]
+        )
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.steps[2].status, "fail")
+        self.assertEqual(run.steps[3].status, "not_started")
+
+    def test_missing_drill_target_blocks_before_backup_and_is_visible(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        baseline = self.store.list_deployment_records(
+            context_name=self.context, instance_name="prod"
+        )[0]
+        self.store.write_deployment_record(
+            baseline.model_copy(
+                update={"deploy": baseline.deploy.model_copy(update={"status": "fail"})}
+            )
+        )
+        self.assertEqual(self.advance(), ())
+        self.assertEqual(self.store.list_verireel_prod_backup_gate_operation_records(), ())
+        self.assertEqual(self.provider.deployed_artifacts, [])
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertIn("rollback target", run.blocked_reason)
+
+    def test_same_digest_with_another_source_ref_is_not_the_drill_target(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        baseline = self.store.list_deployment_records(
+            context_name=self.context, instance_name="prod"
+        )[0]
+        self.store.write_deployment_record(
+            baseline.model_copy(
+                update={
+                    "record_id": "wrong-source-ref",
+                    "source_git_ref": "c" * 40,
+                    "deploy": baseline.deploy.model_copy(
+                        update={"finished_at": datetime.now(UTC).isoformat()}
+                    ),
+                }
+            )
+        )
+        self.advance()
+        self.capture()
+        self.advance()
+        self.advance()
+        self.assertEqual(self.review().checklist_digest, accepted.checklist_digest)
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="prod"
+        )
+        self.assertEqual(inventory.promotion_record_id, "promotion-previous-release")
+        self.assertEqual(inventory.promoted_from_instance, "testing")
+
+    def test_drill_health_failure_and_unknown_effect_stop_repromotion(self) -> None:
+        for outcome in ("unhealthy", "unknown"):
+            with self.subTest(outcome=outcome):
+                self.setUp()
+                self.switch("promote_with_rollback_drill")
+                accepted = self.accept()
+                self.advance()
+                self.capture()
+                self.advance()
+                execute = self.provider.execute_artifact_deploy
+
+                def disconnect(**kwargs: Any) -> None:
+                    execute(**kwargs)
+                    raise TimeoutError("Rollback may still be running.")
+
+                if outcome == "unhealthy":
+                    with patch(
+                        "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
+                        side_effect=click.ClickException("Rollback health failed"),
+                    ):
+                        self.advance()
+                else:
+                    with patch.object(
+                        self.provider, "execute_artifact_deploy", side_effect=disconnect
+                    ):
+                        self.advance()
+                run = read_client_release_run(
+                    store=self.store, profile=self.profile, decision=accepted
+                )
+                assert run is not None
+                self.assertEqual(run.state, "stopped")
+                self.assertEqual(
+                    run.steps[2].status,
+                    "fail" if outcome == "unhealthy" else "reconciliation_required",
+                )
+                self.assertEqual(run.steps[3].status, "not_started")
+                deployed = list(self.provider.deployed_artifacts)
+                self.assertEqual(self.advance(), ())
+                self.assertEqual(self.provider.deployed_artifacts, deployed)
+
+    def test_repromotion_failure_can_recover_after_releases_are_held(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        self.advance()
+        self.advance()
+        self.advance()
+        self.capture()
+        self.provider.fail_artifact = accepted.checklist.candidate.artifact_id
+        execute = self.provider.execute_artifact_deploy
+
+        def hold_after_effect(**kwargs: Any) -> None:
+            try:
+                execute(**kwargs)
+            finally:
+                self.switch("held")
+
+        with patch.object(self.provider, "execute_artifact_deploy", side_effect=hold_after_effect):
+            self.advance()
+        assert self.provider.running is not None
+        self.assertEqual(
+            self.provider.running.artifact_id, accepted.checklist.production.artifact_id
+        )
+        self.assertTrue(
+            any(record.rollback.status == "pass" for record in self.store.list_promotion_records())
+        )
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.steps[-1].status, "fail")
 
     def test_github_outage_before_deploy_retries_accepted_release_without_rollback(self) -> None:
         from control_plane.lane_movement import LaneMovementRefused
@@ -621,7 +941,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             profile.model_copy(
                 update={
                     "updated_at": datetime.now(UTC).isoformat(),
-                    "source_label": "metadata update",
+                    "source": "metadata update",
                 }
             )
         )
@@ -791,6 +1111,35 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.assertEqual(failure.record_id, reservation.record_id)
         self.assertEqual(self.advance(), ())
         self.assertEqual(self.provider.deployed_artifacts, [])
+
+    def test_busy_drill_target_does_not_report_another_operation_as_queued(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        self.advance()
+        promotion = self.store.read_idempotency_record(
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=f"{accepted.record_id}:promote-1",
+        )
+        assert promotion is not None
+        competing = self.store.reserve_mutation(
+            scope="manual-deploy",
+            route_path="/v1/admin/generic-web/deploy",
+            idempotency_key="manual-deploy",
+            request_fingerprint="f" * 64,
+            lease_owner="admin-worker",
+            reconciliation_key=promotion.reconciliation_key,
+            provider_target_key=promotion.provider_target_key,
+        )
+        self.assertEqual(competing.status, "acquired")
+        effects = list(self.provider.deployed_artifacts)
+        self.assertEqual(self.advance(), ())
+        self.assertEqual(self.provider.deployed_artifacts, effects)
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.steps[2].status, "not_started")
 
     def test_expired_running_promotion_reports_reconciliation(self) -> None:
         accepted = self.accept()

@@ -118,8 +118,9 @@ fits this file.
 - `Merge train that just works` proves an agent's merge lands in one pass
   without a wedge, a hand merge, or main going red on its own; ends if the
   friction log gains the same entry twice.
-- `Real prod safe on SellYourOutboard and VeriReel` proves every promotion to
-  a live site is preceded by a verified backup and both products promote
-  cleanly; ends if a live promotion happens without one.
+- `Real prod safe on every live product` proves every promotion of a product
+  marked Live is preceded by a verified backup, and each Live product's first
+  Client-started release proves rollback with the one-time drill; ends if a
+  Live product's promotion happens without one.
 - `Retired machinery deleted` proves the retired designs above are gone from
   the code; ends if a deletion breaks a live product.
