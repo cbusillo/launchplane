@@ -9,13 +9,18 @@ import click
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackPlanRequest,
     build_generic_web_rollback_plan,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
-from control_plane.generic_web_promotion_http import GenericWebProdPromotionEnvelope
+from control_plane.generic_web_promotion_http import (
+    GenericWebProdPromotionEnvelope,
+    GENERIC_WEB_PROD_PROMOTION_ROUTE,
+)
 from control_plane.generic_web_promotion_provider_adapter import (
     GenericWebProdPromotionProviderMutationAdapter,
     require_generic_web_promotion_target,
@@ -60,6 +65,9 @@ def run_generic_web_rollback_drill(
         raise click.ClickException("The accepted rollback target is not ready.")
     planned = plan.planned_deploy
     trace_id = f"client-release-{decision.record_id}"
+    previous_inventory, _promotion = rollback_drill_previous_inventory(
+        store=store, decision=decision, deployment=deployment, scope=scope
+    )
 
     class RollbackDrillAdapter(GenericWebProdPromotionProviderMutationAdapter):
         def resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
@@ -98,7 +106,7 @@ def run_generic_web_rollback_drill(
                 effects_started = True
 
             try:
-                validate_checkpoint()
+                self._validate_before_effect(self.resolve_deploy_target())
                 current = build_generic_web_rollback_plan(record_store=store, request=request)
                 if current.status != "ready" or current.planned_deploy != planned:
                     raise click.ClickException("The accepted rollback target changed.")
@@ -120,9 +128,7 @@ def run_generic_web_rollback_drill(
                         rollback_target=_RollbackTarget(
                             deployment_record_id=deployment.record_id,
                             planned_deploy=planned,
-                            previous_inventory=build_environment_inventory(
-                                deployment_record=deployment, updated_at=utc_now_timestamp()
-                            ),
+                            previous_inventory=previous_inventory,
                         ),
                         production_changed=True,
                         deploy_provider=self._deploy_provider,
@@ -143,7 +149,11 @@ def run_generic_web_rollback_drill(
             except (FileNotFoundError, ValueError, click.ClickException) as error:
                 if effects_started:
                     raise ProviderMutationUnknownError(str(error)) from error
-                result = {"rollback_status": "fail", "error_code": "rollback_not_ready"}
+                result = {
+                    "rollback_status": "fail",
+                    "error_code": "rollback_not_ready",
+                    "error_message": str(error),
+                }
             return ProviderMutationOutcome(
                 response_status_code=202,
                 response_payload=provider_operation_response_payload(
@@ -169,7 +179,7 @@ def run_generic_web_rollback_drill(
         trace_id=trace_id,
         validate_before_effect=lambda _target: validate_checkpoint(),
     )
-    result = run_durable_provider_operation(
+    reservation_result = run_durable_provider_operation(
         store=store,
         scope=scope,
         route_path=GENERIC_WEB_ROLLBACK_ROUTE,
@@ -181,4 +191,34 @@ def run_generic_web_rollback_drill(
         response_trace_id=trace_id,
         adapter=adapter,
     )
-    return result.record.record_id if result.record is not None else ""
+    return reservation_result.record.record_id if reservation_result.record is not None else ""
+
+
+def rollback_drill_previous_inventory(
+    *,
+    store: PostgresRecordStore,
+    decision: ReleaseReviewDecisionRecord,
+    deployment: DeploymentRecord,
+    scope: str,
+) -> tuple[EnvironmentInventory, PromotionRecord | None]:
+    """Keep the baseline lineage pinned by the first promotion, when it matches."""
+    inventory = build_environment_inventory(
+        deployment_record=deployment, updated_at=utc_now_timestamp()
+    )
+    reservation = store.read_idempotency_record(
+        scope=scope,
+        route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+        idempotency_key=f"{decision.record_id}:promote-1",
+    )
+    if reservation is not None:
+        promotion_id = reservation.response_payload.get("result", {}).get("promotion_record_id")
+        if isinstance(promotion_id, str) and promotion_id:
+            promotion = store.read_promotion_record(promotion_id)
+            if promotion.rollback.target_deployment_record_id == deployment.record_id:
+                return inventory.model_copy(
+                    update={
+                        "promotion_record_id": promotion.rollback.target_promotion_record_id,
+                        "promoted_from_instance": promotion.rollback.target_promoted_from_instance,
+                    }
+                ), promotion
+    return inventory, None

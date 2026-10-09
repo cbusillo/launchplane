@@ -355,6 +355,19 @@ rollback outcome stops the run for reconciliation. A failed drill or second
 backup never starts re-promotion. Automatic rollback after a failed promotion
 remains permitted even when the Client's forward release authority is revoked.
 
+Before the first backup, a generic-web drill requires a deployable passing
+production record for the checklist's exact artifact and source commit. A
+missing target is shown as a release blocker without changing production.
+For an interrupted drill, use the same scoped admin recovery route above with
+`?step=rollback` on selection, dry-run and Apply. It binds the original target
+through the saved rollback plan and reservation fingerprint, verifies the exact
+recorded rollback deployment against the provider's configured/running image,
+deployment ID and current health, then adopts the existing result atomically.
+It starts no provider effect and grants no access. Active leases, no-effect
+reservations, missing or changed records, failed health and unproven runtime
+stay held; a completed adoption replays. Normal acceptance and hold checks
+still gate the second backup and re-promotion.
+
 Each step runs under a `client_release_acceptance` grant that names the
 decision. Before a step is queued, the worker checks all of the following:
 

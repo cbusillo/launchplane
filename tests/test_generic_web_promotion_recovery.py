@@ -3,6 +3,7 @@
 import hashlib
 import json
 import unittest
+import click
 from datetime import timedelta
 from threading import Event, Thread, current_thread
 from typing import Any
@@ -11,6 +12,7 @@ from unittest.mock import patch
 from control_plane.client_release import (
     CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
     client_release_promotion_request,
+    read_client_release_run,
 )
 from control_plane.generic_web_promotion_http import (
     GENERIC_WEB_PROD_PROMOTION_ROUTE,
@@ -35,6 +37,7 @@ from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRe
 
 class PromotionRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.recovery_step = "promote"
         self.case = fixtures.GenericWebClientReleaseTests()
         self.case.setUp()
         self.addCleanup(self.case.doCleanups)
@@ -92,10 +95,14 @@ class PromotionRecoveryTests(unittest.TestCase):
         )
 
     def reservation(self) -> Any:
+        from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
+
         return self.store.read_idempotency_record(
             scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
-            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
-            idempotency_key=f"{self.decision.record_id}:promote-1",
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE
+            if self.recovery_step == "promote"
+            else GENERIC_WEB_ROLLBACK_ROUTE,
+            idempotency_key=f"{self.decision.record_id}:{self.recovery_step}-1",
         )
 
     def interrupt_completion(self, *, rollback: bool = False, hold: bool = True) -> None:
@@ -124,6 +131,7 @@ class PromotionRecoveryTests(unittest.TestCase):
             self.app,
             method="POST" if suffix else "GET",
             path=self.path + suffix,
+            query_string=f"step={self.recovery_step}",
             authorization=f"Bearer {_OPERATOR_TOKEN}",
             payload=payload,
         )
@@ -182,6 +190,102 @@ class PromotionRecoveryTests(unittest.TestCase):
         self.assertEqual(self.apply(plan)[0], 202)
         self.assertEqual(self.provider.deployed_artifacts, effects)
         self.assertEqual(self.case.advance(), ())
+
+    def prepare_drill(self) -> None:
+        self.case.switch("promote_with_rollback_drill")
+        self.decision = self.case.accept(suffix="-drill")
+        self.path = f"/v1/admin/generic-web/promotion-recovery/{self.case.profile.product}/{self.decision.record_id}"
+        self.case.advance()
+        self.case.capture()
+        self.case.advance()
+        self.recovery_step = "rollback"
+
+    def test_adopts_unknown_drill_once_and_continues_the_accepted_release(self) -> None:
+        self.prepare_drill()
+        self.interrupt_completion()
+        effects = list(self.provider.deployed_artifacts)
+        before = self.snapshot()
+        self.assertEqual(self.request()[0], 200)
+        plan = self.dry_run()
+        self.assertEqual(plan["proposed_action"], "adopt_rollback")
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.apply(plan)[0], 202)
+        self.assertEqual(self.apply(plan)[0], 202)
+        self.assertEqual(self.provider.deployed_artifacts, effects)
+        self.assertEqual(self.reservation().response_payload["result"]["rollback_status"], "pass")
+        self.assertEqual(len(self.case.advance()), 1)
+        self.case.capture()
+        self.assertEqual(len(self.case.advance()), 1)
+        run = read_client_release_run(
+            store=self.store, profile=self.case.profile, decision=self.decision
+        )
+        assert run is not None
+        self.assertEqual(run.state, "passed")
+
+    def test_drill_recovery_requires_exact_records_runtime_and_reviewed_evidence(self) -> None:
+        for drift in ("health", "runtime", "record", "race"):
+            with self.subTest(drift=drift):
+                self.setUp()
+                self.prepare_drill()
+                self.interrupt_completion()
+                effects = list(self.provider.deployed_artifacts)
+                plan = self.dry_run()
+                self.assertEqual(plan["proposed_action"], "adopt_rollback")
+                if drift == "health":
+                    self.case.fail_health = True
+                    with patch(
+                        "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
+                        side_effect=click.ClickException("Unhealthy rollback"),
+                    ):
+                        self.assertEqual(self.dry_run()["proposed_action"], "hold_unknown")
+                elif drift == "runtime":
+                    assert self.provider.running is not None
+                    self.provider.running = self.provider.running.model_copy(
+                        update={"deployment_record_id": "another-deployment"}
+                    )
+                    self.assertEqual(self.dry_run()["proposed_action"], "hold_unknown")
+                else:
+                    original = self.store.list_deployment_records(
+                        context_name=self.case.context, instance_name="prod"
+                    )[0]
+                    changed = original.model_copy(update={"source_git_ref": "c" * 40})
+                    if drift == "record":
+                        self.store.write_deployment_record(changed)
+                        self.assertEqual(self.apply(plan)[0], 409)
+                    else:
+                        adopt = self.store.adopt_reconciled_mutation
+
+                        def race(**kwargs: Any) -> Any:
+                            self.store.write_deployment_record(changed)
+                            return adopt(**kwargs)
+
+                        with patch.object(
+                            self.store, "adopt_reconciled_mutation", side_effect=race
+                        ):
+                            self.assertEqual(self.apply(plan)[0], 409)
+                self.assertEqual(self.reservation().state, "reconcile_required")
+                self.assertEqual(self.provider.deployed_artifacts, effects)
+
+    def test_drill_adoption_refuses_late_record_change(self) -> None:
+        self.prepare_drill()
+        self.interrupt_completion()
+        plan = self.dry_run()
+        effects = list(self.provider.deployed_artifacts)
+        original = self.store.list_deployment_records(
+            context_name=self.case.context, instance_name="prod"
+        )[0]
+        adopt = self.store.adopt_reconciled_mutation
+
+        def race(**kwargs: Any) -> Any:
+            self.store.write_deployment_record(
+                original.model_copy(update={"source_git_ref": "c" * 40})
+            )
+            return adopt(**kwargs)
+
+        with patch.object(self.store, "adopt_reconciled_mutation", side_effect=race):
+            self.assertEqual(self.apply(plan)[0], 409)
+        self.assertEqual(self.reservation().state, "reconcile_required")
+        self.assertEqual(self.provider.deployed_artifacts, effects)
 
     def test_identical_apply_that_loses_adoption_race_replays(self) -> None:
         self.interrupt_completion()

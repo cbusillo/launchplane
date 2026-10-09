@@ -34,7 +34,11 @@ from pydantic import BaseModel, ConfigDict
 from control_plane.child_process_errors import redact_untrusted_text
 from control_plane.operation_status_read import safe_operation_error_code
 
-from control_plane.contracts.deployment_record import deployment_record_passed
+from control_plane.contracts.deployment_record import DeploymentRecord, deployment_record_passed
+from control_plane.contracts.generic_web_rollback import (
+    GenericWebRollbackPlanRequest,
+    build_generic_web_rollback_plan,
+)
 from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
@@ -548,6 +552,15 @@ def read_client_release_run(
             pin_odoo_release_recovery_target(store, decision, _prod_context(profile))
         except ValueError:
             blocked_reason = "No passing production deployment is available for recovery. An admin must reconcile the production record before this release can start."
+    if (
+        profile.driver_id == "generic-web"
+        and decision.release_start == "promote_with_rollback_drill"
+        and state == "waiting"
+    ):
+        try:
+            _generic_web_drill_target(store, profile, decision)
+        except ClientReleaseNotReady:
+            blocked_reason = "The reviewed production version has no deployable passing rollback target. An admin must reconcile its deployment evidence before this drill can continue."
     return ClientReleaseRunView(
         blocked_reason=blocked_reason,
         decision_record_id=decision.record_id,
@@ -850,6 +863,8 @@ def _advance(
                     pin_odoo_release_recovery_target(store, decision, context)
                 except ValueError as error:
                     raise ClientReleaseNotReady("recovery_target_missing") from error
+            elif decision.release_start == "promote_with_rollback_drill":
+                _generic_web_drill_target(store, profile, decision)
             return _queue_backup(store, profile, decision, step, context, authorized_at)
         backup_record_id = str(getattr(previous, "backup_record_id", ""))
         return _queue_promotion(
@@ -1022,15 +1037,21 @@ def _queue_rollback(
     ):
         raise ClientReleaseNotReady("release_changed")
     target_artifact_id = checklist.production.artifact_id
-    deployment = next(
-        (
-            record
-            for record in store.list_deployment_records(context_name=context, instance_name="prod")
-            if record.artifact_identity is not None
-            and record.artifact_identity.artifact_id == target_artifact_id
-            and deployment_record_passed(record)
-        ),
-        None,
+    deployment = (
+        _generic_web_drill_target(store, profile, decision)
+        if profile.driver_id == "generic-web"
+        else next(
+            (
+                record
+                for record in store.list_deployment_records(
+                    context_name=context, instance_name="prod"
+                )
+                if record.artifact_identity is not None
+                and record.artifact_identity.artifact_id == target_artifact_id
+                and deployment_record_passed(record)
+            ),
+            None,
+        )
     )
     if deployment is None:
         raise ClientReleaseNotReady("rollback_target_missing")
@@ -1095,3 +1116,30 @@ def _queue_rollback(
         operation
     )
     return persisted.operation_id if persisted.operation_id == operation.operation_id else ""
+
+
+def _generic_web_drill_target(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+) -> DeploymentRecord:
+    for deployment in store.list_deployment_records(
+        context_name=_prod_context(profile), instance_name="prod"
+    ):
+        if (
+            deployment.artifact_identity is None
+            or deployment.artifact_identity.artifact_id != decision.checklist.production.artifact_id
+            or deployment.source_git_ref != decision.checklist.production.source_commit
+            or not deployment_record_passed(deployment)
+        ):
+            continue
+        plan = build_generic_web_rollback_plan(
+            record_store=store,
+            request=GenericWebRollbackPlanRequest(
+                product=profile.product, rollback_deployment_record_id=deployment.record_id
+            ),
+        )
+        if plan.status != "ready":
+            raise ClientReleaseNotReady("rollback_not_ready")
+        return deployment
+    raise ClientReleaseNotReady("rollback_target_missing")

@@ -30,6 +30,12 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import PromotionRecord, promotion_failure
 from control_plane.contracts.record_failures import record_failure_summary
 from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
+from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
+from control_plane.generic_web_rollback_drill import rollback_drill_previous_inventory
+from control_plane.contracts.generic_web_rollback import (
+    GenericWebRollbackPlanRequest,
+    build_generic_web_rollback_plan,
+)
 from control_plane.generic_web_promotion_provider_adapter import (
     require_generic_web_promotion_target,
     generic_web_promotion_deployment_id,
@@ -45,6 +51,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
     resolve_generic_web_provider_reconciliation_target,
 )
 from control_plane.workflows.generic_web_promotion import (
+    GenericWebProdPromotionRequest,
     _result_from_record,
     _verify_health_evidence_with_identity,
     _health_evidence_for_lane,
@@ -434,5 +441,215 @@ def inspect_promotion(
         inspection.action = action
     except (FileNotFoundError, ValueError, click.ClickException):
         # Missing, conflicting or unobservable evidence never releases a fence.
+        inspection.action = "hold_unknown"
+    return inspection
+
+
+def inspect_rollback_drill(
+    *,
+    store: PostgresRecordStore,
+    root: Path,
+    product: str,
+    decision_record_id: str,
+    attempt: int,
+    inspect_provider: bool = True,
+) -> PromotionInspection:
+    """Adopt only an existing exact drill deployment; never repeat its effects."""
+    profile = store.read_product_profile_record(product)
+    decision = store.read_release_review_decision_record(
+        product=product, record_id=decision_record_id
+    )
+    lane = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
+    step = ClientReleaseStep("rollback", attempt)
+    if (
+        lane is None
+        or profile.driver_id != "generic-web"
+        or step not in client_release_steps(decision.release_start)
+    ):
+        raise FileNotFoundError("Rollback drill not found.")
+    if (
+        decision.decision != "accepted"
+        or checklist_digest(decision.checklist) != decision.checklist_digest
+    ):
+        raise PromotionRecoveryConflict("Rollback drill acceptance is not authoritative.")
+    reservation = store.read_idempotency_record(
+        scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+        route_path=GENERIC_WEB_ROLLBACK_ROUTE,
+        idempotency_key=f"{decision.record_id}:{step.name}",
+    )
+    if reservation is None:
+        raise FileNotFoundError("Rollback drill reservation not found.")
+    if reservation.record_id != client_release_step_operation_id(
+        profile=profile, decision=decision, step=step
+    ):
+        raise PromotionRecoveryConflict("Rollback drill reservation identity conflicts.")
+    inspection = PromotionInspection(reservation, (profile, decision))
+    if reservation.state == "completed":
+        inspection.action = "replay_completed"
+        return inspection
+    if reservation.state == "running" and parse_launchplane_mutation_timestamp(
+        reservation.lease_expires_at, field_name="lease_expires_at"
+    ) > parse_launchplane_mutation_timestamp(utc_now_timestamp(), field_name="now"):
+        inspection.action = "wait_for_active_lease"
+        return inspection
+    if not inspect_provider or not reservation.provider_effect_started_at:
+        return inspection
+    try:
+        # The persisted plan and request fingerprint identify the original target,
+        # even after the drill creates a newer deployment of that same artifact.
+        plans = []
+        for plan in store.list_generic_web_rollback_plan_records(
+            context_name=lane.context, instance_name="prod"
+        ):
+            request = GenericWebRollbackPlanRequest(
+                product=product, rollback_deployment_record_id=plan.rollback_deployment_record_id
+            )
+            if (
+                plan.product == product
+                and plan.planned_deploy is not None
+                and hashlib.sha256(
+                    (request.model_dump_json() + plan.planned_deploy.model_dump_json()).encode()
+                ).hexdigest()
+                == reservation.request_fingerprint
+            ):
+                plans.append(plan)
+        if len(plans) != 1:
+            return inspection
+        plan = plans[0]
+        planned = plan.planned_deploy
+        assert planned is not None
+        original = store.read_deployment_record(plan.rollback_deployment_record_id)
+        current_plan = build_generic_web_rollback_plan(
+            record_store=store,
+            request=GenericWebRollbackPlanRequest(
+                product=product, rollback_deployment_record_id=original.record_id
+            ),
+        )
+        if (
+            current_plan.status != "ready"
+            or current_plan.planned_deploy != planned
+            or (planned.artifact_id, planned.source_git_ref)
+            != (
+                decision.checklist.production.artifact_id,
+                decision.checklist.production.source_commit,
+            )
+        ):
+            return inspection
+        target = resolve_generic_web_provider_reconciliation_target(
+            reconciliation_key=reservation.reconciliation_key,
+            request_artifact_id=planned.artifact_id,
+            normalized_artifact_id=planned.artifact_id,
+            request_source_git_ref=planned.source_git_ref,
+            request_timeout_seconds=planned.timeout_seconds,
+            request_no_cache=planned.no_cache,
+            lane=lane,
+        )
+        if build_generic_web_provider_target_key(target) != reservation.provider_target_key:
+            return inspection
+        require_generic_web_promotion_target(
+            record_store=store, lane=lane, resolved_deploy_target=target
+        )
+        operation_key = build_provider_operation_key(
+            scope=reservation.scope,
+            route_path=reservation.route_path,
+            idempotency_key=reservation.idempotency_key,
+            request_fingerprint=reservation.request_fingerprint,
+            reconciliation_key=reservation.reconciliation_key,
+        )
+        deployed = store.read_deployment_record(
+            generic_web_promotion_deployment_id(operation_key, lane) + "-rollback"
+        )
+        inventory = store.read_environment_inventory(
+            context_name=lane.context, instance_name="prod"
+        )
+        recorded_target = store.read_provider_target_record(
+            context_name=lane.context, instance_name="prod"
+        )
+        inspection.evidence += (original, deployed, inventory, recorded_target)
+        identity = deployed.runtime_identity
+        if (
+            deployed.deploy.status != "pass"
+            or deployed.post_deploy_update.status not in {"pass", "skipped"}
+            or deployed.destination_health.status == "fail"
+            or deployed.deployed_target != target.deployed_target
+            or identity is None
+            or identity.product != product
+            or (identity.context, identity.instance) != (lane.context, "prod")
+            or identity.deployment_record_id != deployed.record_id
+            or (identity.artifact_id, identity.source_git_ref)
+            != (planned.artifact_id, planned.source_git_ref)
+            or deployed.artifact_identity is None
+            or deployed.artifact_identity.artifact_id != planned.artifact_id
+            or deployed.source_git_ref != planned.source_git_ref
+            or inventory.runtime_identity is None
+            or (
+                inventory.runtime_identity != identity
+                and (
+                    inventory.runtime_identity.artifact_id,
+                    inventory.runtime_identity.source_git_ref,
+                )
+                != (
+                    decision.checklist.candidate.artifact_id,
+                    decision.checklist.candidate.source_commit,
+                )
+            )
+        ):
+            return inspection
+        provider = default_generic_web_deploy_provider()
+        if not isinstance(provider, GenericWebDeployRuntimeArtifactProvider):
+            return inspection
+        runtime = provider.observe_runtime_artifact(
+            control_plane_root=root, resolved_deploy_target=target
+        )
+        evaluate_generic_web_runtime_close_out(
+            observation=runtime,
+            expected_artifact_reference=planned.artifact_id,
+            expected_deployment_record_id=deployed.record_id,
+        )
+        checked = _verify_health_evidence_with_identity(
+            _health_evidence_for_lane(
+                lane=lane,
+                request=GenericWebProdPromotionRequest(
+                    product=product,
+                    artifact_id=planned.artifact_id,
+                    source_git_ref=planned.source_git_ref,
+                ),
+                health_path=profile.health_path,
+                status="pending",
+            ),
+            expected_runtime_identity=identity,
+        )
+        if checked.status != "pass" or checked.runtime_identity_status != "match":
+            return inspection
+        inspection.provider_evidence = {
+            "runtime": runtime.model_dump(mode="json"),
+            "health": checked.model_dump(mode="json"),
+        }
+        deployed = deployed.model_copy(
+            update={"destination_health": checked, "verify_destination_health": True}
+        )
+        inspection.deployments = (deployed,)
+        previous_inventory, lineage = rollback_drill_previous_inventory(
+            store=store,
+            decision=decision,
+            deployment=original,
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+        )
+        if isinstance(lineage, PromotionRecord):
+            inspection.evidence += (lineage,)
+        inspection.inventory = build_environment_inventory(
+            deployment_record=deployed,
+            updated_at=utc_now_timestamp(),
+            promotion_record_id=previous_inventory.promotion_record_id,
+            promoted_from_instance=previous_inventory.promoted_from_instance,
+        )
+        inspection.result = {
+            "rollback_status": "pass",
+            "rollback_health_status": "pass",
+            "deployment_record_id": deployed.record_id,
+            "rollback_target_deployment_record_id": original.record_id,
+        }
+        inspection.action = "adopt_rollback"
+    except (FileNotFoundError, ValueError, click.ClickException):
         inspection.action = "hold_unknown"
     return inspection

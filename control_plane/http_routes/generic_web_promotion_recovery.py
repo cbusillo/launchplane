@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Callable
 from typing import Annotated
+from typing import Literal
 from fastapi import Depends, Query
 
 from control_plane.contracts.generic_web_deploy_recovery import (
@@ -14,7 +15,11 @@ from control_plane.contracts.generic_web_promotion_recovery import (
     PromotionRecoveryPlan,
     PromotionRecoveryApplied,
 )
-from control_plane.generic_web_promotion_recovery import PromotionInspection, inspect_promotion
+from control_plane.generic_web_promotion_recovery import (
+    PromotionInspection,
+    inspect_promotion,
+    inspect_rollback_drill,
+)
 from control_plane.http_routes.generic_web import GenericWebWriteRouteDependencies
 from control_plane.http_routes.support import ApiRouteRegistrar
 from control_plane.service_auth import (
@@ -86,12 +91,13 @@ def register_promotion_recovery_routes(
         product: str,
         decision_record_id: str,
         attempt: int,
+        step: Literal["promote", "rollback"],
         *,
         inspect_provider: bool = True,
     ) -> PromotionInspection:
         try:
             return await asyncio.to_thread(
-                inspect_promotion,
+                inspect_promotion if step == "promote" else inspect_rollback_drill,
                 store=store,
                 root=dependencies.control_plane_root,
                 product=product,
@@ -120,10 +126,11 @@ def register_promotion_recovery_routes(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
         attempt: Annotated[int, Query(ge=1, le=2)] = 1,
+        step: Literal["promote", "rollback"] = "promote",
     ) -> PromotionRecoveryPlan:
         store = authorized_store(product, identity, record_store, apply=False)
         return (
-            await inspect(store, product, decision_record_id, attempt, inspect_provider=False)
+            await inspect(store, product, decision_record_id, attempt, step, inspect_provider=False)
         ).plan(product, "")
 
     async def dry_run_promotion_recovery(
@@ -135,9 +142,10 @@ def register_promotion_recovery_routes(
         ],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
         attempt: Annotated[int, Query(ge=1, le=2)] = 1,
+        step: Literal["promote", "rollback"] = "promote",
     ) -> PromotionRecoveryPlan:
         store = authorized_store(product, identity, record_store, apply=False)
-        return (await inspect(store, product, decision_record_id, attempt)).plan(
+        return (await inspect(store, product, decision_record_id, attempt, step)).plan(
             product, review.reason
         )
 
@@ -150,9 +158,10 @@ def register_promotion_recovery_routes(
         ],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
         attempt: Annotated[int, Query(ge=1, le=2)] = 1,
+        step: Literal["promote", "rollback"] = "promote",
     ) -> PromotionRecoveryApplied:
         store = authorized_store(product, identity, record_store, apply=True)
-        inspection = await inspect(store, product, decision_record_id, attempt)
+        inspection = await inspect(store, product, decision_record_id, attempt, step)
         plan = inspection.plan(product, review.reason)
         trace = dependencies.next_trace_id()
         reason_digest = build_generic_web_deploy_recovery_digest({"reason": review.reason})

@@ -311,6 +311,20 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             context_name=self.context, instance_name="prod"
         )[0]
         assert baseline.artifact_identity is not None
+        assert baseline.runtime_identity is not None
+        baseline = baseline.model_copy(
+            update={
+                "record_id": "newest-passing-reviewed-version",
+                "runtime_identity": baseline.runtime_identity.model_copy(
+                    update={"deployment_record_id": "newest-passing-reviewed-version"}
+                ),
+                "deploy": baseline.deploy.model_copy(
+                    update={"finished_at": (datetime.now(UTC) - timedelta(seconds=2)).isoformat()}
+                ),
+            }
+        )
+        self.store.write_deployment_record(baseline)
+        assert baseline.artifact_identity is not None
         # The newest passing deployment may be a different artifact; a newer
         # failed record of the reviewed artifact must not be selected either.
         for record_id, artifact_id, status in (
@@ -324,8 +338,9 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                         "artifact_identity": baseline.artifact_identity.model_copy(
                             update={"artifact_id": artifact_id}
                         ),
-                        "deploy": baseline.deploy.model_copy(update={"status": status}),
-                        "finished_at": datetime.now(UTC).isoformat(),
+                        "deploy": baseline.deploy.model_copy(
+                            update={"status": status, "finished_at": datetime.now(UTC).isoformat()}
+                        ),
                     }
                 )
             )
@@ -480,6 +495,52 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         assert run is not None
         self.assertEqual(run.steps[2].status, "fail")
         self.assertEqual(run.steps[3].status, "not_started")
+
+    def test_missing_drill_target_blocks_before_backup_and_is_visible(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        baseline = self.store.list_deployment_records(
+            context_name=self.context, instance_name="prod"
+        )[0]
+        self.store.write_deployment_record(
+            baseline.model_copy(
+                update={"deploy": baseline.deploy.model_copy(update={"status": "fail"})}
+            )
+        )
+        self.assertEqual(self.advance(), ())
+        self.assertEqual(self.store.list_verireel_prod_backup_gate_operation_records(), ())
+        self.assertEqual(self.provider.deployed_artifacts, [])
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertIn("rollback target", run.blocked_reason)
+
+    def test_same_digest_with_another_source_ref_is_not_the_drill_target(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        baseline = self.store.list_deployment_records(
+            context_name=self.context, instance_name="prod"
+        )[0]
+        self.store.write_deployment_record(
+            baseline.model_copy(
+                update={
+                    "record_id": "wrong-source-ref",
+                    "source_git_ref": "c" * 40,
+                    "deploy": baseline.deploy.model_copy(
+                        update={"finished_at": datetime.now(UTC).isoformat()}
+                    ),
+                }
+            )
+        )
+        self.advance()
+        self.capture()
+        self.advance()
+        self.advance()
+        self.assertEqual(self.review().checklist_digest, accepted.checklist_digest)
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="prod"
+        )
+        self.assertEqual(inventory.promotion_record_id, "promotion-previous-release")
+        self.assertEqual(inventory.promoted_from_instance, "testing")
 
     def test_drill_health_failure_and_unknown_effect_stop_repromotion(self) -> None:
         for outcome in ("unhealthy", "unknown"):
@@ -880,7 +941,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             profile.model_copy(
                 update={
                     "updated_at": datetime.now(UTC).isoformat(),
-                    "source_label": "metadata update",
+                    "source": "metadata update",
                 }
             )
         )
