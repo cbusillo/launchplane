@@ -527,10 +527,8 @@ function EnvironmentOverview({
   const openIncidentCheck = effectiveChecks.find(
     (check) => check.incident_eligible && check.incident_status === "open",
   );
-  const openIncidentSeverity =
-    openIncidentCheck?.incident_severity || detail.public_ingress.incident_severity;
-  const currentIncidentId =
-    openIncidentCheck?.incident_id || detail.public_ingress.incident_id;
+  const openIncidentSeverity = openIncidentCheck?.incident_severity;
+  const currentIncidentId = openIncidentCheck?.incident_id || "";
   const actionableMonitoringFailure = effectiveChecks.some(
     (check) => check.incident_eligible && check.status === "fail",
   );
@@ -539,6 +537,7 @@ function EnvironmentOverview({
   );
   const primaryTls =
     tlsDomains.find((domain) => domain.role === "primary") ?? tlsDomains[0] ?? null;
+  const tlsNotApplicable = detail.topology.desired.public_website === "none" && !primaryTls;
   const warningItems = collectWarnings(detail);
   const diagnosis = diagnosisFor(detail, primaryTls, warningItems);
 
@@ -547,7 +546,7 @@ function EnvironmentOverview({
       <section className="environment-condition-strip" aria-label="Environment condition">
         <ConditionTile
           detail={
-            detail.public_ingress.summary ||
+            effectiveChecks.map(check => check.summary).filter(Boolean).join(" · ") ||
             `${effectiveChecks.length} effective health check${effectiveChecks.length === 1 ? "" : "s"}`
           }
           label="Monitoring"
@@ -562,7 +561,7 @@ function EnvironmentOverview({
               : readinessMonitoringFailure
                 ? "warning"
                 : conditionTone(
-                    statusTone(detail.public_ingress.status),
+                    effectiveChecks.length && effectiveChecks.every(check => check.status === "pass") ? "pass" : "unknown",
                     detail.health_monitoring.trust_state,
                   )
           }
@@ -574,12 +573,12 @@ function EnvironmentOverview({
           }
         />
         <ConditionTile
-          detail={primaryTls?.summary || trustLabel(primaryTls?.trust_state ?? "missing")}
+          detail={tlsNotApplicable ? "No public website declared" : primaryTls?.summary || trustLabel(primaryTls?.trust_state ?? "missing")}
           label="TLS"
           timestamp={primaryTls ? evidenceTimestamp(primaryTls.provenance) : ""}
           tone={conditionTone(tlsTone(primaryTls), primaryTls?.trust_state ?? "missing")}
-          trustState={primaryTls?.trust_state ?? "missing"}
-          value={primaryTls ? humanize(primaryTls.status) : "No observation"}
+          trustState={tlsNotApplicable ? "recorded" : primaryTls?.trust_state ?? "missing"}
+          value={tlsNotApplicable ? "Not applicable" : primaryTls ? humanize(primaryTls.status) : "No observation"}
         />
         <ConditionTile
           detail={
@@ -596,19 +595,19 @@ function EnvironmentOverview({
           value={humanize(observedPlacement.runtime_identity_status)}
         />
         <ConditionTile
-          detail={warningItems.length ? "Review recorded evidence" : trustLabel(detail.trust_state)}
+          detail={warningItems.some(warning => warning.severity !== "info") ? "Review recorded evidence" : warningItems.length ? "Information only" : "No warnings listed"}
           label="Warnings"
           timestamp={evidenceTimestamp(detail.provenance)}
           tone={conditionTone(
             warningItems.some((warning) => warning.severity === "error")
               ? "danger"
-              : warningItems.length
+              : warningItems.some(warning => warning.severity === "warning")
                 ? "warning"
                 : "unknown",
             detail.trust_state,
           )}
           trustState={detail.trust_state}
-          value={`${warningItems.length} recorded`}
+          value={`${warningItems.filter(warning => warning.severity !== "info").length} recorded`}
         />
       </section>
 
@@ -714,12 +713,13 @@ function IngressEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
           label="Monitoring intent"
           value={humanize(detail.health_monitoring.monitoring_intent)}
         />
+        <EvidenceFact label="Public website" value={detail.topology.desired.public_website === "none" ? "None declared · public ingress not applicable" : "Required"} />
         <EvidenceFact
           label="Public incident eligibility"
           value={detail.health_monitoring.public_incident_eligible ? "Eligible" : "Not eligible"}
         />
         <EvidenceFact label="Effective checks" value={checkSummary || "No effective checks"} />
-        <EvidenceFact label="Current observation" value={detail.public_ingress.status ? humanize(detail.public_ingress.status) : "No observation"} />
+        <EvidenceFact label={detail.health_monitoring.monitoring_intent === "private" ? "Public ingress" : detail.topology.observed.ingress.probe_effective ? "Current public observation" : detail.public_ingress.status ? "Public observation history" : "Public ingress"} value={detail.public_ingress.status ? humanize(detail.public_ingress.status) : "No observation"} />
         <EvidenceFact label="Summary" value={detail.public_ingress.summary || "No public ingress summary was returned."} />
         <EvidenceFact label="Desired endpoint" value={detail.topology.desired.base_url || "Not recorded"} />
         <EvidenceFact label="Recorded path" value={humanize(ingress.path)} />
@@ -784,6 +784,8 @@ function TlsEvidence({
             </li>
           ))}
         </ul>
+      ) : detail.topology.desired.public_website === "none" ? (
+        <p>Public TLS is not applicable: the product declares no public website.</p>
       ) : (
         <MissingEvidenceState
           detail="No TLS domain observation was returned for this environment."
@@ -926,7 +928,7 @@ interface WarningItem {
   scope: string;
   detail: string;
   domain: string;
-  severity: "warning" | "error";
+  severity: ProductTopologyWarning["severity"];
 }
 
 interface Diagnosis {
@@ -979,7 +981,7 @@ function diagnosisFor(
 ): Diagnosis | null {
   const errorWarning = warnings.find((warning) => warning.severity === "error");
   const openIncident = detail.health_monitoring.checks.find(
-    (check) => check.incident_eligible && check.incident_status === "open",
+    (check) => check.probe_effective && check.incident_eligible && check.incident_status === "open",
   );
   if (openIncident) {
     return {
@@ -1002,12 +1004,13 @@ function diagnosisFor(
       severity: "error",
     };
   }
-  if (statusTone(detail.public_ingress.status) === "danger") {
+  const failedCheck = detail.health_monitoring.checks.find(check => check.probe_effective && check.status === "fail");
+  if (failedCheck) {
     return {
-      title: detail.public_ingress.summary || "Public ingress needs attention",
+      title: failedCheck.summary || `${humanize(failedCheck.name)} failed`,
       detail:
         errorWarning?.detail ||
-        "Launchplane recorded a failing public ingress observation.",
+        "Launchplane recorded a failing effective health check.",
       targetId: "ingress-evidence",
       severity: "error",
     };
@@ -1020,29 +1023,16 @@ function diagnosisFor(
       severity: "error",
     };
   }
-  if (warnings.length) {
+  const applicableWarning = warnings.find(warning => warning.severity !== "info");
+  if (applicableWarning) {
     return {
-      title: warnings[0].scope,
-      detail: warnings[0].detail,
+      title: applicableWarning.scope,
+      detail: applicableWarning.detail,
       targetId: "topology-warnings",
-      severity: warnings[0].severity,
+      severity: applicableWarning.severity as "warning" | "error",
     };
   }
   return null;
-}
-
-function statusTone(status: string): ConditionTone {
-  const normalized = status.toLowerCase();
-  if (["pass", "passed", "healthy", "ok", "success", "valid", "match"].includes(normalized)) {
-    return "pass";
-  }
-  if (["fail", "failed", "error", "unhealthy", "down", "blocked"].includes(normalized)) {
-    return "danger";
-  }
-  if (["pending", "degraded", "expiring", "warning"].includes(normalized)) {
-    return "warning";
-  }
-  return "unknown";
 }
 
 function conditionTone(tone: ConditionTone, trustState: TrustState): ConditionTone {

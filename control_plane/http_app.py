@@ -12672,6 +12672,13 @@ def create_launchplane_fastapi_app(
                 code="invalid_health_monitoring_target",
                 message=str(error),
             ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_product_profile",
+                message="Updated product profile failed validation.",
+            ) from error
         if (
             health_monitoring_request.mode == "apply"
             and health_monitoring_request.reviewed_plan_sha256 != plan.plan_sha256

@@ -12,6 +12,7 @@ from control_plane.contracts.product_health_monitoring_migration import health_c
 
 
 ProductLifecycleState = Literal["active", "retiring", "retired"]
+ProductPublicWebsite = Literal["required", "none"]
 OdooDataAuthority = Literal["unknown", "resettable", "restorable", "authoritative"]
 OdooRebuildSourceMode = Literal["empty", "upstream_restore"]
 
@@ -542,6 +543,12 @@ class LaunchplaneProductProfileRecord(BaseModel):
     lifecycle_state: ProductLifecycleState = "active"
     # Unknown existing records require review; only explicit prelaunch records are exempt.
     production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
+    # Existing products keep requiring public authority until an admin declares otherwise.
+    public_website: ProductPublicWebsite = Field(
+        default="required",
+        exclude_if=lambda value: value == "required",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     # Whether the Client's release acceptance starts the gated promotion. Held by
     # default; an admin switches a product on. See docs/release-review.md. A held
     # product serializes exactly as before the switch existed, so digests over
@@ -574,6 +581,19 @@ class LaunchplaneProductProfileRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "LaunchplaneProductProfileRecord":
+        if self.public_website == "none" and any(
+            lane.base_url.strip()
+            or lane.health_url.strip()
+            or lane.health_monitoring.monitoring_intent == "public"
+            or any(
+                check.enabled and check.kind == "public_http"
+                for check in lane.health_monitoring.checks
+            )
+            for lane in self.lanes
+        ):
+            raise ValueError(
+                "no public website cannot declare public lane URLs or enabled public checks"
+            )
         if not self.product.strip():
             raise ValueError("product profile requires product")
         if not self.display_name.strip():

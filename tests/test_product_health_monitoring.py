@@ -79,6 +79,34 @@ def _request(
 
 
 class ProductHealthMonitoringTests(unittest.TestCase):
+    def test_no_website_conflict_is_rejected_in_plan_and_apply(self) -> None:
+        payload = _profile().model_dump(mode="json")
+        payload["public_website"] = "none"
+        for lane in payload["lanes"]:
+            lane["base_url"] = ""
+            lane["health_url"] = ""
+            lane["health_monitoring"] = {
+                "monitoring_intent": "prelaunch",
+                "checks": [
+                    {
+                        "name": "public-ingress",
+                        "kind": "public_http",
+                        "enabled": False,
+                        "url": "https://retired.example.test/health",
+                    }
+                ],
+            }
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        request = _request(
+            enabled=True, monitoring_intent="prelaunch", require_runtime_identity=False
+        )
+        with self.assertRaisesRegex(ValueError, "no public website"):
+            build_product_health_monitoring_plan(profile=profile, request=request)
+        with self.assertRaisesRegex(ValueError, "no public website"):
+            updated_product_health_monitoring_profile(
+                profile=profile, request=request, updated_at=profile.updated_at
+            )
+
     def test_dry_run_builds_deterministic_exact_lane_plan(self) -> None:
         profile = _profile()
         plan = build_product_health_monitoring_plan(profile=profile, request=_request())

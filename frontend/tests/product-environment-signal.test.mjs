@@ -30,6 +30,49 @@ function environment() {
 test("a fresh identity and health verification makes a monitored lane green", () =>
   assert.equal(environmentOperationalTone(environment()), "verified"));
 
+test("informational topology stays visible without blocking current verification", () => {
+  const lane = environment();
+  lane.topology.warnings = [{ code: "external_ingress_internals_unsupported", severity: "info", scope: "ingress", detail: "External proxy internals are unavailable.", domain_name: "" }];
+  assert.equal(environmentOperationalTone(lane), "verified");
+  lane.health_monitoring.checks[0].status = "fail";
+  assert.equal(environmentOperationalTone(lane), "danger");
+  lane.health_monitoring.checks[0].status = "pass";
+  lane.health_monitoring.checks[0].incident_status = "open";
+  assert.equal(environmentOperationalTone(lane), "danger");
+  lane.health_monitoring.checks[0].incident_status = "";
+  lane.provenance.freshness_status = "stale";
+  assert.equal(environmentOperationalTone(lane), "warning");
+});
+
+test("no website never bypasses health, identity, placement or applicable topology gates", () => {
+  const lane = environment();
+  lane.topology.desired.public_website = "none";
+  lane.topology.warnings = [{ code: "public_website_not_applicable", severity: "info", scope: "authority", detail: "No public website declared.", domain_name: "" }];
+  assert.equal(environmentOperationalTone(lane), "verified");
+  for (const state of ["missing", "unsupported"]) {
+    lane.trust_state = state;
+    assert.notEqual(environmentOperationalTone(lane), "verified");
+  }
+  lane.trust_state = "recorded";
+  lane.health_monitoring.checks[0].probe_effective = false;
+  assert.notEqual(environmentOperationalTone(lane), "verified");
+  lane.health_monitoring.checks[0].probe_effective = true;
+  lane.topology.observed.placement.runtime_identity_status = "mismatch";
+  assert.equal(environmentOperationalTone(lane), "danger");
+  lane.topology.observed.placement.runtime_identity_status = "match";
+  lane.topology.warnings.push({ code: "stale_route_authority", severity: "error", scope: "authority", detail: "Stale authority", domain_name: "" });
+  assert.equal(environmentOperationalTone(lane), "danger");
+});
+
+test("negative TLS remains blocking beside informational evidence", () => {
+  const lane = environment();
+  lane.topology.warnings = [{ code: "external_ingress_internals_unsupported", severity: "info", scope: "ingress", detail: "External proxy internals unavailable", domain_name: "" }];
+  for (const status of ["expired", "hostname_mismatch", "untrusted", "self_signed", "unreachable"]) {
+    lane.topology.observed.tls_domains = [{ status }];
+    assert.equal(environmentOperationalTone(lane), "danger");
+  }
+});
+
 test("stale or unverified identity cannot show green with passing HTTP", () => {
   /** @type {import("../src/generated/openapi.ts").DataProvenance["freshness_status"][]} */
   const statuses = ["stale", "recorded", "missing"];

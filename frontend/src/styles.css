@@ -1400,6 +1400,11 @@ h3 {
   color: var(--danger);
 }
 
+.warning-list li[data-severity="info"] {
+  background: var(--surface-raised);
+  color: var(--muted);
+}
+
 .warning-list li > span {
   display: grid;
 }

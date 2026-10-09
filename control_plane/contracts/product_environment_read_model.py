@@ -42,6 +42,7 @@ from control_plane.contracts.production_backup_authority import (
 from control_plane.contracts.product_topology_read_model import (
     ProductEnvironmentTopology,
     build_product_environment_topology,
+    select_public_probe_observations,
 )
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentEventKind,
@@ -699,7 +700,11 @@ def build_product_environment_detail(
         warning
         for warning in (
             descriptor_warning,
-            *(topology_warning.detail for topology_warning in topology.warnings),
+            *(
+                topology_warning.detail
+                for topology_warning in topology.warnings
+                if topology_warning.severity != "info"
+            ),
         )
         if warning
     )
@@ -2012,7 +2017,9 @@ def _build_environment_summary(
             fallback=provenance.freshness_status,
         ),
         provenance=provenance,
-        warnings=tuple(warning.detail for warning in topology.warnings),
+        warnings=tuple(
+            warning.detail for warning in topology.warnings if warning.severity != "info"
+        ),
         available_actions=_action_availability(
             descriptor=descriptor,
             profile=profile,
@@ -2294,14 +2301,7 @@ def _public_ingress_summary(
         check_kind="public_http",
         limit=50,
     )
-    latest = next(
-        (
-            record
-            for record in records
-            if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
-        ),
-        None,
-    )
+    latest, _ = select_public_probe_observations(lane=lane, records=records)
     if latest is None or not isinstance(latest, PublicIngressObservationRecord):
         return ProductPublicIngressSummary(
             monitoring_intent=monitoring_intent,
@@ -2313,6 +2313,7 @@ def _public_ingress_summary(
         product=profile.product,
         context_name=lane.context,
         instance_name=lane.instance,
+        check_name=latest.check_name,
         check_kind="public_http",
         status="open",
         limit=1,

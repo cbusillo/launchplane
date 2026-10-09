@@ -58,7 +58,7 @@ export function environmentOperationalTone(environment: ProductEnvironmentSummar
     environment.topology.observed.tls_domains.some(domain => negativeTlsStates.has(domain.status))
   ) return "danger";
   if (
-    environment.warnings.length || environment.topology.warnings.length ||
+    environment.warnings.length || environment.topology.warnings.some(warning => warning.severity !== "info") ||
     checks.some(check => check.status !== "pass" || check.trust_state !== "verified") ||
     checks.length > 0 && environment.provenance.freshness_status !== "verified" ||
     Date.parse(environment.provenance.stale_after) < now ||

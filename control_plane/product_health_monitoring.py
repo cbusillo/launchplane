@@ -178,6 +178,10 @@ def build_product_health_monitoring_plan(
         check=candidate_check,
         resolved_url=resolved_url,
     )
+    # Dry-run must reject the same full-profile conflicts as apply.
+    updated_product_health_monitoring_profile(
+        profile=profile, request=request, updated_at=profile.updated_at
+    )
     changed = (
         existing_check is None
         or existing_check.model_dump(mode="json") != candidate_check.model_dump(mode="json")
