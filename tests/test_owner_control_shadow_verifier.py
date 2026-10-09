@@ -553,7 +553,7 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
         finally:
             second_store.close()
 
-    def test_issuance_floors_operation_expiry(self) -> None:
+    def test_issuance_ignores_legacy_operation_deadline_and_keeps_challenge_ttl(self) -> None:
         private_key = Ed25519PrivateKey.generate()
         binding = _binding(private_key, session_id="owner-control-expiry-session")
         self.store.enroll_owner_control_channel_session(
@@ -562,7 +562,7 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
         )
         operation = _seed_issue_provenance(
             self.store,
-            expires_at="2026-08-28T12:01:30.900000+00:00",
+            expires_at="2026-08-28T11:59:30.900000+00:00",
         )
         issue_request = OwnerControlChallengeIssueRequest(
             channel_session_id=binding.channel_session_id,
@@ -575,7 +575,7 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
             return_value="2026-08-28T12:00:00+00:00",
         ):
             issued = self.store.issue_owner_control_challenge(issue_request)
-        self.assertEqual(issued.expires_at, "2026-08-28T12:01:30+00:00")
+        self.assertEqual(issued.expires_at, "2026-08-28T12:05:00+00:00")
 
     def test_issuance_terminalizes_expired_active_challenge_before_reissue(self) -> None:
         private_key = Ed25519PrivateKey.generate()
@@ -831,7 +831,7 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
             reason="Cancel before owner review",
             now=lambda: datetime.fromisoformat("2026-08-28T00:00:01+00:00"),
         )
-        with self.assertRaisesRegex(ValueError, "unexpired planned operation"):
+        with self.assertRaisesRegex(ValueError, "planned operation"):
             self.store.issue_owner_control_challenge(
                 OwnerControlChallengeIssueRequest(
                     channel_session_id=binding.channel_session_id,

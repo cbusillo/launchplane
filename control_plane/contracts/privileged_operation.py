@@ -663,7 +663,8 @@ class PrivilegedOperationApproval(BaseModel):
                 field_name,
                 _required_token(str(getattr(self, field_name)), field_name),
             )
-        object.__setattr__(self, "expires_at", _timestamp(self.expires_at, "expires_at"))
+        if self.expires_at:
+            object.__setattr__(self, "expires_at", _timestamp(self.expires_at, "expires_at"))
         return self
 
 
@@ -982,13 +983,15 @@ class PrivilegedOperationRecord(BaseModel):
             raise ValueError("Privileged-operation evidence_digest does not match evidence")
         object.__setattr__(self, "created_at", _timestamp(self.created_at, "created_at"))
         object.__setattr__(self, "updated_at", _timestamp(self.updated_at, "updated_at"))
-        object.__setattr__(self, "expires_at", _timestamp(self.expires_at, "expires_at"))
+        # Empty means revision-bound. Retain legacy timestamps for immutable history/digests.
+        if self.expires_at:
+            object.__setattr__(self, "expires_at", _timestamp(self.expires_at, "expires_at"))
         created_at = datetime.fromisoformat(self.created_at)
         updated_at = datetime.fromisoformat(self.updated_at)
-        expires_at = datetime.fromisoformat(self.expires_at)
+        expires_at = datetime.fromisoformat(self.expires_at) if self.expires_at else None
         if updated_at < created_at:
             raise ValueError("Privileged-operation updated_at cannot precede created_at")
-        if expires_at <= created_at:
+        if expires_at is not None and expires_at <= created_at:
             raise ValueError("Privileged-operation expires_at must follow created_at")
         terminal_reason = self.terminal_reason.strip()
         object.__setattr__(self, "terminal_reason", terminal_reason)
@@ -1028,8 +1031,16 @@ class PrivilegedOperationRecord(BaseModel):
                 raise ValueError(
                     "Privileged-operation approval pre-state digest does not match the record"
                 )
-            approval_expires_at = datetime.fromisoformat(self.approval.expires_at)
-            if approval_expires_at > expires_at or approval_expires_at <= created_at:
+            approval_expires_at = (
+                datetime.fromisoformat(self.approval.expires_at)
+                if self.approval.expires_at
+                else None
+            )
+            if approval_expires_at is not None and (
+                expires_at is None
+                or approval_expires_at > expires_at
+                or approval_expires_at <= created_at
+            ):
                 raise ValueError(
                     "Privileged-operation approval expiry must remain within the plan lifetime"
                 )
@@ -1378,7 +1389,8 @@ class PrivilegedOperationSemanticReviewLifecycle(BaseModel):
         object.__setattr__(self, "generated_at", _timestamp(self.generated_at, "generated_at"))
         object.__setattr__(self, "created_at", _timestamp(self.created_at, "created_at"))
         object.__setattr__(self, "updated_at", _timestamp(self.updated_at, "updated_at"))
-        object.__setattr__(self, "expires_at", _timestamp(self.expires_at, "expires_at"))
+        if self.expires_at:
+            object.__setattr__(self, "expires_at", _timestamp(self.expires_at, "expires_at"))
         if self.terminal_at:
             object.__setattr__(
                 self,

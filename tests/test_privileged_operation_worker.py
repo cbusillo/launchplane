@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -68,6 +68,7 @@ from control_plane.privileged_operation_service import (
     create_privileged_operation_plan,
     create_typed_privileged_operation_plan,
     PrivilegedOperationNotApprovableError,
+    revoke_privileged_operation,
 )
 from control_plane.privileged_operation_worker import (
     _construct_approver_authorization,
@@ -357,6 +358,7 @@ def _prepare_approved_policy_operation(
     *,
     approval_policy: LaunchplaneAuthzPolicyRecord,
     request: ManagedAuthzPolicySetProposalInput | None = None,
+    approval_at: datetime | None = None,
 ) -> str:
     resolved_request = request or ManagedAuthzPolicySetProposalInput(
         managed_set_id="test.policy-operation",
@@ -416,7 +418,7 @@ def _prepare_approved_policy_operation(
         operation_id=planned.operation_id,
         approval=approval,
         source_event_id="worker-policy-approval",
-        now=lambda: datetime(2026, 8, 22, 20, 5, tzinfo=timezone.utc),
+        now=lambda: approval_at or datetime(2026, 8, 22, 20, 5, tzinfo=timezone.utc),
     ).record.operation_id
 
 
@@ -505,6 +507,74 @@ def _merge_train_policy_record_with_provider_expectation(
 
 
 class PrivilegedOperationWorkerTests(unittest.TestCase):
+    def test_policy_review_can_be_approved_and_executed_years_after_preparation(self) -> None:
+        later = FIXED_NOW + timedelta(days=3650)
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                policy = store.seed_authz_policy_if_absent(_policy_admin_record())
+                operation_id = _prepare_approved_policy_operation(
+                    store, approval_policy=policy, approval_at=later
+                )
+                approved = store.read_privileged_operation_record(operation_id)
+                self.assertEqual(approved.expires_at, "")
+                self.assertIsNotNone(approved.approval)
+                completed = execute_approved_privileged_operations_once(
+                    record_store=store, now=lambda: later + timedelta(days=3650)
+                )
+                self.assertEqual(tuple(record.status for record in completed), ("executed",))
+                current = store.list_authz_policy_records(status="active")[0]
+                self.assertTrue(
+                    any(
+                        rule.managed_set_id == "test.policy-operation"
+                        for rule in current.policy.github_humans
+                    )
+                )
+                self.assertEqual(
+                    execute_approved_privileged_operations_once(
+                        record_store=store, now=lambda: later + timedelta(days=3651)
+                    ),
+                    (),
+                )
+            finally:
+                store.close()
+
+    def test_old_approved_review_can_be_withdrawn_and_never_executes(self) -> None:
+        later = FIXED_NOW + timedelta(days=3650)
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            try:
+                policy = store.seed_authz_policy_if_absent(_policy_admin_record())
+                operation_id = _prepare_approved_policy_operation(store, approval_policy=policy)
+                revoked = revoke_privileged_operation(
+                    record_store=store,
+                    operation_id=operation_id,
+                    actor_github_id=123,
+                    actor_login="operator-at-approval",
+                    source_event_id="withdraw-old-review",
+                    reason="Withdraw reviewed change",
+                    now=lambda: later,
+                )
+                self.assertEqual(revoked.record.status, "revoked")
+                self.assertEqual(
+                    execute_approved_privileged_operations_once(
+                        record_store=store, now=lambda: later
+                    ),
+                    (),
+                )
+                self.assertEqual(store.list_authz_policy_records(status="active"), (policy,))
+                assert revoked.record.approval is not None
+                with self.assertRaises(PrivilegedOperationNotApprovableError):
+                    approve_privileged_operation(
+                        record_store=store,
+                        operation_id=operation_id,
+                        approval=revoked.record.approval,
+                        source_event_id="reapprove-withdrawn",
+                        now=lambda: later,
+                    )
+            finally:
+                store.close()
+
     def setUp(self) -> None:
         # These loop tests isolate generic operations and cleanup. The actual
         # enrollment recovery is exercised with shared storage by its HTTP test.
@@ -1413,7 +1483,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
 
                 execute_approved_privileged_operations_once(
                     record_store=store,
-                    now=lambda: FIXED_NOW,
+                    now=lambda: FIXED_NOW + timedelta(days=3650),
                 )
 
                 record = store.read_privileged_operation_record(operation_id)
