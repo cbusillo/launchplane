@@ -1635,6 +1635,19 @@ def _finish_landed_merge_train_batch(
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object]:
     landed_plan = landed_record.landing_plan
+    if (
+        landed_record.ordinary_job_binding is None
+        and landed_plan.policy_key == repository_policy.policy_key
+        and landed_plan.policy_sha256 != policy_sha256
+        and _landing_cleanup_allowed(landed_record)
+    ):
+        return _reconcile_completed_landing_after_policy_change(
+            request=request,
+            github_client=github_client,
+            stack_collapse_store=stack_collapse_store,
+            landed_record=landed_record,
+            lease=lease,
+        )
     try:
         validate_merge_train_landing_record_for_controller(
             landing_record=landed_record,
@@ -1739,6 +1752,75 @@ def _finish_landed_merge_train_batch(
         stack_collapse_store=stack_collapse_store,
         lease=lease,
     )
+    return result
+
+
+def _reconcile_completed_landing_after_policy_change(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    github_client: GitHubMergeTrainClient,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    landed_record: MergeTrainBatchLandingPlanRecord,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object]:
+    """Release completed history without executing effects under an obsolete policy."""
+    plan = landed_record.landing_plan
+    for entry in plan.entries:
+        observed_merge = github_client.pull_request_is_merged(
+            repository=request.repository,
+            pull_request_number=entry.pull_request_number,
+            expected_head_sha=entry.expected_head_sha,
+        )
+        if observed_merge != entry.merge_commit_sha or not github_client.branch_contains_commit(
+            repository=request.repository,
+            branch_ref=request.base_branch,
+            commit_sha=entry.merge_commit_sha,
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Completed landing no longer matches the merged PR and target branch.",
+                status_code=409,
+            )
+    collapse_records = stack_collapse_records_for_completed_landing(
+        record_store=stack_collapse_store,
+        github_client=github_client,
+        repository=request.repository,
+        base_branch=request.base_branch,
+        landing_plan=plan,
+        policy_sha256=plan.policy_sha256,
+    )
+    result: dict[str, object] = {
+        "repository": request.repository,
+        "base_branch": request.base_branch,
+        "mode": "land",
+        "controller_action": "land_batch",
+        "merge_train_batch_landing_plan_record_id": landed_record.record_id,
+        "landing_plan": plan.model_dump(mode="json"),
+        "candidate_ref_cleanup_status": "retained",
+        "reason_code": "completed_landing_policy_changed",
+    }
+    missing_stack_record = bool(
+        lease.record.step_payload.get("stack_collapse_plan_record_id") and not collapse_records
+    )
+    if missing_stack_record or any(
+        record.plan.status != "ready_for_train" for record in collapse_records
+    ):
+        reason = "completed_landing_stack_reconciliation_required"
+        result.update(
+            mode="blocked",
+            reason_code=reason,
+            controller_reconciliation_status="required",
+            controller_reconciliation_detail=reason,
+            blocking_reason={
+                "code": reason,
+                "message": "Recorded stack children need reconciliation.",
+            },
+            details={
+                "stack_collapse_plan_record_ids": [record.record_id for record in collapse_records],
+                "expected_stack_collapse_plan_record_id": lease.record.step_payload.get(
+                    "stack_collapse_plan_record_id", ""
+                ),
+            },
+        )
     return result
 
 

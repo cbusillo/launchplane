@@ -20,6 +20,16 @@ Contradictory or incomplete evidence remains `reconcile_required` and needs
 admin investigation. Candidate-ref cleanup failures are separate from
 landing truth and may be retried without changing the outcome record.
 
+If a policy digest changes under the same policy key while a fully merged legacy
+landing is still awaiting controller reconciliation, the controller verifies each recorded PR head and merge commit
+against the provider and confirms containment in the target branch. It then
+clears the completed fence with `reason_code=completed_landing_policy_changed`,
+preserving the landing history and retaining the old candidate ref. This recovery
+performs no provider writes and does not authorize another merge under the old
+policy. Incomplete stack disposition remains fenced with
+`completed_landing_stack_reconciliation_required` and the relevant record IDs;
+conflicting or unavailable provider evidence also preserves reconciliation.
+
 Use the controller phase when diagnosing a failed landing. An active
 `admit_pull_request` phase means the failure occurred while reconciling or
 evaluating Launchplane admission, before a GitHub merge request. An active
