@@ -432,7 +432,7 @@ def publish_release_invitation(
                     return
                 # One durable reminder per open request. A lost response is
                 # recovered from this marker, including after replica restart.
-                body = f"{reminder_marker}\n" + str(request["body"]).replace(
+                body = f"{reminder_marker}\n" + "\n".join(_comment_lines(request)).replace(
                     f"Hi {profile.owner.github_login},", f"Hi @{profile.owner.github_login},"
                 ).replace("Hi @", "A reminder: hi @")
                 body = re.sub(r"(?m)^Updated at: .*", f"Updated at: {_display_time()}", body)
