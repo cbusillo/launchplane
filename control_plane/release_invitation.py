@@ -56,8 +56,10 @@ def _remember_delivery(
 
 
 def _timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("Release invitation timestamp is unavailable.")
     try:
-        parsed = datetime.fromisoformat(str(value))
+        parsed = datetime.fromisoformat(value)
     except ValueError as error:
         raise ValueError("Release invitation timestamp is unavailable.") from error
     if parsed.tzinfo is None:
@@ -71,17 +73,24 @@ def _change_link(item: ReleaseReviewItem) -> str:
     return f"- [#{item.pull_request_number}]({item.url}): {title}"
 
 
+def _comment_lines(comment: dict[str, object]) -> list[str]:
+    body = comment.get("body")
+    if not isinstance(body, str):
+        raise ValueError("Release invitation comment body is unavailable.")
+    return body.splitlines()
+
+
 def _last_client_decision(
     store: ReleaseReviewStore, profile: LaunchplaneProductProfileRecord
 ) -> ReleaseReviewDecisionRecord | None:
     return max(
-        (
+        [
             decision
             for decision in store.list_release_review_decision_records(product=profile.product)
             if decision.checklist.repository == profile.repository
             and decision.checklist.owner_github_id == profile.owner.github_id
             and decision.decision in ("accepted", "changes_requested")
-        ),
+        ],
         key=lambda decision: (_timestamp(decision.decided_at), decision.record_id),
         default=None,
     )
@@ -105,9 +114,7 @@ def _open_request(
     marker: str,
     decision: ReleaseReviewDecisionRecord | None,
 ) -> dict[str, object] | None:
-    matching = [
-        comment for comment in comments if marker in str(comment.get("body", "")).splitlines()
-    ]
+    matching = [comment for comment in comments if marker in _comment_lines(comment)]
     if len(matching) > 1:
         raise ValueError("Release invitation request is ambiguous.")
     if matching:
@@ -116,7 +123,7 @@ def _open_request(
     # Candidate markers alone cannot distinguish an open request from a decided one.
     legacy = []
     for comment in comments:
-        lines = str(comment.get("body", "")).splitlines()
+        lines = _comment_lines(comment)
         if any(line.startswith("<!-- launchplane:release-request:") for line in lines):
             continue
         if not any(
@@ -293,9 +300,7 @@ def publish_release_invitation(
             comments = _pages(comments_path, token)
             request = _open_request(comments, request_marker, last_decision)
             reminder_marker = request_marker.replace("release-request:", "release-reminder:")
-            reminded = any(
-                reminder_marker in str(comment.get("body", "")).splitlines() for comment in comments
-            )
+            reminded = any(reminder_marker in _comment_lines(comment) for comment in comments)
             # Recompile after destination lookup: a concurrent acceptance or testing
             # deploy must not receive an invitation for the obsolete snapshot.
             if store.read_product_profile_record(profile.product) != profile:
@@ -326,7 +331,7 @@ def publish_release_invitation(
                 if request
                 else _now() + timedelta(days=3)
             )
-            if request and marker in str(request.get("body", "")).splitlines():
+            if request and marker in _comment_lines(request):
                 if reminded or _now() < due:
                     _remember_delivery(backoff, receipt, due, reminded)
                     return
