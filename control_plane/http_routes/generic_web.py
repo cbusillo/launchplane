@@ -1883,6 +1883,11 @@ def register_generic_web_write_routes(
     dependencies: GenericWebWriteRouteDependencies,
     handlers: GenericWebWriteRouteHandlers,
 ) -> None:
+    from control_plane.http_routes.legacy_preview_reconciliation import (
+        register_legacy_preview_reconciliation_route,
+    )
+
+    register_legacy_preview_reconciliation_route(app, dependencies=dependencies)
     app.add_api_route(
         _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
         handlers.apply_generic_web_preview_desired_state,

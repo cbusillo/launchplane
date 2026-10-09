@@ -134,6 +134,7 @@ from control_plane.contracts.provider_delivery_readiness import (
 )
 
 if TYPE_CHECKING:
+    from control_plane.legacy_preview_reconciliation import LegacyPreviewReconciliationRequest
     from control_plane.product_retirement import BoundProductRetirement
     from control_plane.contracts.merge_train_historical_completion import (
         MergeTrainHistoricalCompletionProviderEvidence,
@@ -35624,6 +35625,82 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             rows = session.scalars(statement).all()
             return tuple(self._read_product_profile_payload(row.payload) for row in rows)
+
+    def write_legacy_preview_plan(self, completion: LaunchplaneIdempotencyRecord) -> None:
+        """Never replace a reviewed plan when concurrent callers reuse its key."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            existing = session.scalar(
+                self._idempotency_statement(
+                    scope=completion.scope,
+                    route_path=completion.route_path,
+                    idempotency_key=completion.idempotency_key,
+                )
+            )
+            if existing is not None:
+                stored = LaunchplaneIdempotencyRecord.model_validate(existing.payload)
+                if (
+                    stored.request_fingerprint != completion.request_fingerprint
+                    or stored.response_payload.get("result")
+                    != completion.response_payload.get("result")
+                ):
+                    raise ValueError(
+                        "Legacy preview plan key is already bound to different evidence."
+                    )
+                return
+            session.add(self._idempotency_row(completion))
+            session.commit()
+
+    def commit_legacy_preview_reconciliation(
+        self,
+        *,
+        reconciliation: LegacyPreviewReconciliationRequest,
+        expected_authority_digest: str,
+        destroyed_at: str,
+        completion: LaunchplaneIdempotencyRecord,
+    ) -> None:
+        """Recheck authority and atomically close exactly one preview with its replay receipt."""
+        from control_plane.legacy_preview_reconciliation import bind_legacy_preview
+        from control_plane.workflows.launchplane import apply_preview_destroyed_transition
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_preview_authority_write(
+                session, preview=self.read_preview_record(reconciliation.preview_id)
+            )
+            if self._engine.dialect.name == "postgresql":
+                tables = ", ".join(
+                    model.__tablename__
+                    for model in (
+                        LaunchplaneProductProfileRow,
+                        LaunchplaneProviderTargetRow,
+                        LaunchplaneDokployTargetIdRow,
+                        LaunchplaneDokployTargetRow,
+                        LaunchplanePreviewRow,
+                        LaunchplanePreviewGenerationRow,
+                        LaunchplaneProductReconcileRequestRow,
+                        LaunchplaneDeploymentRow,
+                    )
+                )
+                session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
+            current = bind_legacy_preview(self, reconciliation)
+            if current.digest != expected_authority_digest:
+                raise ValueError("Legacy preview authority changed before completion.")
+            closed = apply_preview_destroyed_transition(
+                preview=current.preview,
+                destroyed_at=destroyed_at,
+                destroy_reason=reconciliation.reason,
+            )
+            row = session.get(LaunchplanePreviewRow, closed.preview_id)
+            if row is None:
+                raise ValueError("Preview disappeared before completion.")
+            row.state = closed.state
+            row.updated_at = closed.updated_at
+            row.payload = self._payload_dict(closed)
+            session.add(self._idempotency_row(completion))
+            session.commit()
 
     def commit_no_target_retirement(
         self,

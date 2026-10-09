@@ -42,6 +42,7 @@ from tests.test_odoo_addon_settings_override import _existing_record as _addon_o
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from tests import test_http_app_product_retirement as retirement_tests
+from tests import test_legacy_preview_reconciliation as legacy_preview_tests
 from tests.http_app_test_support import _asgi_request
 from control_plane import authz_grant_service, authz_policy_activation
 from control_plane.authz_candidate_preparation import (
@@ -948,6 +949,13 @@ def _owner_acceptance_system_event(
         source_event_id=source_event_id,
         reason="PostgreSQL subject sequence integration evidence.",
     )
+
+
+class RealPostgresLegacyPreviewReconciliationTests(
+    legacy_preview_tests.LegacyPreviewReconciliationTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
 
 
 class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
