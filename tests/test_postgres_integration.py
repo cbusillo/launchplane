@@ -29,6 +29,10 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.preview_generation_record import (
+    PreviewGenerationRecord,
+    PreviewPullRequestSummary,
+)
 from control_plane.odoo_import_overrides import plan_import_override_reconciliation
 from control_plane.workflows.odoo_post_deploy import _write_odoo_instance_override_apply_result
 from tests.test_odoo_import_override_reconciliation import (
@@ -956,6 +960,87 @@ class RealPostgresLegacyPreviewReconciliationTests(
 ):
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
+
+    async def test_sibling_generation_write_does_not_deadlock_reconciliation(self) -> None:
+        sibling = self.preview.model_copy(update={"preview_id": "sibling", "anchor_pr_number": 7})
+        self.store.write_preview_record(sibling)
+        generation = PreviewGenerationRecord(
+            generation_id="sibling-generation",
+            preview_id=sibling.preview_id,
+            sequence=1,
+            state="ready",
+            requested_reason="fixture",
+            requested_at=sibling.created_at,
+            finished_at=sibling.created_at,
+            resolved_manifest_fingerprint="fixture-manifest",
+            anchor_summary=PreviewPullRequestSummary.model_validate(
+                {
+                    "repo": self.profile.repository,
+                    "pr_number": 7,
+                    "head_sha": "a" * 40,
+                    "pr_url": sibling.anchor_pr_url,
+                }
+            ),
+        )
+        plan = await self.plan()
+        generation_written = threading.Event()
+        release_writer = threading.Event()
+
+        def pause_generation_writer(
+            connection: Any,
+            cursor: Any,
+            statement: str,
+            parameters: Any,
+            context: Any,
+            executemany: bool,
+        ) -> None:
+            if statement.startswith("INSERT INTO launchplane_preview_generations"):
+                generation_written.set()
+                if not release_writer.wait(10):
+                    raise ValueError("fixture writer timed out")
+
+        event.listen(self.store._engine, "after_cursor_execute", pause_generation_writer)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                writer = executor.submit(
+                    self.store.write_preview_generation_evidence_records,
+                    preview_record=sibling.model_copy(
+                        update={"latest_generation_id": generation.generation_id}
+                    ),
+                    generation_record=generation,
+                )
+                apply = None
+                try:
+                    self.assertTrue(await asyncio.to_thread(generation_written.wait, 5))
+                    apply = asyncio.create_task(self.apply(plan))
+                    blocked = False
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        with self.store._engine.connect() as connection:
+                            blocked = bool(
+                                connection.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_locks WHERE NOT granted "
+                                        "AND relation = 'launchplane_preview_generations'::regclass"
+                                    )
+                                )
+                            )
+                        if blocked:
+                            break
+                        await asyncio.sleep(0.01)
+                    self.assertTrue(blocked, "Reconciliation never waited on generation evidence")
+                finally:
+                    release_writer.set()
+                await asyncio.to_thread(writer.result, 5)
+                assert apply is not None
+                response = await asyncio.wait_for(apply, 5)
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(
+                    self.store.read_preview_generation_record(generation.generation_id), generation
+                )
+        finally:
+            release_writer.set()
+            event.remove(self.store._engine, "after_cursor_execute", pause_generation_writer)
 
     def test_provider_destroy_waits_for_reconciliation_serialization(self) -> None:
         from control_plane.workflows.generic_web_preview import (

@@ -35678,8 +35678,8 @@ class PostgresRecordStore(HumanSessionStore):
                         LaunchplaneProviderTargetRow,
                         LaunchplaneDokployTargetIdRow,
                         LaunchplaneDokployTargetRow,
-                        LaunchplanePreviewRow,
                         LaunchplanePreviewGenerationRow,
+                        LaunchplanePreviewRow,
                         LaunchplaneProductReconcileRequestRow,
                         LaunchplaneDeploymentRow,
                     )

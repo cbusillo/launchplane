@@ -26,6 +26,8 @@ missing deployment references; those missing records never establish absence.
 Review binds this preview's authority and provider classification. Changes to
 unrelated products or provider applications do not invalidate an otherwise
 unchanged, absent-preview plan. Complete inventory is inspected again at apply.
+Sibling target/ownership changes in the same preview context invalidate review
+and require a fresh plan.
 
 `apply` requires a different `Idempotency-Key`, `plan_idempotency_key`,
 `expected_plan_digest`, and `reviewed_plan: true`. It rechecks the saved plan's
@@ -41,6 +43,9 @@ never substitute a key, caller or payload. A successful replay proves the
 recorded result, not current provider state. After apply, independently run
 `inspect` again and require both `provider_absence_verified: true` and
 `preview_state: destroyed` with a destruction timestamp.
+Large inventories can outlast the helper's HTTP timeout. Allow the original
+scan to finish before repeating the same key; a retry during that scan waits
+on the same preview lock.
 
 ## Evidence and authority
 

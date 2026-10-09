@@ -518,3 +518,54 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
         response = await self.call("inspect", product="missing-product")
         self.assertEqual(response.status_code, 404)
         self.search.assert_not_called()
+
+    async def test_slow_preview_destroy_keeps_service_available_and_preserves_cancelled_receipt(
+        self,
+    ) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_destroy(**_: object) -> tuple[dict[str, str], dict[str, object]]:
+            started.set()
+            if not release.wait(5):
+                raise ValueError("fixture timed out")
+            return {}, {"destroy_status": "pass", "destroy_outcome": "destroyed"}
+
+        async def destroy() -> Any:
+            return await request(
+                self.app,
+                "POST",
+                "/v1/drivers/generic-web/preview-destroy",
+                headers={
+                    "Authorization": "Bearer local-operator-token",
+                    "Idempotency-Key": "slow-destroy",
+                },
+                payload={
+                    "product": self.profile.product,
+                    "destroy": {
+                        "product": self.profile.product,
+                        "anchor_pr_number": 1,
+                        "destroy_reason": "fixture",
+                    },
+                },
+            )
+
+        with patch(
+            "control_plane.http_routes.generic_web.apply_generic_web_preview_destroy_result",
+            side_effect=slow_destroy,
+        ) as driver:
+            task = asyncio.create_task(destroy())
+            try:
+                self.assertTrue(await asyncio.to_thread(started.wait, 3))
+                health = await asyncio.wait_for(request(self.app, "GET", "/openapi.json"), 2)
+                self.assertEqual(health.status_code, 200)
+                task.cancel()
+                await asyncio.sleep(0)
+            finally:
+                release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+            replay = await destroy()
+            self.assertEqual(replay.status_code, 202, replay.text)
+            self.assertTrue(replay.json()["replayed"])
+            driver.assert_called_once()

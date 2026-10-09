@@ -1120,13 +1120,28 @@ def build_generic_web_write_route_handlers(
         )
         if replayed_response is not None:
             return replayed_response
+        cancellation: asyncio.CancelledError | None = None
         try:
-            records, result = apply_generic_web_preview_destroy_result(
-                control_plane_root=dependencies.control_plane_root,
-                record_store=record_store,
-                request=destroy_request,
-                profile=profile,
+            destroy_task = asyncio.create_task(
+                asyncio.to_thread(
+                    apply_generic_web_preview_destroy_result,
+                    control_plane_root=dependencies.control_plane_root,
+                    record_store=record_store,
+                    request=destroy_request,
+                    profile=profile,
+                ),
+                name=f"generic-web-preview-destroy:{trace_id}",
             )
+            try:
+                records, result = await asyncio.shield(destroy_task)
+            except asyncio.CancelledError as error:
+                cancellation = error
+                while not destroy_task.done():
+                    try:
+                        await asyncio.shield(destroy_task)
+                    except asyncio.CancelledError:
+                        continue
+                records, result = destroy_task.result()
         except (ValueError, click.ClickException) as error:
             raise dependencies.http_error(
                 status_code=400,
@@ -1150,6 +1165,8 @@ def build_generic_web_write_route_handlers(
                 trace_id=trace_id,
                 response=response,
             )
+        if cancellation is not None:
+            raise cancellation
         return response
 
     async def apply_generic_web_deploy(
