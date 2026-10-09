@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
-for (const field of ["Image repository", "Production use", "Releases on acceptance"]) {
-  test(`${field}: dry run, draft invalidation, Apply and read-back`, async ({ page }, testInfo) => {
+for (const [field, option] of [["Image repository", ""], ["Production use", "live"], ["Releases on acceptance", "director_standing"], ["Releases on acceptance", "promote_with_rollback_drill"]]) {
+  test(`${field} ${option}: dry run, draft invalidation, Apply and read-back`, async ({ page }, testInfo) => {
     const mutations: string[] = [];
     page.on("request", request => { if (request.method() === "POST") mutations.push(request.url()); });
     await page.goto("/ui/products/atlas-commerce?fixture=products");
@@ -10,7 +10,7 @@ for (const field of ["Image repository", "Production use", "Releases on acceptan
     const apply = panel.getByRole("button", { name: "Apply", exact: true });
     await expect(apply).toBeDisabled();
     if (field === "Image repository") await panel.getByLabel(field, { exact: true }).fill("ghcr.io/example/atlas-commerce");
-    else await panel.getByLabel(field, { exact: true }).selectOption(field === "Production use" ? "live" : "director_standing");
+    else await panel.getByLabel(field, { exact: true }).selectOption(option);
     await panel.getByLabel("Change reason").fill("Review the classification or package move.");
     await panel.getByRole("button", { name: "Dry run", exact: true }).click();
     await expect(apply).toBeEnabled();

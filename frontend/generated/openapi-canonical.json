@@ -46621,6 +46621,20 @@
             }
           },
           {
+            "in": "query",
+            "name": "step",
+            "required": false,
+            "schema": {
+              "default": "promote",
+              "enum": [
+                "promote",
+                "rollback"
+              ],
+              "title": "Step",
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,
@@ -46738,6 +46752,20 @@
               "minimum": 1,
               "title": "Attempt",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "step",
+            "required": false,
+            "schema": {
+              "default": "promote",
+              "enum": [
+                "promote",
+                "rollback"
+              ],
+              "title": "Step",
+              "type": "string"
             }
           },
           {
@@ -46868,6 +46896,20 @@
               "minimum": 1,
               "title": "Attempt",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "step",
+            "required": false,
+            "schema": {
+              "default": "promote",
+              "enum": [
+                "promote",
+                "rollback"
+              ],
+              "title": "Step",
+              "type": "string"
             }
           },
           {

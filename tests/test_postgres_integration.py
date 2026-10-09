@@ -6626,6 +6626,9 @@ class RealPostgresProviderOperationTests(unittest.TestCase):
         from tests.test_generic_web_promotion_recovery import PromotionRecoveryTests
 
         for scenario in (
+            "test_adopts_unknown_drill_once_and_continues_the_accepted_release",
+            "test_drill_recovery_ignores_a_later_manual_rollback_plan",
+            "test_drill_adoption_refuses_late_record_change",
             "test_adopts_terminal_promotion_once_without_provider_effect",
             "test_adopts_verified_rollback_and_preserves_failed_release",
             "test_atomic_adoption_refuses_late_record_change",

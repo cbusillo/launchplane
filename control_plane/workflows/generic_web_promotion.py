@@ -452,7 +452,17 @@ def execute_generic_web_prod_promotion(
         failure = f"Destination deploy failed: {deploy_result.error_message or 'no detail'}"
         failure_code = "destination_deploy_failed"
 
-    rollback = _RollbackOutcome()
+    rollback = _RollbackOutcome(
+        evidence=RollbackExecutionEvidence(
+            target_deployment_record_id=rollback_target.deployment_record_id,
+            target_promotion_record_id=rollback_target.previous_inventory.promotion_record_id
+            if rollback_target.previous_inventory is not None
+            else "",
+            target_promoted_from_instance=rollback_target.previous_inventory.promoted_from_instance
+            if rollback_target.previous_inventory is not None
+            else "",
+        )
+    )
     if failure:
         # Restore production before writing evidence, so a failed record write
         # cannot leave production on the failed artifact.
@@ -648,6 +658,7 @@ def _roll_back_production(
     provider_operation_title: str,
     deployment_record_id: str,
     provider_effect_checkpoint: Callable[[str], None] | None,
+    resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
 ) -> _RollbackOutcome:
     target_id = rollback_target.deployment_record_id
     planned_deploy = rollback_target.planned_deploy
@@ -683,6 +694,7 @@ def _roll_back_production(
             profile=profile,
             lane=lane,
             deploy_provider=deploy_provider,
+            resolved_deploy_target=resolved_deploy_target,
             provider_operation_title=(
                 f"{provider_operation_title} rollback" if provider_operation_title else ""
             ),

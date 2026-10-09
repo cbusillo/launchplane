@@ -575,7 +575,7 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
         <p>{field === "image"
           ? "Change where this product publishes new images. Recorded rollback artifacts remain available."
           : field === "release"
-            ? "Held: the Client's acceptance only records a decision. Promote: the Client's acceptance starts the gated production release. With rollback drill (Odoo): the next accepted release also rolls back once and promotes again. Director standing acceptance (generic web): use only when the recorded Client is the Director; Launchplane accepts each complete candidate and releases it automatically. Applying this setting enables production releases."
+            ? "Held: the Client's acceptance only records a decision. Promote: the Client's acceptance starts the gated production release. With rollback drill (Odoo or generic web): the next accepted release also rolls back to its reviewed production version, takes a second verified backup, and promotes the same version again. After one drill passes, later releases only promote. Director standing acceptance (generic web): use only when the recorded Client is the Director; Launchplane accepts each complete candidate and releases it automatically. Applying this setting enables production releases."
             : "Prelaunch exempts this product from release review. Unknown and live require review."}</p>
       </div></header>
       <p>Current: {current === null ? "Reading profile…" : current || "Not set"}</p>
