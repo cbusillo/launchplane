@@ -1271,6 +1271,21 @@ status, rendered markdown, and GitHub comment identity remain auditable. Callers
 must keep the message public-safe: no tokens, raw headers, private API base URLs,
 local paths, or unchecked provider responses.
 
+The in-service controller scheduler also recovers the latest failed terminal
+feedback (`completed` or `stale_policy`) after the controller advances to idle
+or other work. It selects at most 25 current retry candidates per target, after
+superseding older status for each PR; successful recent comments cannot hide an
+older unresolved terminal delivery. Recovery sends the stored rendered body
+with the existing policy credential, without another merge or admission.
+The delivery receipt retains its identity and original evidence timestamp while
+attempt count and delivery result are updated. New receipts retain precise
+creation time to order same-second status changes; ambiguous legacy ties remain
+unqualified for recovery. Transient transport failures use bounded exponential
+backoff; quota refusals preserve Retry-After and exhausted
+primary-quota reset deadlines and defer that target's other comment attempts.
+Permission refusals do not retry. Dry-runs never recover or send comments, and an
+identical managed comment is observed without another PATCH.
+
 The batch-landing service endpoint
 `POST /v1/work-graph/merge-train/batch-landing/run-once` owns that PR-native
 landing phase. It accepts `mode: plan` with a passed candidate record id and

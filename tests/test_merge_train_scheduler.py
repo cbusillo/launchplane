@@ -74,6 +74,7 @@ def _controller_result() -> MergeTrainControllerRunOnceResult:
 class MergeTrainSchedulerPassTests(TestCase):
     def setUp(self) -> None:
         self.record_store = MagicMock()
+        self.record_store.list_merge_train_pr_feedback_records.return_value = ()
         self.patchers = {
             name: patch.object(merge_train_scheduler, name)
             for name in (
@@ -91,7 +92,7 @@ class MergeTrainSchedulerPassTests(TestCase):
         self.mocks["resolve_merge_train_github_token"].return_value = "token"
         self.mocks["execute_merge_train_controller_run_once"].return_value = _controller_result()
         self.mocks["build_merge_train_pr_feedback_record"].return_value = SimpleNamespace(
-            delivery_status="delivered"
+            delivery_status="delivered", provider_retry_at=""
         )
 
     def _run(self) -> tuple[MergeTrainScheduledTargetResult, ...]:

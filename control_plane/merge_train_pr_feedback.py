@@ -1,4 +1,8 @@
-from typing import Literal, Protocol, cast
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from time import time_ns
+from urllib.error import HTTPError, URLError
+from typing import Protocol, cast
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -54,6 +58,10 @@ class MergeTrainPrFeedbackRecordStore(Protocol):
         base_branch: str = "",
         pr_number: int | None = None,
         limit: int | None = None,
+        latest_per_pr: bool = False,
+        delivery_status: str = "",
+        terminal_retry_candidates: bool = False,
+        provider_backoff_only: bool = False,
     ) -> tuple[MergeTrainPrFeedbackRecord, ...]: ...
 
 
@@ -75,6 +83,7 @@ def build_merge_train_pr_feedback_record(
     token: str,
     recorded_at: str,
     response_trace_id: str,
+    defer_until: str = "",
 ) -> MergeTrainPrFeedbackRecord:
     marker = merge_train_pr_feedback_marker(
         repository=request.repository,
@@ -85,32 +94,7 @@ def build_merge_train_pr_feedback_record(
         marker=marker,
         request=request,
     )
-    delivery_status: Literal["delivered", "skipped", "failed"] = "skipped"
-    delivery_action = ""
-    comment_id = 0
-    comment_url = ""
-    error_message = ""
-    owner, repo = request.repository.split("/", 1)
-    if not token:
-        error_message = "Configured merge train GitHub token is not available."
-    else:
-        try:
-            comment = upsert_github_issue_comment(
-                owner=owner,
-                repo=repo,
-                issue_number=request.pull_request_number,
-                token=token,
-                marker=marker,
-                body=comment_markdown,
-            )
-            delivery_action = comment["action"]
-            comment_id = comment["comment_id"]
-            comment_url = comment["comment_url"]
-            delivery_status = "delivered"
-        except click.ClickException as exc:
-            delivery_status = "failed"
-            error_message = str(exc)
-    return MergeTrainPrFeedbackRecord(
+    record = MergeTrainPrFeedbackRecord(
         feedback_id=build_merge_train_pr_feedback_id(
             repository=request.repository,
             base_branch=request.base_branch,
@@ -131,16 +115,131 @@ def build_merge_train_pr_feedback_record(
         comment_markdown=comment_markdown,
         source=request.source or "service:merge-train-pr-feedback",
         recorded_at=recorded_at,
+        created_at_ns=time_ns(),
         policy_key=policy_key,
         policy_sha256=policy_sha256,
         controller_action=request.controller_action,
         controller_record_id=request.controller_record_id,
-        delivery_status=delivery_status,
-        delivery_action=delivery_action,
-        comment_id=comment_id,
-        comment_url=comment_url,
-        error_message=error_message,
+        delivery_status="skipped",
     )
+
+    if defer_until:
+        return record.model_copy(
+            update={
+                "delivery_status": "failed",
+                "retry_at": defer_until,
+                "provider_retry_at": defer_until,
+                "error_message": "Comment delivery deferred by the provider quota deadline.",
+            }
+        )
+    return deliver_merge_train_pr_feedback_record(
+        record=record, token=token, attempted_at=recorded_at
+    )
+
+
+def deliver_merge_train_pr_feedback_record(
+    *, record: MergeTrainPrFeedbackRecord, token: str, attempted_at: str
+) -> MergeTrainPrFeedbackRecord:
+    """Deliver the saved body; retry metadata never changes its evidence chronology."""
+    attempts = record.delivery_attempts + (record.delivery_status == "failed")
+    changes: dict[str, object] = {
+        "delivery_attempts": attempts,
+        "provider_retry_at": "",
+        "retry_at": "",
+        "error_message": "",
+    }
+    if not token:
+        changes.update(
+            delivery_status="skipped",
+            retryable=False,
+            error_message="Configured merge train GitHub token is not available.",
+        )
+    else:
+        owner, repo = record.repository.split("/", 1)
+        try:
+            comment = upsert_github_issue_comment(
+                owner=owner,
+                repo=repo,
+                issue_number=record.pull_request_number,
+                token=token,
+                marker=record.marker,
+                body=record.comment_markdown,
+                skip_unchanged=True,
+            )
+            changes.update(
+                delivery_status="delivered",
+                delivery_action=comment["action"],
+                comment_id=comment["comment_id"],
+                comment_url=comment["comment_url"],
+                retryable=False,
+            )
+        except click.ClickException as exc:
+            retryable, retry_at, provider_retry_at = _delivery_retry(
+                exc, attempted_at=attempted_at, attempts=attempts
+            )
+            changes.update(
+                delivery_status="failed",
+                error_message=str(exc),
+                retryable=retryable,
+                retry_at=retry_at,
+                provider_retry_at=provider_retry_at,
+            )
+    return record.model_copy(update=changes)
+
+
+def feedback_retry_is_due(record: MergeTrainPrFeedbackRecord, *, now: str) -> bool:
+    if record.delivery_status != "failed" or not record.retryable:
+        return False
+    try:
+        deadline = (
+            record.retry_at or (_timestamp(record.recorded_at) + timedelta(seconds=60)).isoformat()
+        )
+        return _timestamp(now) >= _timestamp(deadline)
+    except ValueError:
+        return False
+
+
+def _timestamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("feedback retry requires an aware timestamp")
+    return parsed.astimezone(timezone.utc)
+
+
+def _delivery_retry(
+    error: click.ClickException, *, attempted_at: str, attempts: int
+) -> tuple[bool, str, str]:
+    cause = error.__cause__
+    transient = isinstance(cause, (URLError, OSError))
+    rate_limited = False
+    deadlines = [
+        _timestamp(attempted_at) + timedelta(seconds=min(60 * 2 ** min(attempts - 1, 4), 900))
+    ]
+    if isinstance(cause, HTTPError):
+        headers = cause.headers
+        remaining = headers.get("x-ratelimit-remaining", "") if headers else ""
+        retry_after = headers.get("retry-after", "") if headers else ""
+        rate_limited = cause.code == 429 or (
+            cause.code == 403 and (remaining == "0" or bool(retry_after))
+        )
+        transient = (
+            cause.code == 429
+            or cause.code >= 500
+            or (cause.code == 403 and (remaining == "0" or bool(retry_after)))
+        )
+        if transient:
+            if retry_after.isdigit():
+                deadlines.append(_timestamp(attempted_at) + timedelta(seconds=int(retry_after)))
+            elif retry_after:
+                try:
+                    deadlines.append(parsedate_to_datetime(retry_after))
+                except (ValueError, TypeError):
+                    pass
+            reset = headers.get("x-ratelimit-reset", "") if headers else ""
+            if remaining == "0" and reset.isdigit():
+                deadlines.append(datetime.fromtimestamp(int(reset), tz=timezone.utc))
+    retry_at = max(deadlines).isoformat() if transient else ""
+    return transient, retry_at, retry_at if rate_limited else ""
 
 
 def render_merge_train_pr_feedback_markdown(
