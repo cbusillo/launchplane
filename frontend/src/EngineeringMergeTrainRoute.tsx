@@ -84,7 +84,7 @@ export function EngineeringMergeTrainRoute({
   }, [selectedKey, targetSelection.invalid, targets]);
 
   const selectedTarget =
-    targets.find((target) => target.key === selectedKey) ?? null;
+    targets.find(target => target.key === selectedKey) ?? null;
   const statusLoader = useCallback(
     async (
       signal: AbortSignal,
@@ -124,15 +124,14 @@ export function EngineeringMergeTrainRoute({
 
   function chooseTarget(key: string) {
     setTargetSelection({ invalid: false, key });
-    const target = targets.find((candidate) => candidate.key === key);
+    const target = targets.find(candidate => candidate.key === key);
     if (!target) {
       return;
     }
     writeTargetToLocation(target);
   }
 
-  return (
-    <EngineeringRouteFrame
+  return <EngineeringRouteFrame
       actions={
         <EngineeringResourceControls
           cancel={policyResource.cancel}
@@ -155,7 +154,7 @@ export function EngineeringMergeTrainRoute({
         refresh={policyResource.refresh}
         state={policyResource.state}
       >
-        {(policyData) => (
+        {policyData =>
           <MergeTrainContent
             chooseTarget={chooseTarget}
             invalidTargetQuery={targetSelection.invalid}
@@ -165,10 +164,9 @@ export function EngineeringMergeTrainRoute({
             statusResource={statusResource}
             targets={targets}
           />
-        )}
+        }
       </EngineeringResourceGate>
-    </EngineeringRouteFrame>
-  );
+    </EngineeringRouteFrame>;
 }
 
 function MergeTrainContent({
@@ -189,32 +187,29 @@ function MergeTrainContent({
   targets: MergeTrainTargetOption[];
 }) {
   if (!targets.length) {
-    return (
-      <EngineeringEmpty
+    return <EngineeringEmpty
         detail="The active DB-backed merge-train policy contains no authorized repository/base-branch targets."
         icon={Route}
         title="No merge-train targets"
-      />
-    );
+      />;
   }
 
-  return (
-    <div className="engineering-merge-train">
+  return <div className="engineering-merge-train">
       <section className="engineering-merge-targets">
         <label>
           <span>Policy target</span>
           <select
             value={selectedTarget?.key ?? ""}
-            onChange={(event) => chooseTarget(event.target.value)}
+            onChange={event => chooseTarget(event.target.value)}
           >
             <option value="" disabled>
               Select a policy target
             </option>
-            {targets.map((target) => (
+            {targets.map(target =>
               <option key={target.key} value={target.key}>
                 {target.label}
               </option>
-            ))}
+            )}
           </select>
         </label>
         <div>
@@ -229,7 +224,7 @@ function MergeTrainContent({
         </div>
       </section>
 
-      {selectedTarget ? (
+      {selectedTarget ?
         <section className="engineering-policy-card">
           <div>
             <span>Repository</span>
@@ -257,9 +252,9 @@ function MergeTrainContent({
             </small>
           </div>
         </section>
-      ) : null}
+       : null}
 
-      {selectedTarget ? (
+      {selectedTarget ?
         <>
           <div className="engineering-status-toolbar">
             <div>
@@ -278,15 +273,15 @@ function MergeTrainContent({
             refresh={statusResource.refresh}
             state={statusResource.state}
           >
-            {(data) => (
+            {data =>
               <ControllerStatus
                 data={data}
                 expectedPolicySha256={policyData.policy.policy_sha256}
               />
-            )}
+            }
           </EngineeringResourceGate>
         </>
-      ) : (
+       :
         <EngineeringEmpty
           detail={
             requestedTargetKey || invalidTargetQuery
@@ -300,9 +295,8 @@ function MergeTrainContent({
               : "Select a merge-train target"
           }
         />
-      )}
-    </div>
-  );
+      }
+    </div>;
 }
 
 function ControllerStatus({
@@ -321,13 +315,12 @@ function ControllerStatus({
     status.controller_state?.status === "reconcile_required" ||
     status.controller_diagnostics?.reconciliation_status === "required";
   const currentRecords = status.controller_records.filter(
-    (record) => record.policy_status === "current",
+    record => record.policy_status === "current",
   );
   const staleRecords = status.controller_records.filter(
-    (record) => record.policy_status === "stale",
+    record => record.policy_status === "stale",
   );
-  return (
-    <div className="engineering-controller-status">
+  return <div className="engineering-controller-status">
       <section className="engineering-metric-grid" aria-label="Controller summary">
         <Metric label="Admission" value={status.admission.status} />
         <Metric
@@ -348,7 +341,7 @@ function ControllerStatus({
         />
       </section>
 
-      {policyDigestMismatch || reconciliationRequired || staleRecords.length ? (
+      {policyDigestMismatch || reconciliationRequired || staleRecords.length ?
         <div className="engineering-controller-blocker" role="alert">
           <ShieldAlert size={18} aria-hidden="true" />
           <div>
@@ -364,7 +357,7 @@ function ControllerStatus({
             </p>
           </div>
         </div>
-      ) : null}
+       : null}
 
       <section className="engineering-controller-summary">
         <div>
@@ -410,7 +403,7 @@ function ControllerStatus({
         </div>
       </section>
 
-      {status.controller_state ? (
+      {status.controller_state ?
         <section className="engineering-controller-state">
           <div>
             <span>Active phase</span>
@@ -430,9 +423,9 @@ function ControllerStatus({
             </small>
           </div>
         </section>
-      ) : null}
+       : null}
 
-      {status.latest_run ? (
+      {status.latest_run ?
         <section className="engineering-latest-run">
           <ListChecks size={19} aria-hidden="true" />
           <div>
@@ -452,9 +445,9 @@ function ControllerStatus({
               : ""}
           </time>
         </section>
-      ) : null}
+       : null}
 
-      {status.latest_dry_run ? (
+      {status.latest_dry_run ?
         <section className="engineering-dry-run">
           <header>
             <div>
@@ -463,25 +456,24 @@ function ControllerStatus({
               <p>{status.latest_dry_run.next_action_detail}</p>
               <p>
                 Historical queue evidence
-                {status.latest_run ? (
+                {status.latest_run ?
                   <> from <time dateTime={status.latest_run.recorded_at}>{formatTime(status.latest_run.recorded_at)}</time></>
-                ) : null}.
+                 : null}.
               </p>
             </div>
             <div className="engineering-chip-row">
               <span>{status.latest_dry_run.queue_count} queued</span>
               <span>{status.latest_dry_run.eligible_count} eligible</span>
-              {status.latest_dry_run.selected_pr_number ? (
+              {status.latest_dry_run.selected_pr_number ?
                 <span>PR #{status.latest_dry_run.selected_pr_number}</span>
-              ) : null}
+               : null}
             </div>
           </header>
-          {status.latest_dry_run.queue_entries.length ? (
+          {status.latest_dry_run.queue_entries.length ?
             <ul>
-              {status.latest_dry_run.queue_entries.map((entry) => {
+              {status.latest_dry_run.queue_entries.map(entry => {
                 const url = safeExternalUrl(entry.url);
-                return (
-                  <li key={entry.pull_request_number} data-eligible={entry.eligible}>
+                return <li key={entry.pull_request_number} data-eligible={entry.eligible}>
                     <StatusIcon status={entry.eligible ? "pass" : "blocked"} />
                     <div>
                       <strong>PR #{entry.pull_request_number} · {entry.title}</strong>
@@ -491,7 +483,7 @@ function ControllerStatus({
                           : entry.ineligible_reasons.join(", ") || "Not eligible"}
                       </span>
                     </div>
-                    {url ? (
+                    {url ?
                       <a
                         aria-label={`Open PR #${entry.pull_request_number} (opens in a new tab)`}
                         href={url.href}
@@ -501,14 +493,13 @@ function ControllerStatus({
                         Open
                         <ExternalLink size={13} aria-hidden="true" />
                       </a>
-                    ) : null}
-                  </li>
-                );
+                     : null}
+                  </li>;
               })}
             </ul>
-          ) : null}
+           : null}
         </section>
-      ) : null}
+       : null}
 
       <section className="engineering-controller-records">
         <header>
@@ -518,28 +509,26 @@ function ControllerStatus({
           </div>
           <span>{status.controller_records.length} records</span>
         </header>
-        {!status.controller_records.length ? (
+        {!status.controller_records.length ?
           <EngineeringEmpty
             detail="No candidate, landing, or stack-collapse records are visible for the active policy."
             icon={Activity}
             title="No controller records"
           />
-        ) : (
+         :
           <ul>
-            {status.controller_records.map((record) => (
+            {status.controller_records.map(record =>
               <ControllerRecord key={record.record_id} record={record} />
-            ))}
+            )}
           </ul>
-        )}
+        }
       </section>
-    </div>
-  );
+    </div>;
 }
 
 function ControllerRecord({ record }: { record: MergeTrainControllerRecordSummary }) {
   const tone = record.policy_status === "stale" ? "blocked" : "pending";
-  return (
-    <li className="engineering-controller-record" data-policy={record.policy_status}>
+  return <li className="engineering-controller-record" data-policy={record.policy_status}>
       <StatusIcon status={tone} />
       <div>
         <strong>{humanize(record.record_type)}</strong>
@@ -548,20 +537,19 @@ function ControllerRecord({ record }: { record: MergeTrainControllerRecordSummar
       <div className="engineering-chip-row">
         <span>{record.status}</span>
         <span>{record.policy_status} policy</span>
-        {record.pull_request_numbers.length ? (
+        {record.pull_request_numbers.length ?
           <span>PR {record.pull_request_numbers.join(", ")}</span>
-        ) : null}
-        {record.required_checks_status ? (
+         : null}
+        {record.required_checks_status ?
           <span>{record.required_checks_status}</span>
-        ) : null}
+         : null}
       </div>
       <p>
         {record.stale_reason ||
-          `${record.merged_count}/${record.planned_count} merged · ${record.blocked_count} blocked · ${record.skipped_count} skipped`}
+          `${record.merged_count}/${record.pull_request_numbers.length} merged · ${record.planned_count} planned · ${record.blocked_count} blocked · ${record.stale_count} stale · ${record.skipped_count} skipped`}
       </p>
       <time dateTime={record.updated_at}>{formatTime(record.updated_at)}</time>
-    </li>
-  );
+    </li>;
 }
 
 function Metric({
@@ -573,12 +561,10 @@ function Metric({
   tone?: string;
   value: string;
 }) {
-  return (
-    <div className="engineering-metric" data-tone={tone}>
+  return <div className="engineering-metric" data-tone={tone}>
       <span>{label}</span>
       <strong>{value}</strong>
-    </div>
-  );
+    </div>;
 }
 
 function writeTargetToLocation(target: MergeTrainTargetOption): void {
