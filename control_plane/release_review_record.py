@@ -8,7 +8,11 @@ from urllib.parse import quote
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.release_review import ReleaseReviewStore
-from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
+from control_plane.workflows.launchplane import (
+    github_api_request,
+    resolve_launchplane_github_token,
+    launchplane_github_token,
+)
 
 
 def _literal(value: str) -> str:
@@ -143,66 +147,68 @@ def _publish_release_decision_issue(
     body = release_decision_issue_body(decision)
     marker = release_decision_marker(decision.record_id)
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
-    token = resolve_launchplane_github_token(
+    with launchplane_github_token(
+        token_resolver=resolve_launchplane_github_token,
+        api_request=github_api_request,
         control_plane_root=control_plane_root,
         context_name=lane.context,
         repository=profile.repository,
         purpose="release_record",
-    )
-    if not token:
-        raise ValueError("Release record source-control access is unavailable.")
-    path = f"/repos/{quote(profile.repository)}/issues"
-    decision_time = (
-        datetime.fromisoformat(decision.decided_at).astimezone(UTC).replace(microsecond=0)
-    )
-    issue_number = None
-    # A retry reuses the saved decision ID. Do not duplicate an issue when the
-    # first POST succeeded but its response or the following DB write was lost.
-    # Match the record marker on the first line, not the whole body, so a
-    # record written before a wording change is still recovered.
-    for page in range(1, 11):
-        issues = github_api_request(
-            path=f"{path}?state=all&sort=created&direction=desc&per_page=100&page={page}",
-            token=token,
+    ) as token:
+        if not token:
+            raise ValueError("Release record source-control access is unavailable.")
+        path = f"/repos/{quote(profile.repository)}/issues"
+        decision_time = (
+            datetime.fromisoformat(decision.decided_at).astimezone(UTC).replace(microsecond=0)
         )
-        if not isinstance(issues, list):
-            raise ValueError("Release record lookup is unavailable.")
-        reached_older_issue = False
-        for issue in issues:
-            if not isinstance(issue, dict):
-                raise ValueError("Release record lookup is incomplete.")
-            created_at = issue.get("created_at")
-            if isinstance(created_at, str):
-                created_time = datetime.fromisoformat(created_at).astimezone(UTC)
-                reached_older_issue |= created_time < decision_time
-            issue_body = issue.get("body")
-            if (
-                "pull_request" in issue
-                or not isinstance(issue_body, str)
-                or issue_body.splitlines()[:1] != [marker]
-            ):
-                continue
-            number = issue.get("number")
+        issue_number = None
+        # A retry reuses the saved decision ID. Do not duplicate an issue when the
+        # first POST succeeded but its response or the following DB write was lost.
+        # Match the record marker on the first line, not the whole body, so a
+        # record written before a wording change is still recovered.
+        for page in range(1, 11):
+            issues = github_api_request(
+                path=f"{path}?state=all&sort=created&direction=desc&per_page=100&page={page}",
+                token=token,
+            )
+            if not isinstance(issues, list):
+                raise ValueError("Release record lookup is unavailable.")
+            reached_older_issue = False
+            for issue in issues:
+                if not isinstance(issue, dict):
+                    raise ValueError("Release record lookup is incomplete.")
+                created_at = issue.get("created_at")
+                if isinstance(created_at, str):
+                    created_time = datetime.fromisoformat(created_at).astimezone(UTC)
+                    reached_older_issue |= created_time < decision_time
+                issue_body = issue.get("body")
+                if (
+                    "pull_request" in issue
+                    or not isinstance(issue_body, str)
+                    or issue_body.splitlines()[:1] != [marker]
+                ):
+                    continue
+                number = issue.get("number")
+                if not isinstance(number, int) or number < 1:
+                    raise ValueError("Release record number is unavailable.")
+                issue_number = number
+                break
+            if issue_number is not None or len(issues) < 100 or reached_older_issue:
+                break
+        else:
+            raise ValueError("Release record lookup exceeds the supported size.")
+        if issue_number is None:
+            created = github_api_request(
+                path=path,
+                token=token,
+                method="POST",
+                body={
+                    "title": f"Release {decision.checklist.candidate.source_commit[:7]}: {decision.decision.replace('_', ' ')}",
+                    "body": body,
+                },
+            )
+            number = created.get("number") if isinstance(created, dict) else None
             if not isinstance(number, int) or number < 1:
-                raise ValueError("Release record number is unavailable.")
+                raise ValueError("Release record creation was not confirmed.")
             issue_number = number
-            break
-        if issue_number is not None or len(issues) < 100 or reached_older_issue:
-            break
-    else:
-        raise ValueError("Release record lookup exceeds the supported size.")
-    if issue_number is None:
-        created = github_api_request(
-            path=path,
-            token=token,
-            method="POST",
-            body={
-                "title": f"Release {decision.checklist.candidate.source_commit[:7]}: {decision.decision.replace('_', ' ')}",
-                "body": body,
-            },
-        )
-        number = created.get("number") if isinstance(created, dict) else None
-        if not isinstance(number, int) or number < 1:
-            raise ValueError("Release record creation was not confirmed.")
-        issue_number = number
-    return f"https://github.com/{profile.repository}/issues/{issue_number}"
+        return f"https://github.com/{profile.repository}/issues/{issue_number}"

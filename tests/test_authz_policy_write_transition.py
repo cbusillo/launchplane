@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import unittest
 
 from control_plane.contracts.authz_policy_write_transition import (
@@ -61,15 +60,14 @@ class AuthzPolicyWriteTransitionTests(unittest.TestCase):
         )
         self.assertEqual(result.kind, "v3_enable_or_expand")
 
-    def test_source_status_includes_executing_and_fences_expired_plan(self) -> None:
-        now = datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
-        require_authz_policy_source_status(
-            status="executing", expires_at="2026-09-10T11:00:00+00:00", observed_at=now
-        )
-        with self.assertRaises(AuthzPolicySchemaV3TransitionDeniedError):
-            require_authz_policy_source_status(
-                status="approved", expires_at="2026-09-10T12:00:00+00:00", observed_at=now
-            )
+    def test_source_status_accepts_pending_and_executing_but_fences_terminal_expiry(self) -> None:
+        require_authz_policy_source_status(status="planned")
+        require_authz_policy_source_status(status="approved")
+        require_authz_policy_source_status(status="executing")
+        for status in ("expired", "cancelled", "revoked"):
+            with self.subTest(status=status):
+                with self.assertRaises(AuthzPolicySchemaV3TransitionDeniedError):
+                    require_authz_policy_source_status(status=status)
 
 
 if __name__ == "__main__":

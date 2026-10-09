@@ -75,6 +75,8 @@ class _GitHubPullRequestApi:
         token = str(kwargs.get("token") or "")
         with self._lock:
             self.calls.append((path, token))
+            if path == "/installation/token" and kwargs.get("method") == "DELETE":
+                return None
             if self.fail_next:
                 self.fail_next = False
                 raise click.ClickException("GitHub is temporarily unavailable.")
@@ -197,7 +199,12 @@ class TrustedMaintenanceGitHubWebhookTests(unittest.TestCase):
         self.assertTrue(evidence[0].expires_at)
         self.assertEqual(token_resolver.calls, [(root, CONTEXT), (root, CONTEXT)])
         self.assertEqual(
-            api.calls, [(f"/repos/{REPOSITORY}/pulls/{PULL_REQUEST_NUMBER}", "managed-token")] * 2
+            api.calls,
+            [
+                (f"/repos/{REPOSITORY}/pulls/{PULL_REQUEST_NUMBER}", "managed-token"),
+                ("/installation/token", "managed-token"),
+            ]
+            * 2,
         )
 
     def test_signed_and_refetched_fact_mismatches_skip_without_evidence(self) -> None:

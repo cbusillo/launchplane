@@ -85,7 +85,7 @@ from control_plane.privileged_operation_service import (
     cancel_privileged_operation,
     create_privileged_operation_plan,
     create_typed_privileged_operation_plan,
-    expire_privileged_operation_if_due,
+    read_privileged_operation,
     list_privileged_operations,
     privileged_operation_semantic_review,
     validate_privileged_operation_semantic_review_coverage,
@@ -469,7 +469,7 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         )
         self.assertEqual(
             activation_review.lifecycle.expires_at,
-            "2026-08-22T20:30:00+00:00",
+            "",
         )
 
     def _ordinary_agent_activation_record(self) -> PrivilegedOperationRecord:
@@ -742,15 +742,16 @@ class PrivilegedOperationContractTests(unittest.TestCase):
                 generated_at=datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc),
             )
 
-    def test_semantic_review_marks_past_expiry_without_reconciling(self) -> None:
+    def test_semantic_review_remains_active_after_legacy_deadline(self) -> None:
         review = privileged_operation_semantic_review(
             record=_record(),
             generated_at=datetime(2026, 8, 22, 21, 0, tzinfo=timezone.utc),
         )
 
-        self.assertEqual(review.lifecycle.expiry_state, "past_expiry_unreconciled")
-        self.assertIn("operation_past_expiry", review.blockers.codes)
-        self.assertFalse(review.can_approve)
+        self.assertEqual(review.lifecycle.expiry_state, "active")
+        self.assertEqual(review.lifecycle.expires_at, "")
+        self.assertNotIn("operation_past_expiry", review.blockers.codes)
+        self.assertTrue(review.can_approve)
 
     def test_semantic_review_fails_closed_on_descriptor_drift(self) -> None:
         record = _record().model_copy(update={"descriptor_version": 2})
@@ -1199,7 +1200,7 @@ class PrivilegedOperationStorageTests(unittest.TestCase):
             finally:
                 stores[1].close()
 
-    def test_plan_replay_cancel_and_expiry_are_consistent_across_stores(self) -> None:
+    def test_plan_replay_cancel_and_lifetime_are_consistent_across_stores(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             stores = self._stores(Path(temporary_directory))
             try:
@@ -1219,7 +1220,9 @@ class PrivilegedOperationStorageTests(unittest.TestCase):
                         actor_login="reviewer",
                         source_event_id="cancel-1",
                         reason="Superseded by a newer plan",
-                        now=lambda: datetime(2026, 8, 22, 20, 10, tzinfo=timezone.utc),
+                        now=lambda: (
+                            datetime.fromisoformat(record.created_at) + timedelta(days=3650)
+                        ),
                     )
                     self.assertEqual(cancelled.record.status, "cancelled")
                     self.assertEqual(
@@ -1249,12 +1252,22 @@ class PrivilegedOperationStorageTests(unittest.TestCase):
                         }
                     )
                     store.write_privileged_operation_plan(expiring, expiring_event)
-                    expired = expire_privileged_operation_if_due(
+                    still_planned = read_privileged_operation(
                         record_store=store,
-                        record=expiring,
+                        operation_id=expiring.operation_id,
                         now=lambda: datetime(2026, 8, 22, 20, 0, tzinfo=timezone.utc),
                     )
-                    self.assertEqual(expired.status, "expired")
+                    self.assertEqual(still_planned, expiring)
+                    self.assertEqual(
+                        list_privileged_operations(record_store=store, status="planned"),
+                        (expiring,),
+                    )
+                    self.assertEqual(
+                        store.list_privileged_operation_event_records(
+                            operation_id=expiring.operation_id
+                        ),
+                        (expiring_event,),
+                    )
             finally:
                 stores[1].close()
 

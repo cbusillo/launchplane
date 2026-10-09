@@ -11,6 +11,7 @@ from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyc
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
+    launchplane_github_token,
 )
 
 
@@ -128,45 +129,47 @@ def discover_github_preview_desired_state(
 ) -> PreviewDesiredStateRecord:
     try:
         owner, repo = _repository_parts(repository)
-        github_token = resolve_launchplane_github_token(
+        with launchplane_github_token(
+            token_resolver=resolve_launchplane_github_token,
+            api_request=github_api_request,
             control_plane_root=control_plane_root,
             context_name=context,
             repository=repository,
-        )
-        if not github_token:
-            raise click.ClickException(
-                "Launchplane Delivery App credentials are unavailable for this repository"
+        ) as github_token:
+            if not github_token:
+                raise click.ClickException(
+                    "Launchplane Delivery App credentials are unavailable for this repository"
+                )
+            pull_requests = list_github_open_pull_requests(
+                owner=owner,
+                repo=repo,
+                token=github_token,
+                max_pages=max_pages,
             )
-        pull_requests = list_github_open_pull_requests(
-            owner=owner,
-            repo=repo,
-            token=github_token,
-            max_pages=max_pages,
-        )
-        desired_previews = tuple(
-            PreviewLifecycleDesiredPreview(
-                preview_slug=render_preview_slug(
+            desired_previews = tuple(
+                PreviewLifecycleDesiredPreview(
+                    preview_slug=render_preview_slug(
+                        anchor_pr_number=pull_request["number"],
+                        preview_slug_prefix=preview_slug_prefix,
+                        preview_slug_template=preview_slug_template,
+                    ),
+                    anchor_repo=anchor_repo,
                     anchor_pr_number=pull_request["number"],
-                    preview_slug_prefix=preview_slug_prefix,
-                    preview_slug_template=preview_slug_template,
-                ),
-                anchor_repo=anchor_repo,
-                anchor_pr_number=pull_request["number"],
-                anchor_pr_url=pull_request["html_url"],
-                head_sha=pull_request["head_sha"],
+                    anchor_pr_url=pull_request["html_url"],
+                    head_sha=pull_request["head_sha"],
+                )
+                for pull_request in pull_requests
             )
-            for pull_request in pull_requests
-        )
-        return build_preview_desired_state_record(
-            product=product,
-            context=context,
-            source=source,
-            discovered_at=discovered_at,
-            repository=repository,
-            anchor_repo=anchor_repo,
-            preview_slug_prefix=preview_slug_prefix,
-            desired_previews=desired_previews,
-        )
+            return build_preview_desired_state_record(
+                product=product,
+                context=context,
+                source=source,
+                discovered_at=discovered_at,
+                repository=repository,
+                anchor_repo=anchor_repo,
+                preview_slug_prefix=preview_slug_prefix,
+                desired_previews=desired_previews,
+            )
     except click.ClickException as exc:
         return build_preview_desired_state_record(
             product=product,

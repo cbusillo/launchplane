@@ -202,6 +202,8 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
                         [{"name": "preview-ready"}],
                         {},
                         {},
+                        None,
+                        None,
                     ],
                 ) as github_request,
             ):
@@ -298,6 +300,8 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
                         [{"name": "preview-ready"}],
                         {},
                         {},
+                        None,
+                        None,
                     ],
                 ) as github_request,
             ):
@@ -332,7 +336,14 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
         self.assertEqual(update_comment.call_args_list[1].kwargs["comment_id"], 456)
         self.assertIn("comment `/preview ok`", update_comment.call_args_list[1].kwargs["body"])
         self.assertNotIn("reviewer", update_comment.call_args_list[1].kwargs["body"].lower())
-        self.assertEqual(github_request.call_count, 6)
+        self.assertEqual(
+            [
+                call.kwargs.get("token")
+                for call in github_request.call_args_list
+                if call.kwargs.get("path") == "/installation/token"
+            ],
+            ["github-token", "github-token"],
+        )
 
     def test_pending_feedback_renders_neutral_waiting_comment(self) -> None:
         with (

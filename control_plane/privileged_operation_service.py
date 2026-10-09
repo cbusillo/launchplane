@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Literal, Protocol, cast, get_args
 
 from pydantic import ValidationError
@@ -228,11 +228,8 @@ def _semantic_review_lifecycle(
     *,
     generated_at: datetime,
 ) -> PrivilegedOperationSemanticReviewLifecycle:
-    expires_at = datetime.fromisoformat(record.expires_at)
     if record.status == "expired":
-        expiry_state: Literal["active", "past_expiry_unreconciled", "expired"] = "expired"
-    elif record.status in {"planned", "approved"} and generated_at >= expires_at:
-        expiry_state = "past_expiry_unreconciled"
+        expiry_state: Literal["active", "expired"] = "expired"
     else:
         expiry_state = "active"
     return PrivilegedOperationSemanticReviewLifecycle(
@@ -241,7 +238,7 @@ def _semantic_review_lifecycle(
         expiry_state=expiry_state,
         created_at=record.created_at,
         updated_at=record.updated_at,
-        expires_at=record.expires_at,
+        expires_at=record.expires_at if record.status == "expired" else "",
         terminal_at=record.terminal_at,
         terminal_reason_available=bool(record.terminal_reason),
         approval_recorded=record.approval is not None,
@@ -1064,15 +1061,11 @@ def _replay_existing_plan(
     source_kind: PrivilegedOperationSourceKind,
     source_event_id: str,
     request: PrivilegedOperationRequest,
-    expires_in_seconds: int,
 ) -> PrivilegedOperationWriteResult | None:
     try:
         record = store.read_privileged_operation_record(operation_id)
     except FileNotFoundError:
         return None
-    expected_expiry = datetime.fromisoformat(record.created_at) + timedelta(
-        seconds=expires_in_seconds
-    )
     registration = read_privileged_operation_descriptor(descriptor_id)
     if (
         record.descriptor_id != registration.descriptor.descriptor_id
@@ -1081,7 +1074,6 @@ def _replay_existing_plan(
         or record.source_event_id != source_event_id
         or record.requested_by != actor
         or record.request_digest not in privileged_operation_request_digest_candidates(request)
-        or datetime.fromisoformat(record.expires_at) != expected_expiry
     ):
         raise PrivilegedOperationConflictError(
             "Privileged-operation plan replay changed the original request."
@@ -1119,6 +1111,7 @@ def create_typed_privileged_operation_plan(
     expires_in_seconds: int = DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
     now: Callable[[], datetime] = _utc_now,
 ) -> PrivilegedOperationWriteResult:
+    # Retained as a validated compatibility input; it no longer sets a deadline.
     if (
         not MIN_PRIVILEGED_OPERATION_TTL_SECONDS
         <= expires_in_seconds
@@ -1146,7 +1139,6 @@ def create_typed_privileged_operation_plan(
         source_kind=source_kind,
         source_event_id=source_event_id,
         request=request,
-        expires_in_seconds=expires_in_seconds,
     )
     if replay is not None:
         return replay
@@ -1167,7 +1159,7 @@ def create_typed_privileged_operation_plan(
         evidence_digest=privileged_operation_evidence_digest(evidence),
         created_at=_timestamp(created_at),
         updated_at=_timestamp(created_at),
-        expires_at=_timestamp(created_at + timedelta(seconds=expires_in_seconds)),
+        expires_at="",
     )
     event = PrivilegedOperationEventRecord(
         operation_id=operation_id,
@@ -1190,7 +1182,6 @@ def create_typed_privileged_operation_plan(
             source_kind=source_kind,
             source_event_id=source_event_id,
             request=request,
-            expires_in_seconds=expires_in_seconds,
         )
         if replay is not None:
             return replay
@@ -1252,58 +1243,6 @@ def create_privileged_operation_plan(
     return result
 
 
-def expire_privileged_operation_if_due(
-    *,
-    record_store: object,
-    record: PrivilegedOperationRecord,
-    now: Callable[[], datetime] = _utc_now,
-) -> PrivilegedOperationRecord:
-    if record.status not in {"planned", "approved"}:
-        return record
-    current_time = now().astimezone(timezone.utc)
-    if current_time < datetime.fromisoformat(record.expires_at):
-        return record
-    store = require_privileged_operation_store(record_store)
-    occurred_at = _timestamp(current_time)
-    reason = (
-        "Privileged-operation plan expired before approval."
-        if record.status == "planned"
-        else "Privileged-operation approval expired before execution began."
-    )
-    sequence = 2 if record.status == "planned" else 3
-    expired_record = record.model_copy(
-        update={
-            "status": "expired",
-            "updated_at": occurred_at,
-            "terminal_at": occurred_at,
-            "terminal_reason": reason,
-        }
-    )
-    source_event_id = f"expiry:{record.operation_id}"
-    event = PrivilegedOperationEventRecord(
-        event_id=build_privileged_operation_event_id(
-            operation_id=record.operation_id,
-            action="expired",
-            source_kind="system",
-            source_event_id=source_event_id,
-        ),
-        operation_id=record.operation_id,
-        sequence=sequence,
-        action="expired",
-        occurred_at=occurred_at,
-        source_kind="system",
-        source_event_id=source_event_id,
-        actor=PrivilegedOperationActor(identity_type="system", login="system"),
-        reason=reason,
-        resulting_record_digest=privileged_operation_record_digest(expired_record),
-    )
-    try:
-        store.transition_privileged_operation(expired_record, event)
-    except PrivilegedOperationConflictError:
-        return store.read_privileged_operation_record(record.operation_id)
-    return expired_record
-
-
 def read_privileged_operation(
     *,
     record_store: object,
@@ -1311,12 +1250,7 @@ def read_privileged_operation(
     now: Callable[[], datetime] = _utc_now,
 ) -> PrivilegedOperationRecord:
     store = require_privileged_operation_store(record_store)
-    record = store.read_privileged_operation_record(operation_id)
-    return expire_privileged_operation_if_due(
-        record_store=store,
-        record=record,
-        now=now,
-    )
+    return store.read_privileged_operation_record(operation_id)
 
 
 def list_privileged_operations(
@@ -1328,16 +1262,6 @@ def list_privileged_operations(
     now: Callable[[], datetime] = _utc_now,
 ) -> tuple[PrivilegedOperationRecord, ...]:
     store = require_privileged_operation_store(record_store)
-    if status not in {"cancelled", "revoked", "executed", "execution_failed"}:
-        expiry_statuses = (
-            (status,) if status in {"planned", "approved"} else ("planned", "approved")
-        )
-        for expiry_status in expiry_statuses:
-            for record in store.list_privileged_operation_records(
-                status=expiry_status,
-                descriptor_id=descriptor_id,
-            ):
-                expire_privileged_operation_if_due(record_store=store, record=record, now=now)
     return store.list_privileged_operation_records(
         status=status,
         descriptor_id=descriptor_id,

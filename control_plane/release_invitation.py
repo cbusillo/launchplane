@@ -19,7 +19,11 @@ from control_plane.release_review import (
     release_version,
 )
 from control_plane.service_human_auth import launchplane_public_origin_from_env
-from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
+from control_plane.workflows.launchplane import (
+    github_api_request,
+    resolve_launchplane_github_token,
+    launchplane_github_token,
+)
 
 
 @dataclass(slots=True)
@@ -147,72 +151,74 @@ def publish_release_invitation(
         marker = release_invitation_marker(profile.product, review.checklist.candidate)
         issue_marker = release_request_issue_marker(profile.product)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
-        token = resolve_launchplane_github_token(
+        with launchplane_github_token(
+            token_resolver=resolve_launchplane_github_token,
+            api_request=github_api_request,
             control_plane_root=control_plane_root,
             context_name=lane.context,
             repository=profile.repository,
             purpose="release_record",
-        )
-        if not token:
-            raise ValueError("Release invitation source-control access is unavailable.")
-        path = f"/repos/{quote(profile.repository)}/issues"
-        issues = _pages(
-            f"{path}?state=all&sort=updated&direction=desc",
-            token,
-            marker=issue_marker,
-            issues_only=True,
-        )
-        if len(issues) > 1:
-            raise ValueError("Release invitation destination is ambiguous.")
-        if not issues:
-            created = github_api_request(
-                path=path,
-                token=token,
-                method="POST",
-                body={"title": "Release review requests", "body": issue_marker},
+        ) as token:
+            if not token:
+                raise ValueError("Release invitation source-control access is unavailable.")
+            path = f"/repos/{quote(profile.repository)}/issues"
+            issues = _pages(
+                f"{path}?state=all&sort=updated&direction=desc",
+                token,
+                marker=issue_marker,
+                issues_only=True,
             )
-            if not isinstance(created, dict):
-                raise ValueError("Release invitation issue creation was not confirmed.")
-            issues = [created]
-        number = issues[0].get("number")
-        if not isinstance(number, int) or number < 1:
-            raise ValueError("Release invitation issue number is unavailable.")
-        comments_path = f"{path}/{number}/comments"
-        if _pages(comments_path, token, marker=marker):
+            if len(issues) > 1:
+                raise ValueError("Release invitation destination is ambiguous.")
+            if not issues:
+                created = github_api_request(
+                    path=path,
+                    token=token,
+                    method="POST",
+                    body={"title": "Release review requests", "body": issue_marker},
+                )
+                if not isinstance(created, dict):
+                    raise ValueError("Release invitation issue creation was not confirmed.")
+                issues = [created]
+            number = issues[0].get("number")
+            if not isinstance(number, int) or number < 1:
+                raise ValueError("Release invitation issue number is unavailable.")
+            comments_path = f"{path}/{number}/comments"
+            if _pages(comments_path, token, marker=marker):
+                if backoff is not None:
+                    backoff.delivered.add((profile.product, profile.repository, marker))
+                return
+            # Recompile after destination lookup: a concurrent acceptance or testing
+            # deploy must not receive an invitation for the obsolete snapshot.
+            if store.read_product_profile_record(profile.product) != profile:
+                return
+            latest = current_release_review(
+                control_plane_root=control_plane_root, record_store=store, profile=profile
+            )
+            if not _ready(latest, profile) or latest.checklist_digest != review.checklist_digest:
+                return
+            # Reuse the review page's authority calculation, including unsupported
+            # drivers and the one-time rollback drill. Import here to avoid the
+            # client-release module's publisher import creating a module cycle.
+            from control_plane.client_release import release_start_for_acceptance
+
+            mode = release_start_for_acceptance(store=store, profile=profile)
+            effect = "Accepting records your approval; an admin starts the release."
+            if mode:
+                effect = "Accepting starts the release to the production site, with a verified backup, checks and automatic rollback."
+                if mode == "promote_with_rollback_drill":
+                    effect = "Accepting starts the release to the production site and its rollback-and-re-release drill, with verified backups, checks and automatic rollback."
+            body = (
+                f"{marker}\n\n@{profile.owner.github_login} this release is ready for you to review:\n\n"
+                f"{origin}/ui/owner-review?product={quote(profile.product, safe='')}\n\n{effect}"
+            )
+            result = github_api_request(
+                path=comments_path, token=token, method="POST", body={"body": body}
+            )
+            if not isinstance(result, dict) or not isinstance(result.get("id"), int):
+                raise ValueError("Release invitation publication was not confirmed.")
             if backoff is not None:
                 backoff.delivered.add((profile.product, profile.repository, marker))
-            return
-        # Recompile after destination lookup: a concurrent acceptance or testing
-        # deploy must not receive an invitation for the obsolete snapshot.
-        if store.read_product_profile_record(profile.product) != profile:
-            return
-        latest = current_release_review(
-            control_plane_root=control_plane_root, record_store=store, profile=profile
-        )
-        if not _ready(latest, profile) or latest.checklist_digest != review.checklist_digest:
-            return
-        # Reuse the review page's authority calculation, including unsupported
-        # drivers and the one-time rollback drill. Import here to avoid the
-        # client-release module's publisher import creating a module cycle.
-        from control_plane.client_release import release_start_for_acceptance
-
-        mode = release_start_for_acceptance(store=store, profile=profile)
-        effect = "Accepting records your approval; an admin starts the release."
-        if mode:
-            effect = "Accepting starts the release to the production site, with a verified backup, checks and automatic rollback."
-            if mode == "promote_with_rollback_drill":
-                effect = "Accepting starts the release to the production site and its rollback-and-re-release drill, with verified backups, checks and automatic rollback."
-        body = (
-            f"{marker}\n\n@{profile.owner.github_login} this release is ready for you to review:\n\n"
-            f"{origin}/ui/owner-review?product={quote(profile.product, safe='')}\n\n{effect}"
-        )
-        result = github_api_request(
-            path=comments_path, token=token, method="POST", body={"body": body}
-        )
-        if not isinstance(result, dict) or not isinstance(result.get("id"), int):
-            raise ValueError("Release invitation publication was not confirmed.")
-        if backoff is not None:
-            backoff.delivered.add((profile.product, profile.repository, marker))
 
 
 def main() -> None:

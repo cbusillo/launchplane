@@ -24,11 +24,27 @@ If a policy digest changes under the same policy key while a fully merged legacy
 landing is still awaiting controller reconciliation, the controller verifies each recorded PR head and merge commit
 against the provider and confirms containment in the target branch. It then
 clears the completed fence with `reason_code=completed_landing_policy_changed`,
-preserving the landing history and retaining the old candidate ref. This recovery
-performs no provider writes and does not authorize another merge under the old
-policy. Incomplete stack disposition remains fenced with
-`completed_landing_stack_reconciliation_required` and the relevant record IDs;
-conflicting or unavailable provider evidence also preserves reconciliation.
+preserving the landing history and retaining the old candidate ref. It never
+re-admits or re-merges the root or repeats a stack collapse. For unfinished
+legacy stack disposition, the same supported controller pass verifies every
+unfinished child head against its PR and confirms containment in the landed
+root head before any provider write. Plain merge landings also require child
+containment in the merge commit; squash and rebase rely on the provider's
+exact merged-root head because those methods rewrite commit ancestry. It then resumes the
+checkpointed comment, label and close effects using the current repository
+policy's disposition label; retries observe completed provider effects instead
+of repeating them. Completed non-stack history requires no provider writes.
+Persisted completed child dispositions are skipped, preserving any later work
+on a reopened child. Transient provider failures retain the controller's
+retry classification and rate-limit reset evidence.
+
+Missing or incompatible recorded stack history stays fenced with
+`completed_landing_stack_reconciliation_required`. Missing current disposition
+configuration, changed child heads, unavailable child evidence and missing
+containment return explicit `completed_landing_stack_*` reasons with the relevant
+record IDs. Conflicting or unavailable root evidence also preserves
+reconciliation. Diagnose through controller/status and resume through the
+controller's normal run-once route; do not edit database records or merge by hand.
 
 Use the controller phase when diagnosing a failed landing. An active
 `admit_pull_request` phase means the failure occurred while reconciling or
@@ -4145,6 +4161,16 @@ unavailable-credential result rather than receiving a new exception. Only alread
 may run; this PR grants none. Promotion-status polling checks configuration and
 tracked inventory without minting a write token; the actual operation verifies
 the accepted grants when it mints its token.
+
+Service callers use `launchplane_github_token` as an operation context. It
+revokes that exact token on return, provider failure, or Python interruption;
+cached release-evidence reads close every repository's lease, and companion
+reads own separate tokens. Cleanup failures log only the exception type and do
+not change saved decisions, successful writes, or dispatch reconciliation state.
+Validated expiry remains the backstop when revocation fails or the process is
+terminated without Python cleanup. Repository evidence inside a merge-train
+operation borrows the train's existing token through an explicit context; the
+train retains its lifetime ownership. Readiness checks still mint no token.
 
 The Advisory Checks App remains separately configured with
 `LAUNCHPLANE_ADVISORY_GITHUB_APP_ID` and its managed private key. Both publisher

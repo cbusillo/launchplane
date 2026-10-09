@@ -39,6 +39,16 @@ PULL_REQUEST_NUMBER = 17
 
 
 class TenantAdmissionStatusHttpTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        def provider(**kwargs: object) -> object:
+            if kwargs.get("path") == "/installation/token" and kwargs.get("method") == "DELETE":
+                return None
+            raise AssertionError("Provider operations must use the test's fake GitHub client")
+
+        transport = patch("control_plane.http_app.github_api_request", side_effect=provider)
+        transport.start()
+        self.addCleanup(transport.stop)
+
     async def test_controller_run_once_requires_scoped_authorization(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = _postgres_store(Path(temporary_directory_name), actions=())
@@ -218,6 +228,8 @@ class TenantAdmissionStatusHttpTests(unittest.IsolatedAsyncioTestCase):
 
         def github_api(**kwargs: object) -> object:
             calls.append(kwargs)
+            if kwargs.get("path") == "/installation/token":
+                return None
             return _pull_request_payload()
 
         with TemporaryDirectory() as temporary_directory_name:
@@ -250,7 +262,8 @@ class TenantAdmissionStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         result = response.json()["result"]
         self.assertEqual(result["read_model"]["category"], "engineering")
         self.assertEqual(result["write_result"]["status"], "not_required")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual([call.get("method", "GET") for call in calls], ["GET", "DELETE"])
+        self.assertEqual(calls[-1]["token"], "managed-token")
 
     async def test_reconcile_rejects_stale_github_head_before_projection(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

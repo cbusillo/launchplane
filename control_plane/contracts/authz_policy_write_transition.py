@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -162,10 +161,6 @@ def classify_authz_policy_schema_v3_transition(
     )
 
 
-def require_authz_policy_source_status(
-    *, status: str, expires_at: str, observed_at: datetime
-) -> None:
+def require_authz_policy_source_status(*, status: str) -> None:
     if status not in AUTHZ_POLICY_SOURCE_ADMISSIBLE_STATUSES:
         raise AuthzPolicySchemaV3TransitionDeniedError("policy_source_status_inadmissible")
-    if status in {"planned", "approved"} and observed_at >= datetime.fromisoformat(expires_at):
-        raise AuthzPolicySchemaV3TransitionDeniedError("policy_source_expired")

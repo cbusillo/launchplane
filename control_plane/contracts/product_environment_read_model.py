@@ -1022,6 +1022,7 @@ def build_product_activity_read_model(
     profile = record_store.read_product_profile_record(product)
     source_limit = max(limit, 0)
     events: list[ProductActivityEvent] = []
+    events.extend(_client_release_failure_activity_events(record_store, profile, source_limit))
     for lane in _product_activity_lanes(profile):
         events.extend(
             _deployment_activity_events(
@@ -1079,6 +1080,53 @@ def build_product_activity_read_model(
         driver_id=profile.driver_id,
         events=tuple(events[:limit]),
     )
+
+
+def _client_release_failure_activity_events(
+    record_store: object, profile: LaunchplaneProductProfileRecord, source_limit: int
+) -> tuple[ProductActivityEvent, ...]:
+    from control_plane.client_release import read_client_release_step_views
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if not isinstance(record_store, PostgresRecordStore):
+        return ()
+    prod_lane = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
+    if prod_lane is None:
+        return ()
+    events = []
+    for decision in record_store.list_release_review_decision_records(
+        product=profile.product, limit=source_limit
+    ):
+        for step in read_client_release_step_views(
+            store=record_store, profile=profile, decision=decision
+        ):
+            failure = step.failure
+            if failure is None:
+                continue
+            links = [
+                _record_link("operation", step.operation_id),
+                _record_link("release_decision", decision.record_id),
+            ]
+            if failure.record_id != step.operation_id:
+                links.append(_record_link("failure_record", failure.record_id))
+            if failure.trace_id:
+                links.append(_record_link("trace", failure.trace_id))
+            events.append(
+                _activity_event(
+                    event_type="client_release_step",
+                    product=profile.product,
+                    context=prod_lane.context,
+                    environment="prod",
+                    driver_id=profile.driver_id,
+                    action_id=f"client_release_{step.kind}",
+                    status=step.status,
+                    occurred_at=failure.recorded_at,
+                    title=f"{profile.display_name} release {step.kind} stopped",
+                    summary=f"{failure.code}: {failure.reason}"[:300],
+                    records=tuple(links),
+                )
+            )
+    return tuple(events)
 
 
 def _read_profile_descriptor(

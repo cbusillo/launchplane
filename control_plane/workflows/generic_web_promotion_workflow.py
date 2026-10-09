@@ -16,7 +16,11 @@ from control_plane.contracts.outbox_delivery import (
     retry_outbox_delivery,
 )
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
-from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
+from control_plane.workflows.launchplane import (
+    github_api_request,
+    resolve_launchplane_github_token,
+    launchplane_github_token,
+)
 
 BumpLevel = Literal["patch", "minor", "major"]
 
@@ -86,78 +90,80 @@ def dispatch_generic_web_promotion_workflow(
             "Generic-web promotion workflow context is not in the product profile."
         )
     owner, repo = _repository_parts(profile.repository)
-    token = resolve_launchplane_github_token(
+    with launchplane_github_token(
+        token_resolver=resolve_launchplane_github_token,
+        api_request=github_api_request,
         control_plane_root=control_plane_root,
         context_name=request.context,
         repository=profile.repository,
         purpose="workflow_dispatch",
-    )
-    if not token:
-        raise click.ClickException(
-            "Launchplane Delivery App credentials are unavailable for this repository"
+    ) as token:
+        if not token:
+            raise click.ClickException(
+                "Launchplane Delivery App credentials are unavailable for this repository"
+            )
+        workflow = profile.promotion_workflow
+        workflow_id = workflow.workflow_id.strip()
+        ref = workflow.ref.strip()
+        bump = _normalize_bump(request.bump if request.bump is not None else workflow.default_bump)
+        previous_run_ids = _workflow_dispatch_run_ids(
+            owner=owner,
+            repo=repo,
+            workflow_id=workflow_id,
+            ref=ref,
+            token=token,
         )
-    workflow = profile.promotion_workflow
-    workflow_id = workflow.workflow_id.strip()
-    ref = workflow.ref.strip()
-    bump = _normalize_bump(request.bump if request.bump is not None else workflow.default_bump)
-    previous_run_ids = _workflow_dispatch_run_ids(
-        owner=owner,
-        repo=repo,
-        workflow_id=workflow_id,
-        ref=ref,
-        token=token,
-    )
-    dispatch_started_at = _github_timestamp_precision(datetime.now(UTC))
-    github_api_request(
-        path=f"/repos/{owner}/{repo}/actions/workflows/{quote(workflow_id, safe='')}/dispatches",
-        token=token,
-        method="POST",
-        body={
-            "ref": ref,
-            "inputs": {
-                workflow.dry_run_input.strip(): str(request.dry_run).lower(),
-                workflow.bump_input.strip(): bump,
-                **(
-                    {workflow.artifact_id_input.strip(): request.artifact_id}
-                    if request.artifact_id
-                    else {}
-                ),
-                **(
-                    {workflow.deploy_reference_input.strip(): request.deploy_reference}
-                    if request.deploy_reference
-                    else {}
-                ),
-                **(
-                    {workflow.source_git_ref_input.strip(): request.source_git_ref}
-                    if request.source_git_ref
-                    else {}
-                ),
+        dispatch_started_at = _github_timestamp_precision(datetime.now(UTC))
+        github_api_request(
+            path=f"/repos/{owner}/{repo}/actions/workflows/{quote(workflow_id, safe='')}/dispatches",
+            token=token,
+            method="POST",
+            body={
+                "ref": ref,
+                "inputs": {
+                    workflow.dry_run_input.strip(): str(request.dry_run).lower(),
+                    workflow.bump_input.strip(): bump,
+                    **(
+                        {workflow.artifact_id_input.strip(): request.artifact_id}
+                        if request.artifact_id
+                        else {}
+                    ),
+                    **(
+                        {workflow.deploy_reference_input.strip(): request.deploy_reference}
+                        if request.deploy_reference
+                        else {}
+                    ),
+                    **(
+                        {workflow.source_git_ref_input.strip(): request.source_git_ref}
+                        if request.source_git_ref
+                        else {}
+                    ),
+                },
             },
-        },
-    )
-    run = _wait_for_workflow_run(
-        owner=owner,
-        repo=repo,
-        workflow_id=workflow_id,
-        ref=ref,
-        token=token,
-        previous_run_ids=previous_run_ids,
-        min_created_at=dispatch_started_at,
-        timeout_seconds=request.observe_timeout_seconds,
-    )
-    return GenericWebPromotionWorkflowResult(
-        product=profile.product,
-        context=request.context,
-        repository=profile.repository,
-        workflow_id=workflow_id,
-        ref=ref,
-        dry_run=request.dry_run,
-        bump=bump,
-        run_id=_int_value(run.get("id")) if run else 0,
-        run_url=_string_value(run.get("html_url")) if run else "",
-        run_status=_string_value(run.get("status")) if run else "pending",
-        run_conclusion=_string_value(run.get("conclusion")) if run else "",
-    )
+        )
+        run = _wait_for_workflow_run(
+            owner=owner,
+            repo=repo,
+            workflow_id=workflow_id,
+            ref=ref,
+            token=token,
+            previous_run_ids=previous_run_ids,
+            min_created_at=dispatch_started_at,
+            timeout_seconds=request.observe_timeout_seconds,
+        )
+        return GenericWebPromotionWorkflowResult(
+            product=profile.product,
+            context=request.context,
+            repository=profile.repository,
+            workflow_id=workflow_id,
+            ref=ref,
+            dry_run=request.dry_run,
+            bump=bump,
+            run_id=_int_value(run.get("id")) if run else 0,
+            run_url=_string_value(run.get("html_url")) if run else "",
+            run_status=_string_value(run.get("status")) if run else "pending",
+            run_conclusion=_string_value(run.get("conclusion")) if run else "",
+        )
 
 
 def dispatch_generic_web_promotion_workflow_delivery(
@@ -174,64 +180,90 @@ def dispatch_generic_web_promotion_workflow_delivery(
         ref = _required_payload_text(payload, "ref")
         credential_context = _required_payload_text(payload, "credential_context")
         inputs = _string_dict(payload.get("inputs"))
-        token = resolve_launchplane_github_token(
+        with launchplane_github_token(
+            token_resolver=resolve_launchplane_github_token,
+            api_request=github_api_request,
             control_plane_root=control_plane_root,
             context_name=credential_context,
             repository=f"{owner}/{repo}",
             purpose="workflow_dispatch",
             retry_provider_errors=True,
-        )
-        if not token:
-            if record.provider_operation_key:
-                return retry_outbox_delivery(record, error_code="missing_managed_github_token")
-            return _failed_outbox_delivery(record, "missing_managed_github_token")
-        reconciling_existing_marker = bool(record.provider_operation_key)
-        previous_run_ids = _int_set(payload.get("previous_run_ids"))
-        min_created_at = _datetime_value(payload.get("dispatch_started_at"))
-        if not reconciling_existing_marker:
-            if "previous_run_ids" not in payload:
-                previous_run_ids = _workflow_dispatch_run_ids(
+        ) as token:
+            if not token:
+                if record.provider_operation_key:
+                    return retry_outbox_delivery(record, error_code="missing_managed_github_token")
+                return _failed_outbox_delivery(record, "missing_managed_github_token")
+            reconciling_existing_marker = bool(record.provider_operation_key)
+            previous_run_ids = _int_set(payload.get("previous_run_ids"))
+            min_created_at = _datetime_value(payload.get("dispatch_started_at"))
+            if not reconciling_existing_marker:
+                if "previous_run_ids" not in payload:
+                    previous_run_ids = _workflow_dispatch_run_ids(
+                        owner=owner,
+                        repo=repo,
+                        workflow_id=workflow_id,
+                        ref=ref,
+                        token=token,
+                    )
+                if min_created_at is None:
+                    min_created_at = _github_timestamp_precision(datetime.now(UTC))
+                payload.update(
+                    {
+                        "previous_run_ids": sorted(previous_run_ids),
+                        "dispatch_started_at": min_created_at.isoformat().replace("+00:00", "Z"),
+                    }
+                )
+            elif min_created_at is None:
+                min_created_at = _datetime_value(record.created_at) or datetime.now(UTC)
+            provider_operation_key = _workflow_provider_operation_key(
+                repository=f"{owner}/{repo}",
+                workflow_id=workflow_id,
+                ref=ref,
+                dispatch_started_at=_github_timestamp_precision(min_created_at)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                inputs=inputs,
+            )
+            if (
+                record.provider_operation_key
+                and record.provider_operation_key != provider_operation_key
+            ):
+                return _failed_outbox_delivery(record, "provider_marker_mismatch")
+            delivery_record = record.model_copy(
+                update={
+                    "provider_operation_key": provider_operation_key,
+                    "provider_id": "github",
+                    "payload": payload,
+                }
+            )
+            if not reconciling_existing_marker:
+                mark_provider_started(delivery_record, provider_operation_key, "github")
+            else:
+                existing_run = _latest_workflow_dispatch_run(
                     owner=owner,
                     repo=repo,
                     workflow_id=workflow_id,
                     ref=ref,
                     token=token,
+                    previous_run_ids=previous_run_ids,
+                    min_created_at=min_created_at,
                 )
-            if min_created_at is None:
-                min_created_at = _github_timestamp_precision(datetime.now(UTC))
-            payload.update(
-                {
-                    "previous_run_ids": sorted(previous_run_ids),
-                    "dispatch_started_at": min_created_at.isoformat().replace("+00:00", "Z"),
-                }
+                if existing_run:
+                    return _delivered_workflow_outbox_delivery(delivery_record, existing_run)
+                return delivery_record.model_copy(
+                    update={
+                        "state": "reconcile_required",
+                        "action": "workflow_dispatch_in_doubt",
+                        "error_code": "workflow_run_not_observed",
+                    }
+                )
+            github_api_request(
+                path=f"/repos/{owner}/{repo}/actions/workflows/{quote(workflow_id, safe='')}/dispatches",
+                token=token,
+                method="POST",
+                body={"ref": ref, "inputs": inputs},
             )
-        elif min_created_at is None:
-            min_created_at = _datetime_value(record.created_at) or datetime.now(UTC)
-        provider_operation_key = _workflow_provider_operation_key(
-            repository=f"{owner}/{repo}",
-            workflow_id=workflow_id,
-            ref=ref,
-            dispatch_started_at=_github_timestamp_precision(min_created_at)
-            .isoformat()
-            .replace("+00:00", "Z"),
-            inputs=inputs,
-        )
-        if (
-            record.provider_operation_key
-            and record.provider_operation_key != provider_operation_key
-        ):
-            return _failed_outbox_delivery(record, "provider_marker_mismatch")
-        delivery_record = record.model_copy(
-            update={
-                "provider_operation_key": provider_operation_key,
-                "provider_id": "github",
-                "payload": payload,
-            }
-        )
-        if not reconciling_existing_marker:
-            mark_provider_started(delivery_record, provider_operation_key, "github")
-        else:
-            existing_run = _latest_workflow_dispatch_run(
+            run = _wait_for_workflow_run(
                 owner=owner,
                 repo=repo,
                 workflow_id=workflow_id,
@@ -239,42 +271,18 @@ def dispatch_generic_web_promotion_workflow_delivery(
                 token=token,
                 previous_run_ids=previous_run_ids,
                 min_created_at=min_created_at,
+                timeout_seconds=_bounded_observe_timeout(payload.get("observe_timeout_seconds")),
             )
-            if existing_run:
-                return _delivered_workflow_outbox_delivery(delivery_record, existing_run)
+            if run:
+                return _delivered_workflow_outbox_delivery(delivery_record, run)
             return delivery_record.model_copy(
                 update={
                     "state": "reconcile_required",
-                    "action": "workflow_dispatch_in_doubt",
-                    "error_code": "workflow_run_not_observed",
+                    "provider_operation_key": provider_operation_key,
+                    "provider_id": "github",
+                    "action": "workflow_dispatch_sent",
                 }
             )
-        github_api_request(
-            path=f"/repos/{owner}/{repo}/actions/workflows/{quote(workflow_id, safe='')}/dispatches",
-            token=token,
-            method="POST",
-            body={"ref": ref, "inputs": inputs},
-        )
-        run = _wait_for_workflow_run(
-            owner=owner,
-            repo=repo,
-            workflow_id=workflow_id,
-            ref=ref,
-            token=token,
-            previous_run_ids=previous_run_ids,
-            min_created_at=min_created_at,
-            timeout_seconds=_bounded_observe_timeout(payload.get("observe_timeout_seconds")),
-        )
-        if run:
-            return _delivered_workflow_outbox_delivery(delivery_record, run)
-        return delivery_record.model_copy(
-            update={
-                "state": "reconcile_required",
-                "provider_operation_key": provider_operation_key,
-                "provider_id": "github",
-                "action": "workflow_dispatch_sent",
-            }
-        )
     except click.ClickException as error:
         if error.__cause__ is None:
             return _failed_outbox_delivery(delivery_record, _provider_safe_error_code(error))

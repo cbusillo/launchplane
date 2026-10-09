@@ -8,6 +8,16 @@ testing site and the **`Client test notes`** from every merged pull request in t
 commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
 
+Checklist compilation replaces links to preview hostnames (including hosts in
+the product's retained preview records) and per-PR `/ui/owner-review` pages with
+the fixed line `Check this on the testing site.`. Other notes and links remain;
+the source PR body is never edited. Affected items carry `preview_era_notes: true`
+in the response, and the admin/read-only view identifies their PR numbers.
+The digest includes the displayed notes and this marker: sanitizing old notes
+changes the digest and requires review of the displayed checklist. Unaffected
+items omit the false marker, preserving historical digests. Prior preview
+acceptance annotations still do not change the digest.
+
 When the checklist is complete and only the Client's approval remains, the
 stable worker posts a release-review request mentioning the recorded Client,
 through the existing Launchplane Delivery App's release-record access. It links
@@ -397,7 +407,18 @@ this worker, and record fresh acceptance if such a release was stopped.
 
 The review page says before the Accept button whether accepting puts the
 version on the live site, naming it, or whether releases are held. After
-acceptance it shows each step's status. `GET /v1/release-review` returns
+acceptance it shows each step's status. A stopped step also shows its bounded,
+redacted recorded reason and code. Expand **Failure details** for the failure
+record, operation and recorded trace IDs. Cancellation can replace an operation's
+saved trace with the cancellation request's trace. A missing saved trace says **Not
+recorded**: this includes older queued operations and generic-web reservations
+stopped before a response was saved. New queued backup and Odoo release
+operations persist a trace; generic-web reservations expose their saved response
+trace after settling.
+The activity read derives stopped-step events from those same operations, with
+the reason in `summary` and record, operation, decision and available trace IDs
+in `records`. Reading this evidence never retries a stopped release.
+`GET /v1/release-review` returns
 `release_on_acceptance` (what the next acceptance would do), `live_site_url`,
 and `release_run`, derived from the step operations, whose ids come from the
 decision.

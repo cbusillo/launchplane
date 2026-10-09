@@ -92,10 +92,11 @@ and deterministic review payload from those locked records; callers cannot
 author request, evidence, policy, admin, review, or provenance fields.
 
 Issuance requires exactly one active schema-v2 or schema-v3 policy, a live enrolled session,
-an unexpired `planned` operation, and one immutable GitHub-ID managed rule that
+a `planned` operation, and one immutable GitHub-ID managed rule that
 allows the enrolled admin under the descriptor's existing approval action.
 Blocked managed-policy plans and unsupported evidence fail closed. Challenge
-expiry is the earliest of requested TTL, operation expiry, and session expiry.
+expiry is the earliest of requested TTL and session expiry. Review lifetime is
+owned by [privileged operations](privileged-operations.md#records-and-lifecycle).
 The review discloses only typed status, bounded counts, digests, and timestamps;
 it never discloses secret/key IDs, desired policy bodies, raw logins or subjects,
 token labels, planner errors, or free-text request reasons.

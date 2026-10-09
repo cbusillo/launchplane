@@ -2,7 +2,8 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Literal, Protocol, cast
 from urllib.parse import quote
 
@@ -26,6 +27,7 @@ from control_plane.workflows.launchplane import (
     github_api_request,
     github_pull_request_reference,
     resolve_launchplane_github_token,
+    launchplane_github_token,
     update_github_issue_comment,
 )
 from control_plane.workflows.preview_pr_feedback import (
@@ -412,15 +414,20 @@ def apply_remediation(
     return outcome, evidence, feedback
 
 
-def resolve_remediation_token(*, control_plane_root: Path, context: str, repository: str) -> str:
-    token = resolve_launchplane_github_token(
+@contextmanager
+def resolve_remediation_token(
+    *, control_plane_root: Path, context: str, repository: str
+) -> Iterator[str]:
+    with launchplane_github_token(
+        token_resolver=resolve_launchplane_github_token,
+        api_request=github_api_request,
         control_plane_root=control_plane_root,
         context_name=context,
         repository=repository,
         purpose="pull_request_feedback",
-    )
-    if not token:
-        raise click.ClickException(
-            "Launchplane Delivery App credentials are unavailable for this repository."
-        )
-    return token
+    ) as token:
+        if not token:
+            raise click.ClickException(
+                "Launchplane Delivery App credentials are unavailable for this repository."
+            )
+        yield token
