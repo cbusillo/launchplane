@@ -1,8 +1,8 @@
 """A Client's accepted release, promoted by Launchplane itself.
 
 When a product's recorded Client accepts a release and an admin has not held the
-product's releases, the decision is stamped with how the release runs. The Odoo
-stable worker then queues the operations the admin's Release panel queues: a
+product's releases, the decision is stamped with how the release runs. The release
+worker then runs the operations the admin's Release panel queues: a
 verified backup, then the promotion. With the one rollback drill, it then rolls
 back to the production version the Client's checklist was compiled against, takes
 another backup, and promotes the same artifact again. Rolling back restores the
@@ -82,6 +82,8 @@ from control_plane.generic_web_promotion_http import (
     GENERIC_WEB_PROD_PROMOTION_ROUTE,
     GenericWebProdPromotionEnvelope,
 )
+from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
+from control_plane.generic_web_rollback_drill import run_generic_web_rollback_drill
 from control_plane.generic_web_promotion_provider_adapter import (
     GenericWebProdPromotionProviderMutationAdapter,
     require_generic_web_promotion_target,
@@ -207,10 +209,12 @@ def client_release_step_operation_id(
     key = _step_key(decision, step)
     if step.kind == "backup":
         return production_backup_gate_operation_id(f"{CLIENT_RELEASE_IDEMPOTENCY_SCOPE}|{key}")
-    if profile.driver_id == "generic-web" and step.kind == "promote":
+    if profile.driver_id == "generic-web" and step.kind in {"promote", "rollback"}:
         return build_launchplane_mutation_reservation_id(
             scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
-            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE
+            if step.kind == "promote"
+            else GENERIC_WEB_ROLLBACK_ROUTE,
             idempotency_key=key,
         )
     builder = (
@@ -231,7 +235,7 @@ def release_start_for_acceptance(
 ) -> ReleaseStart:
     """How a Client's acceptance recorded now runs; "" when it starts nothing.
 
-    Only an Odoo product with a prod lane, not prelaunch and not held, starts a
+    An Odoo or generic-web product with a prod lane, not prelaunch and not held, starts a
     release. A product drills once: after a release's drill passed, later ones
     only promote.
     """
@@ -244,10 +248,8 @@ def release_start_for_acceptance(
         or not _prod_context(profile)
     ):
         return ""
-    if profile.driver_id == "generic-web":
-        return "promote" if mode in {"promote", "director_standing"} else ""
     if mode == "director_standing":
-        return ""
+        return "promote" if profile.driver_id == "generic-web" else ""
     if mode == "promote_with_rollback_drill" and _product_drill_passed(store, profile):
         return "promote"
     return mode
@@ -372,27 +374,32 @@ def _step_status(
     try:
         if step.kind == "backup":
             operation: object = store.read_verireel_prod_backup_gate_operation_record(operation_id)
-        elif step.kind == "promote":
-            if profile.driver_id == "generic-web":
-                reservation = store.read_idempotency_record(
-                    scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
-                    route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
-                    idempotency_key=_step_key(decision, step),
-                )
-                if reservation is None:
-                    return "not_started", None
-                if reservation.state == "reconcile_required":
+        elif profile.driver_id == "generic-web":
+            reservation = store.read_idempotency_record(
+                scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE
+                if step.kind == "promote"
+                else GENERIC_WEB_ROLLBACK_ROUTE,
+                idempotency_key=_step_key(decision, step),
+            )
+            if reservation is None:
+                return "not_started", None
+            if reservation.state == "reconcile_required":
+                return "reconciliation_required", reservation
+            if reservation.state == "running":
+                if parse_launchplane_mutation_timestamp(
+                    reservation.lease_expires_at, field_name="lease_expires_at"
+                ) <= datetime.now(UTC):
                     return "reconciliation_required", reservation
-                if reservation.state == "running":
-                    if parse_launchplane_mutation_timestamp(
-                        reservation.lease_expires_at, field_name="lease_expires_at"
-                    ) <= datetime.now(UTC):
-                        return "reconciliation_required", reservation
-                    return "running", reservation
-                outcome = reservation.response_payload.get("result", {})
-                return (
-                    "pass" if outcome.get("promotion_status") == "pass" else "fail"
-                ), reservation
+                return "running", reservation
+            outcome = reservation.response_payload.get("result", {})
+            return (
+                "pass"
+                if outcome.get("promotion_status" if step.kind == "promote" else "rollback_status")
+                == "pass"
+                else "fail"
+            ), reservation
+        elif step.kind == "promote":
             operation = store.read_odoo_prod_promotion_operation_record(operation_id)
         else:
             operation = store.read_odoo_prod_rollback_operation_record(operation_id)
@@ -833,7 +840,9 @@ def _advance(
             return ""
         authorized_at = utc_now_timestamp()
         if step.kind == "rollback":
-            return _queue_rollback(store, profile, decision, step, context, authorized_at)
+            return _queue_rollback(
+                store, control_plane_root, profile, decision, step, context, authorized_at
+            )
         _require_current_release(store, control_plane_root, profile, decision)
         if step.kind == "backup":
             if profile.driver_id == "odoo":
@@ -992,6 +1001,7 @@ def _queue_promotion(
 
 def _queue_rollback(
     store: PostgresRecordStore,
+    control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
     step: ClientReleaseStep,
@@ -1002,9 +1012,9 @@ def _queue_rollback(
 
     checklist = decision.checklist
     try:
-        production = store.read_release_tuple_record(context_name=context, channel_name="prod")
-        testing = store.read_release_tuple_record(context_name=context, channel_name="testing")
-    except FileNotFoundError as error:
+        production = release_version(store=store, profile=profile, instance="prod")
+        testing = release_version(store=store, profile=profile, instance="testing")
+    except (FileNotFoundError, ValueError) as error:
         raise ClientReleaseNotReady("release_record_missing") from error
     if (production.artifact_id, testing.artifact_id) != (
         checklist.candidate.artifact_id,
@@ -1024,6 +1034,28 @@ def _queue_rollback(
     )
     if deployment is None:
         raise ClientReleaseNotReady("rollback_target_missing")
+    if profile.driver_id == "generic-web":
+        grant = client_release_grant(
+            decision=decision,
+            action="generic_web_rollback.execute",
+            context=context,
+            authorized_at=authorized_at,
+        )
+
+        def validate_checkpoint() -> None:
+            if not client_release_grant_allows(store, grant):
+                raise click.ClickException("The release is no longer accepted.")
+
+        return run_generic_web_rollback_drill(
+            store=store,
+            control_plane_root=control_plane_root,
+            profile=profile,
+            decision=decision,
+            deployment=deployment,
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            idempotency_key=_step_key(decision, step),
+            validate_checkpoint=validate_checkpoint,
+        )
     request = OdooProdRollbackRequest(
         context=context,
         artifact_id=target_artifact_id,

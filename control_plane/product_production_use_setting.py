@@ -86,13 +86,6 @@ def build_product_production_use_plan(
             raise ValueError(
                 "Director standing acceptance requires a generic-web product with a recorded Client."
             )
-    if (
-        profile.driver_id == "generic-web"
-        and release_on_acceptance_after == "promote_with_rollback_drill"
-    ):
-        raise ValueError(
-            "Generic-web releases use automatic rollback; the optional drill is Odoo-only."
-        )
     digest = hashlib.sha256(
         json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
