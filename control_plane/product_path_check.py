@@ -268,7 +268,7 @@ def _completed_testing_noop(plan: dict[str, object]) -> bool:
     return (
         isinstance(artifact, str)
         and bool(artifact.strip())
-        and artifact != "[redacted]"
+        and _testing_artifact_id(artifact) == artifact
         and artifact == plan.get("desired_artifact_id")
         and isinstance(commit, str)
         and re.fullmatch(r"[0-9a-f]{40}", commit) is not None
@@ -277,6 +277,16 @@ def _completed_testing_noop(plan: dict[str, object]) -> bool:
         and re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is not None
         and digest == plan.get("desired_image_digest")
     )
+
+
+def _testing_artifact_id(value: object) -> str:
+    if isinstance(value, str) and re.fullmatch(
+        r"(?:artifact-[A-Za-z0-9][A-Za-z0-9_.-]*-run-[0-9]+-[0-9]+"
+        r"|[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64})",
+        value,
+    ):
+        return value
+    return ""
 
 
 def _testing_steps(inputs: PathCheckInputs) -> list[PathCheckStep]:
@@ -567,6 +577,10 @@ def _testing_reconcile_plan(
     return {
         **product_reconcile_request_view(testing).last_plan,
         "reconcile_state": testing.state,
+        # The general reconcile view redacts long artifact ids as possible secrets.
+        # Only these validated provenance shapes may be compared or cited here.
+        "current_artifact_id": _testing_artifact_id(testing.last_plan.get("current_artifact_id")),
+        "desired_artifact_id": _testing_artifact_id(testing.last_plan.get("desired_artifact_id")),
     }
 
 

@@ -99,8 +99,8 @@ def _completed_noop_plan() -> dict[str, object]:
         "action": "none",
         "reason": "already_deployed",
         "held": False,
-        "current_artifact_id": "artifact-example-1",
-        "desired_artifact_id": "artifact-example-1",
+        "current_artifact_id": "artifact-example-site-run-37499907206-1",
+        "desired_artifact_id": "artifact-example-site-run-37499907206-1",
         "current_commit": "a" * 40,
         "desired_commit": "a" * 40,
         "current_image_digest": "sha256:" + "b" * 64,
@@ -153,6 +153,60 @@ class ProductPathCheckTests(unittest.TestCase):
                     ][0],
                     "blocked",
                 )
+
+    def test_testing_reader_preserves_only_valid_matching_artifact_provenance(self) -> None:
+        odoo_id = str(_completed_noop_plan()["current_artifact_id"])
+        image_id = "ghcr.io/example/example-site@sha256:" + "b" * 64
+        for current, desired, expected in (
+            (odoo_id, odoo_id, "clear"),
+            (image_id, image_id, "clear"),
+            (odoo_id, odoo_id.replace("37499907206", "37499907207"), "unknown"),
+            (image_id, image_id.replace("example-site", "other-site"), "unknown"),
+            ("[redacted-secret]", "[redacted-secret]", "unknown"),
+            ("provider-password-" + "x" * 40, "provider-password-" + "x" * 40, "unknown"),
+        ):
+            with (
+                self.subTest(current=current, desired=desired),
+                patch(
+                    "control_plane.product_path_check.read_staff_testing_hold", return_value=None
+                ),
+            ):
+                record = ProductReconcileRequestRecord(
+                    target_key="example-site:testing",
+                    product="example-site",
+                    target_kind="testing",
+                    state="done",
+                    requested_at="2026-10-09T00:00:00Z",
+                    updated_at="2026-10-09T00:00:00Z",
+                    request_count=1,
+                    last_plan=cast(
+                        dict[str, JsonValue],
+                        {
+                            **_completed_noop_plan(),
+                            "current_artifact_id": current,
+                            "desired_artifact_id": desired,
+                        },
+                    ),
+                )
+                store = Mock()
+                store.list_product_reconcile_requests.return_value = (record,)
+                inputs = read_path_check_inputs(
+                    path="testing",
+                    profile=_profile(),
+                    record_store=store,
+                    action_allowed=Mock(),
+                    caller_is_admin=lambda: False,
+                    read_release_review=Mock(),
+                    generated_at=record.updated_at,
+                )
+                check = build_product_path_check(
+                    product="example-site", path="testing", inputs=inputs
+                )
+                self.assertEqual(check.steps[-1].state, expected)
+                if expected == "clear":
+                    self.assertEqual(check.steps[-1].record_ids, (current,))
+                else:
+                    self.assertEqual(check.steps[-1].record_ids, ())
 
     def test_testing_reader_uses_request_state_instead_of_saved_plan_state(self) -> None:
         record = ProductReconcileRequestRecord(
