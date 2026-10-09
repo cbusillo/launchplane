@@ -27,11 +27,14 @@ clears the completed fence with `reason_code=completed_landing_policy_changed`,
 preserving the landing history and retaining the old candidate ref. It never
 re-admits or re-merges the root or repeats a stack collapse. For unfinished
 legacy stack disposition, the same supported controller pass verifies every
-recorded child head against its PR and confirms containment in both the landed
+unfinished child head against its PR and confirms containment in both the landed
 root head and merge commit before any provider write. It then resumes the
 checkpointed comment, label and close effects using the current repository
 policy's disposition label; retries observe completed provider effects instead
 of repeating them. Completed non-stack history requires no provider writes.
+Persisted completed child dispositions are skipped, preserving any later work
+on a reopened child. Transient provider failures retain the controller's
+retry classification and rate-limit reset evidence.
 
 Missing or incompatible recorded stack history stays fenced with
 `completed_landing_stack_reconciliation_required`. Missing current disposition

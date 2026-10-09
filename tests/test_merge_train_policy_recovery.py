@@ -93,6 +93,7 @@ class _StackRecoveryTransport(_RecoveryTransport):
         self.comments: dict[int, list[dict[str, str]]] = {2: [], 3: []}
         self.effects: list[tuple[str, str]] = []
         self.child_read_failure = False
+        self.child_error: MergeTrainGitHubError | None = None
         self.child_contained = True
         self.interrupt_after_close = False
 
@@ -100,6 +101,8 @@ class _StackRecoveryTransport(_RecoveryTransport):
         for number, child in self.children.items():
             if path.endswith(f"/pulls/{number}"):
                 if method == "GET":
+                    if self.child_error is not None:
+                        raise self.child_error
                     if self.child_read_failure:
                         raise MergeTrainGitHubError("Child not found", status_code=404)
                     return child
@@ -115,8 +118,10 @@ class _StackRecoveryTransport(_RecoveryTransport):
                     return self.comments[number]
                 if method == "POST" and body is not None:
                     self.effects.append((method, path))
+                    comment_body = body["body"]
+                    assert isinstance(comment_body, str)
                     comment = {
-                        "body": str(body["body"]),
+                        "body": comment_body,
                         "html_url": f"https://example.test/{number}",
                     }
                     self.comments[number].append(comment)
@@ -413,11 +418,15 @@ class MergeTrainPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.store.list_merge_train_controller_state_records()[0].status, "reconcile_required"
         )
         effects = list(transport.effects)
+        # The first child completed before the crash. Its subsequent new work
+        # must neither block the remaining disposition nor be closed by history.
+        transport.children[2].update(state="open", head={"sha": "9" * 40})
         resumed = self._run().accepted_result
         stack_plan = resumed["stack_collapse_plan"]
         assert isinstance(stack_plan, dict)
         self.assertEqual(stack_plan["status"], "ready_for_train")
         self.assertEqual(transport.effects, effects)
+        self.assertEqual(transport.children[2]["state"], "open")
         snapshot = MergeTrainDryRunSnapshot(
             repository=REPOSITORY, base_branch="main", base_sha=OTHER_SHA, pull_requests=()
         )
@@ -468,6 +477,33 @@ class MergeTrainPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             result["reason_code"], "completed_landing_stack_disposition_not_configured"
         )
         self.assertEqual(transport.effects, [])
+
+    def test_old_policy_child_read_keeps_transient_error_retry_evidence(self) -> None:
+        transport = self._record_unfinished_stack()
+        for error, expected_detail in (
+            (
+                MergeTrainGitHubError("Unavailable", status_code=503),
+                "retryable:github_request_failed",
+            ),
+            (
+                MergeTrainGitHubError(
+                    "Quota limited",
+                    status_code=429,
+                    rate_limited=True,
+                    rate_limit_reset=123,
+                    retry_after_seconds=60,
+                ),
+                "retryable:github_rate_limited; reset_at:123; retry_after_seconds:60",
+            ),
+        ):
+            with self.subTest(status=error.status_code):
+                transport.child_error = error
+                with self.assertRaises(MergeTrainGitHubError):
+                    self._run()
+                state = self.store.list_merge_train_controller_state_records()[0]
+                self.assertEqual(state.reconciliation_detail, expected_detail)
+                self.assertEqual(state.status, "reconcile_required")
+                self.assertEqual(transport.effects, [])
 
     def test_old_policy_stack_missing_record_keeps_record_linked_fence(self) -> None:
         self._record_completed_landing()

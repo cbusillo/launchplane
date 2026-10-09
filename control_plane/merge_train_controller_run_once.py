@@ -1854,6 +1854,8 @@ def _reconcile_completed_landing_after_policy_change(
             if entry.pull_request_number == record.plan.root_pull_request_number
         )
         for child in record.plan.child_dispositions:
+            if child.status == "closed":
+                continue  # A completed disposition cannot close a later reopened head.
             try:
                 github_client.pull_request_is_closed(
                     repository=request.repository,
@@ -1873,7 +1875,9 @@ def _reconcile_completed_landing_after_policy_change(
                     "completed_landing_stack_child_head_changed",
                     f"Stack child PR #{child.pull_request_number} no longer matches recorded history.",
                 )
-            except MergeTrainGitHubError:
+            except MergeTrainGitHubError as error:
+                if error.rate_limited or error.status_code is None or error.status_code >= 500:
+                    raise  # Preserve the controller's retry classification and reset evidence.
                 return blocked(
                     "completed_landing_stack_child_evidence_unavailable",
                     f"Stack child PR #{child.pull_request_number} evidence is unavailable.",
