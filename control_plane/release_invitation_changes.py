@@ -2,16 +2,39 @@
 
 import hashlib
 import re
+from typing import Protocol, cast
 from urllib.parse import parse_qs, urlsplit
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.release_review import ReleaseChecklist, ReleaseReviewItem
 from control_plane.product_review import source_control_pull_request_url
 from control_plane.release_review import ReleaseReviewStore
 
 
+class InvitationEvidenceStore(ReleaseReviewStore, Protocol):
+    def list_merge_train_batch_landing_plan_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        record_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]: ...
+
+    def list_preview_pr_feedback_records(
+        self, *, context_name: str = "", limit: int | None = None
+    ) -> tuple[PreviewPrFeedbackRecord, ...]: ...
+
+
+class ReleaseInvitationNotesUnavailable(ValueError):
+    """A Client-facing constituent is missing its recorded batch test notes."""
+
+
 def _release_items(
-    store: ReleaseReviewStore, checklist: ReleaseChecklist
+    store: InvitationEvidenceStore, checklist: ReleaseChecklist
 ) -> list[tuple[str, ReleaseReviewItem]]:
     groups = [(checklist.repository, checklist.items)] + [
         (source.repository, source.items) for source in checklist.shared_sources
@@ -41,8 +64,6 @@ def _release_items(
             notes = dict(zip(sections[1::2], sections[2::2]))
             for entry in batch.entries:
                 note = notes.get(str(entry.pull_request_number), "").strip()
-                if not note:
-                    raise ValueError("Release invitation batch Client notes are unavailable.")
                 result.append(
                     (
                         repository,
@@ -67,10 +88,11 @@ def client_invitation_changes(
     profile: LaunchplaneProductProfileRecord,
     checklist: ReleaseChecklist,
 ) -> dict[str, ReleaseReviewItem]:
+    evidence = cast(InvitationEvidenceStore, store)
     # Historical feedback persists the rendered request, not a separate flag.
     # Its bound per-PR review URL is request evidence; a preview alone is not.
     requested: set[tuple[str, int]] = set()
-    for feedback in store.list_preview_pr_feedback_records(context_name=profile.preview.context):
+    for feedback in evidence.list_preview_pr_feedback_records(context_name=profile.preview.context):
         if feedback.product != profile.product or feedback.status != "ready":
             continue
         for link in re.findall(r"https?://[^\s<>\"')]+", feedback.comment_markdown):
@@ -83,7 +105,7 @@ def client_invitation_changes(
             ):
                 requested.add((feedback.repository, feedback.anchor_pr_number))
     changes = {}
-    for repository, item in _release_items(store, checklist):
+    for repository, item in _release_items(evidence, checklist):
         decisions = store.list_product_review_decision_records(
             repository=repository, pull_request_number=item.pull_request_number
         )
@@ -92,6 +114,10 @@ def client_invitation_changes(
             and decision.owner_github_id == profile.owner.github_id
             for decision in decisions
         ):
+            if not item.owner_test_notes.strip():
+                raise ReleaseInvitationNotesUnavailable(
+                    f"Release invitation batch Client notes are unavailable for {repository}#{item.pull_request_number}."
+                )
             key = hashlib.sha256(f"{repository}:{item.pull_request_number}".encode()).hexdigest()
             changes[key] = item
     return changes

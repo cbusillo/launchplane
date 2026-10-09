@@ -44,6 +44,10 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _display_time() -> str:
+    return _now().astimezone(ZoneInfo("America/New_York")).strftime("%B %-d, %Y at %-I:%M %p ET")
+
+
 def _remember_delivery(
     backoff: ReleaseInvitationBackoff | None,
     receipt: tuple[str, str, str],
@@ -130,6 +134,14 @@ def _replace_older_invitations(
                 REPLACED_MARKER,
                 "",
                 "Replaced by the current release invitation below. No action is needed on this older invitation.",
+                "",
+                "<details><summary>Earlier invitation</summary>",
+                "",
+                "\n".join(line for line in lines if line not in receipts)
+                .replace("@", "@\u200b")
+                .strip(),
+                "",
+                "</details>",
             ]
         )
         result = github_api_request(
@@ -423,6 +435,7 @@ def publish_release_invitation(
                 body = f"{reminder_marker}\n" + str(request["body"]).replace(
                     f"Hi {profile.owner.github_login},", f"Hi @{profile.owner.github_login},"
                 ).replace("Hi @", "A reminder: hi @")
+                body = re.sub(r"(?m)^Updated at: .*", f"Updated at: {_display_time()}", body)
                 result = github_api_request(
                     path=comments_path, token=token, method="POST", body={"body": body}
                 )
@@ -450,16 +463,19 @@ def publish_release_invitation(
             )
             if reminded:
                 receipts += f"\n{reminder_marker}"
-            display_time = _now().astimezone(ZoneInfo("America/New_York")).strftime(
-                "%B %-d, %Y at %-I:%M %p ET"
+            display_time = _display_time()
+            action = (
+                "check the changes on the testing site, then press **Accept** or **Request changes**."
+                if client_changes
+                else "there is nothing new to test. Read the release summary, then press **Accept** or **Request changes**."
             )
             body = (
                 f"{request_marker}\n{marker}\n{receipts}\n\nHi {client},\n\n"
                 f"{heading}:\n"
                 + "\n".join(changes)
                 + f"\n\nStill one thing to do: [open the release page]({review_link}), "
-                "check the changes on the testing site, then press **Accept** or **Request changes**."
-                f"\n\n{effect}\n\nUpdated at: {display_time}"
+                + action
+                + f"\n\n{effect}\n\nUpdated at: {display_time}"
             )
             destination = comments_path
             method = "POST"

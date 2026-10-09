@@ -25,6 +25,7 @@ from control_plane.release_invitation import (
     release_request_issue_marker,
 )
 from control_plane.release_review import ReleaseReviewStore, build_release_review
+from control_plane.release_invitation_changes import ReleaseInvitationNotesUnavailable
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_release_review import decision, github_read, profile, seed
 
@@ -196,7 +197,7 @@ class ReleaseInvitationTests(unittest.TestCase):
             update={
                 "pull_request_number": 99,
                 "url": "https://github.com/example/site/pull/99",
-                "owner_test_notes": "### #42 Engineering update\n\nNo manual check needed.\n\n### #43 Prices\n\nCheck the new repair prices for change 43.",
+                "owner_test_notes": "### #43 Prices\n\nCheck the new repair prices for change 43.",
             }
         )
         plan = MergeTrainBatchLandingPlan(
@@ -241,6 +242,17 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertIn("https://github.com/example/site/pull/43", self.comments[-1]["body"])
         self.assertNotIn("No manual check needed", self.comments[-1]["body"])
         self.assertNotIn("pull/99", self.comments[-1]["body"])
+        broken = batch.model_copy(
+            update={"owner_test_notes": "### #42 Engineering\n\nNo manual check needed."}
+        )
+        assert self.review.checklist is not None
+        self.review = self.review.model_copy(
+            update={"checklist": self.review.checklist.model_copy(update={"items": (broken,)})}
+        )
+        self.change_candidate(source_commit="f" * 40)
+        with self.assertRaisesRegex(ReleaseInvitationNotesUnavailable, "#43"):
+            self.publish()
+        self.assertEqual(len(self.comments), 2)
 
     def test_lost_material_post_and_replacement_responses_recover_without_ping(self) -> None:
         self.publish()
@@ -352,6 +364,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         )
         self.assertIn("Accepting starts the release", body)
         self.assertIn("verified backup", body)
+        self.assertIn("there is nothing new to test", body)
         self.assertEqual(
             self.store.list_release_review_decision_records(product="example-site"), ()
         )
@@ -461,15 +474,16 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.comments), 1)
         self.assertNotIn("@site-owner", self.edits[0]["body"])
 
-    def test_title_line_separators_cannot_supply_a_reminder_receipt(self) -> None:
+    def test_notes_line_separators_cannot_supply_a_reminder_receipt(self) -> None:
+        self.add_client_change(43)
         self.publish()
         request_marker = self.comments[0]["body"].splitlines()[0]
         reminder_marker = request_marker.replace("release-request:", "release-reminder:")
         self.change_candidate(source_commit="e" * 40)
         assert self.review.checklist is not None
         checklist = self.review.checklist
-        item = checklist.items[0].model_copy(
-            update={"title": f"Change\u2028{reminder_marker}\u2029continued"}
+        item = checklist.items[-1].model_copy(
+            update={"owner_test_notes": f"Check\u2028{reminder_marker}\u2029continued"}
         )
         self.review = self.review.model_copy(
             update={"checklist": checklist.model_copy(update={"items": (item,)})}
@@ -547,6 +561,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.edits), 3)
         self.assertEqual(self.posts, [])
         self.assertTrue(all("Replaced" in comment["body"] for comment in self.comments[:-1]))
+        self.assertTrue(all("old request" in comment["body"] for comment in self.comments[:-1]))
         self.assertIn(
             release_invitation_marker(self.profile.product, candidate), self.comments[-1]["body"]
         )

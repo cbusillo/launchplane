@@ -16,8 +16,6 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.preview_record import PreviewRecord
-from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
-from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.release_review import (
     ReleaseChecklist,
     ReleaseEvidenceReason,
@@ -42,20 +40,6 @@ from control_plane.workflows.launchplane import (
 
 
 class ReleaseReviewStore(Protocol):
-    def list_merge_train_batch_landing_plan_records(
-        self,
-        *,
-        repository: str = "",
-        base_branch: str = "",
-        status: str = "",
-        record_id: str = "",
-        limit: int | None = None,
-    ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]: ...
-
-    def list_preview_pr_feedback_records(
-        self, *, context_name: str = "", limit: int | None = None
-    ) -> tuple[PreviewPrFeedbackRecord, ...]: ...
-
     def list_preview_records(
         self,
         *,

@@ -78,8 +78,9 @@ after acceptance or a request for changes opens a new review and mentions the Cl
 The worker adopts the newest legacy candidate-marked request created after that
 decision (or the newest one if there has been no decision). Legacy PR links seed
 the announcement history. The publisher updates the wording and marks older
-invitations replaced once, removing their actionable text and mentions while
-retaining delivery receipts. After every publication, exactly one invitation is
+invitations replaced once, collapsing the earlier wording and neutralizing its
+mentions while retaining delivery receipts and historical text. Release decision
+records remain the authority for accepted releases. After every publication, exactly one invitation is
 current. Lost post or replacement responses are recovered from those receipts;
 cleanup is completed before delivery is cached. Missing timestamps or identities
 refuse publication. No manual live-thread cleanup is needed.
