@@ -266,6 +266,31 @@ class PromotionRecoveryTests(unittest.TestCase):
                 self.assertEqual(self.reservation().state, "reconcile_required")
                 self.assertEqual(self.provider.deployed_artifacts, effects)
 
+    def test_drill_recovery_ignores_a_later_manual_rollback_plan(self) -> None:
+        from control_plane.contracts.generic_web_rollback import (
+            GenericWebRollbackPlanRequest,
+            build_generic_web_rollback_plan,
+        )
+
+        self.prepare_drill()
+        self.interrupt_completion()
+        self.store.write_generic_web_rollback_plan_record(
+            build_generic_web_rollback_plan(
+                record_store=self.store,
+                request=GenericWebRollbackPlanRequest(
+                    product=self.case.profile.product,
+                    rollback_deployment_record_id=self.initial_inventory.deployment_record_id,
+                    timeout_seconds=17,
+                ),
+            )
+        )
+        effects = list(self.provider.deployed_artifacts)
+        plan = self.dry_run()
+        self.assertEqual(plan["proposed_action"], "adopt_rollback")
+        self.assertEqual(self.apply(plan)[0], 202)
+        self.assertEqual(self.reservation().state, "completed")
+        self.assertEqual(self.provider.deployed_artifacts, effects)
+
     def test_drill_adoption_refuses_late_record_change(self) -> None:
         self.prepare_drill()
         self.interrupt_completion()

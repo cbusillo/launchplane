@@ -1067,7 +1067,7 @@ def _queue_rollback(
             if not client_release_grant_allows(store, grant):
                 raise click.ClickException("The release is no longer accepted.")
 
-        return run_generic_web_rollback_drill(
+        operation_id = run_generic_web_rollback_drill(
             store=store,
             control_plane_root=control_plane_root,
             profile=profile,
@@ -1077,6 +1077,10 @@ def _queue_rollback(
             idempotency_key=_step_key(decision, step),
             validate_checkpoint=validate_checkpoint,
         )
+        expected_id = client_release_step_operation_id(
+            profile=profile, decision=decision, step=step
+        )
+        return expected_id if operation_id == expected_id else ""
     request = OdooProdRollbackRequest(
         context=context,
         artifact_id=target_artifact_id,

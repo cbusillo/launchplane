@@ -26,7 +26,7 @@ from control_plane.contracts.idempotency_record import (
     parse_launchplane_mutation_timestamp,
 )
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deployment_record import DeploymentRecord, deployment_record_passed
 from control_plane.contracts.promotion_record import PromotionRecord, promotion_failure
 from control_plane.contracts.record_failures import record_failure_summary
 from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
@@ -495,17 +495,26 @@ def inspect_rollback_drill(
     if not inspect_provider or not reservation.provider_effect_started_at:
         return inspection
     try:
-        # The persisted plan and request fingerprint identify the original target,
-        # even after the drill creates a newer deployment of that same artifact.
+        # The reservation fingerprint identifies the original deployment without
+        # depending on a plan record another rollback request can overwrite.
         plans = []
-        for plan in store.list_generic_web_rollback_plan_records(
+        for deployment in store.list_deployment_records(
             context_name=lane.context, instance_name="prod"
         ):
-            request = GenericWebRollbackPlanRequest(
-                product=product, rollback_deployment_record_id=plan.rollback_deployment_record_id
-            )
             if (
-                plan.product == product
+                not deployment_record_passed(deployment)
+                or deployment.artifact_identity is None
+                or deployment.artifact_identity.artifact_id
+                != decision.checklist.production.artifact_id
+                or deployment.source_git_ref != decision.checklist.production.source_commit
+            ):
+                continue
+            request = GenericWebRollbackPlanRequest(
+                product=product, rollback_deployment_record_id=deployment.record_id
+            )
+            plan = build_generic_web_rollback_plan(record_store=store, request=request)
+            if (
+                plan.status == "ready"
                 and plan.planned_deploy is not None
                 and hashlib.sha256(
                     (request.model_dump_json() + plan.planned_deploy.model_dump_json()).encode()

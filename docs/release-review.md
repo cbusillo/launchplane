@@ -360,7 +360,7 @@ production record for the checklist's exact artifact and source commit. A
 missing target is shown as a release blocker without changing production.
 For an interrupted drill, use the same scoped admin recovery route above with
 `?step=rollback` on selection, dry-run and Apply. It binds the original target
-through the saved rollback plan and reservation fingerprint, verifies the exact
+through the original deployment and reservation fingerprint, verifies the exact
 recorded rollback deployment against the provider's configured/running image,
 deployment ID and current health, then adopts the existing result atomically.
 It starts no provider effect and grants no access. Active leases, no-effect

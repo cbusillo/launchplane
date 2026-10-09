@@ -1112,6 +1112,35 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.assertEqual(self.advance(), ())
         self.assertEqual(self.provider.deployed_artifacts, [])
 
+    def test_busy_drill_target_does_not_report_another_operation_as_queued(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        self.advance()
+        promotion = self.store.read_idempotency_record(
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=f"{accepted.record_id}:promote-1",
+        )
+        assert promotion is not None
+        competing = self.store.reserve_mutation(
+            scope="manual-deploy",
+            route_path="/v1/admin/generic-web/deploy",
+            idempotency_key="manual-deploy",
+            request_fingerprint="f" * 64,
+            lease_owner="admin-worker",
+            reconciliation_key=promotion.reconciliation_key,
+            provider_target_key=promotion.provider_target_key,
+        )
+        self.assertEqual(competing.status, "acquired")
+        effects = list(self.provider.deployed_artifacts)
+        self.assertEqual(self.advance(), ())
+        self.assertEqual(self.provider.deployed_artifacts, effects)
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.steps[2].status, "not_started")
+
     def test_expired_running_promotion_reports_reconciliation(self) -> None:
         accepted = self.accept()
         self.advance()
