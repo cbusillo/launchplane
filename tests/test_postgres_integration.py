@@ -1042,7 +1042,7 @@ class RealPostgresLegacyPreviewReconciliationTests(
             release_writer.set()
             event.remove(self.store._engine, "after_cursor_execute", pause_generation_writer)
 
-    def test_provider_destroy_waits_for_reconciliation_serialization(self) -> None:
+    def test_provider_destroy_refuses_contention_before_provider_and_can_retry(self) -> None:
         from control_plane.workflows.generic_web_preview import (
             GenericWebPreviewDestroyRequest,
             execute_generic_web_preview_destroy,
@@ -1050,7 +1050,7 @@ class RealPostgresLegacyPreviewReconciliationTests(
         )
 
         with (
-            ThreadPoolExecutor(max_workers=1) as executor,
+            ThreadPoolExecutor(max_workers=20) as executor,
             patch(
                 "control_plane.workflows.generic_web_preview._execute_generic_web_preview_destroy_unserialized"
             ) as provider,
@@ -1058,29 +1058,50 @@ class RealPostgresLegacyPreviewReconciliationTests(
             with serialize_generic_web_preview_operation(
                 record_store=self.store, profile=self.profile, preview_slug="pr-1"
             ):
-                future = executor.submit(
-                    execute_generic_web_preview_destroy,
-                    control_plane_root=self.root,
-                    record_store=self.store,
-                    profile=self.profile,
-                    request=GenericWebPreviewDestroyRequest(
-                        product=self.profile.product, anchor_pr_number=1, destroy_reason="fixture"
-                    ),
+                futures = [
+                    executor.submit(
+                        execute_generic_web_preview_destroy,
+                        control_plane_root=self.root,
+                        record_store=self.store,
+                        profile=self.profile,
+                        request=GenericWebPreviewDestroyRequest(
+                            product=self.profile.product,
+                            anchor_pr_number=1,
+                            destroy_reason="fixture",
+                        ),
+                    )
+                    for _ in range(20)
+                ]
+                for future in futures:
+                    with self.assertRaises(ValueError):
+                        future.result(timeout=5)
+                self.assertEqual(
+                    self.store.read_product_profile_record(self.profile.product), self.profile
                 )
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    with self.store._engine.connect() as connection:
-                        blocked = connection.scalar(
-                            text(
-                                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
-                            )
-                        )
-                    if blocked:
-                        break
-                self.assertTrue(blocked, "Provider action never waited on the preview lock")
                 provider.assert_not_called()
-            future.result(timeout=5)
+            execute_generic_web_preview_destroy(
+                control_plane_root=self.root,
+                record_store=self.store,
+                profile=self.profile,
+                request=GenericWebPreviewDestroyRequest(
+                    product=self.profile.product, anchor_pr_number=1, destroy_reason="fixture"
+                ),
+            )
             provider.assert_called_once()
+
+    async def test_contended_plan_is_refused_without_scan_and_identical_key_can_retry(self) -> None:
+        from control_plane.workflows.generic_web_preview import (
+            serialize_generic_web_preview_operation,
+        )
+
+        with serialize_generic_web_preview_operation(
+            record_store=self.store, profile=self.profile, preview_slug="pr-1"
+        ):
+            response = await self.call("plan", key="review-plan")
+            self.assertEqual(response.status_code, 409)
+            self.search.assert_not_called()
+        plan = await self.plan()
+        self.assertTrue(plan["apply_eligible"])
 
 
 class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):

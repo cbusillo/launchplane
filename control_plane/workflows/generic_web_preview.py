@@ -1346,7 +1346,9 @@ def serialize_generic_web_preview_operation(
     if callable(serialize):
         return cast(
             ContextManager[None],
-            serialize(preview_id=f"{profile.product}:{profile.preview.context}:{preview_slug}"),
+            serialize(
+                preview_id=f"{profile.product}:{profile.preview.context}:{preview_slug}", wait=False
+            ),
         )
     return nullcontext()
 

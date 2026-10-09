@@ -507,7 +507,7 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(self.call("inspect"))
         try:
             self.assertTrue(await asyncio.to_thread(started.wait, 3))
-            healthy = await asyncio.wait_for(request(self.app, "GET", "/openapi.json"), 2)
+            healthy = await asyncio.wait_for(request(self.app, "GET", "/v1/health"), 2)
             self.assertEqual(healthy.status_code, 200)
         finally:
             release.set()
@@ -557,7 +557,7 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(destroy())
             try:
                 self.assertTrue(await asyncio.to_thread(started.wait, 3))
-                health = await asyncio.wait_for(request(self.app, "GET", "/openapi.json"), 2)
+                health = await asyncio.wait_for(request(self.app, "GET", "/v1/health"), 2)
                 self.assertEqual(health.status_code, 200)
                 task.cancel()
                 await asyncio.sleep(0)

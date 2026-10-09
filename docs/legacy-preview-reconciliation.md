@@ -44,8 +44,8 @@ recorded result, not current provider state. After apply, independently run
 `inspect` again and require both `provider_absence_verified: true` and
 `preview_state: destroyed` with a destruction timestamp.
 Large inventories can outlast the helper's HTTP timeout. Allow the original
-scan to finish before repeating the same key; a retry during that scan waits
-on the same preview lock.
+scan to finish before repeating the same key; a retry during that scan returns
+a busy/conflict result. Repeat the identical intent and key after it finishes.
 
 ## Evidence and authority
 
@@ -63,6 +63,10 @@ generation pointers, and existing preview target authority fail closed.
 Inspection and completion run off the HTTP event loop. Generic-web provider
 refresh, teardown and reconciliation share the database's preview serialization
 lock; HTTP cancellation preserves any atomic completion and its replay receipt.
+Generic-web lock acquisition is nonblocking: contention is refused before
+provider work, without keeping a waiting database connection. Retry the same
+operation intent and key after the active operation finishes; refresh/teardown
+callers use their existing retry path, and reconciliation returns 409.
 
 Inspection and planning use existing `preview_inventory.read` authorization
 for the recorded product/preview context. Apply additionally requires existing

@@ -12555,7 +12555,7 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
 
     @contextmanager
-    def serialize_preview_refresh(self, *, preview_id: str) -> Iterator[None]:
+    def serialize_preview_refresh(self, *, preview_id: str, wait: bool = True) -> Iterator[None]:
         normalized_preview_id = preview_id.strip()
         if not normalized_preview_id:
             raise ValueError("Preview refresh serialization requires preview_id.")
@@ -12563,10 +12563,16 @@ class PostgresRecordStore(HumanSessionStore):
             yield
             return
         with self._session_factory() as session:
-            session.execute(
-                text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+            acquired = session.scalar(
+                text(
+                    "select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"
+                    if wait
+                    else "select pg_try_advisory_xact_lock(hashtextextended(:lock_name, 0))"
+                ),
                 {"lock_name": f"launchplane-preview-refresh:{normalized_preview_id}"},
             )
+            if not wait and not acquired:
+                raise ValueError("Preview operation is already running; retry after it completes.")
             try:
                 yield
             finally:
@@ -35671,6 +35677,7 @@ class PostgresRecordStore(HumanSessionStore):
                 session, preview=self.read_preview_record(reconciliation.preview_id)
             )
             if self._engine.dialect.name == "postgresql":
+                # Generation evidence flushes before its preview; the real race test guards this order.
                 tables = ", ".join(
                     model.__tablename__
                     for model in (
