@@ -15,6 +15,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideApplyStatus,
 )
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
+from control_plane.contracts.public_hosts import resolve_public_base_url
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
 from control_plane.contracts.odoo_target_replacement_failures import (
     OdooProviderEffectUncertainError,
@@ -211,12 +212,25 @@ def execute_odoo_post_deploy(
     protected_shopify_store_keys = (
         dokploy_source.protected_shopify_store_keys_for_target_definition(target_definition)
     )
+    public_hosts = (
+        target_definition.public_hosts
+        if not run_destructive_restore and request.phase in {"deploy", "promotion"}
+        else ()
+    )
+    public_base_url = resolve_public_base_url(instance=request.instance, public_hosts=public_hosts)
+    rendering_record = control_plane_odoo_instance_overrides.record_with_public_base_url(
+        odoo_override_record if override_should_apply else None,
+        context=request.context,
+        instance=request.instance,
+        public_hosts=public_hosts,
+        updated_at=utc_now_timestamp(),
+    )
 
-    if odoo_override_record is not None and override_should_apply:
+    if rendering_record is not None:
         try:
             post_deploy_environment = (
                 control_plane_odoo_instance_overrides.build_post_deploy_environment(
-                    odoo_override_record,
+                    rendering_record,
                     record_store=record_store,
                     workflow_intent=workflow_intent,
                     protected_shopify_store_keys=protected_shopify_store_keys,
@@ -228,19 +242,20 @@ def execute_odoo_post_deploy(
                 post_deploy_environment.required_container_environment_keys
             )
         except click.ClickException as error:
-            _write_odoo_instance_override_apply_result(
-                record_store=typed_record_store,
-                record=odoo_override_record,
-                status="fail",
-                detail=str(error),
-            )
+            if odoo_override_record is not None and override_should_apply:
+                _write_odoo_instance_override_apply_result(
+                    record_store=typed_record_store,
+                    record=odoo_override_record,
+                    status="fail",
+                    detail=str(error),
+                )
             return OdooPostDeployResult(
                 context=request.context,
                 instance=request.instance,
                 phase=request.phase,
                 post_deploy_status="fail",
                 override_status="fail" if override_should_apply else "skipped",
-                override_record_found=True,
+                override_record_found=override_record_found,
                 workflow_intent=workflow_intent,
                 required_container_environment_keys=required_workflow_environment_keys,
                 error_message=str(error),
@@ -388,6 +403,7 @@ def execute_odoo_post_deploy(
         workflow_intent=workflow_intent,
         required_container_environment_keys=required_workflow_environment_keys,
         override_evidence={
+            **({"resolved_base_url": public_base_url} if public_base_url else {}),
             **(override_payload.redacted_evidence() if override_payload else {}),
             **_prefix_post_deploy_readback_evidence(post_deploy_readback_markers),
         },

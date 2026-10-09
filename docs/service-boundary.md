@@ -2161,6 +2161,9 @@ routes internally under product-config authority, with no caller target-setup
 grant and no Client release. Routes use HTTPS and `certificateType: none`, as
 the existing origin does; this does not provision public TLS or change DNS,
 the Client's proxy, or the Odoo base URL.
+Host order is preserved: the next Odoo deploy or promotion uses the first public
+host as described in [Odoo instance overrides](records.md#odoo-instance-override-record).
+Product-config apply itself does not rewrite the running website.
 
 Apply reads back the provider routes before committing the target configuration
 and idempotent success receipt. `verified: true` and `read_back_hosts` prove
