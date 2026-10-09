@@ -653,7 +653,6 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
                             anchor_repo=self.preview.anchor_repo,
                             preview_slug_prefix="pr-",
                             status="pass",
-                            desired_count=0,
                         ),
                     ),
                 ):
