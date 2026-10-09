@@ -110,17 +110,18 @@ def client_invitation_changes(
             query = parse_qs(parsed.query)
             if (
                 parsed.path == "/ui/owner-review"
-                and query.get("repository") == [feedback.repository]
+                and len(query.get("repository", [])) == 1
+                and query["repository"][0].casefold() == feedback.repository.casefold()
                 and query.get("pull_request") == [str(feedback.anchor_pr_number)]
             ):
-                requested.add((feedback.repository, feedback.anchor_pr_number))
+                requested.add((feedback.repository.casefold(), feedback.anchor_pr_number))
     changes = {}
     for repository, change in _release_items(evidence, checklist):
         item = change.item
         decisions = store.list_product_review_decision_records(
             repository=repository, pull_request_number=item.pull_request_number
         )
-        if (repository, item.pull_request_number) in requested or any(
+        if (repository.casefold(), item.pull_request_number) in requested or any(
             decision.product == profile.product
             and decision.owner_github_id == profile.owner.github_id
             for decision in decisions

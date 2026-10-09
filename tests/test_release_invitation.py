@@ -148,6 +148,26 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertNotIn("@site-owner", self.comments[0]["body"])
         self.assertIn("change 43", self.comments[0]["body"])
 
+    def test_review_request_repository_casing_does_not_hide_client_change(self) -> None:
+        self.publish()
+        self.add_client_change(43, request_only=True)
+        feedback = self.store.list_preview_pr_feedback_records()[0]
+        self.store.write_preview_pr_feedback_record(
+            feedback.model_copy(
+                update={
+                    "repository": "Example/Site",
+                    "comment_markdown": feedback.comment_markdown.replace(
+                        "example%2Fsite", "EXAMPLE%2FSITE"
+                    ),
+                }
+            )
+        )
+        self.change_candidate(source_commit="e" * 40)
+        self.publish()
+        self.assertEqual(len(self.comments), 2)
+        self.assertIn("@site-owner", self.comments[-1]["body"])
+        self.assertIn("change 43", self.comments[-1]["body"])
+
     def test_preview_without_review_request_and_other_product_decision_stay_silent(self) -> None:
         self.publish()
         self.add_client_change(43, request_only=True)
@@ -628,6 +648,7 @@ class ReleaseInvitationTests(unittest.TestCase):
                 self.assertEqual(self.posts, [])
 
     def test_manual_request_is_adopted_without_another_mention(self) -> None:
+        self.add_client_change(43)
         assert self.review.checklist is not None
         self.issues = [
             {"number": 91, "body": "Go live\n" + release_request_issue_marker(self.profile.product)}

@@ -80,11 +80,17 @@ def _change_link(item: ReleaseReviewItem) -> str:
 
 
 def _announced_changes(
-    request: dict[str, object] | None, changes: dict[str, InvitationChange]
+    request: dict[str, object] | None, changes: dict[str, InvitationChange], candidate_marker: str
 ) -> set[str]:
     if request is None:
         return set()
     lines = _comment_lines(request)
+    if candidate_marker in lines and not any(
+        line.startswith("<!-- launchplane:release-request:") for line in lines
+    ):
+        # A manually adopted receipt for this exact candidate already requested
+        # every included change, even when its prose has no individual PR links.
+        return set(changes)
     keys = {
         match[1]
         for line in lines
@@ -437,7 +443,7 @@ def publish_release_invitation(
                 else _now() + timedelta(days=3)
             )
             client_changes = client_invitation_changes(store, profile, review.checklist)
-            announced = _announced_changes(request, client_changes)
+            announced = _announced_changes(request, client_changes, marker)
             added = {key: item for key, item in client_changes.items() if key not in announced}
             # A matching candidate receipt still needs the one-time migration
             # to plain wording and cleanup of older duplicate invitations.
@@ -462,7 +468,8 @@ def publish_release_invitation(
                 # recovered from this marker, including after replica restart.
                 body = f"{reminder_marker}\n" + "\n".join(_comment_lines(request)).replace(
                     f"Hi {profile.owner.github_login},", f"Hi @{profile.owner.github_login},"
-                ).replace("Hi @", "A reminder: hi @")
+                )
+                body = re.sub(r"(?m)^Hi @", "A reminder: hi @", body)
                 body = re.sub(r"(?m)^Updated at: .*", f"Updated at: {_display_time()}", body)
                 result = github_api_request(
                     path=comments_path, token=token, method="POST", body={"body": body}
@@ -510,6 +517,7 @@ def publish_release_invitation(
                 + "\n".join(changes)
                 + f"\n\nStill one thing to do: [open the release page]({review_link}), "
                 + action
+                + " The release page lists every included change."
                 + f"\n\n{effect}\n\nUpdated at: {display_time}"
             )
             destination = comments_path

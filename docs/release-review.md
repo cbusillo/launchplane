@@ -82,6 +82,9 @@ after acceptance or a request for changes opens a new review and mentions the Cl
 The worker adopts the newest legacy candidate-marked request created after that
 decision (or the newest one if there has been no decision). Legacy PR links,
 including batch links bound to their constituents, seed the announcement history.
+An adopted manual receipt for the exact current candidate covers its included
+changes even without individual PR links. Bound request evidence compares
+repository names without case sensitivity, as GitHub does.
 The publisher updates the wording and marks older invitations in the same open
 review replaced once, collapsing the earlier wording and neutralizing its
 mentions while retaining delivery receipts and historical text. Release decision
