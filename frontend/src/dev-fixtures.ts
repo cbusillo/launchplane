@@ -1768,6 +1768,7 @@ export function mergeTrainStatusForFixture(
           blocked_count: reconciliationRequired ? 1 : 0,
           candidate_sha: "fixture-candidate-sha",
           held_out: [],
+          historical: false,
           merged_count: 0,
           planned_count: 2,
           policy_key: `${repository}:${baseBranch}`,

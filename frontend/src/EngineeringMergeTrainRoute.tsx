@@ -15,7 +15,7 @@ import {
 import {
   MERGE_TRAIN_BROWSER_BOUNDARY,
   mergeTrainActiveRecordIds,
-  mergeTrainActiveStaleRecords,
+  mergeTrainStaleAttentionRecords,
   mergeTrainControllerTone,
   mergeTrainStatusScopeKey,
   mergeTrainTargetSelection,
@@ -329,7 +329,7 @@ function ControllerStatus({
     (record) => record.policy_status === "stale",
   );
   const activeIds = mergeTrainActiveRecordIds(status);
-  const activeStaleRecords = mergeTrainActiveStaleRecords(status);
+  const staleAttentionRecords = mergeTrainStaleAttentionRecords(status);
   return (
     <div className="engineering-controller-status">
       <section className="engineering-metric-grid" aria-label="Controller summary">
@@ -342,7 +342,7 @@ function ControllerStatus({
         <Metric label="Current records" value={String(currentRecords.length)} />
         <Metric
           label="Historical policy records"
-          value={String(staleRecords.length - activeStaleRecords.length)}
+          value={String(staleRecords.length - staleAttentionRecords.length)}
           tone="unknown"
         />
         <Metric
@@ -352,7 +352,7 @@ function ControllerStatus({
         />
       </section>
 
-      {policyDigestMismatch || reconciliationRequired || activeStaleRecords.length ? (
+      {policyDigestMismatch || reconciliationRequired || staleAttentionRecords.length ? (
         <div className="engineering-controller-blocker" role="alert">
           <ShieldAlert size={18} aria-hidden="true" />
           <div>
@@ -364,7 +364,7 @@ function ControllerStatus({
                   ? status.controller_state?.reconciliation_detail ||
                     status.controller_diagnostics?.reconciliation_detail ||
                     "Controller reconciliation is required."
-                  : `${activeStaleRecords.length} active record${activeStaleRecords.length === 1 ? " is" : "s are"} stale under the active policy.`}
+                  : `${staleAttentionRecords.length} unresolved record${staleAttentionRecords.length === 1 ? " is" : "s are"} stale under the active policy.`}
             </p>
           </div>
         </div>
@@ -551,7 +551,7 @@ function ControllerStatus({
 }
 
 function ControllerRecord({ record, active }: { record: MergeTrainControllerRecordSummary; active: boolean }) {
-  const historical = record.policy_status === "stale" && !active;
+  const historical = record.policy_status === "stale" && record.historical === true && !active;
   const tone = historical ? "unknown" : record.policy_status === "stale" ? "blocked" : "pending";
   return (
     <li className="engineering-controller-record" data-policy={record.policy_status}>

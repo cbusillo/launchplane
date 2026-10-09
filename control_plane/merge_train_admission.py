@@ -24,6 +24,9 @@ from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
+from control_plane.workflows.merge_train_controller import (
+    decide_merge_train_controller_record_action,
+)
 
 MergeTrainControllerPolicyStatus = Literal["current", "stale", "unchecked"]
 MergeTrainReconciliationClassification = Literal[
@@ -92,6 +95,10 @@ class MergeTrainControllerRecordSummary(BaseModel):
     policy_key: str = ""
     policy_sha256: str = ""
     policy_status: MergeTrainControllerPolicyStatus = "unchecked"
+    historical: bool = Field(
+        default=False,
+        description="Stored lineage has no remaining controller action; not current effect authority.",
+    )
     stale_reason: str = ""
     batch_id: str = ""
     pull_request_numbers: tuple[int, ...] = ()
@@ -861,9 +868,61 @@ def _summarize_controller_records(
             for record in controller_records.stack_collapse_plan_records
         ),
     ]
+    historical_ids = _historical_controller_record_ids(controller_records)
     return tuple(
-        sorted(summaries, key=lambda summary: (summary.updated_at, summary.record_id), reverse=True)
+        summary.model_copy(update={"historical": summary.record_id in historical_ids})
+        for summary in sorted(
+            summaries, key=lambda summary: (summary.updated_at, summary.record_id), reverse=True
+        )
     )
+
+
+def _historical_controller_record_ids(records: MergeTrainControllerRecords) -> set[str]:
+    """Qualify history with the same stored-progress selector the controller uses.
+
+    Evaluate each lineage before current-policy filtering: an obsolete unfinished
+    lineage still needs retirement even when admission correctly selects no action.
+    """
+    historical: set[str] = set()
+    for batch_id in {record.candidate.batch_id for record in records.candidate_records}:
+        candidates = tuple(
+            record for record in records.candidate_records if record.candidate.batch_id == batch_id
+        )
+        landings = tuple(
+            record
+            for record in records.landing_plan_records
+            if record.landing_plan.batch_id == batch_id
+        )
+        decision = decide_merge_train_controller_record_action(
+            candidate_records=candidates,
+            landing_plan_records=landings,
+            stack_collapse_plan_records=(),
+        )
+        if decision.action in {"idle", "candidate_stopped"}:
+            historical.update(record.record_id for record in candidates)
+    for plan_id in {record.landing_plan.plan_id for record in records.landing_plan_records}:
+        landings = tuple(
+            record
+            for record in records.landing_plan_records
+            if record.landing_plan.plan_id == plan_id
+        )
+        decision = decide_merge_train_controller_record_action(
+            candidate_records=(), landing_plan_records=landings, stack_collapse_plan_records=()
+        )
+        if decision.action == "idle":
+            historical.update(record.record_id for record in landings)
+    for collapse_id in {record.plan.collapse_id for record in records.stack_collapse_plan_records}:
+        collapses = tuple(
+            record
+            for record in records.stack_collapse_plan_records
+            if record.plan.collapse_id == collapse_id
+        )
+        decision = decide_merge_train_controller_record_action(
+            candidate_records=(), landing_plan_records=(), stack_collapse_plan_records=collapses
+        )
+        if decision.action == "idle":
+            historical.update(record.record_id for record in collapses)
+    return historical
 
 
 def _candidate_summary(

@@ -25,6 +25,7 @@ test("policy history stays visible without blocking current controller status", 
     ...original,
     record_id: "historical-candidate",
     status: "passed",
+    historical: true,
     policy_status: "stale" as const,
     policy_sha256: "old-policy",
     stale_reason: "Recorded under an earlier policy revision.",
@@ -68,6 +69,16 @@ test("policy history stays visible without blocking current controller status", 
   await expect(page.getByText("historical policy", { exact: true })).toBeVisible();
   await expect(page.getByText(history.record_id, { exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("historical-controller.png"), fullPage: true });
+
+  // Policy filtering can advertise idle before unfinished old work is retired.
+  history.historical = false;
+  history.status = "planned";
+  await page.getByRole("button", { name: "Refresh status", exact: true }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(controller).toHaveAttribute("data-tone", "blocked");
+  await expect(page.getByText("historical policy", { exact: true })).toHaveCount(0);
+  history.historical = true;
+  history.status = "passed";
 
   // A currently referenced stale record still requires attention, even if its
   // stored status looks terminal. The service's reference owns applicability.

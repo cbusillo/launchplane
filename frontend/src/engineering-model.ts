@@ -183,12 +183,16 @@ export function mergeTrainControllerTone(
     (expectedPolicySha256 &&
       status.current_policy_sha256 !== expectedPolicySha256) ||
     status.controller_state?.status === "reconcile_required" ||
-    mergeTrainActiveStaleRecords(status).length > 0 ||
+    mergeTrainStaleAttentionRecords(status).length > 0 ||
     status.controller_diagnostics?.reconciliation_status === "required"
   ) {
     return "blocked";
   }
-  if (status.controller_state?.status === "running") {
+  if (
+    status.controller_state?.status === "running" ||
+    status.controller_state?.reconciliation_status === "adopted" ||
+    status.controller_diagnostics?.reconciliation_status === "adopted"
+  ) {
     return "pending";
   }
   if (!status.controller_state && !status.controller_diagnostics) {
@@ -204,19 +208,17 @@ export function mergeTrainActiveRecordIds(
     [
       status.controller_state?.active_record_id,
       status.controller_diagnostics?.active_record_id,
-      status.admission?.controller_candidate_record_id,
-      status.admission?.controller_landing_plan_record_id,
-      status.admission?.controller_stack_collapse_plan_record_id,
     ].filter((id): id is string => Boolean(id)),
   );
 }
 
-export function mergeTrainActiveStaleRecords(
+export function mergeTrainStaleAttentionRecords(
   status: MergeTrainControllerStatusReadModel,
 ): MergeTrainControllerRecordSummary[] {
   const activeIds = mergeTrainActiveRecordIds(status);
   return status.controller_records.filter(
-    (record) => record.policy_status === "stale" && activeIds.has(record.record_id),
+    (record) => record.policy_status === "stale" &&
+      (record.historical !== true || activeIds.has(record.record_id)),
   );
 }
 

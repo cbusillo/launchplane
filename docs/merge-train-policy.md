@@ -1370,8 +1370,11 @@ eligible count, queued count, and visible ineligible reasons from the persisted
 dry-run payload. Stored controller records only influence the advertised
 controller action when their policy key and digest match the active repository
 policy; stale records remain visible in the summaries with a stale reason. The
-workbench uses the admission's selected record IDs and the controller's active
-record references for current attention. An idle, reconciled train does not
+read model qualifies each lineage's `historical` flag with the controller's stored
+progress selector, before current-policy filtering. Completed/retired history is
+distinct from unfinished old-policy work awaiting retirement. The workbench uses
+that qualification and active controller references for current attention.
+An idle, reconciled train does not
 become blocked solely because old-policy history remains visible; those rows are
 labeled historical. A stale active/selected record, policy-digest mismatch or
 unresolved reconciliation still requires attention. It is
