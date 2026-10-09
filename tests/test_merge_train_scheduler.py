@@ -5,6 +5,8 @@ from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 from control_plane import merge_train_scheduler
+from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
+from control_plane.repository_evidence import GitHubRepositoryEvidenceProvider
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerLeaseHeldError,
 )
@@ -105,6 +107,49 @@ class MergeTrainSchedulerPassTests(TestCase):
         ].side_effect = MergeTrainPolicyStoreMissingError("missing")
 
         self.assertEqual(self._run(), ())
+
+    def test_controller_evidence_reads_leave_the_scheduler_token_usable(self) -> None:
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+        revoked: list[str] = []
+        reads: list[str] = []
+
+        def provider(**kwargs: object) -> object:
+            token = kwargs["token"]
+            assert isinstance(token, str)
+            if kwargs.get("method") == "DELETE":
+                revoked.append(token)
+                return None
+            self.assertNotIn(token, revoked)
+            reads.append(token)
+            return []
+
+        def execute(**kwargs: object) -> MergeTrainControllerRunOnceResult:
+            evaluator = kwargs["admission_evaluator"]
+            assert isinstance(evaluator, LiveMergeAdmissionEvaluator)
+            evidence = evaluator.repository_evidence_provider
+            assert isinstance(evidence, GitHubRepositoryEvidenceProvider)
+            for _ in range(2):
+                self.assertEqual(evidence.list_open_pull_requests("cbusillo/alpha", limit=1), ())
+            # The controller still needs its credential after admission evidence completes.
+            provider(path="/repos/cbusillo/alpha/pulls", token=kwargs["token"])
+            return _controller_result()
+
+        self.mocks["execute_merge_train_controller_run_once"].side_effect = execute
+        with (
+            patch.object(merge_train_scheduler, "github_api_request", side_effect=provider),
+            patch.object(
+                merge_train_scheduler, "_deliver_controller_feedback", return_value=(0, 0)
+            ),
+        ):
+            results = self._run()
+        self.assertEqual(results[0].status, "ran")
+        self.assertEqual(reads, ["token", "token", "token"])
+        self.assertEqual(revoked, [])
 
     def test_one_pass_advances_planning_and_passed_checks_to_landing(self) -> None:
         feedback = patch.object(

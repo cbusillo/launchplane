@@ -250,7 +250,7 @@ class ReleaseReviewRecordTests(unittest.TestCase):
     def test_publishes_full_checklist_and_decision_to_tenant_repository(self) -> None:
         with patch(
             "control_plane.release_review_record.github_api_request",
-            side_effect=[[], {"number": 99}],
+            side_effect=[[], {"number": 99}, None],
         ) as api:
             url = publish_release_decision(
                 store=self.store,
@@ -259,7 +259,9 @@ class ReleaseReviewRecordTests(unittest.TestCase):
                 decision=self.decision,
             )
         self.assertEqual(url, "https://github.com/example/site/issues/99")
-        write = api.call_args.kwargs
+        write = next(
+            call.kwargs for call in api.call_args_list if call.kwargs.get("method") == "POST"
+        )
         self.assertEqual(write["method"], "POST")
         self.assertEqual(write["path"], "/repos/example/site/issues")
         body = write["body"]["body"]
@@ -283,8 +285,10 @@ class ReleaseReviewRecordTests(unittest.TestCase):
                 decision=self.decision,
             )
         self.assertEqual(url, "https://github.com/example/site/issues/99")
-        self.assertEqual(api.call_count, 1)
-        self.assertNotIn("method", api.call_args.kwargs)
+        self.assertEqual(
+            [call.kwargs.get("method", "GET") for call in api.call_args_list], ["GET", "DELETE"]
+        )
+        self.assertNotIn("method", api.call_args_list[0].kwargs)
 
     def test_recovers_a_record_written_with_older_wording(self) -> None:
         older_body = (
@@ -303,7 +307,9 @@ class ReleaseReviewRecordTests(unittest.TestCase):
                 decision=self.decision,
             )
         self.assertEqual(url, "https://github.com/example/site/issues/99")
-        self.assertEqual(api.call_count, 1)
+        self.assertEqual(
+            [call.kwargs.get("method", "GET") for call in api.call_args_list], ["GET", "DELETE"]
+        )
 
     def test_only_the_same_record_marker_on_the_first_line_recovers(self) -> None:
         body = release_decision_issue_body(self.decision)
@@ -327,7 +333,7 @@ class ReleaseReviewRecordTests(unittest.TestCase):
                 decision=self.decision,
             )
         self.assertEqual(url, "https://github.com/example/site/issues/101")
-        self.assertEqual(api.call_args.kwargs["method"], "POST")
+        self.assertTrue(any(call.kwargs.get("method") == "POST" for call in api.call_args_list))
 
     def test_incomplete_lookup_or_create_never_claims_a_release_record(self) -> None:
         cases: tuple[list[object], ...] = (

@@ -228,7 +228,13 @@ class SharedReleaseReviewTests(unittest.TestCase):
             assert isinstance(repository, str)
             return repository
 
-        def request(*, path: str, token: str) -> object:
+        revoked: list[str] = []
+
+        def request(*, path: str, token: str, method: str = "GET") -> object:
+            if path == "/installation/token":
+                self.assertEqual(method, "DELETE")
+                revoked.append(token)
+                return None
             self.assertEqual(token, "/".join(path.split("/")[2:4]))
             return self.github.read(path)
 
@@ -243,6 +249,11 @@ class SharedReleaseReviewTests(unittest.TestCase):
                 control_plane_root=self.root, record_store=self.store, profile=profile()
             )
             self.assertIsNotNone(review.checklist)
+            self.assertEqual(
+                set(revoked), {"example/site", "example/shared-addons", "example/disable-online"}
+            )
+            self.assertEqual(len(revoked), len(set(revoked)))
+            revoked.clear()
             self.github.fail = True
             failed = current_release_review(
                 control_plane_root=self.root, record_store=self.store, profile=profile()
@@ -251,6 +262,10 @@ class SharedReleaseReviewTests(unittest.TestCase):
             self.assertFalse(failed.checklist_complete)
             self.assertIsNotNone(failed.checklist)
             self.assertNotIn("private provider error", str(failed))
+            self.assertEqual(
+                set(revoked), {"example/site", "example/shared-addons", "example/disable-online"}
+            )
+            self.assertEqual(len(revoked), len(set(revoked)))
         with (
             patch(
                 "control_plane.release_review.resolve_launchplane_github_token",
