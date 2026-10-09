@@ -12,8 +12,10 @@ agent-instruction filename, including any directory-specific guidance.
 
 ## Development
 
-Use Python 3.13 or later with `uv`, and Node 22.12 or later with the pnpm version
-in [frontend/package.json](frontend/package.json). From the repository root:
+Use `uv` with the interpreter pinned in [.python-version](.python-version), and
+Node 22.12 or later with the pnpm version in
+[frontend/package.json](frontend/package.json). CI uses the same Python pin.
+From the repository root:
 
 ```bash
 uv sync --extra dev
