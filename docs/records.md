@@ -2323,6 +2323,15 @@ run` is the foreground loop intended for an external process supervisor, and
   to the Launchplane-resolved stable target base URL before post-deploy renders
   the payload, so local tenant bootstrap defaults do not become stable lane URL
   authority.
+- For prod targets with `public_hosts`, the first entry resolves to
+  `https://<first host>` for stable bootstrap, deploy and promotion. That URL
+  supplies both the website canonical domain and `web.base.url`; the latter is
+  derived for rendering rather than stored as a second config override. An
+  existing `web.base.url` override is superseded on those runs, so no separate
+  config-parameter workflow is needed. Target-replacement dry runs expose
+  `base_url`; post-deploy evidence exposes `resolved_base_url`. Origin domains
+  and health checks remain internal. Lanes without public hosts retain their
+  previous behavior; previews and destructive restore do not inherit this URL.
 - Isolated Odoo previews inherit only `website_bootstrap` from the preview
   template instance when that record applies on deploy. Launchplane renders an
   ephemeral payload with the preview URL as `canonical_url`; it does not persist

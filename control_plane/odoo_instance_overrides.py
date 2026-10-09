@@ -3,7 +3,10 @@ from dataclasses import dataclass
 
 import click
 
-from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooConfigParameterOverride,
+    OdooInstanceOverrideRecord,
+)
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployAddonSetting
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployConfigParameter
@@ -12,6 +15,7 @@ from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployRende
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
 from control_plane.contracts.runtime_environment_record import ScalarValue
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
+from control_plane.contracts.public_hosts import resolve_public_base_url
 
 ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
 LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY = "LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED"
@@ -298,6 +302,43 @@ def addon_setting_secret_env_key(*, addon_name: str, setting_name: str) -> str:
     if not suffix:
         raise click.ClickException("Odoo addon setting override requires a non-empty setting.")
     return f"{ODOO_OVERRIDE_SECRET_ENV_PREFIX}ADDON__{addon_suffix}__{suffix}"
+
+
+def record_with_public_base_url(
+    record: OdooInstanceOverrideRecord | None,
+    *,
+    context: str,
+    instance: str,
+    public_hosts: tuple[str, ...],
+    updated_at: str,
+) -> OdooInstanceOverrideRecord | None:
+    """Derive an ephemeral payload; public_hosts remains the stored authority."""
+    base_url = resolve_public_base_url(instance=instance, public_hosts=public_hosts)
+    if not base_url:
+        return record
+    parameter = OdooConfigParameterOverride(
+        key="web.base.url", value=OdooOverrideValue(source="literal", value=base_url)
+    )
+    if record is None:
+        return OdooInstanceOverrideRecord(
+            context=context,
+            instance=instance,
+            config_parameters=(parameter,),
+            updated_at=updated_at,
+        )
+    return record.model_copy(
+        update={
+            "config_parameters": tuple(
+                item for item in record.config_parameters if item.key != "web.base.url"
+            )
+            + (parameter,),
+            "website_bootstrap": record.website_bootstrap.model_copy(
+                update={"canonical_url": base_url}
+            )
+            if record.website_bootstrap is not None
+            else None,
+        }
+    )
 
 
 def build_post_deploy_environment(

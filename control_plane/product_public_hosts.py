@@ -210,15 +210,15 @@ def plan_public_hosts(
                     sort_keys=True,
                 ).encode()
             ).hexdigest(),
-            before=sorted(before),
-            after=sorted(after),
+            before=list(target.public_hosts),
+            after=list(hosts),
             added=added,
             updated=updated,
             removed=removed,
             unchanged=unchanged,
             runtime_port=port,
             verified=mode == "apply",
-            read_back_hosts=sorted(after) if mode == "apply" else [],
+            read_back_hosts=list(hosts) if mode == "apply" else [],
         )
         return PublicHostsPlan(
             target, target_id, provider_target, replacement, result, host, token, routes

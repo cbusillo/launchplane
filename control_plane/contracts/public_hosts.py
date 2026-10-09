@@ -23,4 +23,11 @@ def normalize_public_hosts(value: object) -> tuple[str, ...]:
         if host in hosts:
             raise ValueError("Public hosts must be unique.")
         hosts.append(host)
-    return tuple(sorted(hosts))
+    return tuple(hosts)
+
+
+def resolve_public_base_url(*, instance: str, public_hosts: tuple[str, ...]) -> str:
+    """Resolve presentation intent without changing origin/health authority."""
+    if instance == "prod" and public_hosts:
+        return f"https://{public_hosts[0]}"
+    return ""
