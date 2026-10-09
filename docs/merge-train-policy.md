@@ -1273,7 +1273,7 @@ local paths, or unchecked provider responses.
 
 The in-service controller scheduler also recovers the latest failed terminal
 feedback (`completed` or `stale_policy`) after the controller advances to idle
-or other work. It selects at most 25 current retry candidates per target, after
+or other work. It selects a bounded set of current retry candidates per target, after
 superseding older status for each PR; successful recent comments cannot hide an
 older unresolved terminal delivery. Recovery sends the stored rendered body
 with the existing policy credential, without another merge or admission.
