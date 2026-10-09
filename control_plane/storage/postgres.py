@@ -53,6 +53,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_column, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
@@ -5698,8 +5699,11 @@ def _build_engine(
     connection_factory: ConnectionFactory | None = None,
     postgres_connect_timeout_seconds: int | None = None,
     postgres_statement_timeout_milliseconds: int | None = None,
+    unpooled: bool = False,
 ) -> Engine:
     engine_kwargs: dict[str, Any] = {}
+    if unpooled:
+        engine_kwargs["poolclass"] = NullPool
     if connection_factory is not None:
         engine_kwargs["creator"] = connection_factory
     connect_args = _engine_connect_args(
@@ -5800,6 +5804,15 @@ class PostgresRecordStore(HumanSessionStore):
             postgres_statement_timeout_milliseconds=postgres_statement_timeout_milliseconds,
         )
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
+        self._preview_lock_engine: Engine | None = None
+        if self._engine.dialect.name == "postgresql":
+            self._preview_lock_engine = _build_engine(
+                database_url,
+                connection_factory=connection_factory,
+                postgres_connect_timeout_seconds=postgres_connect_timeout_seconds,
+                postgres_statement_timeout_milliseconds=postgres_statement_timeout_milliseconds,
+                unpooled=True,
+            )
         self._provider_evidence_context = local()
         self._release_review_publication_context = local()
 
@@ -5898,6 +5911,8 @@ class PostgresRecordStore(HumanSessionStore):
 
     def close(self) -> None:
         self._engine.dispose()
+        if self._preview_lock_engine is not None:
+            self._preview_lock_engine.dispose()
 
     def __del__(self) -> None:
         with suppress(Exception):
@@ -12555,24 +12570,24 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
 
     @contextmanager
-    def serialize_preview_refresh(self, *, preview_id: str, wait: bool = True) -> Iterator[None]:
+    def serialize_preview_refresh(
+        self, *, preview_id: str, dedicated: bool = False
+    ) -> Iterator[None]:
         normalized_preview_id = preview_id.strip()
         if not normalized_preview_id:
             raise ValueError("Preview refresh serialization requires preview_id.")
         if self._engine.dialect.name != "postgresql":
             yield
             return
-        with self._session_factory() as session:
-            acquired = session.scalar(
-                text(
-                    "select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"
-                    if wait
-                    else "select pg_try_advisory_xact_lock(hashtextextended(:lock_name, 0))"
-                ),
+        factory = self._session_factory
+        if dedicated:
+            assert self._preview_lock_engine is not None
+            factory = sessionmaker(self._preview_lock_engine, expire_on_commit=False)
+        with factory() as session:
+            session.execute(
+                text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
                 {"lock_name": f"launchplane-preview-refresh:{normalized_preview_id}"},
             )
-            if not wait and not acquired:
-                raise ValueError("Preview operation is already running; retry after it completes.")
             try:
                 yield
             finally:
