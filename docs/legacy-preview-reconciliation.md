@@ -23,6 +23,10 @@ product and preview, reason, current profile/record/generation/target authority,
 and provider observation. Historical generations are retained, including
 missing deployment references; those missing records never establish absence.
 
+Review binds this preview's authority and provider classification. Changes to
+unrelated products or provider applications do not invalidate an otherwise
+unchanged, absent-preview plan. Complete inventory is inspected again at apply.
+
 `apply` requires a different `Idempotency-Key`, `plan_idempotency_key`,
 `expected_plan_digest`, and `reviewed_plan: true`. It rechecks the saved plan's
 caller binding, current authority and provider absence. It rejects any drift
@@ -48,6 +52,10 @@ product's repository, image or naming policy block reconciliation. Missing,
 malformed, truncated, duplicate, changing or uncertain inventory is not absence.
 Shared contexts, ambiguous anchors, running generations/reconciliation, missing
 generation pointers, and existing preview target authority fail closed.
+
+Inspection and completion run off the HTTP event loop. Generic-web provider
+refresh, teardown and reconciliation share the database's preview serialization
+lock; HTTP cancellation preserves any atomic completion and its replay receipt.
 
 Inspection and planning use existing `preview_inventory.read` authorization
 for the recorded product/preview context. Apply additionally requires existing

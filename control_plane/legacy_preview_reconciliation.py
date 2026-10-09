@@ -181,11 +181,21 @@ def bind_legacy_preview(
             "preview": preview.model_dump(mode="json"),
             "generations": [g.model_dump(mode="json") for g in generations],
             "deployments": deployment_evidence,
-            "profiles": [p.model_dump(mode="json") for p in profiles],
-            "previews": [p.model_dump(mode="json") for p in previews],
-            "targets": [t.model_dump(mode="json") for t in targets],
-            "target_ids": [t.model_dump(mode="json") for t in target_ids],
-            "target_configs": [t.model_dump(mode="json") for t in target_configs],
+            "targets": [
+                t.model_dump(mode="json")
+                for t in targets
+                if t.context == preview.context or (t.context, t.instance) in lane_scopes
+            ],
+            "target_ids": [
+                t.model_dump(mode="json")
+                for t in target_ids
+                if t.context == preview.context or (t.context, t.instance) in lane_scopes
+            ],
+            "target_configs": [
+                t.model_dump(mode="json")
+                for t in target_configs
+                if t.context == preview.context or (t.context, t.instance) in lane_scopes
+            ],
         }
     )
     return LegacyPreviewAuthority(
@@ -225,7 +235,7 @@ def observe_legacy_preview(
         if not name or not app_name:
             raise ValueError("Provider application naming evidence is incomplete.")
         domains = dokploy_api.fetch_dokploy_application_domains(
-            host=host, token=token, application_id=target_id
+            host=host, token=token, application_id=target_id, strict=True
         )
         domain_names = sorted(
             str(d.get("host") or d.get("domain") or "").strip().lower() for d in domains
@@ -234,27 +244,30 @@ def observe_legacy_preview(
             raise ValueError("Provider domain evidence is incomplete.")
         exact_candidate = (
             target_id in bound.preview_target_ids
-            or name == bound.application_name
-            or app_name == f"{bound.profile.product}-{bound.slug}"
-            or app_name.startswith(f"{bound.profile.product}-{bound.slug}-")
+            or name.lower() == bound.application_name.lower()
+            or app_name.lower() == f"{bound.profile.product}-{bound.slug}".lower()
+            or app_name.lower().startswith(f"{bound.profile.product}-{bound.slug}-".lower())
             or domain_host.lower() in domain_names
         )
-        repository = bound.profile.repository
+        repository = bound.profile.repository.lower()
         image_repository = bound.profile.image.repository
         repository_values = [
-            str(app.get(key) or "").strip()
+            str(app.get(key) or "").strip().lower().rstrip("/").removesuffix(".git")
             for key in (
                 "repository",
                 "customGitUrl",
                 "githubRepository",
                 "gitlabRepository",
+                "giteaRepository",
                 "bitbucketRepository",
             )
         ]
         image = str(app.get("dockerImage") or "").strip()
         potential_product = (
-            name.startswith(effective_preview_app_name_prefix(profile=bound.profile) + "-")
-            or app_name.startswith(bound.profile.product + "-")
+            name.lower().startswith(
+                effective_preview_app_name_prefix(profile=bound.profile).lower() + "-"
+            )
+            or app_name.lower().startswith(bound.profile.product.lower() + "-")
             or any(
                 repository in value or value == repository.partition("/")[2]
                 for value in repository_values
@@ -277,13 +290,14 @@ def observe_legacy_preview(
             }
         )
     final = dokploy_api.search_dokploy_applications(host=host, token=token)
-    if canonical_sha256(applications) != canonical_sha256(final):
+    if sorted(str(a.get("applicationId") or a.get("id")) for a in applications) != sorted(
+        str(a.get("applicationId") or a.get("id")) for a in final
+    ):
         raise ValueError("Provider inventory changed during inspection.")
     return {
         "provider_state": "present" if present else "absent",
         "provider_absence_verified": not present,
         "inventory_digest": canonical_sha256(sorted(seen, key=lambda a: str(a["id"]))),
-        "provider_application_count": len(seen),
         "provider_writes": False,
     }
 
@@ -318,7 +332,7 @@ def plan_legacy_preview(
         {
             "caller_scope": caller_scope,
             "reason": request.reason,
-            "result": result,
+            "result": {key: value for key, value in result.items() if key != "inventory_digest"},
         }
     )
     return bound, result

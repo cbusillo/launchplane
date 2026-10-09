@@ -957,6 +957,46 @@ class RealPostgresLegacyPreviewReconciliationTests(
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
 
+    def test_provider_destroy_waits_for_reconciliation_serialization(self) -> None:
+        from control_plane.workflows.generic_web_preview import (
+            GenericWebPreviewDestroyRequest,
+            execute_generic_web_preview_destroy,
+            serialize_generic_web_preview_operation,
+        )
+
+        with (
+            ThreadPoolExecutor(max_workers=1) as executor,
+            patch(
+                "control_plane.workflows.generic_web_preview._execute_generic_web_preview_destroy_unserialized"
+            ) as provider,
+        ):
+            with serialize_generic_web_preview_operation(
+                record_store=self.store, profile=self.profile, preview_slug="pr-1"
+            ):
+                future = executor.submit(
+                    execute_generic_web_preview_destroy,
+                    control_plane_root=self.root,
+                    record_store=self.store,
+                    profile=self.profile,
+                    request=GenericWebPreviewDestroyRequest(
+                        product=self.profile.product, anchor_pr_number=1, destroy_reason="fixture"
+                    ),
+                )
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with self.store._engine.connect() as connection:
+                        blocked = connection.scalar(
+                            text(
+                                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+                            )
+                        )
+                    if blocked:
+                        break
+                self.assertTrue(blocked, "Provider action never waited on the preview lock")
+                provider.assert_not_called()
+            future.result(timeout=5)
+            provider.assert_called_once()
+
 
 class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
     async def test_approved_rotation_survives_stale_retirement(self) -> None:

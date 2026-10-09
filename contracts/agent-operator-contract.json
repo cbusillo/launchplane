@@ -431,6 +431,7 @@
           "202",
           "400",
           "403",
+          "404",
           "409",
           "503"
         ],
@@ -439,7 +440,7 @@
           "expected_plan_digest",
           "plan_idempotency_key"
         ],
-        "schema_fingerprint_sha256": "381e0838fafd715e5c6006e920501c94372bb5c76af9e02629d4f73ae07f0781",
+        "schema_fingerprint_sha256": "1a5b6056a5f67987eb4fc7ac9b4f242b3b95a1d306599cb72a74a58bff7371b0",
         "supported_surfaces": [
           "agent_helper",
           "service_api"
@@ -625,8 +626,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "9f99276b5220502137dd20b2a851ac3122d6fe13"
+    "source_commit_sha": "467079df49834e25d27b33fd6c4546cee6f5ed31"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "f978a1ded032bc985e82b53d8fcc2bb66d1f0314044dfdacc4ae99b1f41dcbdd"
+  "semantic_digest_sha256": "62b4e5e6ebb57a820e7d233b55b455087af19f008fa93ca37ce5a595ef1253fa"
 }

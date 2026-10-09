@@ -1,4 +1,6 @@
 import unittest
+import asyncio
+import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -340,7 +342,114 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_provider_appears_between_plan_and_apply(self) -> None:
         plan = await self.plan()
+        self.search.return_value = ({"applicationId": "new-preview"},)
+        with (
+            patch(
+                "control_plane.legacy_preview_reconciliation.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "applicationId": "new-preview",
+                    "name": "unfamiliar",
+                    "appName": "unfamiliar",
+                },
+            ),
+            patch(
+                "control_plane.legacy_preview_reconciliation.dokploy_api.fetch_dokploy_application_domains",
+                return_value=({"host": "pr-1.example.test"},),
+            ),
+        ):
+            response = await self.apply(plan)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.store.read_preview_record(self.preview.preview_id), self.preview)
+
+    async def test_incomplete_enumeration_refuses_apply(self) -> None:
+        plan = await self.plan()
         self.search.side_effect = ValueError("incomplete enumeration")
         response = await self.apply(plan)
         self.assertEqual(response.status_code, 409)
         self.assertEqual(self.store.read_preview_record(self.preview.preview_id), self.preview)
+
+    async def test_unrelated_deploy_and_profile_do_not_invalidate_review(self) -> None:
+        self.search.return_value = ({"applicationId": "other-app"},)
+        app = {
+            "applicationId": "other-app",
+            "name": "other-site",
+            "appName": "other-site",
+            "dockerImage": "other-image:old",
+        }
+        with (
+            patch(
+                "control_plane.legacy_preview_reconciliation.dokploy_api.fetch_dokploy_target_payload",
+                side_effect=lambda **_: app,
+            ),
+            patch(
+                "control_plane.legacy_preview_reconciliation.dokploy_api.fetch_dokploy_application_domains",
+                return_value=(),
+            ),
+        ):
+            plan = await self.plan()
+            app["dockerImage"] = "other-image:new"
+            other_payload = _product_profile_payload(product="other-site")
+            self.store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(other_payload)
+            )
+            response = await self.apply(plan)
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(self.store.read_preview_record(self.preview.preview_id).state, "destroyed")
+
+    async def test_mixed_case_gitea_orphan_blocks_absence(self) -> None:
+        self.search.return_value = ({"applicationId": "orphan"},)
+        with (
+            patch(
+                "control_plane.legacy_preview_reconciliation.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "applicationId": "orphan",
+                    "name": "renamed",
+                    "appName": "renamed",
+                    "giteaRepository": "https://git.example/Cbusillo/Example-Site.git",
+                },
+            ),
+            patch(
+                "control_plane.legacy_preview_reconciliation.dokploy_api.fetch_dokploy_application_domains",
+                return_value=(),
+            ),
+        ):
+            response = await self.call("plan", key="mixed-case")
+        self.assertEqual(response.status_code, 409)
+
+    async def test_malformed_domain_inventory_is_not_absence(self) -> None:
+        self.search.return_value = ({"applicationId": "other-app"},)
+        with (
+            patch(
+                "control_plane.legacy_preview_reconciliation.dokploy_api.fetch_dokploy_target_payload",
+                return_value={"applicationId": "other-app", "name": "other", "appName": "other"},
+            ),
+            patch("control_plane.dokploy.api.dokploy_request", return_value=["malformed domain"]),
+        ):
+            response = await self.call("plan", key="malformed-domain")
+        self.assertEqual(response.status_code, 409)
+
+    async def test_slow_provider_scan_keeps_http_event_loop_available(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_scan(**_: object) -> tuple[()]:
+            started.set()
+            if not release.wait(5):
+                raise ValueError("fixture timed out")
+            return ()
+
+        self.search.side_effect = slow_scan
+        task = asyncio.create_task(self.call("inspect"))
+        try:
+            self.assertTrue(await asyncio.to_thread(started.wait, 3))
+            healthy = await asyncio.wait_for(request(self.app, "GET", "/openapi.json"), 2)
+            self.assertEqual(healthy.status_code, 200)
+        finally:
+            release.set()
+        inspected = await asyncio.wait_for(task, 5)
+        self.assertEqual(inspected.status_code, 202, inspected.text)
+
+    async def test_unknown_product_has_bounded_not_found_result(self) -> None:
+        response = await self.call("inspect", product="missing-product")
+        self.assertEqual(response.status_code, 404)
+        self.search.assert_not_called()

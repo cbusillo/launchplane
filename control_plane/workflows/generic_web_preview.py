@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import json
 from ipaddress import ip_address
 import time
 from pathlib import Path
-from typing import Iterator, Literal, Protocol, runtime_checkable
+from typing import ContextManager, Iterator, Literal, Protocol, cast, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -1334,7 +1336,44 @@ def evaluate_generic_web_preview_readiness(
     )
 
 
+def serialize_generic_web_preview_operation(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    preview_slug: str,
+) -> ContextManager[None]:
+    serialize = getattr(record_store, "serialize_preview_refresh", None)
+    if callable(serialize):
+        return cast(
+            ContextManager[None],
+            serialize(preview_id=f"{profile.product}:{profile.preview.context}:{preview_slug}"),
+        )
+    return nullcontext()
+
+
 def execute_generic_web_preview_refresh(
+    *,
+    control_plane_root: Path,
+    record_store: GenericWebPreviewProfileStore,
+    request: GenericWebPreviewRefreshRequest,
+    profile: LaunchplaneProductProfileRecord | None = None,
+) -> GenericWebPreviewRefreshResult:
+    resolved = profile or resolve_generic_web_preview_profile(
+        record_store=record_store, product=request.product
+    )
+    request = _refresh_request_with_resolved_preview_slug(profile=resolved, request=request)
+    with serialize_generic_web_preview_operation(
+        record_store=record_store, profile=resolved, preview_slug=request.preview_slug
+    ):
+        return _execute_generic_web_preview_refresh_unserialized(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=request,
+            profile=resolved,
+        )
+
+
+def _execute_generic_web_preview_refresh_unserialized(
     *,
     control_plane_root: Path,
     record_store: GenericWebPreviewProfileStore,
@@ -1649,6 +1688,28 @@ def execute_generic_web_preview_inventory(
 
 
 def execute_generic_web_preview_destroy(
+    *,
+    control_plane_root: Path,
+    record_store: GenericWebPreviewProfileStore,
+    request: GenericWebPreviewDestroyRequest,
+    profile: LaunchplaneProductProfileRecord | None = None,
+) -> GenericWebPreviewDestroyResult:
+    resolved = profile or resolve_generic_web_preview_profile(
+        record_store=record_store, product=request.product
+    )
+    request = _destroy_request_with_resolved_preview_slug(profile=resolved, request=request)
+    with serialize_generic_web_preview_operation(
+        record_store=record_store, profile=resolved, preview_slug=request.preview_slug
+    ):
+        return _execute_generic_web_preview_destroy_unserialized(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=request,
+            profile=resolved,
+        )
+
+
+def _execute_generic_web_preview_destroy_unserialized(
     *,
     control_plane_root: Path,
     record_store: GenericWebPreviewProfileStore,
