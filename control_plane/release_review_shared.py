@@ -56,6 +56,7 @@ def read_shared_source_changes(
     candidate: ArtifactIdentityManifest,
     repository: str,
     read: GitHubRead,
+    preview_hosts: tuple[str, ...] = (),
 ) -> tuple[tuple[SharedSourceReview, ...], tuple[str, ...]]:
     try:
         before = _shared_sources(production, repository)
@@ -85,6 +86,7 @@ def read_shared_source_changes(
                 production_commit=before[key],
                 candidate_commit=after[key],
                 read=read,
+                preview_hosts=preview_hosts,
             )
         except (ValueError, click.ClickException):
             # Preserve the existing release-scoped admin review path. Client

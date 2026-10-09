@@ -42,6 +42,7 @@ function ReleaseItems({ items, viewerIsOwner, emptyMessage = "No merged pull req
           <p className="release-review-notes">{check.notes || "Test notes are missing for this change."}</p>
           <ul className="release-review-changes">{check.items.map(item => <li key={item.url}>
             {item.title}
+            {!viewerIsOwner && item.preview_era_notes ? <span>PR #{item.pull_request_number}: preview-era test links replaced with testing-site instructions.</span> : null}
             {item.already_reviewed ? <span>{`${viewerIsOwner ? "You" : "The Client"} accepted this change in its preview. Check it again as part of this release.`}</span> : null}
           </li>)}</ul>
         </li>)}</ol> : <p>{items.length ? "No changes from this repository need you to test them." : emptyMessage}</p>}
@@ -49,6 +50,7 @@ function ReleaseItems({ items, viewerIsOwner, emptyMessage = "No merged pull req
           <summary>{grouped.nothingToTest.length === 1 ? "1 change needs nothing from you" : `${grouped.nothingToTest.length} changes need nothing from you`}</summary>
           <ul>{grouped.nothingToTest.map(item => <li key={item.url}>
             {item.title}
+            {!viewerIsOwner && item.preview_era_notes ? <span>PR #{item.pull_request_number}: preview-era test links replaced with testing-site instructions.</span> : null}
             {untestedReason(item.owner_test_notes) ? <span>{untestedReason(item.owner_test_notes)}</span> : null}
           </li>)}</ul>
         </details> : null}

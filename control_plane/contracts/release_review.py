@@ -23,6 +23,11 @@ class ReleaseReviewItem(BaseModel):
     merge_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     owner_test_notes: str
     already_reviewed: bool = False
+    preview_era_notes: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class SharedSourceReview(BaseModel):

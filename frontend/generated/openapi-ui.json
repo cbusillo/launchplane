@@ -30928,6 +30928,12 @@
             "title": "Owner Test Notes",
             "type": "string"
           },
+          "preview_era_notes": {
+            "default": false,
+            "title": "Preview Era Notes",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
+          },
           "pull_request_number": {
             "minimum": 1,
             "title": "Pull Request Number",
