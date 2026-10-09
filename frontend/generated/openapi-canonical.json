@@ -13182,7 +13182,8 @@
               "none"
             ],
             "title": "Public Website",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "release_on_acceptance": {
             "default": "held",

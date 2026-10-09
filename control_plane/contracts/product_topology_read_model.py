@@ -869,9 +869,20 @@ def _observed_ingress(
         for record in records
         if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
     )
-    newest_observation = observations[0] if observations else None
+    effective_names = {
+        canonical_health_check_record_token(check.name)
+        for check in lane.health_monitoring.checks
+        if check.enabled and check.kind == "public_http"
+    }
+    effective_observations = tuple(
+        record
+        for record in observations
+        if canonical_health_check_record_token(record.check_name) in effective_names
+    )
+    candidates = effective_observations or observations
+    newest_observation = candidates[0] if candidates else None
     latest = next(
-        (record for record in observations if _public_runtime_identity_target(record) is not None),
+        (record for record in candidates if _public_runtime_identity_target(record) is not None),
         newest_observation,
     )
     if latest is None:
@@ -1306,14 +1317,16 @@ def _topology_warnings(
                     ),
                 )
             )
-            if public_monitoring_effective and observed.ingress.status == "missing":
+            if public_monitoring_effective and (
+                observed.ingress.status == "missing" or not observed.ingress.probe_effective
+            ):
                 warnings.append(
                     _warning(
                         code="public_ingress_observation_missing",
                         scope="observation",
                         severity="error",
                         detail=(
-                            "Externally managed ingress has no public HTTP observation for "
+                            "Externally managed ingress has no effective public HTTP observation for "
                             "the requested lane."
                         ),
                     )

@@ -904,7 +904,7 @@ export type LaunchplaneProductProfileRecord = {
     product: string;
     production_use: 'unknown' | 'prelaunch' | 'live';
     promotion_workflow: ProductPromotionWorkflowProfile;
-    public_website: 'required' | 'none';
+    public_website?: 'required' | 'none';
     release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing';
     repository: string;
     repository_id: string;

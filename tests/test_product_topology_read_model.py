@@ -626,6 +626,54 @@ class ProductTopologyReadModelTests(unittest.TestCase):
         self.assertIn("public_website_not_applicable", codes)
         self.assertFalse(topology.observed.ingress.probe_effective)
 
+    def test_disabled_strict_history_cannot_mask_replacement_public_check(self) -> None:
+        payload = _strict_public_profile().model_dump(mode="json")
+        payload["lanes"][0]["health_monitoring"] = {
+            "monitoring_intent": "prelaunch",
+            "checks": [
+                {"name": "public-ingress", "kind": "public_http", "enabled": False},
+                {"name": "replacement", "kind": "public_http", "enabled": True},
+            ],
+        }
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        history = _http_observation(observed_at="2026-07-14T08:00:00Z")
+        replacement = _http_observation(runtime_identity_status="unchecked").model_copy(
+            update={"record_id": "replacement-observation", "check_name": "replacement"}
+        )
+        for replacement_present in (False, True):
+            with self.subTest(replacement_present=replacement_present):
+                topology = build_product_environment_topology(
+                    record_store=_TopologyStore(
+                        route_binding=_route_binding(
+                            ingress_provider="external",
+                            tls_owner="external",
+                            source_kind="operator",
+                        ),
+                        observations=(
+                            (replacement, history) if replacement_present else (history,)
+                        ),
+                    ),
+                    profile=profile,
+                    lane=profile.lanes[0],
+                    lane_summary=_lane_summary(freshness_status="verified"),
+                    now=_NOW,
+                )
+                codes = {warning.code for warning in topology.warnings}
+                self.assertNotIn("public_website_check_missing", codes)
+                self.assertEqual(topology.observed.ingress.probe_effective, replacement_present)
+                if replacement_present:
+                    self.assertEqual(
+                        topology.observed.ingress.provenance.source_record_id, replacement.record_id
+                    )
+                    self.assertIn("public_runtime_identity_unverified", codes)
+                else:
+                    missing = next(
+                        warning
+                        for warning in topology.warnings
+                        if warning.code == "public_ingress_observation_missing"
+                    )
+                    self.assertEqual(missing.severity, "error")
+
     def test_disabled_public_history_does_not_age_current_placement(self) -> None:
         for website in ("required", "none"):
             with self.subTest(website=website):

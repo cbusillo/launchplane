@@ -909,6 +909,8 @@ TLS observations remain diagnostic errors even for a no-website declaration.
 Applicable missing/stale public authority, enabled-check failures and negative TLS still
 block green. Environment warning strings contain only blocking warnings;
 structured topology retains the informational evidence for review.
+Enabled public-check observations take precedence over disabled-check history.
+External ingress still requires effective public proof when a website is required.
 
 Each check has a stable name and kind. `public_http` checks use an explicit URL
 or the lane `health_url`, or derive one from lane `base_url` plus product

@@ -528,8 +528,7 @@ function EnvironmentOverview({
     (check) => check.incident_eligible && check.incident_status === "open",
   );
   const openIncidentSeverity = openIncidentCheck?.incident_severity;
-  const currentIncidentId =
-    openIncidentCheck?.incident_id || detail.public_ingress.incident_id;
+  const currentIncidentId = openIncidentCheck?.incident_id || "";
   const actionableMonitoringFailure = effectiveChecks.some(
     (check) => check.incident_eligible && check.status === "fail",
   );

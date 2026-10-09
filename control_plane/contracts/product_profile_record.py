@@ -545,7 +545,9 @@ class LaunchplaneProductProfileRecord(BaseModel):
     production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
     # Existing products keep requiring public authority until an admin declares otherwise.
     public_website: ProductPublicWebsite = Field(
-        default="required", exclude_if=lambda value: value == "required"
+        default="required",
+        exclude_if=lambda value: value == "required",
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
     # Whether the Client's release acceptance starts the gated promotion. Held by
     # default; an admin switches a product on. See docs/release-review.md. A held
