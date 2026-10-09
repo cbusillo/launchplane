@@ -338,6 +338,13 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
         assert run is not None
         self.assertEqual(run.state, "stopped")
+        failure = run.steps[1].failure
+        assert failure is not None
+        self.assertTrue(failure.trace_id)
+        assert promotion.failure is not None
+        self.assertEqual(failure.code, promotion.failure.code)
+        self.assertIn("health", failure.reason.lower())
+        self.assertEqual(failure.record_id, promotion.deployment_record_id)
         self.assertEqual(self.advance(), ())
 
     def test_standing_acceptance_records_and_publishes_exact_candidate(self) -> None:
@@ -770,6 +777,18 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
         assert run is not None
         self.assertEqual(run.state, "stopped")
+        failure = run.steps[1].failure
+        assert failure is not None
+        reservation = self.store.read_idempotency_record(
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=f"{accepted.record_id}:promote-1",
+        )
+        assert reservation is not None
+        self.assertEqual(failure.code, reservation.response_payload["result"]["error_code"])
+        self.assertIn("before deployment", failure.reason)
+        self.assertEqual(failure.trace_id, reservation.response_trace_id)
+        self.assertEqual(failure.record_id, reservation.record_id)
         self.assertEqual(self.advance(), ())
         self.assertEqual(self.provider.deployed_artifacts, [])
 

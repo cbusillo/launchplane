@@ -146,6 +146,7 @@ def build_odoo_release_recovery(
         authorization=authorization,
         created_at=source.finished_at,
         updated_at=source.finished_at,
+        runner_trace_id=source.runner_trace_id,
         checkpoints=(
             OdooProdRollbackCheckpoint(
                 phase="created",
