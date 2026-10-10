@@ -15,11 +15,18 @@ for (const state of cases) {
       lane.trust_state = "recorded";
       lane.provenance.freshness_status = "verified";
       lane.provenance.stale_after = new Date(now + 60_000).toISOString();
+      // Keep unrelated topology proof fresh; expired proof has its own browser cases.
+      const freshen = (value: unknown) => {
+        if (!value || typeof value !== "object") return;
+        const record = value as Record<string, unknown>;
+        if ("stale_after" in record) record.stale_after = lane.provenance.stale_after;
+        Object.values(record).forEach(freshen);
+      };
+      freshen(lane.topology);
       lane.warnings = [];
       lane.topology.warnings = [];
       lane.topology.observed.tls_domains = [];
       lane.topology.observed.placement.runtime_identity_status = "match";
-      lane.topology.observed.placement.provenance.stale_after = lane.provenance.stale_after;
       lane.health_monitoring.checks = [structuredClone(lane.health_monitoring.checks[0])];
       const check = lane.health_monitoring.checks[0];
       check.probe_effective = true;

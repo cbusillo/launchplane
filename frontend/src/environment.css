@@ -160,6 +160,34 @@
   margin-left: 4px;
 }
 
+.environment-operational-status[data-tone="verified"] {
+  color: var(--prod);
+}
+
+.environment-operational-status[data-tone="warning"] {
+  color: var(--warning);
+}
+
+.environment-operational-status[data-tone="danger"] {
+  color: var(--danger);
+}
+
+.environment-operational-status[data-tone="recorded"] {
+  color: var(--preview);
+}
+
+.environment-operational-status[data-tone="missing"] {
+  color: var(--danger);
+}
+
+.environment-operational-status[data-tone="unsupported"] {
+  color: var(--unknown);
+}
+
+.environment-operational-status > span {
+  background: currentColor;
+}
+
 .environment-hero-main > p:not(.eyebrow),
 .activity-hero p:not(.eyebrow),
 .config-view-header p:not(.eyebrow),
