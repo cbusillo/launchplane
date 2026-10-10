@@ -154,8 +154,8 @@ export type ArtifactPythonPackageSource = {
 export type ArtifactReleaseCompatibility = {
     complete: boolean;
     database_update_modules: Array<string> | null;
+    examined_inputs_sha256: string;
     modules: Array<ReleaseModuleDeclaration>;
-    opaque_inputs_sha256: string;
     read_write_compatible: boolean;
     schema_version: 1;
     sources: Array<ReleaseSourceInventory>;

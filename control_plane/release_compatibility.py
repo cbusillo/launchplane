@@ -121,15 +121,24 @@ def _kind_conflicts(file: ReleaseInputFile) -> bool:
         return not (
             path.suffix in {".md", ".rst", ".adoc"}
             or {"docs", "doc", ".github", "tests"} & set(path.parts)
-            or path.name in {".gitignore", "Makefile", ".pre-commit-config.yaml"}
+            or path.name == ".gitignore"
         )
     return False
 
 
-def release_opaque_inputs_sha256(manifest: ArtifactIdentityManifest) -> str:
-    """Producer/consumer fingerprint for the opaque-input examination contract."""
+def release_examined_inputs_sha256(manifest: ArtifactIdentityManifest) -> str:
+    """Bind an examined DB plan to all file, module and opaque build inputs."""
+    declaration = manifest.release_compatibility
+    if declaration is None:
+        raise ValueError("examined plan requires an input inventory")
+    payload = {
+        "opaque_inputs": _opaque_inputs(manifest),
+        "sources": [source.model_dump(mode="json") for source in declaration.sources],
+        "modules": [module.model_dump(mode="json") for module in declaration.modules],
+        "install_modules": list(manifest.odoo_install_modules),
+    }
     return hashlib.sha256(
-        json.dumps(_opaque_inputs(manifest), sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
 
@@ -172,8 +181,8 @@ def classify_release_database_compatibility(
             new = candidate.release_compatibility
             assert old is not None and new is not None
             examined_database_plan = (
-                old.opaque_inputs_sha256 == release_opaque_inputs_sha256(production)
-                and new.opaque_inputs_sha256 == release_opaque_inputs_sha256(candidate)
+                old.examined_inputs_sha256 == release_examined_inputs_sha256(production)
+                and new.examined_inputs_sha256 == release_examined_inputs_sha256(candidate)
                 and new.database_update_modules is not None
             )
             old_sources = {source.input_name: source for source in old.sources}

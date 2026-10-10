@@ -19,7 +19,7 @@ from control_plane.contracts.artifact_release_compatibility import (
 from control_plane.contracts.release_review import ReleaseChecklist, ReleaseReviewDecisionRecord
 from control_plane.release_compatibility import (
     classify_release_database_compatibility,
-    release_opaque_inputs_sha256,
+    release_examined_inputs_sha256,
 )
 from control_plane.release_review import build_release_review, checklist_digest
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -148,8 +148,6 @@ class ReleaseCompatibilityTests(unittest.TestCase):
             ("docs/deployment.md", "docs_ci", ""),
             (".github/workflows/build.yml", "docs_ci", ""),
             (".gitignore", "docs_ci", ""),
-            ("Makefile", "docs_ci", ""),
-            (".pre-commit-config.yaml", "docs_ci", ""),
             ("README.rst", "docs_ci", ""),
             ("addons/site/tests/mock_response.json", "docs_ci", ""),
             ("addons/site/static/favicon.ico", "static", "site"),
@@ -261,12 +259,12 @@ class ReleaseCompatibilityTests(unittest.TestCase):
         assert before.release_compatibility is not None and after.release_compatibility is not None
         before.release_compatibility = before.release_compatibility.model_copy(
             update={
-                "opaque_inputs_sha256": release_opaque_inputs_sha256(before),
+                "examined_inputs_sha256": release_examined_inputs_sha256(before),
             }
         )
         after.release_compatibility = after.release_compatibility.model_copy(
             update={
-                "opaque_inputs_sha256": release_opaque_inputs_sha256(after),
+                "examined_inputs_sha256": release_examined_inputs_sha256(after),
                 "database_update_modules": ("base",),
             }
         )
@@ -300,12 +298,12 @@ class ReleaseCompatibilityTests(unittest.TestCase):
                 )
                 before.release_compatibility = before.release_compatibility.model_copy(
                     update={
-                        "opaque_inputs_sha256": release_opaque_inputs_sha256(before),
+                        "examined_inputs_sha256": release_examined_inputs_sha256(before),
                     }
                 )
                 after.release_compatibility = after.release_compatibility.model_copy(
                     update={
-                        "opaque_inputs_sha256": release_opaque_inputs_sha256(after),
+                        "examined_inputs_sha256": release_examined_inputs_sha256(after),
                         "database_update_modules": (),
                     }
                 )
@@ -314,6 +312,39 @@ class ReleaseCompatibilityTests(unittest.TestCase):
                 self.assertTrue(result.module_plan_complete)
                 self.assertEqual(result.update_modules, ())
                 self.assertEqual(result.install_modules, ())
+
+    def test_examined_plan_cannot_be_reused_after_file_inputs_change(self) -> None:
+        before = artifact("old", files=(file("Makefile", "dependency", module=""),))
+        after = artifact("new", files=(file("Makefile", "dependency", module="", digest="b"),))
+        assert before.release_compatibility is not None and after.release_compatibility is not None
+        before.release_compatibility = before.release_compatibility.model_copy(
+            update={
+                "examined_inputs_sha256": release_examined_inputs_sha256(before),
+            }
+        )
+        after.release_compatibility = after.release_compatibility.model_copy(
+            update={
+                "examined_inputs_sha256": release_examined_inputs_sha256(after),
+                "database_update_modules": (),
+            }
+        )
+        self.assertTrue(classify(before, after).module_plan_complete)
+        sources = list(after.release_compatibility.sources)
+        sources[0] = sources[0].model_copy(
+            update={
+                "files": (file("Makefile", "dependency", module="", digest="c"),),
+            }
+        )
+        after.release_compatibility = after.release_compatibility.model_copy(
+            update={"sources": tuple(sources)}
+        )
+        self.assertFalse(classify(before, after).module_plan_complete)
+        # A build file cannot bypass that path with a docs-only declaration.
+        for path in ("Makefile", ".pre-commit-config.yaml"):
+            unexamined = artifact("new", files=(file(path, "docs_ci", module="", digest="b"),))
+            result = classify(before, unexamined)
+            self.assertEqual(result.classification, "database_changing")
+            self.assertFalse(result.module_plan_complete)
 
     def test_missing_history_declarations_or_full_inputs_cannot_be_compatible(self) -> None:
         after = artifact("new")

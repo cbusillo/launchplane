@@ -71,10 +71,14 @@ enterprise base digest, build flags, selector, platform, lock hash, package
 inventory and external dependency changes remain conservative even if the
 source file declarations suggest compatibility.
 
-To examine an opaque change, both declarations supply `opaque_inputs_sha256`,
-matching the fingerprint defined by `release_opaque_inputs_sha256` in
+To examine an opaque change, both declarations supply `examined_inputs_sha256`,
+matching the full-input fingerprint defined by `release_examined_inputs_sha256` in
 `control_plane/release_compatibility.py`. That function is the canonical
-semantic projection and hashing specification. The producer supplies
+semantic projection and hashing specification: sorted-key compact JSON of the
+opaque inputs, complete source/file inventories, module graph and install
+requirements, hashed with SHA-256. The plan/hash fields themselves are excluded
+to avoid a circular hash. Reusing a plan after a file or module input changes
+fails, even when opaque dependency/base metadata did not change. The producer supplies
 `database_update_modules` naming the resolved update roots for its examined
 inputs. `null` means unexamined; an explicit empty list asserts no module DB
 work is required. Names must exist in the full module graph. A non-addon dependency/build configuration file uses `kind=dependency` with

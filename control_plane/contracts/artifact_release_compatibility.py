@@ -84,7 +84,7 @@ class ArtifactReleaseCompatibility(BaseModel):
     sources: tuple[ReleaseSourceInventory, ...]
     modules: tuple[ReleaseModuleDeclaration, ...]
     # None is unexamined; an explicit empty tuple asserts no module DB work.
-    opaque_inputs_sha256: str = Field(default="", pattern=r"^(|[0-9a-f]{64})$")
+    examined_inputs_sha256: str = Field(default="", pattern=r"^(|[0-9a-f]{64})$")
     database_update_modules: tuple[str, ...] | None = None
 
     @model_validator(mode="after")
@@ -104,10 +104,10 @@ class ArtifactReleaseCompatibility(BaseModel):
         ):
             raise ValueError("release inventory must include the full module dependency graph")
         if self.database_update_modules is not None and (
-            not self.opaque_inputs_sha256 or not set(self.database_update_modules) <= set(modules)
+            not self.examined_inputs_sha256 or not set(self.database_update_modules) <= set(modules)
         ):
             raise ValueError(
-                "examined database plan requires the opaque input hash and known modules"
+                "examined database plan requires the complete input hash and known modules"
             )
         return self
 
