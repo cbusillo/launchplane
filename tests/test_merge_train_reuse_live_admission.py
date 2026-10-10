@@ -90,7 +90,7 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
         )
         transport = _AdmissionTransport()
         client = GitHubMergeTrainClient(transport=transport)
-        reuse = client._read_head_check_reuse(candidate=candidate_record.candidate)
+        reuse = client.read_head_check_reuse(candidate=candidate_record.candidate)
         assert reuse is not None
         candidate = MergeTrainBatchCandidate.model_validate(
             candidate_record.candidate.model_dump()
@@ -125,7 +125,7 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
             # controller creates its landing plan, including full-CI fallback.
             lease = cast(
                 MergeTrainControllerLeaseContext,
-                SimpleNamespace(record=controller, checkpoint=Mock()),
+                cast(object, SimpleNamespace(record=controller, checkpoint=Mock())),
             )
             request = MergeTrainControllerRunOnceEnvelope(repository=REPOSITORY, mutate=True)
             with patch(

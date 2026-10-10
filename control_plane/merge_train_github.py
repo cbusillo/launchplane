@@ -4,7 +4,7 @@ from hashlib import sha256
 import logging
 import re
 from time import sleep
-from typing import TYPE_CHECKING, Callable, Literal, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Callable, Literal, Protocol, TypeVar, cast, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -656,7 +656,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     f"candidate_entry_merged:{entry_index}",
                 )
             candidate = progress_candidate
-        reuse = self._read_head_check_reuse(candidate=candidate)
+        reuse = self.read_head_check_reuse(candidate=candidate)
         if reuse is not None:
             # Construction refs do not trigger candidate CI. Keep the verified
             # merge commit reachable there until the ordinary landing cleanup.
@@ -800,7 +800,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainBatchCandidate:
         if candidate.head_check_reuse is not None:
-            reuse = self._read_head_check_reuse(candidate=candidate)
+            reuse = self.read_head_check_reuse(candidate=candidate)
             if reuse is not None:
                 return _validated_model_update(
                     candidate,
@@ -871,7 +871,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             status=candidate_status,
         )
 
-    def _read_head_check_reuse(
+    def read_head_check_reuse(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainHeadCheckReuse | None:
         if len(candidate.entries) != 1:
@@ -1018,16 +1018,21 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 MergeTrainReusedCheck(
                     name=required.name,
                     app_id=required.app_id,
-                    sources=tuple(
-                        sorted(
-                            {
-                                signal.source
-                                for signal in checks.signals
-                                if signal.name.casefold() == required.name.casefold()
-                                and (required.app_id is None or signal.app_id == required.app_id)
-                                and signal.state == "pass"
-                            }
-                        )
+                    sources=cast(
+                        tuple[Literal["commit_status", "check_run"], ...],
+                        tuple(
+                            sorted(
+                                {
+                                    signal.source
+                                    for signal in checks.signals
+                                    if signal.name.casefold() == required.name.casefold()
+                                    and (
+                                        required.app_id is None or signal.app_id == required.app_id
+                                    )
+                                    and signal.state == "pass"
+                                }
+                            )
+                        ),
                     ),
                 )
                 for required in checks.required_checks

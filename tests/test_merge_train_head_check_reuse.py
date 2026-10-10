@@ -78,15 +78,19 @@ class _ReuseTransport:
         suffix = path.removeprefix(prefix)
         if method == "POST" and suffix == "/git/refs":
             assert body is not None
-            self.refs[str(body["ref"]).removeprefix("refs/heads/")] = str(body["sha"])
+            ref, sha = body["ref"], body["sha"]
+            assert isinstance(ref, str) and isinstance(sha, str)
+            self.refs[ref.removeprefix("refs/heads/")] = sha
             return {}
         if method == "DELETE":
             self.refs.pop(suffix.removeprefix("/git/refs/heads/"), None)
             return None
         if suffix == "/merges":
             assert body is not None
-            result_sha = "candidate-after-" + str(body["head"]).removeprefix("head-")
-            self.refs[str(body["base"])] = result_sha
+            head, base = body["head"], body["base"]
+            assert isinstance(head, str) and isinstance(base, str)
+            result_sha = "candidate-after-" + head.removeprefix("head-")
+            self.refs[base] = result_sha
             return {"sha": result_sha}
         if suffix.startswith("/branches/"):
             branch = suffix.removeprefix("/branches/")

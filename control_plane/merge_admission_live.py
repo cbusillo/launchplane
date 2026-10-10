@@ -381,7 +381,7 @@ class LiveMergeAdmissionEvaluator:
         check_head_sha = landing_plan.candidate_sha
         if candidate_record.candidate.head_check_reuse is not None:
             if not isinstance(self.technical_check_client, GitHubMergeTrainClient) or (
-                self.technical_check_client._read_head_check_reuse(
+                self.technical_check_client.read_head_check_reuse(
                     candidate=candidate_record.candidate
                 )
                 is None
