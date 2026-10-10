@@ -27,7 +27,7 @@ from control_plane.workflows.odoo_prod_backup_gate import (
 )
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
-from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan
+from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan, persisted_cutover
 
 from control_plane.workflows.odoo_prod_promotion import (
     OdooProdPromotionResult,
@@ -102,6 +102,15 @@ def admit_odoo_prod_promotion_run(
             artifact_id=inputs_result.artifact_id,
             source_commit=inputs_result.source_git_ref,
         )
+        admitted_plan = resolve_profile_cutover_plan(
+            record_store,
+            product=request.product,
+            context=request.context,
+            instance=request.to_instance,
+            artifact_id=inputs_result.artifact_id,
+            release_id=request.request_id,
+        )
+        recovery = persisted_cutover(record_store, admitted_plan)
         require_production_promotion_backup(
             record_store=record_store,
             product=request.product,
@@ -109,6 +118,7 @@ def admit_odoo_prod_promotion_run(
             instance=request.to_instance,
             promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
             backup_record_id=request.infrastructure_backup_record_id,
+            cutover_recovery=recovery,
         )
     except (AttributeError, FileNotFoundError, ValueError, click.ClickException) as error:
         return OdooProdPromotionRunAdmission(
@@ -148,6 +158,25 @@ def execute_odoo_prod_promotion_run(
     )
     inputs_result = admission.inputs_result
     if admission.blocked_reason:
+        from control_plane.odoo_cutover_plan import cutover_identity
+
+        try:
+            prior = record_store.read_deployment_record(
+                "deployment-cutover-"
+                + cutover_identity(
+                    request.product, request.context, request.to_instance, request.request_id
+                )
+            )
+        except FileNotFoundError:
+            prior = None
+        from control_plane.contracts.deployment_record import DeploymentRecord
+
+        if (
+            isinstance(prior, DeploymentRecord)
+            and prior.odoo_cutover is not None
+            and prior.odoo_cutover.step not in {"complete", "rolled_back"}
+        ):
+            raise RuntimeError("Cutover remains unfinished; retain its recovery hold.")
         return _result_from_inputs(
             request=request,
             inputs_result=inputs_result,

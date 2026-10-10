@@ -14,7 +14,7 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
-from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan
+from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan, persisted_cutover
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane.workflows.odoo_cutover_deployment import (
     OdooCutoverApplyResult,
@@ -164,22 +164,27 @@ def execute_odoo_prod_promotion(
     backup_gate = None
     infrastructure_backup = None
     backup_checkpoint = None
+    recovery = None
     try:
-        artifact_manifest = record_store.read_artifact_manifest(request.artifact_id)
-        source_tuple = _read_source_tuple(record_store=record_store, request=request)
         if cutover_plan is None:
-            cutover_plan = resolve_profile_cutover_plan(
-                record_store,
-                product=product,
-                context=request.context,
-                instance=request.to_instance,
-                artifact_id=request.artifact_id,
-                release_id=promotion_record_id,
-            )
+            try:
+                cutover_plan = resolve_profile_cutover_plan(
+                    record_store,
+                    product=product,
+                    context=request.context,
+                    instance=request.to_instance,
+                    artifact_id=request.artifact_id,
+                    release_id=promotion_record_id,
+                )
+            except FileNotFoundError:
+                # Existing approval/backup gates retain their original order for
+                # legacy records. Replacement still requires the real profile.
+                cutover_plan = None
         if cutover_plan is not None:
             from control_plane.odoo_cutover_plan import cutover_record_id
 
             promotion_record_id = "promotion-cutover-" + cutover_record_id(cutover_plan)
+        recovery = persisted_cutover(record_store, cutover_plan)
         infrastructure_backup = require_production_promotion_backup(
             record_store=record_store,
             product=product,
@@ -187,10 +192,14 @@ def execute_odoo_prod_promotion(
             instance=request.to_instance,
             promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
             backup_record_id=request.infrastructure_backup_record_id,
+            cutover_recovery=recovery,
         )
-        if cutover_plan is None and any(
+        artifact_manifest = record_store.read_artifact_manifest(request.artifact_id)
+        source_tuple = _read_source_tuple(record_store=record_store, request=request)
+        if any(
             item.odoo_cutover is not None
             and item.odoo_cutover.step not in {"complete", "rolled_back"}
+            and (cutover_plan is None or item.odoo_cutover.plan != cutover_plan)
             for item in record_store.list_deployment_records(
                 context_name=request.context, instance_name=request.to_instance
             )
@@ -225,6 +234,7 @@ def execute_odoo_prod_promotion(
             promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
             backup_record_id=request.infrastructure_backup_record_id,
             pending_promotion=pending_record,
+            cutover_recovery=recovery,
         ) as backup_checkpoint:
             replacement_result: OdooCutoverApplyResult | OdooStableTargetReplacementApplyResult
             if cutover_plan is not None:
@@ -324,6 +334,8 @@ def execute_odoo_prod_promotion(
             error_message=replacement_result.error_message,
         )
     except click.ClickException as error:
+        if recovery is not None and recovery.step not in {"complete", "rolled_back"}:
+            raise RuntimeError("Cutover remains unfinished; retain its recovery hold.") from error
         from control_plane.lane_movement import LaneMovementRefused
 
         if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable":

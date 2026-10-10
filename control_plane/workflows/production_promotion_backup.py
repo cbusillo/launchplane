@@ -12,6 +12,8 @@ import click
 from control_plane.lane_movement import LaneMovementRefused
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.odoo_cutover import OdooCutoverRecord
 from control_plane.contracts.production_backup_authority import (
     ProxmoxGuestBackupDestinationReference,
 )
@@ -46,6 +48,7 @@ class ProductionPromotionBackupGuard:
 
 
 class ProductionPromotionBackupStore(Protocol):
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
     def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
 
     def write_promotion_record(self, record: PromotionRecord) -> object: ...
@@ -80,6 +83,7 @@ def require_production_promotion_backup(
     promotion_action: str,
     backup_record_id: str,
     active_promotion_record_id: str = "",
+    cutover_recovery: OdooCutoverRecord | None = None,
 ) -> BackupGateEvidence:
     """Require worker-completed evidence for the exact current policy and targets."""
     operation = _read_operation(
@@ -128,7 +132,40 @@ def require_production_promotion_backup(
         raise click.ClickException(
             "Production backup evidence does not match its authority binding."
         )
+    promotions = store.list_promotion_records(context_name=context, to_instance_name=instance)
     now = datetime.now(UTC)
+    if cutover_recovery is not None:
+        from control_plane.odoo_cutover_plan import cutover_record_id
+
+        plan = cutover_recovery.plan
+        expected_id = "promotion-cutover-" + cutover_record_id(plan)
+        persisted = store.read_deployment_record(plan.new.runtime_identity.deployment_record_id)
+        admitted = next((item for item in promotions if item.record_id == expected_id), None)
+        if (
+            promotion_action != ODOO_PROMOTION_BACKUP_ACTION
+            or persisted.odoo_cutover != cutover_recovery
+            or cutover_recovery.record_id != cutover_record_id(plan)
+            or (
+                plan.new.binding.product_id,
+                plan.new.runtime_identity.context,
+                plan.new.binding.environment_id,
+            )
+            != (product, context, instance)
+            or admitted is None
+            or admitted.artifact_identity is None
+            or admitted.artifact_identity.artifact_id != plan.candidate.artifact_id
+            or admitted.backup_gate.evidence.get("infrastructure_backup_record_id")
+            != backup_record_id
+            or active_promotion_record_id not in {"", expected_id}
+        ):
+            raise click.ClickException(
+                "Backup recovery lacks its exact persisted admitted cutover."
+            )
+        active_promotion_record_id = expected_id
+        # This is continuation of the already admitted release, not a fresh
+        # promotion of today's data under an expired capture. Authority,
+        # retention and competing consumption are still checked below.
+        now = cutover_recovery.began_at
     for field, maximum_age in (
         ("snapshot_finished_at", binding.policy.fast_snapshot.max_evidence_age_seconds),
         (
@@ -165,7 +202,7 @@ def require_production_promotion_backup(
             raise click.ClickException(
                 "Production backup evidence was superseded by another capture."
             )
-    for promotion in store.list_promotion_records(context_name=context, to_instance_name=instance):
+    for promotion in promotions:
         if promotion.record_id == active_promotion_record_id:
             continue
         if (
@@ -204,6 +241,7 @@ def production_promotion_backup_guard(
     promotion_action: str,
     backup_record_id: str,
     pending_promotion: PromotionRecord,
+    cutover_recovery: OdooCutoverRecord | None = None,
 ) -> Iterator[ProductionPromotionBackupGuard]:
     """Validate before effects; retain the backup lock through the promotion."""
     operation = _read_operation(
@@ -258,6 +296,7 @@ def production_promotion_backup_guard(
                 promotion_action=promotion_action,
                 backup_record_id=backup_record_id,
                 active_promotion_record_id=active_promotion_record_id,
+                cutover_recovery=cutover_recovery,
             )
 
         def checkpoint(_phase: str) -> None:

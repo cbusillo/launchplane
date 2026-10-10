@@ -6,6 +6,7 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooSlot
+from control_plane.contracts.odoo_cutover import OdooCutoverRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.prepared_public_site import PublicSiteBinding
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
@@ -38,6 +39,22 @@ def cutover_record_id(plan: OdooCutoverPlan) -> str:
         plan.new.binding.environment_id,
         plan.release_id,
     )
+
+
+def persisted_cutover(
+    store: CutoverAuthorityStore, plan: OdooCutoverPlan | None
+) -> OdooCutoverRecord | None:
+    if plan is None:
+        return None
+    try:
+        deployment = store.read_deployment_record(plan.new.runtime_identity.deployment_record_id)
+    except FileNotFoundError:
+        return None
+    if not isinstance(deployment, DeploymentRecord) or deployment.odoo_cutover is None:
+        return None
+    if deployment.odoo_cutover.plan != plan:
+        raise ValueError("persisted release differs from its recovery plan")
+    return deployment.odoo_cutover
 
 
 def resolve_profile_cutover_plan(

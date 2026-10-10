@@ -40,6 +40,10 @@ web. Replay consumes that bound receipt without another registry. The SQL-only
 credential transaction in devkit remains the sole sanitizing/override policy;
 no registry, shell or module hook is substituted for it. A started attempt with
 no passing bound receipt stays uncertain rather than rerunning an upgrade.
+The adapter uses the image's registry-free devkit resolver and an independent
+SQL module inventory to seal the exact install/update work before the child.
+The passing receipt must match that resolved work, including optional-addon and
+dependency behavior, rather than merely containing a subset of static roots.
 Secrets stay in the existing managed container environment, outside plans and
 records. The legacy empty install pass is never called on this path.
 
@@ -104,6 +108,12 @@ resumption or drain. It uses the same lane lock, service drain admission, lease,
 accepted release and fresh authorization checks. An uncertain maintenance or
 backup operation is not automatically repeated. Recovery reuses the original
 passing logical backup rather than relabeling later data with the old image.
+The infrastructure backup guard validates continuation against the exact
+persisted cutover and admitted promotion. It evaluates capture freshness at
+that original admission, while still checking current authority, retention and
+competing consumption. A failed continuation keeps unfinished work held. New
+releases cannot bypass another unfinished cutover; recover it first. Configured
+two-slot lanes also refuse an in-place rollback after a switch-back event.
 
 Persist intent before publication, maintenance, switch and resumption. Failed
 preparation/readiness keeps old traffic or verified prepared traffic intact.

@@ -438,6 +438,16 @@ def execute_odoo_prod_rollback(
                 artifact_id=rollback_source.artifact_id,
             )
         else:
+            profile = typed_record_store.read_product_profile_record(product)
+            if any(
+                lane.context == request.context
+                and lane.instance == request.instance
+                and lane.odoo_cutover is not None
+                for lane in profile.lanes
+            ):
+                raise click.ClickException(
+                    "Two-slot lane has no matching retained cutover; in-place rollback is refused."
+                )
             replacement_result = execute_odoo_stable_target_replacement_apply(
                 control_plane_root=control_plane_root,
                 record_store=typed_record_store,

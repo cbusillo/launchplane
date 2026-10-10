@@ -81,6 +81,16 @@ payload = json.dumps(request['payload'], sort_keys=True, separators=(',', ':'))
 if plan_file.exists() and plan_file.read_text() != payload:
     raise RuntimeError('immutable maintenance plan changed')
 if not attempt.exists():
+    # Reuse the image's registry-free resolver against an independent SQL
+    # inventory. Static roots may include optional uninstalled addons; exact
+    # work means the resolved native plan, not a copied approximation of it.
+    sys.path.insert(0,str(Path(sys.argv[1]).parent))
+    from odoo_release_plan import resolve_plan
+    with psycopg2.connect(**connection_args) as connection, connection.cursor() as cursor:
+        cursor.execute('SELECT name,state FROM ir_module_module')
+        states=dict(cursor.fetchall())
+    graph={module['name']:set(module['depends']) for module in request['payload']['candidate_manifest']['release_compatibility']['modules']}
+    expected=resolve_plan(request['payload'],database=request['payload']['database'],image=request['payload']['release']['candidate_image'],states=states,graph=graph)
     plan_file.write_text(payload)
     descriptor = os.open(attempt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, 'w') as stream:
@@ -102,7 +112,7 @@ if not attempt.exists():
     if not committed or committed==previous_boundary:
         raise RuntimeError('passing maintenance has no new committed boundary witness')
     with os.fdopen(os.open(attestation,os.O_WRONLY | os.O_CREAT | os.O_EXCL,0o600),'w') as stream:
-        json.dump({'plan':payload,'credential_commit_id':committed},stream)
+        json.dump({'plan':payload,'credential_commit_id':committed,'install_modules':expected['install_modules'],'update_modules':expected['update_modules']},stream)
         stream.flush();os.fsync(stream.fileno())
 if not receipt.is_file():
     raise RuntimeError('maintenance outcome is uncertain')
@@ -113,6 +123,8 @@ if result.get('state') != 'passed':
 proof=json.loads(attestation.read_text())
 if proof.get('plan') != payload or not proof.get('credential_commit_id') or boundary()!=proof['credential_commit_id']:
     raise RuntimeError('committed boundary does not belong to this passing run')
+if any(result.get(field)!=proof.get(field) for field in ('install_modules','update_modules')):
+    raise RuntimeError('passing receipt omits resolved native module work')
 print(json.dumps({'receipt': result, 'credential_commit_id': proof['credential_commit_id']}, sort_keys=True))
 """
     output = execute(

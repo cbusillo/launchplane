@@ -156,9 +156,13 @@ class TraefikFileRoute:
         # A watched file belongs to this route alone. Never replace a shared
         # dynamic configuration and silently retire its other routers/services.
         owned = yaml.safe_load(self.target.route_file.read_text())
-        if owned != json.loads(json.dumps(route_payload(self.target, observed))):
+        intended = json.loads(json.dumps(route_payload(self.target, backend)))
+        previous = json.loads(json.dumps(route_payload(self.target, observed)))
+        if owned not in (previous, intended):
             raise ValueError("route file is not the exact single-route owned configuration")
-        payload = json.dumps(route_payload(self.target, backend), sort_keys=True)
+        if owned == intended:
+            return self._wait_applied(backend, expected)
+        payload = json.dumps(intended, sort_keys=True)
         temporary: str | None = None
         try:
             # No supported file-provider extension while the file is incomplete.
@@ -183,6 +187,9 @@ class TraefikFileRoute:
         finally:
             if temporary is not None:
                 Path(temporary).unlink(missing_ok=True)
+        return self._wait_applied(backend, expected)
+
+    def _wait_applied(self, backend: str, expected: tuple[str, ...]) -> str:
         # Asynchronous provider application may not be observable yet. The
         # controller records switching and reconciles instead of claiming pass.
         deadline = time.monotonic() + self.apply_timeout_seconds

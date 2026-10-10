@@ -17,6 +17,38 @@ from tests.test_odoo_cutover import IsolatedCutoverProvider
 
 
 class OdooCutoverProviderTests(unittest.TestCase):
+    def test_timed_out_publication_waits_for_the_already_published_owned_file(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "route.yaml"
+            target = TraefikRouteTarget(
+                route_id="lane",
+                host="fixture.invalid",
+                entrypoints=("web",),
+                route_file=path,
+                api_url="http://fixture.invalid",
+                tls=False,
+            )
+            path.write_text(json.dumps(route_payload(target, "http://old:8069")))
+            route = TraefikFileRoute(target, apply_timeout_seconds=0.005)
+            with (
+                patch.object(route, "observed_target", return_value="http://old:8069"),
+                self.assertRaises(TimeoutError),
+            ):
+                route.publish("http://new:8069", expected=("http://old:8069",))
+            with (
+                patch.object(
+                    route, "observed_target", side_effect=("http://old:8069", "http://new:8069")
+                ),
+                patch(
+                    "control_plane.dokploy.traefik_cutover.os.replace",
+                    side_effect=AssertionError("must not publish again"),
+                ),
+            ):
+                self.assertEqual(
+                    route.publish("http://new:8069", expected=("http://old:8069",)),
+                    "http://new:8069",
+                )
+
     def test_single_route_switch_never_deletes_another_service_in_its_file(self) -> None:
         with TemporaryDirectory() as temporary:
             path = Path(temporary) / "route.yaml"
