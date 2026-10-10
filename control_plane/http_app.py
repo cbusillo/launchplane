@@ -777,6 +777,7 @@ from control_plane.product_config_http import (
     ProductEnvironmentConfigRefused,
     product_config_live_target_next_actions,
     product_environment_config_apply_request,
+    product_config_has_undeclared_runtime_settings,
     product_environment_config_confirmation,
 )
 from control_plane.provider_target_operations_http import (
@@ -15438,7 +15439,9 @@ def create_launchplane_fastapi_app(
             )
         try:
             request_payload = canonical_product_config_request_payload(
-                product_config_request.model_dump(mode="json", exclude_none=True)
+                product_config_request.model_dump(
+                    mode="json", exclude_none=True, exclude_unset=True
+                )
             )
         except control_plane_product_config.ProductConfigError as error:
             product_config_error = (
@@ -15501,6 +15504,20 @@ def create_launchplane_fastapi_app(
         if replay_response is not None:
             return ProductConfigApplyResponse.model_validate(
                 replay_response.model_dump(mode="json")
+            )
+        if (
+            isinstance(identity, LocalOperatorIdentity)
+            and config_profile.production_use == "live"
+            and product_config_has_undeclared_runtime_settings(
+                profile=config_profile, payload=request_payload
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="live_product_requires_operator",
+                message="A live product's undeclared settings are recorded by an admin, "
+                "not with the local_operator credential the Director's agent uses.",
             )
         if (
             operator_identity
@@ -16060,10 +16077,6 @@ def create_launchplane_fastapi_app(
                     )
                 ),
                 current_retired_provider_keys=current_retired_provider_keys,
-                # The same guard as declaring a key on a live product.
-                undeclared_settings_allowed=not (
-                    isinstance(identity, LocalOperatorIdentity) and profile.production_use == "live"
-                ),
             )
         except ProductEnvironmentConfigRefused as error:
             raise _launchplane_http_error(
