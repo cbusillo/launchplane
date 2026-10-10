@@ -402,11 +402,14 @@ that PR again. Applied-block PR feedback explains the failure and how to rejoin.
 
 Automatically admitted within-major dependency updates use current-head check and
 mergeability evidence for failure holds, rather than acquiring a persistent block
-label. The service queue records the observed head and its refusal reason, excludes
-that failed or conflicting head, and can plan other eligible PRs immediately.
+label. Controller and dry-run queue entries report the observed head and its
+refusal reason; GitHub's current checks also remain visible. The service excludes
+the update while that failure or conflict persists and can plan other eligible PRs
+immediately.
 Every fresh snapshot requalifies the update under the existing dependency admission
 and required-check gates; a new head with pending or unknown checks still cannot
-land. A passing rerun on the same head can also requalify it. An explicit enqueue
+land. A passing rerun on the same head or a base change resolving conflicts can
+also requalify it. An explicit enqueue
 label uses the normal block path above. Every existing block label remains a hold,
 including labels applied by earlier controller versions: no actor or historical
 record is used to guess that a generic hold may be cleared. Those PRs retain the

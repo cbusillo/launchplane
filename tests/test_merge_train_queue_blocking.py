@@ -54,6 +54,7 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
         self, failure_policy: str, *, automatically_admitted: bool = False
     ) -> None:
         labels: list[tuple[int, str]] = []
+        dependency_requalified = False
 
         class Reader(_FakeExpandedMergeTrainSnapshotReader):
             def read_merge_train_snapshot(
@@ -76,10 +77,17 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
                                     "actor_id": 42,
                                     "actor_role": "trusted_automation",
                                     "dependency_update_class": "patch_or_minor",
-                                    "required_checks_status": "fail",
+                                    "required_checks_status": (
+                                        "pass" if dependency_requalified else "fail"
+                                    ),
+                                    "head_sha": (
+                                        "requalified-head"
+                                        if dependency_requalified
+                                        else failing.head_sha
+                                    ),
                                 }
                             ),
-                            green,
+                            *(() if dependency_requalified else (green,)),
                         )
                     }
                 )
@@ -163,6 +171,7 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
                 [2],
             )
             self.assertEqual(labels, expected_labels)
+
             for action in ("build_candidate", "observe_candidate", "plan_landing", "land_batch"):
                 response = await _post_merge_train_controller_run_once(
                     app, {**request, "mutate": True}
@@ -180,6 +189,20 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
                 [(2, "merged")],
             )
             self.assertEqual(labels, expected_labels)
+
+            if automatically_admitted:
+                dependency_requalified = True
+                reentered = await _post_merge_train_controller_run_once(
+                    app, {**request, "mutate": True}
+                )
+                self.assertEqual(reentered.status_code, 202, reentered.text)
+                self.assertEqual(reentered.json()["result"]["controller_action"], "plan_candidate")
+                entries = reentered.json()["result"]["candidate"]["entries"]
+                self.assertEqual(
+                    [(entry["pull_request_number"], entry["head_sha"]) for entry in entries],
+                    [(1, "requalified-head")],
+                )
+                self.assertEqual(labels, [])
 
     def test_bound_controller_reports_queue_block_without_ambient_provider_write(self) -> None:
         policy = build_test_merge_train_policy_record().policy

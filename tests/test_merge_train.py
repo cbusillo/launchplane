@@ -373,6 +373,26 @@ class MergeTrainDryRunTests(unittest.TestCase):
                 "dependency update needs agent review", result.queue[0].ineligible_reasons
             )
 
+    def test_closed_dependency_failure_does_not_add_an_active_head_hold(self) -> None:
+        policy = _dependency_update_policy(49699333)
+        update = _pull_request(8, labels=(), actor_id=49699333).model_copy(
+            update={"state": "closed", "dependency_update_class": "patch_or_minor"}
+        )
+        queues = []
+        for checks in ("fail", "pass"):
+            result = build_merge_train_dry_run_result(
+                policy=policy,
+                snapshot=MergeTrainDryRunSnapshot(
+                    repository=policy.policies[0].repository,
+                    base_branch="main",
+                    pull_requests=(update.model_copy(update={"required_checks_status": checks}),),
+                ),
+                batch_landing=True,
+            )
+            self.assertEqual(result.queue_order, ())
+            queues.append(result.queue[0].ineligible_reasons)
+        self.assertEqual(queues[0], queues[1])
+
     def test_dependency_update_identity_without_policy_still_needs_the_label(self) -> None:
         result = build_merge_train_dry_run_result(
             policy=build_test_merge_train_policy(trusted_automation_github_user_ids=(49699333,)),

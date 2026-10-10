@@ -660,6 +660,7 @@ def _build_queue_entry(
     label_refusal = _enqueue_label_refusal(repository_policy, pull_request)
     if (
         skip_blocked
+        and pull_request.state == "open"
         and is_dependency_update
         and pull_request.dependency_update_class == "patch_or_minor"
         and label_refusal
