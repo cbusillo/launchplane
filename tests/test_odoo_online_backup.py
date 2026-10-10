@@ -59,7 +59,7 @@ class OnlineBackupTests(unittest.TestCase):
         }
         self.output = io.StringIO()
 
-    def dump(self, command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def dump(self, command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         if command[0] == "pg_dump":
             self.fence.commit.assert_called_once()
             self.assertEqual(command[command.index("--snapshot") + 1], self.reader.fetchone()[0])
@@ -134,7 +134,7 @@ class OnlineBackupTests(unittest.TestCase):
         self.assertEqual(self.verify()["verification_status"], "pass")
 
     def test_failed_dump_never_publishes_success(self) -> None:
-        def fail(command: list[str], **kwargs: object) -> None:
+        def fail(command: list[str], **_kwargs: object) -> None:
             self.dump(command)
             raise subprocess.CalledProcessError(23, command)
 
@@ -186,12 +186,12 @@ class OnlineBackupTests(unittest.TestCase):
         self.assertEqual(result["tar_status"], "fail")
 
     def test_capture_binding_rejects_manifest_downgrade(self) -> None:
-        evidence = self.capture()
+        evidence = OdooProdBackupCaptureEvidence.model_validate(self.capture())
         manifest_path = self.destination / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
         manifest["schema_version"] = 1
         manifest_path.write_text(json.dumps(manifest))
-        result = self.verify({"schema_version": str(evidence["schema_version"])})
+        result = self.verify({"schema_version": str(evidence.schema_version)})
         self.assertEqual(result["verification_status"], "fail")
         self.assertEqual(result["manifest_status"], "fail")
 
