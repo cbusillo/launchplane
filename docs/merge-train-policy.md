@@ -1328,6 +1328,21 @@ status, rendered markdown, and GitHub comment identity remain auditable. Callers
 must keep the message public-safe: no tokens, raw headers, private API base URLs,
 local paths, or unchecked provider responses.
 
+The in-service controller scheduler also recovers the latest failed terminal
+feedback (`completed` or `stale_policy`) after the controller advances to idle
+or other work. It selects a bounded set of current retry candidates per target, after
+superseding older status for each PR; successful recent comments cannot hide an
+older unresolved terminal delivery. Recovery sends the stored rendered body
+with the existing policy credential, without another merge or admission.
+The delivery receipt retains its identity and original evidence timestamp while
+attempt count and delivery result are updated. New receipts retain precise
+creation time to order same-second status changes; ambiguous legacy ties remain
+unqualified for recovery. Transient transport failures use bounded exponential
+backoff; quota refusals preserve Retry-After and exhausted
+primary-quota reset deadlines and defer that target's other comment attempts.
+Permission refusals do not retry. Dry-runs never recover or send comments, and an
+identical managed comment is observed without another PATCH.
+
 The batch-landing service endpoint
 `POST /v1/work-graph/merge-train/batch-landing/run-once` owns that PR-native
 landing phase. It accepts `mode: plan` with a passed candidate record id and
@@ -1616,3 +1631,11 @@ fresh current-policy controller discovery: current Git ancestry prevents another
 an already-contained child, and the fresh collapse owns disposition of its
 remaining open children. A carried child GitHub already merged indirectly stays
 closed; this recovery does not restore its Launchplane landing annotations.
+
+Terminal feedback recovery and current feedback delivery serialize the managed
+comment for each repository/PR through the record-store lock. Recovery rechecks
+the latest stored status while holding that lock; a newer status cannot be
+overwritten by a concurrent replay. PostgreSQL uses the same held session for
+feedback reads and writes, so delivery does not require a second pooled connection.
+The lock affects comment delivery only, and does not replace merge authority or
+the controller lease.

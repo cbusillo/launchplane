@@ -392,7 +392,7 @@ from control_plane.merge_train_historical_disposition_http import (
 )
 from control_plane.merge_train_pr_feedback import (
     MergeTrainPrFeedbackEnvelope,
-    build_merge_train_pr_feedback_record,
+    write_merge_train_pr_feedback_record,
     require_merge_train_pr_feedback_record_store,
 )
 from control_plane.merge_train_run_once import (
@@ -11226,7 +11226,8 @@ def create_launchplane_fastapi_app(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        feedback_record = build_merge_train_pr_feedback_record(
+        feedback_record = write_merge_train_pr_feedback_record(
+            store=feedback_store,
             request=feedback_request,
             policy_key=repository_policy.policy_key,
             policy_sha256=policy_record.policy_sha256,
@@ -11234,7 +11235,6 @@ def create_launchplane_fastapi_app(
             recorded_at=utc_now_timestamp(),
             response_trace_id=trace_id,
         )
-        feedback_store.write_merge_train_pr_feedback_record(feedback_record)
         result: dict[str, object] = {"feedback": feedback_record.model_dump(mode="json")}
         if feedback_record.delivery_status == "failed":
             return JSONResponse(

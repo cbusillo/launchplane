@@ -80,6 +80,7 @@ def _controller_result() -> MergeTrainControllerRunOnceResult:
 class MergeTrainSchedulerPassTests(TestCase):
     def setUp(self) -> None:
         self.record_store = MagicMock()
+        self.record_store.list_merge_train_pr_feedback_records.return_value = ()
         self.patchers = {
             name: patch.object(merge_train_scheduler, name)
             for name in (
@@ -88,7 +89,7 @@ class MergeTrainSchedulerPassTests(TestCase):
                 "resolve_merge_train_github_token",
                 "execute_merge_train_controller_run_once",
                 "execute_recorded_merge_train_run_once",
-                "build_merge_train_pr_feedback_record",
+                "write_merge_train_pr_feedback_record",
             )
         }
         self.mocks = {name: patcher.start() for name, patcher in self.patchers.items()}
@@ -96,8 +97,8 @@ class MergeTrainSchedulerPassTests(TestCase):
             self.addCleanup(patcher.stop)
         self.mocks["resolve_merge_train_github_token"].return_value = "token"
         self.mocks["execute_merge_train_controller_run_once"].return_value = _controller_result()
-        self.mocks["build_merge_train_pr_feedback_record"].return_value = SimpleNamespace(
-            delivery_status="delivered"
+        self.mocks["write_merge_train_pr_feedback_record"].return_value = SimpleNamespace(
+            delivery_status="delivered", provider_retry_at=""
         )
 
     def _run(self) -> tuple[MergeTrainScheduledTargetResult, ...]:
@@ -411,7 +412,7 @@ class MergeTrainSchedulerPassTests(TestCase):
         request = self.mocks["execute_merge_train_controller_run_once"].call_args.kwargs["request"]
         self.assertFalse(request.mutate)
         self.assertEqual(result.feedback_delivered, 0)
-        self.mocks["build_merge_train_pr_feedback_record"].assert_not_called()
+        self.mocks["write_merge_train_pr_feedback_record"].assert_not_called()
 
     def test_mutating_controller_pass_delivers_feedback(self) -> None:
         self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
@@ -426,13 +427,16 @@ class MergeTrainSchedulerPassTests(TestCase):
         self.assertTrue(
             self.mocks["execute_merge_train_controller_run_once"].call_args.kwargs["request"].mutate
         )
-        feedback_request = self.mocks["build_merge_train_pr_feedback_record"].call_args.kwargs[
+        feedback_request = self.mocks["write_merge_train_pr_feedback_record"].call_args.kwargs[
             "request"
         ]
         self.assertEqual(feedback_request.pull_request_number, 7)
         self.assertEqual(feedback_request.source, "launchplane:merge-train-scheduler")
         self.assertEqual(result.feedback_delivered, 1)
-        self.record_store.write_merge_train_pr_feedback_record.assert_called_once()
+        self.assertIs(
+            self.mocks["write_merge_train_pr_feedback_record"].call_args.kwargs["store"],
+            self.record_store,
+        )
 
     def test_candidate_less_wait_and_refresh_reach_scheduled_feedback(self) -> None:
         policy = _policy_record(

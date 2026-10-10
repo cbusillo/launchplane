@@ -238,13 +238,20 @@ def update_github_issue_comment(
 
 
 class GitHubCommentUpsert(TypedDict):
-    action: Literal["created_comment", "updated_comment"]
+    action: Literal["created_comment", "updated_comment", "unchanged_comment"]
     comment_id: int
     comment_url: str
 
 
 def upsert_github_issue_comment(
-    *, owner: str, repo: str, issue_number: int, token: str, marker: str, body: str
+    *,
+    owner: str,
+    repo: str,
+    issue_number: int,
+    token: str,
+    marker: str,
+    body: str,
+    skip_unchanged: bool = False,
 ) -> GitHubCommentUpsert:
     """Edit the issue's comment that carries the marker, or add it: one comment per marker."""
     existing_comment = find_github_issue_comment_by_marker(
@@ -263,6 +270,12 @@ def upsert_github_issue_comment(
     existing_comment_id = existing_comment.get("id")
     if not isinstance(existing_comment_id, int):
         raise click.ClickException("Existing GitHub feedback comment is missing a numeric id.")
+    if skip_unchanged and existing_comment.get("body") == body:
+        return {
+            "action": "unchanged_comment",
+            "comment_id": existing_comment_id,
+            "comment_url": _github_comment_url(existing_comment),
+        }
     updated_comment = update_github_issue_comment(
         owner=owner, repo=repo, comment_id=existing_comment_id, token=token, body=body
     )
