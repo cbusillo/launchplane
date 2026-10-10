@@ -3578,6 +3578,142 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_self_deploy_repair_cannot_overtake_an_active_provider_dispatch(self) -> None:
+        from control_plane.service_deploy_drain import ServiceDeployDispatchBusy, dispatch_lock
+
+        with _head_postgres_database() as url:
+            original = PostgresRecordStore(database_url=url)
+            repair = PostgresRecordStore(database_url=url)
+            try:
+                with dispatch_lock(original):
+                    with self.assertRaises(ServiceDeployDispatchBusy):
+                        with dispatch_lock(repair):
+                            self.fail("Repair overtook the original provider dispatch")
+                with dispatch_lock(repair):
+                    pass  # The process/transaction lock releases when the provider call ends.
+            finally:
+                original.close()
+                repair.close()
+
+    def test_self_deploy_fence_and_release_admission_serialize_in_both_orders(self) -> None:
+        from control_plane.service_deploy_drain import ServiceDeployDraining, prepare
+
+        for admission_kind, admission_first in (
+            ("reservation", True),
+            ("reservation", False),
+            ("backup-claim", True),
+            ("backup-claim", False),
+        ):
+            with (
+                self.subTest(kind=admission_kind, admission_first=admission_first),
+                _head_postgres_database() as url,
+            ):
+                store = PostgresRecordStore(database_url=url)
+                if admission_kind == "backup-claim":
+                    from tests.test_verireel_prod_backup_gate import (
+                        VeriReelProdBackupGateWorkflowTests,
+                    )
+
+                    specimen = VeriReelProdBackupGateWorkflowTests(
+                        methodName="runTest"
+                    )._operation_record()
+                    store.write_verireel_prod_backup_gate_operation_record(specimen)
+                held = threading.Event()
+                release = threading.Event()
+                timestamp = store._database_mutation_timestamp
+
+                def paused_timestamp(session: Any) -> str:
+                    if threading.current_thread().name.startswith("first") and not held.is_set():
+                        held.set()
+                        if not release.wait(10):
+                            raise AssertionError("Fixture never released the admission lock")
+                    return timestamp(session)
+
+                def admit() -> Any:
+                    if admission_kind == "backup-claim":
+                        return store.claim_next_verireel_prod_backup_gate_operation_record(
+                            lease_owner="worker",
+                            lease_expires_at=(
+                                datetime.now(timezone.utc) + timedelta(minutes=1)
+                            ).isoformat(),
+                            claimed_at=datetime.now(timezone.utc).isoformat(),
+                        )
+                    return store.reserve_mutation(
+                        scope="client-release",
+                        route_path="/isolated",
+                        idempotency_key="race",
+                        request_fingerprint="release",
+                        lease_owner="worker",
+                    )
+
+                def drain() -> Any:
+                    return prepare(
+                        store,
+                        request_fingerprint="replace",
+                        target_type="compose",
+                        target_id="isolated",
+                        image_reference="example.invalid/image@sha256:" + "a" * 64,
+                        deployment_marker="replacement",
+                    )
+
+                try:
+                    with (
+                        patch.object(
+                            store, "_database_mutation_timestamp", side_effect=paused_timestamp
+                        ),
+                        ThreadPoolExecutor(max_workers=1, thread_name_prefix="first") as first,
+                        ThreadPoolExecutor(max_workers=1, thread_name_prefix="second") as second,
+                    ):
+                        initial = first.submit(admit if admission_first else drain)
+                        self.assertTrue(held.wait(10))
+                        contender = second.submit(drain if admission_first else admit)
+                        try:
+                            # Observe the real PostgreSQL lock wait, rather than sleep
+                            # and mistake thread starvation for serialization proof.
+                            deadline = time.monotonic() + 10
+                            waiting = False
+                            while time.monotonic() < deadline:
+                                with store._engine.connect() as connection:
+                                    waiting = bool(
+                                        connection.scalar(
+                                            text(
+                                                "select exists(select 1 from pg_locks where locktype = 'advisory' "
+                                                "and not granted and database = (select oid from pg_database "
+                                                "where datname = current_database()))"
+                                            )
+                                        )
+                                    )
+                                if waiting:
+                                    break
+                            self.assertTrue(
+                                waiting, "contender never reached the transaction fence"
+                            )
+                        finally:
+                            release.set()
+                        if admission_first:
+                            reservation = initial.result(10)
+                            record, running, dispatch = contender.result(10)
+                            self.assertEqual(record.state, "draining")
+                            record_id = (
+                                reservation.operation_id
+                                if admission_kind == "backup-claim"
+                                else reservation.record.record_id
+                            )
+                            self.assertEqual(running, (record_id,))
+                            self.assertFalse(dispatch)
+                        else:
+                            _, running, dispatch = initial.result(10)
+                            self.assertTrue(dispatch)
+                            self.assertFalse(running)
+                            if admission_kind == "backup-claim":
+                                self.assertIsNone(contender.result(10))
+                            else:
+                                with self.assertRaises(ServiceDeployDraining):
+                                    contender.result(10)
+                finally:
+                    release.set()
+                    store.close()
+
     def test_expired_delivery_history_allows_approved_native_retirement(self) -> None:
         from tests.test_delivery_administration_retirement import (
             _approve,

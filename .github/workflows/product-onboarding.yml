@@ -344,7 +344,7 @@ jobs:
 
       - name: Plan Dokploy application target
         id: target-plan
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
@@ -356,7 +356,7 @@ jobs:
 
       - name: Plan product records
         id: onboarding-plan
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
@@ -368,7 +368,7 @@ jobs:
 
       - name: Plan preview authorization
         id: authz-plan
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}

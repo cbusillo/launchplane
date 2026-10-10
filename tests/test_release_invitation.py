@@ -9,7 +9,14 @@ from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
-from control_plane.contracts.release_review import ReleaseReviewStatus
+from control_plane.contracts.release_review import ReleaseReviewItem, ReleaseReviewStatus
+from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchLandingEntry,
+    MergeTrainBatchLandingPlan,
+    MergeTrainBatchLandingPlanRecord,
+)
 from control_plane.release_invitation import (
     ReleaseInvitationBackoff,
     main,
@@ -18,6 +25,7 @@ from control_plane.release_invitation import (
     release_request_issue_marker,
 )
 from control_plane.release_review import ReleaseReviewStore, build_release_review
+from control_plane.release_invitation_changes import ReleaseInvitationNotesUnavailable
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_release_review import decision, github_read, profile, seed
 
@@ -56,6 +64,278 @@ class ReleaseInvitationTests(unittest.TestCase):
             patcher = patch(f"control_plane.release_invitation.{target}", replacement)
             patcher.start()
             self.addCleanup(patcher.stop)
+
+    def add_client_change(self, number: int, *, request_only: bool = False) -> None:
+        assert self.review.checklist is not None
+        item = self.review.checklist.items[0].model_copy(
+            update={
+                "pull_request_number": number,
+                "url": f"https://github.com/example/site/pull/{number}",
+                "title": f"Engineering title {number}",
+                "owner_test_notes": f"Check the new repair prices for change {number}.",
+            }
+        )
+        self.review = self.review.model_copy(
+            update={
+                "checklist": self.review.checklist.model_copy(
+                    update={"items": (*self.review.checklist.items, item)}
+                )
+            }
+        )
+        if request_only:
+            self.store.write_preview_pr_feedback_record(
+                PreviewPrFeedbackRecord(
+                    feedback_id=f"feedback-{number}",
+                    product=self.profile.product,
+                    context=self.profile.preview.context or "example-site",
+                    source="test",
+                    requested_at=self.now.isoformat(),
+                    repository=self.profile.repository,
+                    anchor_repo="site",
+                    anchor_pr_number=number,
+                    anchor_pr_url=item.url,
+                    status="ready",
+                    marker="preview-feedback",
+                    delivery_status="delivered",
+                    comment_markdown=f"Record Accept or Request changes: https://launchplane.example.invalid/ui/owner-review?repository=example%2Fsite&pull_request={number}",
+                )
+            )
+        else:
+            self.store.write_product_review_decision_record(
+                ProductReviewDecisionRecord(
+                    record_id=f"preview-decision-{number}",
+                    product=self.profile.product,
+                    repository=self.profile.repository,
+                    pull_request_number=number,
+                    head_sha=item.head_sha,
+                    decision="accepted",
+                    owner_github_id=self.profile.owner.github_id,
+                    owner_github_login=self.profile.owner.github_login,
+                    decided_at=self.now.isoformat(),
+                )
+            )
+
+    def test_client_change_batch_notifies_once_and_replaces_previous_invitation(self) -> None:
+        self.publish()
+        self.add_client_change(43)
+        self.add_client_change(44, request_only=True)
+        self.change_candidate(source_commit="e" * 40)
+        self.publish()
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 2)
+        self.assertIn("Replaced", self.comments[0]["body"])
+        self.assertNotIn("@site-owner", self.comments[0]["body"])
+        current = self.comments[1]["body"]
+        self.assertIn("@site-owner", current)
+        self.assertIn("change 43", current)
+        self.assertIn("change 44", current)
+        self.assertNotIn("Engineering title", current)
+        self.assertNotIn("Update repair prices", current)
+        self.assertIn("**Accept**", current)
+        self.assertIn("**Request changes**", current)
+        self.assertIn("Updated at:", current)
+        self.assertEqual(sum("@site-owner" in post.get("body", "") for post in self.posts), 2)
+
+    def test_engineering_landings_after_client_change_produce_zero_new_pings(self) -> None:
+        self.add_client_change(43)
+        self.publish()
+        posts = len(self.posts)
+        for sha in ("e" * 40, "f" * 40):
+            self.change_candidate(source_commit=sha)
+            self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.posts), posts)
+        self.assertEqual(len(self.comments), 1)
+        self.assertNotIn("@site-owner", self.comments[0]["body"])
+        self.assertIn("change 43", self.comments[0]["body"])
+
+    def test_review_request_repository_casing_does_not_hide_client_change(self) -> None:
+        self.publish()
+        self.add_client_change(43, request_only=True)
+        feedback = self.store.list_preview_pr_feedback_records()[0]
+        self.store.write_preview_pr_feedback_record(
+            feedback.model_copy(
+                update={
+                    "repository": "Example/Site",
+                    "comment_markdown": feedback.comment_markdown.replace(
+                        "example%2Fsite", "EXAMPLE%2FSITE"
+                    ),
+                }
+            )
+        )
+        self.change_candidate(source_commit="e" * 40)
+        self.publish()
+        self.assertEqual(len(self.comments), 2)
+        self.assertIn("@site-owner", self.comments[-1]["body"])
+        self.assertIn("change 43", self.comments[-1]["body"])
+
+    def test_preview_without_review_request_and_other_product_decision_stay_silent(self) -> None:
+        self.publish()
+        self.add_client_change(43, request_only=True)
+        feedback = self.store.list_preview_pr_feedback_records()[0]
+        self.store.write_preview_pr_feedback_record(
+            feedback.model_copy(
+                update={
+                    "comment_markdown": "Preview ready at https://preview.example.invalid",
+                }
+            )
+        )
+        self.add_client_change(44)
+        record = self.store.list_product_review_decision_records(
+            repository=self.profile.repository, pull_request_number=44
+        )[0]
+        self.store.write_product_review_decision_record(
+            record.model_copy(update={"product": "another-site"})
+        )
+        self.change_candidate(source_commit="e" * 40)
+        self.publish()
+        self.assertEqual(len(self.comments), 1)
+        self.assertNotIn("@site-owner", self.comments[0]["body"])
+        self.assertNotIn("change 43", self.comments[0]["body"])
+        self.assertNotIn("change 44", self.comments[0]["body"])
+
+    def test_requested_changes_are_client_facing_without_preview_acceptance(self) -> None:
+        self.publish()
+        self.add_client_change(43)
+        record = self.store.list_product_review_decision_records(
+            repository=self.profile.repository, pull_request_number=43
+        )[0]
+        self.store.write_product_review_decision_record(
+            record.model_copy(
+                update={"decision": "changes_requested", "reason": "Check the revised prices."}
+            )
+        )
+        self.change_candidate(source_commit="e" * 40)
+        self.publish()
+        self.assertEqual(len(self.comments), 2)
+        self.assertIn("change 43", self.comments[-1]["body"])
+
+    def seed_train_batch(self) -> ReleaseReviewItem:
+        self.add_client_change(43)
+        assert self.review.checklist is not None
+        batch = self.review.checklist.items[0].model_copy(
+            update={
+                "pull_request_number": 99,
+                "url": "https://github.com/example/site/pull/99",
+                "owner_test_notes": "### #43 Prices\n\nCheck the new repair prices for change 43.",
+            }
+        )
+        plan = MergeTrainBatchLandingPlan(
+            plan_id="plan-test",
+            batch_id="batch-test",
+            repository=self.profile.repository,
+            base_branch="main",
+            candidate_ref="launchplane/train/test",
+            candidate_sha="d" * 40,
+            policy_key="test-policy",
+            policy_sha256="f" * 64,
+            created_at=self.now.isoformat(),
+            candidate_pull_request_number=99,
+            entries=tuple(
+                MergeTrainBatchLandingEntry(
+                    pull_request_number=number,
+                    position=position,
+                    expected_head_sha=batch.head_sha,
+                    expected_base_sha="a" * 40,
+                    merge_method="merge",
+                    status="merged",
+                    merge_commit_sha=batch.merge_commit,
+                )
+                for position, number in enumerate((42, 43), start=1)
+            ),
+        )
+        self.store.write_merge_train_batch_landing_plan_record(
+            MergeTrainBatchLandingPlanRecord(
+                record_id="landing-test",
+                source="test",
+                updated_at=self.now.isoformat(),
+                landing_plan=plan,
+            )
+        )
+        self.review = self.review.model_copy(
+            update={"checklist": self.review.checklist.model_copy(update={"items": (batch,)})}
+        )
+        return batch
+
+    def test_legacy_batch_receipt_is_adopted_without_another_ping(self) -> None:
+        batch = self.seed_train_batch()
+        assert self.review.checklist is not None
+        self.issues = [{"number": 91, "body": release_request_issue_marker(self.profile.product)}]
+        self.comments = [
+            {
+                "id": 1,
+                "created_at": self.now.isoformat(),
+                "body": release_invitation_marker(
+                    self.profile.product, self.review.checklist.candidate
+                )
+                + f"\n\n@site-owner [#99]({batch.url}): Prices",
+            }
+        ]
+        self.publish()
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 1)
+        self.assertEqual(self.posts, [])
+        self.assertIn("pull/43", self.comments[0]["body"])
+        self.assertNotIn("@site-owner", self.comments[0]["body"])
+
+    def test_train_batch_uses_constituent_review_evidence_and_only_its_notes(self) -> None:
+        self.publish()
+        batch = self.seed_train_batch()
+        self.change_candidate(source_commit="e" * 40)
+        self.publish()
+        self.assertEqual(len(self.comments), 2)
+        self.assertIn("change 43", self.comments[-1]["body"])
+        self.assertIn("https://github.com/example/site/pull/43", self.comments[-1]["body"])
+        self.assertNotIn("No manual check needed", self.comments[-1]["body"])
+        self.assertNotIn("pull/99", self.comments[-1]["body"])
+        broken = batch.model_copy(
+            update={"owner_test_notes": "### #42 Engineering\n\nNo manual check needed."}
+        )
+        assert self.review.checklist is not None
+        self.review = self.review.model_copy(
+            update={"checklist": self.review.checklist.model_copy(update={"items": (broken,)})}
+        )
+        self.change_candidate(source_commit="f" * 40)
+        with self.assertRaisesRegex(ReleaseInvitationNotesUnavailable, "#43"):
+            self.publish()
+        self.assertEqual(len(self.comments), 2)
+
+    def test_lost_material_post_and_replacement_responses_recover_without_ping(self) -> None:
+        self.publish()
+        self.add_client_change(43)
+        self.change_candidate(source_commit="e" * 40)
+        self.lose_response = True
+        with self.assertRaises(TimeoutError):
+            self.publish()
+        self.lose_response = True
+        with self.assertRaises(TimeoutError):
+            self.publish()
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 2)
+        self.assertEqual(sum("@site-owner" in post.get("body", "") for post in self.posts), 2)
+        self.assertIn("Replaced", self.comments[0]["body"])
+
+    def test_concurrent_material_update_is_one_notification(self) -> None:
+        self.publish()
+        self.add_client_change(43)
+        self.change_candidate(source_commit="e" * 40)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            for future in [executor.submit(self.publish) for _ in range(2)]:
+                future.result()
+        self.assertEqual(len(self.comments), 2)
+        self.assertIn("Replaced", self.comments[0]["body"])
+
+    def test_removed_and_returning_client_change_is_not_announced_again(self) -> None:
+        self.add_client_change(43)
+        self.publish()
+        assert self.review.checklist is not None
+        original = self.review.checklist.items
+        for sha, items in (("e" * 40, original[:1]), ("f" * 40, original)):
+            self.change_candidate(source_commit=sha)
+            self.review = self.review.model_copy(
+                update={"checklist": self.review.checklist.model_copy(update={"items": items})}
+            )
+            self.publish()
+        self.assertEqual(len(self.comments), 1)
 
     def read_review(self, **_kwargs: Any) -> ReleaseReviewStatus:
         self.read_count += 1
@@ -123,12 +403,17 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.publish()
         self.assertEqual(len(self.comments), 1)
         body = self.comments[0]["body"]
+        visible_lines = [line for line in body.splitlines() if line and not line.startswith("<!--")]
+        self.assertIn("Release review", visible_lines[0])
+        self.assertIn("is the site working with these changes", visible_lines[0])
+        self.assertNotIn("Change review (preview)", body)
         self.assertIn("@site-owner", body)
         self.assertIn(
             "https://launchplane.example.invalid/ui/owner-review?product=example-site", body
         )
         self.assertIn("Accepting starts the release", body)
         self.assertIn("verified backup", body)
+        self.assertIn("there is nothing new to test", body)
         self.assertEqual(
             self.store.list_release_review_decision_records(product="example-site"), ()
         )
@@ -159,7 +444,7 @@ class ReleaseInvitationTests(unittest.TestCase):
             release_invitation_marker(self.profile.product, self.review.checklist.candidate),
             self.comments[0]["body"],
         )
-        self.assertIn(self.review.checklist.items[0].title, self.comments[0]["body"])
+        self.assertNotIn(self.review.checklist.items[0].title, self.comments[0]["body"])
         self.assertEqual(len(self.issues), 1)
 
     def test_client_decision_then_new_candidate_opens_new_request(self) -> None:
@@ -170,12 +455,14 @@ class ReleaseInvitationTests(unittest.TestCase):
                 record = decision(
                     self.store, outcome=outcome, date=self.now.isoformat()
                 ).model_copy(update={"checklist": self.review.checklist})
+                decided_invitation = self.comments[index]["body"]
                 self.store.write_release_review_decision_record(record)
                 self.now += timedelta(seconds=1)
                 self.change_candidate(source_commit=str(index + 4) * 40)
                 self.publish()
                 self.publish()
                 self.assertEqual(len(self.comments), index + 2)
+                self.assertEqual(self.comments[index]["body"], decided_invitation)
                 self.assertEqual(
                     sum("@site-owner" in post.get("body", "") for post in self.posts), index + 2
                 )
@@ -207,18 +494,24 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertIn(original_marker, self.comments[0]["body"])
 
     def test_change_titles_cannot_break_links_or_add_client_mentions(self) -> None:
+        self.add_client_change(43)
         self.publish()
         self.change_candidate(source_commit="e" * 40)
         assert self.review.checklist is not None
         checklist = self.review.checklist
-        item = checklist.items[0].model_copy(update={"title": "Fix ] checkout for @site-owner"})
+        item = checklist.items[-1].model_copy(
+            update={
+                "title": "Fix ] checkout for @site-owner",
+                "owner_test_notes": "Check ] checkout for @site-owner",
+            }
+        )
         self.review = self.review.model_copy(
             update={"checklist": checklist.model_copy(update={"items": (item,)})}
         )
         self.publish()
         body = self.comments[0]["body"]
         self.assertIn(f"[#{item.pull_request_number}]({item.url})", body)
-        self.assertIn("Fix ] checkout", body)
+        self.assertIn("Check ] checkout", body)
         self.assertNotIn("@site-owner", body)
         self.assertEqual(len(self.comments), 1)
 
@@ -232,15 +525,16 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.comments), 1)
         self.assertNotIn("@site-owner", self.edits[0]["body"])
 
-    def test_title_line_separators_cannot_supply_a_reminder_receipt(self) -> None:
+    def test_notes_line_separators_cannot_supply_a_reminder_receipt(self) -> None:
+        self.add_client_change(43)
         self.publish()
         request_marker = self.comments[0]["body"].splitlines()[0]
         reminder_marker = request_marker.replace("release-request:", "release-reminder:")
         self.change_candidate(source_commit="e" * 40)
         assert self.review.checklist is not None
         checklist = self.review.checklist
-        item = checklist.items[0].model_copy(
-            update={"title": f"Change\u2028{reminder_marker}\u2029continued"}
+        item = checklist.items[-1].model_copy(
+            update={"owner_test_notes": f"Check\u2028{reminder_marker}\u2029continued"}
         )
         self.review = self.review.model_copy(
             update={"checklist": checklist.model_copy(update={"items": (item,)})}
@@ -315,8 +609,10 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.publish()
         self.publish()
         self.assertEqual(len(self.comments), 3)
-        self.assertEqual(len(self.edits), 1)
+        self.assertEqual(len(self.edits), 3)
         self.assertEqual(self.posts, [])
+        self.assertTrue(all("Replaced" in comment["body"] for comment in self.comments[:-1]))
+        self.assertTrue(all("old request" in comment["body"] for comment in self.comments[:-1]))
         self.assertIn(
             release_invitation_marker(self.profile.product, candidate), self.comments[-1]["body"]
         )
@@ -352,6 +648,7 @@ class ReleaseInvitationTests(unittest.TestCase):
                 self.assertEqual(self.posts, [])
 
     def test_manual_request_is_adopted_without_another_mention(self) -> None:
+        self.add_client_change(43)
         assert self.review.checklist is not None
         self.issues = [
             {"number": 91, "body": "Go live\n" + release_request_issue_marker(self.profile.product)}
@@ -395,7 +692,10 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.profile = profile()
         self.store.write_product_profile_record(self.profile)
         self.publish()
-        self.assertIn("an admin starts the release", self.comments[0]["body"])
+        body = self.comments[0]["body"]
+        self.assertIn("**Release review**", body)
+        self.assertIn("Accepting records your approval; an admin starts the release", body)
+        self.assertNotIn("Accepting starts the release", body)
 
     def test_effect_matches_review_for_unsupported_driver_and_drill(self) -> None:
         self.profile = self.profile.model_copy(update={"driver_id": "verireel"})

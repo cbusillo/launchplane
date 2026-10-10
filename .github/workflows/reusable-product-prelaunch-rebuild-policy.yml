@@ -228,7 +228,7 @@ jobs:
 
       - name: Request product prelaunch rebuild policy operation
         id: prelaunch_rebuild_policy_request
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}

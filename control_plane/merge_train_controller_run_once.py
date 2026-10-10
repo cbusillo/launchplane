@@ -410,6 +410,45 @@ def execute_merge_train_controller_with_client(
     admission_evaluator: MergeAdmissionEvaluator,
     before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
 ) -> MergeTrainControllerRunOnceResult:
+    github_client.begin_snapshot_pass(policy=repository_policy, read_only=not request.mutate)
+    try:
+        return _execute_merge_train_controller_with_client(
+            request=request,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            repository_policy=repository_policy,
+            github_client=github_client,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
+            candidate_store=candidate_store,
+            landing_store=landing_store,
+            stack_collapse_store=stack_collapse_store,
+            controller_state_store=controller_state_store,
+            admission_store=admission_store,
+            admission_evaluator=admission_evaluator,
+            before_release=before_release,
+        )
+    finally:
+        github_client.end_snapshot_pass()
+
+
+def _execute_merge_train_controller_with_client(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    policy: MergeTrainPolicy,
+    policy_sha256: str,
+    repository_policy: MergeTrainRepositoryPolicy,
+    github_client: GitHubMergeTrainClient,
+    trace_id: str,
+    recorded_at: str,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    landing_store: MergeTrainBatchLandingPlanRecordStore,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    controller_state_store: MergeTrainControllerStateRecordStore,
+    admission_store: MergeAdmissionRecordStore,
+    admission_evaluator: MergeAdmissionEvaluator,
+    before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
+) -> MergeTrainControllerRunOnceResult:
     """Internal controller core with an explicit caller-owned scoped provider client.
 
     This constructs no transport or credentials. Ordinary callers must supply
@@ -1842,6 +1881,7 @@ def _reconcile_completed_landing_after_policy_change(
         )
     # Historical plans are evidence of an already-landed effect, never authority
     # for another collapse or merge. Verify every child before any provider write.
+    verified_records = []
     for record in unfinished:
         if record.ordinary_job_binding is not None:
             return blocked(
@@ -1860,14 +1900,15 @@ def _reconcile_completed_landing_after_policy_change(
             if root.merge_method == "merge"
             else (root.expected_head_sha,)
         )
+        dispositions = []
         for child in record.plan.child_dispositions:
-            if child.status == "closed":
+            if child.completed:
+                dispositions.append(child)
                 continue  # A completed disposition cannot close a later reopened head.
             try:
-                github_client.pull_request_is_closed(
+                observed_head, observed_state = github_client.read_pull_request_head(
                     repository=request.repository,
                     pull_request_number=child.pull_request_number,
-                    expected_head_sha=child.expected_head_sha,
                 )
                 contained = all(
                     github_client.branch_contains_commit(
@@ -1876,11 +1917,6 @@ def _reconcile_completed_landing_after_policy_change(
                         commit_sha=child.expected_head_sha,
                     )
                     for root_ref in root_refs
-                )
-            except MergeTrainGitHubStaleHeadError:
-                return blocked(
-                    "completed_landing_stack_child_head_changed",
-                    f"Stack child PR #{child.pull_request_number} no longer matches recorded history.",
                 )
             except MergeTrainGitHubError as error:
                 if error.rate_limited or error.status_code is None or error.status_code >= 500:
@@ -1894,7 +1930,27 @@ def _reconcile_completed_landing_after_policy_change(
                     "completed_landing_stack_child_not_contained",
                     f"Stack child PR #{child.pull_request_number} is not contained in the landed root.",
                 )
-    for record in unfinished:
+            if observed_head != child.expected_head_sha:
+                child = type(child).model_validate(
+                    {
+                        **child.model_dump(),
+                        "status": "preserved",
+                        "preserved_head_sha": observed_head,
+                        "preserved_state": observed_state,
+                        "detail": f"Recorded child head landed; changed PR preserved {observed_state} without further provider effects",
+                    }
+                )
+            dispositions.append(child)
+        verified_records.append(
+            record.model_copy(
+                update={
+                    "plan": record.plan.model_copy(
+                        update={"child_dispositions": tuple(dispositions)}
+                    )
+                }
+            )
+        )
+    for record in verified_records:
         reconciled = _reconcile_landed_stack_children(
             collapse_record=record,
             landed_record=landed_record,
@@ -1956,7 +2012,7 @@ def _annotate_historical_closed_stack_children(
             continue
         for child in plan.child_dispositions:
             identity = (child.pull_request_number, child.expected_head_sha)
-            if child.status == "closed" or identity in annotated:
+            if child.completed or identity in annotated:
                 continue
             try:
                 closed = github_client.pull_request_is_closed(
@@ -2077,7 +2133,7 @@ def _reconcile_landed_stack_children(
             (
                 disposition
                 for disposition in progress_plan.child_dispositions
-                if disposition.status != "closed"
+                if not disposition.completed
             ),
             None,
         )
@@ -2093,8 +2149,7 @@ def _reconcile_landed_stack_children(
             step_payload={
                 **lease.record.step_payload,
                 "completed_disposition_count": sum(
-                    disposition.status == "closed"
-                    for disposition in progress_plan.child_dispositions
+                    disposition.completed for disposition in progress_plan.child_dispositions
                 ),
             },
         )

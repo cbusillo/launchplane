@@ -1,9 +1,11 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from control_plane.github_app_identity import GitHubAppInstallationToken
 from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import unquote
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapsePlanRecord
@@ -263,13 +265,21 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with (
             TemporaryDirectory() as directory,
             patch.dict("os.environ", {}, clear=True),
+            patch.dict("control_plane.merge_train_github_token._TOKEN_CACHE", {}, clear=True),
             patch(
                 "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
                 return_value="test-private-key",
             ),
             patch(
                 "control_plane.merge_train_github_token.mint_merge_train_installation_token",
-                return_value=Mock(token="token"),
+                return_value=GitHubAppInstallationToken(
+                    token="token",
+                    app_id=42,
+                    installation_id=77,
+                    repository_id=123,
+                    repository="cbusillo/sellyouroutboard",
+                    expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                ),
             ),
         ):
             state_dir = Path(directory) / "state"

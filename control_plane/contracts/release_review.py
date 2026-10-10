@@ -3,6 +3,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.artifact_release_compatibility import ReleaseDatabaseCompatibility
 
 
 class ReleaseVersion(BaseModel):
@@ -58,6 +59,21 @@ class ReleaseChecklist(BaseModel):
         exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
+    database_compatibility: ReleaseDatabaseCompatibility | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+
+    @model_validator(mode="after")
+    def validate_database_compatibility(self) -> "ReleaseChecklist":
+        compatibility = self.database_compatibility
+        if compatibility is not None and (
+            compatibility.production_artifact_id != self.production.artifact_id
+            or compatibility.candidate_artifact_id != self.candidate.artifact_id
+        ):
+            raise ValueError("release compatibility must identify the checklist artifact tuple")
+        return self
 
 
 ReleaseDecision = Literal["accepted", "changes_requested", "overridden"]

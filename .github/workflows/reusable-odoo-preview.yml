@@ -338,7 +338,7 @@ jobs:
 
       - name: Resolve Launchplane publish inputs
         id: publish_inputs
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
@@ -484,7 +484,7 @@ jobs:
 
       - name: Request Launchplane isolated preview apply inputs
         id: dry_run
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
@@ -522,7 +522,7 @@ jobs:
 
       - name: Request Launchplane isolated preview apply
         id: launchplane
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
@@ -688,7 +688,7 @@ jobs:
 
       - name: Request Launchplane isolated preview destroy inputs
         id: dry_run
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
@@ -725,7 +725,7 @@ jobs:
 
       - name: Request Launchplane isolated preview destroy
         id: launchplane
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}

@@ -3,6 +3,7 @@ import json
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -19,6 +20,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.public_ingress_monitoring import (
+    PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS,
     PublicIngressIncidentEventRecord,
     PublicIngressIncidentMaterialFingerprint,
     PublicIngressIncidentRecord,
@@ -2191,6 +2193,97 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("provider-host-private-123", response_text)
         self.assertNotIn("edge-host-private-456", response_text)
         self.assertNotIn("certificate-private-789", response_text)
+
+    async def test_monitoring_reads_keep_intent_separate_from_observation_evidence(self) -> None:
+        for mode in ("missing", "stale", "fresh", "disabled", "inapplicable"):
+            with self.subTest(mode=mode), TemporaryDirectory() as directory:
+                database_url = _sqlite_database_url(Path(directory) / "state.db")
+                _seed_product_environment_read_records(database_url)
+                store = PostgresRecordStore(database_url=database_url)
+                try:
+                    payload = store.read_product_profile_record("example-site").model_dump(
+                        mode="json"
+                    )
+                    lane = next(lane for lane in payload["lanes"] if lane["instance"] == "prod")
+                    lane["health_monitoring"] = {
+                        "monitoring_intent": (
+                            "private"
+                            if mode == "inapplicable"
+                            else "prelaunch"
+                            if mode == "disabled"
+                            else "public"
+                        ),
+                        "checks": [
+                            {
+                                "name": "public-ingress",
+                                "kind": "public_http",
+                                "enabled": mode != "disabled",
+                            }
+                        ],
+                    }
+                    if mode == "inapplicable":
+                        lane["health_monitoring"]["checks"].append(
+                            {
+                                "name": "private-runtime",
+                                "kind": "private_http",
+                                "private_endpoint_key": "example-private-runtime",
+                            }
+                        )
+                    store.write_product_profile_record(
+                        LaunchplaneProductProfileRecord.model_validate(payload)
+                    )
+                    if mode in ("stale", "fresh"):
+                        observed_at = datetime.now(timezone.utc)
+                        if mode == "stale":
+                            observed_at -= timedelta(
+                                seconds=PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS + 1
+                            )
+                        store.write_public_ingress_observation_record(
+                            PublicIngressObservationRecord(
+                                schema_version=2,
+                                record_id=f"monitor-{mode}",
+                                summary="Successful probe",
+                                product="example-site",
+                                context=lane["context"],
+                                instance=lane["instance"],
+                                check_name=lane["health_monitoring"]["checks"][0]["name"],
+                                check_kind=lane["health_monitoring"]["checks"][0]["kind"],
+                                monitoring_intent="public",
+                                observed_at=observed_at.isoformat(),
+                                status="pass",
+                                targets=(
+                                    PublicIngressTargetObservation(
+                                        target="health_url",
+                                        url=lane["health_url"],
+                                        status="pass",
+                                        http_status=200,
+                                        summary="HTTP 200",
+                                    ),
+                                ),
+                            )
+                        )
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(_identity()),
+                        authz_policy=_product_environment_read_policy(context=lane["context"]),
+                        record_store_factory=lambda: store,
+                    )
+                    response = await _get_product_environment(app)
+                    self.assertEqual(response.status_code, 200, response.text)
+                    monitoring = response.json()["environment"]["health_monitoring"]
+                    self.assertEqual(monitoring["provenance"]["freshness_status"], "recorded")
+                    check = monitoring["checks"][0]
+                    if mode in ("disabled", "inapplicable"):
+                        self.assertFalse(check["probe_effective"])
+                        self.assertEqual(
+                            check["status"], "disabled" if mode == "disabled" else "not_expected"
+                        )
+                    else:
+                        self.assertTrue(check["probe_effective"])
+                        self.assertEqual(
+                            check["trust_state"], "verified" if mode == "fresh" else mode
+                        )
+                finally:
+                    store.close()
 
     async def test_product_environment_incident_reads_expose_redacted_evidence(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

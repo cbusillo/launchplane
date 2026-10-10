@@ -182,7 +182,7 @@ jobs:
 
       - name: Create destructive restore operation
         id: create_restore
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
@@ -221,7 +221,7 @@ jobs:
 
       - name: Poll destructive restore operation
         id: poll_restore
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
