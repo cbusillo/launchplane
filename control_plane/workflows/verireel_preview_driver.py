@@ -478,28 +478,17 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
         token=token,
         path="/api/project.all",
     )
-    if not isinstance(raw_projects, list):
-        return None
-    for raw_project in raw_projects:
-        project = dokploy_api.as_json_object(raw_project)
-        if project is None:
-            continue
-        raw_environments = project.get("environments")
-        if not isinstance(raw_environments, list):
-            continue
-        for raw_environment in raw_environments:
-            environment = dokploy_api.as_json_object(raw_environment)
-            if environment is None:
-                continue
-            raw_applications = environment.get("applications")
-            if not isinstance(raw_applications, list):
-                continue
-            for raw_application in raw_applications:
-                application = dokploy_api.as_json_object(raw_application)
-                if application is None:
-                    continue
-                if str(application.get("name") or "").strip() == application_name:
-                    return application
+    # A match or absence is authoritative only after the full inventory validates.
+    for application in tuple(dokploy_api.iter_dokploy_applications(raw_projects)):
+        if str(application.get("name") or "").strip() == application_name:
+            application_id = str(
+                application.get("applicationId") or application.get("id") or ""
+            ).strip()
+            if not application_id:
+                raise click.ClickException(
+                    "Dokploy project inventory has incomplete application identity."
+                )
+            return {**application, "applicationId": application_id}
     return None
 
 
@@ -514,45 +503,26 @@ def execute_verireel_preview_inventory(
         token=token,
         path="/api/project.all",
     )
-    if not isinstance(raw_projects, list):
-        raise click.ClickException(
-            "Dokploy project inventory returned an invalid response payload."
-        )
     preview_items: list[VeriReelPreviewInventoryItem] = []
-    for raw_project in raw_projects:
-        project = dokploy_api.as_json_object(raw_project)
-        if project is None:
+    for application in dokploy_api.iter_dokploy_applications(raw_projects):
+        application_name = str(application.get("name") or "").strip()
+        preview_slug = _preview_slug_from_application_name(application_name)
+        if not preview_slug:
             continue
-        raw_environments = project.get("environments")
-        if not isinstance(raw_environments, list):
-            continue
-        for raw_environment in raw_environments:
-            environment = dokploy_api.as_json_object(raw_environment)
-            if environment is None:
-                continue
-            raw_applications = environment.get("applications")
-            if not isinstance(raw_applications, list):
-                continue
-            for raw_application in raw_applications:
-                application = dokploy_api.as_json_object(raw_application)
-                if application is None:
-                    continue
-                application_name = str(application.get("name") or "").strip()
-                preview_slug = _preview_slug_from_application_name(application_name)
-                if not preview_slug:
-                    continue
-                application_id = str(
-                    application.get("applicationId") or application.get("id") or ""
-                ).strip()
-                if not application_id:
-                    continue
-                preview_items.append(
-                    VeriReelPreviewInventoryItem(
-                        applicationId=application_id,
-                        applicationName=application_name,
-                        previewSlug=preview_slug,
-                    )
-                )
+        application_id = str(
+            application.get("applicationId") or application.get("id") or ""
+        ).strip()
+        if not application_id:
+            raise click.ClickException(
+                "Dokploy project inventory has incomplete application identity."
+            )
+        preview_items.append(
+            VeriReelPreviewInventoryItem(
+                applicationId=application_id,
+                applicationName=application_name,
+                previewSlug=preview_slug,
+            )
+        )
     return VeriReelPreviewInventoryResult(
         context=request.context,
         previews=tuple(sorted(preview_items, key=lambda item: item.previewSlug)),
@@ -1162,9 +1132,12 @@ def execute_verireel_preview_refresh(
     app_name = _preview_app_name(request.preview_slug)
     preview_host = _preview_url_host(preview_url)
     preview_domain = _preview_domain_from_url(preview_url)
-    existing_application = _find_application_by_name(
-        host=host, token=token, application_name=application_name
-    )
+    try:
+        existing_application = _find_application_by_name(
+            host=host, token=token, application_name=application_name
+        )
+    except click.ClickException as exc:
+        raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
     existing_snapshot = None
     if existing_application is not None:
         application_id = str(existing_application.get("applicationId") or "").strip()
@@ -1408,15 +1381,14 @@ def execute_verireel_preview_refresh(
         )
 
     finished_at = utc_now_timestamp()
-    resolved_application = _find_application_by_name(
-        host=host, token=token, application_name=application_name
-    )
+    # The successful create/reuse and health probe already identify this application.
+    # A second inventory read cannot strengthen that proof and can lose the receipt.
     return VeriReelPreviewRefreshResult(
         refresh_status="pass",
         refresh_started_at=started_at,
         refresh_finished_at=finished_at,
         application_name=application_name,
-        application_id=str((resolved_application or {}).get("applicationId") or "").strip(),
+        application_id=application_id,
         preview_url=preview_url,
         runtime_identity=observed_runtime_identity,
     )
@@ -1445,9 +1417,20 @@ def execute_verireel_preview_destroy(
         control_plane_root=control_plane_root, request=request
     )
     application_name = _preview_application_name(request.preview_slug)
-    application = _find_application_by_name(
-        host=host, token=token, application_name=application_name
-    )
+    try:
+        application = _find_application_by_name(
+            host=host, token=token, application_name=application_name
+        )
+    except click.ClickException as exc:
+        return VeriReelPreviewDestroyResult(
+            destroy_status="fail",
+            destroy_started_at=started_at,
+            destroy_finished_at=utc_now_timestamp(),
+            application_name=application_name,
+            application_id="",
+            preview_url=preview_url,
+            error_message=str(exc),
+        )
     application_id = str((application or {}).get("applicationId") or "").strip()
     database_name, role_name = _preview_database_identifiers(request.preview_slug)
     existing_database = None

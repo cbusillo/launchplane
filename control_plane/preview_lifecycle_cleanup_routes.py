@@ -4,6 +4,8 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Protocol, cast
 
+import click
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.preview_lifecycle_cleanup_record import (
@@ -320,29 +322,36 @@ def build_preview_lifecycle_sweep(
             )
             entries.append(entry)
             continue
-        if cleanup_driver_id == "verireel":
-            verireel_inventory_result = execute_verireel_preview_inventory(
-                control_plane_root=control_plane_root,
-                request=VeriReelPreviewInventoryRequest(context=profile.preview.context),
-            )
-            inventory_context = verireel_inventory_result.context
-            inventory_source = request.source
-            inventory_slugs = tuple(item.previewSlug for item in verireel_inventory_result.previews)
-        else:
-            generic_web_inventory_result = execute_generic_web_preview_inventory(
-                control_plane_root=control_plane_root,
-                record_store=cast(GenericWebPreviewProfileStore, record_store),
-                request=GenericWebPreviewInventoryRequest(
-                    product=profile.product,
-                    source=request.source,
-                ),
-                profile=profile,
-            )
-            inventory_context = generic_web_inventory_result.context
-            inventory_source = generic_web_inventory_result.source
-            inventory_slugs = tuple(
-                item.previewSlug for item in generic_web_inventory_result.previews
-            )
+        try:
+            if cleanup_driver_id == "verireel":
+                verireel_inventory_result = execute_verireel_preview_inventory(
+                    control_plane_root=control_plane_root,
+                    request=VeriReelPreviewInventoryRequest(context=profile.preview.context),
+                )
+                inventory_context = verireel_inventory_result.context
+                inventory_source = request.source
+                inventory_slugs = tuple(
+                    item.previewSlug for item in verireel_inventory_result.previews
+                )
+            else:
+                generic_web_inventory_result = execute_generic_web_preview_inventory(
+                    control_plane_root=control_plane_root,
+                    record_store=cast(GenericWebPreviewProfileStore, record_store),
+                    request=GenericWebPreviewInventoryRequest(
+                        product=profile.product,
+                        source=request.source,
+                    ),
+                    profile=profile,
+                )
+                inventory_context = generic_web_inventory_result.context
+                inventory_source = generic_web_inventory_result.source
+                inventory_slugs = tuple(
+                    item.previewSlug for item in generic_web_inventory_result.previews
+                )
+        except click.ClickException as exc:
+            entry.update({"status": "fail", "error_message": str(exc)})
+            entries.append(entry)
+            continue
         inventory_scan_id = write_preview_inventory_scan_record(
             record_store=record_store,
             context=inventory_context,

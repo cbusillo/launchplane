@@ -374,6 +374,15 @@ rejects a supplied slug when it conflicts with the derived value. `context`,
 `preview_slug`, and `preview_url` remain compatibility fields for older
 adapters, not product-repo authority.
 
+Generic-web lifecycle cleanup uses the repository-name anchor from that same
+profile for stored-preview lookup and terminal evidence; the product key need
+not equal the repository name. Historical callers without a profile retain
+their product-shaped anchor, with no fallback to unrelated records.
+Provider application lookup validates the complete project/environment/application
+inventory before proving absence or reusing a match. Missing or malformed nested
+relations fail cleanup without deleting provider state or marking a preview
+destroyed; a fully enumerated empty inventory remains valid absence.
+
 Launchplane also owns the reusable request-shape builders for Odoo tenant
 preview workflows. Tenant repos may keep thin adapter jobs for checkout, image
 publication, runner selection, and product smoke facts, but the route paths,

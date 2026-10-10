@@ -15,6 +15,7 @@ from control_plane.workflows.verireel_preview_driver import VeriReelPreviewDestr
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshRequest
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshConfigError
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshTransportError
+from control_plane.workflows.verireel_preview_driver import _preview_application_name
 from control_plane.workflows.verireel_preview_driver import _build_preview_runtime_identity
 from control_plane.workflows.verireel_preview_driver import _build_preview_database_command
 from control_plane.workflows.verireel_preview_driver import _ensure_application
@@ -179,6 +180,70 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         destroy_resource.assert_called_once()
         self.assertEqual(result.destroy_status, "pass")
         self.assertEqual(result.error_message, "")
+
+    def test_destroy_refuses_incomplete_inventory_before_any_cleanup(self) -> None:
+        request = VeriReelPreviewDestroyRequest(
+            anchor_pr_number=71, destroy_reason="pull request closed", preview_slug="pr-71"
+        )
+        inventories: tuple[object, ...] = (
+            [{"environments": [{"applications": [{"name": _preview_application_name("pr-71")}]}]}],
+            {},
+            [{"environments": [{"applications": None}]}],
+            [
+                {
+                    "environments": [
+                        {
+                            "applications": [
+                                {
+                                    "name": _preview_application_name("pr-71"),
+                                    "applicationId": "preview",
+                                },
+                                None,
+                            ]
+                        }
+                    ]
+                }
+            ],
+        )
+        for inventory in inventories:
+            with (
+                self.subTest(inventory=inventory),
+                TemporaryDirectory() as directory,
+                patch(
+                    "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "fixture-token"),
+                ),
+                patch(
+                    "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                    return_value=(
+                        _template_target(),
+                        {"env": "DATABASE_URL=postgresql://admin:password@db:5432/verireel"},
+                    ),
+                ),
+                patch(
+                    "control_plane.workflows.verireel_preview_driver._resolve_preview_url_for_destroy",
+                    return_value="https://preview.example.invalid",
+                ),
+                patch(
+                    "control_plane.workflows.verireel_preview_driver.dokploy_api.dokploy_request",
+                    return_value=inventory,
+                ),
+                patch(
+                    "control_plane.workflows.verireel_preview_driver.destroy_dokploy_preview_resource"
+                ) as destroy,
+                patch(
+                    "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
+                ) as database_cleanup,
+            ):
+                result = execute_verireel_preview_destroy(
+                    control_plane_root=Path(directory), request=request
+                )
+            self.assertEqual(result.destroy_status, "fail")
+            self.assertEqual(result.application_id, "")
+            self.assertTrue(result.error_message)
+            destroy.assert_not_called()
+            database_cleanup.assert_not_called()
+            self.delete_recovery_schedule.assert_not_called()
 
     def test_ensure_application_uses_default_server_when_template_omits_server_id(self) -> None:
         requests: list[dict[str, object]] = []
@@ -519,6 +584,42 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
 
         run_command.assert_not_called()
 
+    def test_refresh_maps_incomplete_inventory_to_transport_before_writes(self) -> None:
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "fixture-token"),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                return_value=(
+                    _template_target(),
+                    {"env": "DATABASE_URL=postgresql://admin:password@db:5432/verireel"},
+                ),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._resolve_preview_url",
+                return_value="https://preview.example.invalid",
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.dokploy_api.dokploy_request",
+                return_value=[{"environments": None}],
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._run_application_command"
+            ) as database,
+            patch(
+                "control_plane.workflows.verireel_preview_driver._ensure_application"
+            ) as application,
+        ):
+            with self.assertRaises(VeriReelPreviewRefreshTransportError):
+                execute_verireel_preview_refresh(
+                    control_plane_root=Path(directory), request=_refresh_request()
+                )
+        database.assert_not_called()
+        application.assert_not_called()
+
     def test_preview_refresh_generates_its_own_secrets_and_copies_none_from_testing(
         self,
     ) -> None:
@@ -593,6 +694,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             )
 
         self.assertEqual(result.refresh_status, "pass")
+        self.assertEqual(result.application_id, "app-preview")
         self.assertNotEqual(captured_env["BETTER_AUTH_SECRET"], "template-auth-secret")
         self.assertNotEqual(captured_env["VERIREEL_CRON_SECRET"], "template-cron-secret")
         self.assertNotEqual(
