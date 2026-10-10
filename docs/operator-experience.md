@@ -197,6 +197,12 @@ Empty states are part of the product contract:
 Loading, empty, blocked, missing, unsupported, and error are different states
 and must not share a reassuring generic placeholder.
 
+The directory, workspace signal and preview detail use the preview summary's
+trust decision for the same inventory claim. Missing evidence means inventory
+unknown even when a count is recorded; zero recorded is not verified empty.
+Recorded counts remain labelled recorded, stale and unsupported evidence retain
+their uncertainty, and only verified inventory uses active or empty wording.
+
 ## Responsive Product Contract
 
 Desktop layouts optimize for fast comparison across testing, production, and

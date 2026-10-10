@@ -18,6 +18,7 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
+import { previewInventoryPresentation } from "./preview-inventory";
 import { environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
@@ -318,9 +319,7 @@ function ProductDirectoryRow({ product }: { product: ProductSiteOverview }) {
         <span className="directory-preview">
           <span className="lane-name">Previews</span>
           <strong>
-            {product.preview.enabled
-              ? `${product.preview.active_count} active`
-              : "Not enabled"}
+            {previewInventoryPresentation(product.preview).headline}
           </strong>
           <EvidenceBadge compact state={product.preview.trust_state} />
         </span>
@@ -479,11 +478,7 @@ function ProductWorkspace({
         <SignalTile
           label="Previews"
           state={product.preview.trust_state}
-          value={
-            product.preview.enabled
-              ? `${product.preview.active_count} active`
-              : "Not enabled"
-          }
+          value={previewInventoryPresentation(product.preview).headline}
         />
         <SignalTile
           label="Warnings"
@@ -738,20 +733,7 @@ function EnvironmentRow({
 
 function PreviewSummary({ product }: { product: ProductSiteOverview }) {
   const preview = product.preview;
-  const title = !preview.enabled
-    ? "Preview environments are not enabled"
-    : preview.trust_state === "missing"
-      ? "Preview inventory evidence is missing"
-      : preview.active_count
-        ? `${preview.active_count} active preview${preview.active_count === 1 ? "" : "s"}`
-        : "No active previews";
-  const detail = !preview.enabled
-    ? "This product profile does not expose preview lifecycle capability."
-    : preview.trust_state === "missing"
-      ? "Launchplane cannot determine whether previews exist without inventory evidence."
-      : preview.active_count
-        ? "Active preview inventory is recorded under this product workspace."
-        : "The inventory read completed without an active preview environment.";
+  const { headline, detail } = previewInventoryPresentation(preview);
 
   return (
     <section className="summary-panel preview-summary" id="preview-summary">
@@ -760,7 +742,7 @@ function PreviewSummary({ product }: { product: ProductSiteOverview }) {
       </div>
       <div>
         <p className="eyebrow">Preview inventory</p>
-        <h2>{title}</h2>
+        <h2>{headline}</h2>
         <p>{detail}</p>
       </div>
       <EvidenceBadge
