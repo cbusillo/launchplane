@@ -720,6 +720,21 @@ child head evidence for the next mutation up the stack. Launchplane admits the
 root PR only after the live root head matches the stored final root mutation
 SHA and the root passes required checks from the protected base branch.
 
+#### Historical Landing Annotations
+
+After a current-policy root landing, the controller can restore Launchplane's
+landing comment and configured disposition label for already-closed carried
+children absent from current discovery. Historical collapse records supply
+observation evidence only; they never authorize admission under a new policy.
+
+Recovery requires matching repository, base branch and policy key, the historical
+initial root contained in the landed root head, and the child's exact unchanged
+head contained in both the landed root head and actual landing commit. A child
+already contained in the pre-merge base is excluded. Open or moved children are
+left alone. Comment and label writes are checkpointed and idempotent, so an
+interrupted annotation resumes without duplicates. Recovery does not merge a
+branch, close a child, or rewrite historical admission or collapse proof.
+
 ### Blocker Isolation
 
 When the combined candidate fails checks, Launchplane must not assume all queued
@@ -1233,9 +1248,8 @@ Controller actions have these retry/stop semantics:
   normally. Missing compare evidence refuses execution. The new collapse has its
   own current-policy admission and child-head expectations, and landing reconciles
   children still open in that fresh plan; retired proof never supplies admission
-  under the new policy. GitHub may already mark a carried child merged indirectly
-  and remove it from discovery. Current-policy root landing still proceeds, but
-  this path does not recover Launchplane's comment and label for that absent child.
+  under the new policy. See [Historical Landing Annotations](#historical-landing-annotations)
+  for post-landing observation of carried children absent from discovery.
   Requalifying carried proof under a different policy is not supported.
   A completed stack never revives its older planned progress.
 - `wait_for_root_checks`: The collapsed root PR's required checks are still
@@ -1631,5 +1645,5 @@ partial execution at an unchanged root stays visible and excluded from fresh
 replanning. Changed-root and uncheckpointed effects can be recovered through
 fresh current-policy controller discovery: current Git ancestry prevents another merge of
 an already-contained child, and the fresh collapse owns disposition of its
-remaining open children. A carried child GitHub already merged indirectly stays
-closed; this recovery does not restore its Launchplane landing annotations.
+remaining open children. Post-landing observation of already-closed carried
+children follows [Historical Landing Annotations](#historical-landing-annotations).
