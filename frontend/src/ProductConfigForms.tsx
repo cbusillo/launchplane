@@ -72,6 +72,7 @@ export function RuntimeSettingsChangePanel({
   const [applyResult, setApplyResult] = useState<ProductConfigApplyResponse | null>(null);
   const [plannedDraftKey, setPlannedDraftKey] = useState("");
   const [confirmed, setConfirmed] = useState(false);
+  const [reenterOriginalApply, setReenterOriginalApply] = useState(false);
   const planOperation = useProductConfigOperation(
     `${config.product}:${config.environment}:runtime-settings:plan`,
     config.product,
@@ -105,7 +106,7 @@ export function RuntimeSettingsChangePanel({
     setConfirmed(false);
   }
   const operationBusy = isOperationBusy(planOperation.state) || isOperationBusy(applyOperation.state);
-  const draftLocked = productConfigDraftLocked(planOperation.state, applyOperation.state);
+  const draftLocked = productConfigDraftLocked(planOperation.state, applyOperation.state, reenterOriginalApply);
 
   async function planChanges() {
     setLocalError("");
@@ -144,7 +145,7 @@ export function RuntimeSettingsChangePanel({
 
   async function applyChanges() {
     setLocalError("");
-    if (!planMatchesDraft || !draftChange) {
+    if ((!planMatchesDraft && !(reenterOriginalApply && applyOperation.state.requiresIdempotencyContinuity)) || !draftChange) {
       setLocalError("Runtime settings changed after the dry-run. Run a new dry-run first.");
       return;
     }
@@ -196,6 +197,13 @@ export function RuntimeSettingsChangePanel({
       title="Plan runtime setting changes"
     >
       <AvailabilityBlockers availability={availability} />
+      {applyOperation.state.requiresIdempotencyContinuity ? (
+        <OriginalConfigApplyRecovery active={reenterOriginalApply}
+          disabled={operationBusy || !availability.apply.enabled} confirmed={confirmed}
+          onConfirmed={setConfirmed}
+          onReenter={() => { setReenterOriginalApply(true); setConfirmed(false); }}
+          onRetry={() => void applyChanges()} />
+      ) : null}
       <fieldset disabled={!availability.plan.enabled || draftLocked}>
         <legend className="sr-only">Runtime settings to change</legend>
         <div className="product-config-fields">
@@ -257,7 +265,7 @@ export function RuntimeSettingsChangePanel({
       <div className="product-config-actions">
         <button
           className="button"
-          disabled={!availability.plan.enabled || draftLocked || draftEmpty}
+          disabled={!availability.plan.enabled || draftLocked || draftEmpty || applyOperation.state.requiresIdempotencyContinuity}
           onClick={() => void planChanges()}
           type="button"
         >
@@ -309,6 +317,7 @@ export function ManagedSecretsChangePanel({
   const [applyResult, setApplyResult] = useState<ProductConfigApplyResponse | null>(null);
   const [plannedSelectionKey, setPlannedSelectionKey] = useState("");
   const [confirmed, setConfirmed] = useState(false);
+  const [reenterOriginalApply, setReenterOriginalApply] = useState(false);
   const secretInputs = useRef(new Map<string, HTMLInputElement>());
   const [ownerFields, setOwnerFields] = useState<OwnerSecretInputField[]>([]);
   const [ownerSources, setOwnerSources] = useState(new Map<string, string>());
@@ -351,7 +360,7 @@ export function ManagedSecretsChangePanel({
   const selectionKey = productConfigSelectionKey(selectedIdentities.map(identity => `${identity}:${ownerSources.get(identity) || ""}`));
   const planMatchesSelection = Boolean(planResult && selectionKey === plannedSelectionKey);
   const operationBusy = isOperationBusy(planOperation.state) || isOperationBusy(applyOperation.state);
-  const draftLocked = productConfigDraftLocked(planOperation.state, applyOperation.state);
+  const draftLocked = productConfigDraftLocked(planOperation.state, applyOperation.state, reenterOriginalApply);
 
   useEffect(
     () => () => {
@@ -401,7 +410,7 @@ export function ManagedSecretsChangePanel({
 
   async function applyChanges() {
     setLocalError("");
-    if (!planMatchesSelection) {
+    if (!planMatchesSelection && !(reenterOriginalApply && applyOperation.state.requiresIdempotencyContinuity)) {
       setLocalError("Secret bindings changed after the dry-run. Run a new dry-run first.");
       return;
     }
@@ -460,6 +469,13 @@ export function ManagedSecretsChangePanel({
       title="Plan managed-secret changes"
     >
       <AvailabilityBlockers availability={availability} />
+      {applyOperation.state.requiresIdempotencyContinuity ? (
+        <OriginalConfigApplyRecovery active={reenterOriginalApply}
+          disabled={operationBusy || !availability.apply.enabled} confirmed={confirmed}
+          onConfirmed={setConfirmed}
+          onReenter={() => { setReenterOriginalApply(true); setConfirmed(false); }}
+          onRetry={() => void applyChanges()} />
+      ) : null}
       {ownerLoadError ? <p role="alert">{ownerLoadError}</p> : null}
       {ownerFields.length || ownerLoadError ? <button className="button" type="button" disabled={draftLocked} onClick={() => {
         setOwnerSources(new Map());
@@ -548,7 +564,7 @@ export function ManagedSecretsChangePanel({
         <button
           className="button"
           disabled={
-            !availability.plan.enabled || draftLocked || !selectedIdentities.length
+            !availability.plan.enabled || draftLocked || !selectedIdentities.length || applyOperation.state.requiresIdempotencyContinuity
           }
           onClick={() => void planChanges()}
           type="button"
@@ -830,6 +846,37 @@ function AvailabilityBlockers({
         </ul>
       </div>
     </div>
+  );
+}
+
+function OriginalConfigApplyRecovery({
+  active, disabled, confirmed, onConfirmed, onReenter, onRetry,
+}: {
+  active: boolean;
+  disabled: boolean;
+  confirmed: boolean;
+  onConfirmed: (confirmed: boolean) => void;
+  onReenter: () => void;
+  onRetry: () => void;
+}) {
+  return (
+    <section className="product-config-confirmation" aria-label="Original Apply recovery">
+      <h3>Recover the original Apply</h3>
+      <p>The previous Apply may have completed. Re-enter its exact settings or secret
+        values, selections, and reason. A different request cannot be sent, and a new
+        dry-run stays unavailable until the original Apply is resolved.</p>
+      {!active ? <button className="button" disabled={disabled} onClick={onReenter} type="button">
+        Re-enter original Apply
+      </button> : <>
+        <label className="confirmation-check">
+          <input type="checkbox" checked={confirmed} disabled={disabled}
+            onChange={event => onConfirmed(event.target.checked)} />
+          I re-entered the original request and want to retry that Apply.
+        </label>
+        <button className="button button-primary" disabled={disabled || !confirmed}
+          onClick={onRetry} type="button">Retry original Apply</button>
+      </>}
+    </section>
   );
 }
 

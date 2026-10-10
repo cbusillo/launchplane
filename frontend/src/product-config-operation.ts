@@ -99,11 +99,12 @@ export function productConfigRuntimeChangeKey(change: RuntimeSettingsChange): st
 export function productConfigDraftLocked(
   planState: BrowserOperationState,
   applyState: BrowserOperationState,
+  reenterOriginalApply = false,
 ): boolean {
   return (
     [planState.phase, applyState.phase].some((phase) =>
       ["queued", "submitting"].includes(phase),
-    ) || applyState.requiresIdempotencyContinuity
+    ) || (applyState.requiresIdempotencyContinuity && !reenterOriginalApply)
   );
 }
 

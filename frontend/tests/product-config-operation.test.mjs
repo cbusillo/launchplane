@@ -179,6 +179,8 @@ test("uncertain apply continuity locks every editable draft field", () => {
   };
 
   assert.equal(productConfigDraftLocked(idle, uncertain), true);
+  assert.equal(productConfigDraftLocked(idle, uncertain, true), false);
+  assert.equal(productConfigDraftLocked(idle, { ...uncertain, phase: "submitting" }, true), true);
   assert.equal(productConfigDraftLocked(idle, idle), false);
 });
 

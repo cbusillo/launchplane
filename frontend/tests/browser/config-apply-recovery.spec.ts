@@ -52,20 +52,33 @@ for (const form of ["runtime-settings", "managed-secrets"] as const) {
     if (form === "managed-secrets") await valueInput.fill("inert-secret");
     await page.getByRole("button", { name: "Run dry-run" }).click();
     await expect.poll(() => plans.length).toBe(2);
-    if (form === "runtime-settings") {
-      const confirmation = page.getByRole("region", { name: "Apply confirmation" });
-      await confirmation.getByRole("checkbox").check();
-      await confirmation.getByRole("button", { name: "Apply reviewed change" }).click();
-      await expect(page.getByText("Apply uncertain", { exact: true })).toBeVisible();
-      await expect(page.getByLabel("Change reason")).toBeDisabled();
-      await expect(page.getByRole("button", { name: "Start over" })).toHaveCount(0);
-      await page.screenshot({ path: testInfo.outputPath("runtime-apply-uncertain.png") });
-      await confirmation.getByRole("button", { name: "Retry same apply" }).click();
-      await expect.poll(() => applies.length).toBe(2);
-      expect(applies[1]).toEqual(applies[0]);
-      await expect(page.getByLabel("Change reason")).toBeEnabled();
-    }
-    if (form === "managed-secrets") await page.getByRole("button", { name: "Start over" }).click();
+    if (form === "managed-secrets") await valueInput.fill("inert-secret");
+    const confirmation = page.getByRole("region", { name: "Apply confirmation" });
+    await confirmation.getByRole("checkbox").check();
+    await confirmation.getByRole("button", { name: "Apply reviewed change" }).click();
+    await expect(page.getByText("Apply uncertain", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Change reason")).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Start over" })).toHaveCount(0);
+    expect(await page.evaluate(() => JSON.stringify(sessionStorage))).not.toContain("inert-secret");
+    await page.reload();
+    await page.getByRole("button", { name: "Re-enter original Apply" }).click();
+    await field.getByRole("checkbox").check();
+    await page.getByLabel("Change reason").fill("Edited review");
+    await valueInput.fill(form === "runtime-settings" ? "https://different.invalid" : "different-secret");
+    const recovery = page.getByRole("region", { name: "Original Apply recovery" });
+    await recovery.getByRole("checkbox").check();
+    await recovery.getByRole("button", { name: "Retry original Apply" }).click();
+    await expect(page.getByText(/Cannot create a new browser operation while the previous result is uncertain/)).toBeVisible();
+    expect(applies).toHaveLength(1);
+    if (form === "managed-secrets") await expect(valueInput).toHaveValue("");
+    await valueInput.fill(form === "runtime-settings" ? "https://example.invalid" : "inert-secret");
+    await recovery.getByRole("checkbox").check();
+    await expect(page.getByRole("button", { name: "Run dry-run" })).toBeDisabled();
+    await page.screenshot({ path: testInfo.outputPath(`${form}-original-reentry.png`) });
+    await recovery.getByRole("button", { name: "Retry original Apply" }).click();
+    await expect.poll(() => applies.length).toBe(2);
+    expect(applies[1]).toEqual(applies[0]);
+    await expect(page.getByLabel("Change reason")).toBeEnabled();
     await expect(page.getByLabel("Change reason")).toHaveValue("");
     expect(await page.evaluate(() => Object.keys(sessionStorage)
       .filter(key => key.includes("browser-operation")).length)).toBe(0);
