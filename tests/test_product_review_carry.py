@@ -63,6 +63,12 @@ class _GitHub:
             for head in (_ACCEPTED_HEAD, _REFRESHED_HEAD, _OTHER_MERGE_HEAD, _SECOND_REFRESH_HEAD)
         }
         self.tree_truncated = False
+        self.tree_reads: list[str] = []
+        self.merge_bases = {
+            head: _BASE_COMMIT
+            for head in (_ACCEPTED_HEAD, _REFRESHED_HEAD, _OTHER_MERGE_HEAD, _SECOND_REFRESH_HEAD)
+        }
+        self.base_changes: dict[tuple[str, str], list[dict[str, object]]] = {}
         # Commits on the base branch, and each head's change against a base commit.
         self.on_base = {_BASE_COMMIT, _NEWER_BASE_COMMIT}
         self.changes: dict[tuple[str, str], list[dict[str, object]]] = {
@@ -84,6 +90,7 @@ class _GitHub:
         if path == f"{repository_path}/branches/{quote(self.base_branch, safe='')}":
             return {"commit": {"sha": self.base_sha}} if self.base_sha in self.on_base else {}
         if path.startswith(f"{repository_path}/git/trees/"):
+            self.tree_reads.append(path)
             head = path.rsplit("/", 1)[1].split("?")[0]
             return {
                 "truncated": self.tree_truncated,
@@ -122,7 +129,13 @@ class _GitHub:
             base, head = path.rsplit("/", 1)[1].split("...")
             if head == self.base_branch:
                 return {"status": "ahead" if base in self.on_base else "diverged"}
-            return {"status": "diverged", "files": self.changes[(base, head)]}
+            if head in self.on_base:
+                return {"status": "ahead", "files": self.base_changes.get((base, head), [])}
+            return {
+                "status": "diverged",
+                "merge_base_commit": {"sha": self.merge_bases[head]},
+                "files": self.changes[(base, head)],
+            }
         raise AssertionError(f"Unexpected GitHub request: {method} {path}")
 
     def _record_check(self, run: dict[str, object]) -> None:
@@ -298,11 +311,11 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
 
     def test_nontrain_update_moving_the_change_to_another_function_needs_acceptance(self) -> None:
         accepted_patch = (
-            "@@ -10,3 +10,4 @@ def delete_user():\n request = parse_request()\n"
+            "@@ -10,2 +10,3 @@ def delete_user():\n request = parse_request()\n"
             "+ require_admin(request)\n remove_user(request)"
         )
         moved_patch = (
-            "@@ -40,3 +40,4 @@ def list_users():\n request = parse_request()\n"
+            "@@ -40,2 +40,3 @@ def list_users():\n request = parse_request()\n"
             "+ require_admin(request)\n return users"
         )
         self.github.changes[(_BASE_COMMIT, _ACCEPTED_HEAD)] = _change(patch=accepted_patch)
@@ -311,10 +324,60 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assert_waits_for_the_client(self._publish())
 
     def test_nontrain_update_can_shift_hunk_positions_without_changing_context(self) -> None:
-        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change(
+        self.github.base_sha = _NEWER_BASE_COMMIT
+        self.github.merge_bases[_REFRESHED_HEAD] = _NEWER_BASE_COMMIT
+        self.github.changes[(_NEWER_BASE_COMMIT, _ACCEPTED_HEAD)] = _change()
+        self.github.changes[(_NEWER_BASE_COMMIT, _REFRESHED_HEAD)] = _change(
             patch=_PATCH.replace("@@ -1 +1 @@", "@@ -120 +120 @@"), blob="b" * 40
         )
+        self.github.base_changes[(_BASE_COMMIT, _NEWER_BASE_COMMIT)] = _change(
+            patch="@@ -0,0 +1,119 @@\n" + "\n".join(["+Unrelated base line"] * 119)
+        )
 
+        self.assertEqual(self._publish()["state"], "success")
+
+    def test_relocated_identical_hunk_without_a_base_line_shift_needs_acceptance(self) -> None:
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change(
+            patch=_PATCH.replace("@@ -1 +1 @@", "@@ -20 +20 @@")
+        )
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_missing_or_partial_position_evidence_needs_acceptance(self) -> None:
+        self.github.merge_bases[_REFRESHED_HEAD] = ""
+        self.assert_waits_for_the_client(self._publish())
+        self.github.merge_bases[_REFRESHED_HEAD] = _BASE_COMMIT
+        self.github.changes[(_BASE_COMMIT, _ACCEPTED_HEAD)] = _change(
+            patch="@@ -1 +1 @@\n-Old headline"
+        )
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = self.github.changes[
+            (_BASE_COMMIT, _ACCEPTED_HEAD)
+        ]
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_changed_text_does_not_fetch_head_trees(self) -> None:
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change(patch=_PATCH + "\n+Extra")
+        self.assert_waits_for_the_client(self._publish())
+        self.assertEqual(self.github.tree_reads, [])
+
+    def test_overlapping_base_edits_do_not_supply_a_position_proof(self) -> None:
+        self.github.base_sha = _NEWER_BASE_COMMIT
+        self.github.merge_bases[_REFRESHED_HEAD] = _NEWER_BASE_COMMIT
+        self.github.changes[(_NEWER_BASE_COMMIT, _ACCEPTED_HEAD)] = _change()
+        self.github.changes[(_NEWER_BASE_COMMIT, _REFRESHED_HEAD)] = _change()
+        self.github.base_changes[(_BASE_COMMIT, _NEWER_BASE_COMMIT)] = _change()
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_nearby_base_edit_context_does_not_count_as_an_overlapping_edit(self) -> None:
+        self.github.base_sha = _NEWER_BASE_COMMIT
+        self.github.merge_bases[_REFRESHED_HEAD] = _NEWER_BASE_COMMIT
+        feature = _change(
+            patch="@@ -5,3 +5,3 @@\n Context A\n-Old headline\n+New headline\n Context B"
+        )
+        self.github.changes[(_NEWER_BASE_COMMIT, _ACCEPTED_HEAD)] = feature
+        self.github.changes[(_NEWER_BASE_COMMIT, _REFRESHED_HEAD)] = feature
+        self.github.base_changes[(_BASE_COMMIT, _NEWER_BASE_COMMIT)] = _change(
+            patch="@@ -7,4 +7,4 @@\n Context B\n Unchanged\n-Other old\n+Other new\n Footer"
+        )
         self.assertEqual(self._publish()["state"], "success")
 
     def test_file_mode_changes_and_incomplete_mode_evidence_do_not_carry(self) -> None:
@@ -324,6 +387,15 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 self.assert_waits_for_the_client(self._publish())
         self.github.file_modes[_REFRESHED_HEAD]["website/views/home.xml"] = "100644"
         self.github.tree_truncated = True
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_changed_filename_whitespace_is_a_different_feature_patch(self) -> None:
+        original = "website/views/home.xml"
+        moved = " " + original
+        added = {**_change()[0], "status": "added", "patch": "@@ -0,0 +1 @@\n+New headline"}
+        self.github.changes[(_BASE_COMMIT, _ACCEPTED_HEAD)] = [added]
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = [{**added, "filename": moved}]
+        self.github.file_modes[_REFRESHED_HEAD] = {moved: "100644"}
         self.assert_waits_for_the_client(self._publish())
 
     def test_a_rebase_after_a_train_refresh_uses_the_strict_nontrain_proof(self) -> None:

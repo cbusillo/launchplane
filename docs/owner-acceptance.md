@@ -78,6 +78,10 @@ when all of these hold:
   does not carry.
 - The newest decision is that acceptance, made by the product's current Client,
   with its feedback delivered.
+- Outside the train, hunk positions must move only by the base's own line shifts.
+  Both merge bases and their complete comparison must be readable. Overlapping
+  base edits or relocating a hunk to an identical-looking XML block needs a new
+  Accept. Tree modes are read only after the text and position proofs match.
 
 Changed feature patches, including conflict resolutions that change added or
 removed lines, require a new Accept. Missing base evidence or incomplete

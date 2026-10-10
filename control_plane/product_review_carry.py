@@ -9,8 +9,9 @@ protects nothing. The acceptance carries to the new head only when all hold:
    including rebases, use a pinned commit read from that same base branch.
 2. The pull request's change against its base is the same at both heads: every
    changed file has the same name, status, and added and removed lines, in order.
-   Hunk positions are ignored. Outside the train, context and section names must
-   also match; recorded train refreshes can incorporate base context edits.
+   Outside the train, context, section names and file modes must also match, and
+   each hunk's position must follow the base's own line shifts. Recorded train
+   refreshes can incorporate base context edits.
 3. The carry is saved as its own decision record naming the decision and head it
    came from and the comparison base, so it reads as carried, not re-decided.
 
@@ -41,6 +42,7 @@ from control_plane.merge_train_branch_refresh import (
 )
 from control_plane.product_review import ProductReviewStore
 from control_plane.source_control_change import change_fingerprint as _change_fingerprint
+from control_plane.source_control_change import patch_positions_match_base_update
 
 # A busy train may refresh a pull request more than once before anyone looks.
 MAX_REFRESHES: Final = 10
@@ -105,27 +107,62 @@ def carry_owner_acceptance(
         if re.fullmatch(r"[0-9a-f]{40}", base_commit) is None:
             return None
         reason = "unchanged_patch_base_update"
+    responses: dict[str, object] = {}
+
+    def comparison_read(path: str) -> object:
+        # These comparisons and trees are bound to immutable commits. Reuse the
+        # comparisons; trees are needed only after text and positions match.
+        if path not in responses:
+            responses[path] = read(path)
+        return responses[path]
+
     accepted_change = _change_fingerprint(
         repository=profile.repository,
         base=base_commit,
         head=accepted.head_sha,
-        read=read,
+        read=comparison_read,
         include_blobs=False,
         changed_lines_only=reason == "merge_train_base_refresh",
         ignore_hunk_positions=reason == "unchanged_patch_base_update",
-        include_file_modes=reason == "unchanged_patch_base_update",
     )
     if not accepted_change or accepted_change != _change_fingerprint(
         repository=profile.repository,
         base=base_commit,
         head=head,
-        read=read,
+        read=comparison_read,
         include_blobs=False,
         changed_lines_only=reason == "merge_train_base_refresh",
         ignore_hunk_positions=reason == "unchanged_patch_base_update",
-        include_file_modes=reason == "unchanged_patch_base_update",
     ):
         return None
+    if reason == "unchanged_patch_base_update":
+        if not patch_positions_match_base_update(
+            repository=profile.repository,
+            base=base_commit,
+            accepted_head=accepted.head_sha,
+            head=head,
+            read=comparison_read,
+        ):
+            return None
+        accepted_modes = _change_fingerprint(
+            repository=profile.repository,
+            base=base_commit,
+            head=accepted.head_sha,
+            read=comparison_read,
+            include_blobs=False,
+            ignore_hunk_positions=True,
+            include_file_modes=True,
+        )
+        if accepted_modes is None or accepted_modes != _change_fingerprint(
+            repository=profile.repository,
+            base=base_commit,
+            head=head,
+            read=comparison_read,
+            include_blobs=False,
+            ignore_hunk_positions=True,
+            include_file_modes=True,
+        ):
+            return None
     with store.product_review_lock(
         repository=profile.repository, pull_request_number=pull_request_number
     ):
