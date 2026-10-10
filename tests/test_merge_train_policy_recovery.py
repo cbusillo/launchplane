@@ -98,6 +98,7 @@ class _StackRecoveryTransport(_RecoveryTransport):
         self.child_contained = True
         self.child_merge_contained = True
         self.interrupt_after_close = False
+        self.move_after_child_head_read = False
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         for number, child in self.children.items():
@@ -107,6 +108,11 @@ class _StackRecoveryTransport(_RecoveryTransport):
                         raise self.child_error
                     if self.child_read_failure:
                         raise MergeTrainGitHubError("Child not found", status_code=404)
+                    if number == 3 and self.move_after_child_head_read:
+                        self.move_after_child_head_read = False
+                        observed = dict(child)
+                        child["head"] = {"sha": "9" * 40}
+                        return observed
                     return child
                 if method == "PATCH" and body == {"state": "closed"}:
                     self.effects.append((method, path))
@@ -568,6 +574,26 @@ class MergeTrainPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.store.list_merge_train_controller_state_records()[0].status, "reconcile_required"
         )
+
+    def test_head_move_after_preflight_keeps_fence_and_recovers_without_child_effects(self) -> None:
+        transport = self._record_unfinished_stack()
+        transport.move_after_child_head_read = True
+        with self.assertRaises(MergeTrainGitHubError) as failure:
+            self._run()
+        self.assertEqual(failure.exception.status_code, 409)
+        self.assertEqual(
+            self.store.list_merge_train_controller_state_records()[0].status, "reconcile_required"
+        )
+        effects = list(transport.effects)
+        result = self._run().accepted_result
+        stack_plan = result["stack_collapse_plan"]
+        assert isinstance(stack_plan, dict)
+        self.assertEqual(stack_plan["child_dispositions"][1]["status"], "preserved")
+        self.assertEqual(transport.effects, effects)
+        self.assertEqual(transport.children[3]["state"], "open")
+        self.assertEqual(transport.children[3]["labels"], [])
+        self.assertEqual(transport.comments[3], [])
+        self.assertEqual(self.store.list_merge_train_controller_state_records()[0].status, "idle")
 
     def test_old_policy_stack_requires_current_disposition_policy(self) -> None:
         transport = self._record_unfinished_stack()

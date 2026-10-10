@@ -39,8 +39,10 @@ on a reopened child. If an unfinished child's head has moved, verified containme
 of its recorded head resolves only that historical disposition as `preserved`,
 with `preserved_head_sha` recording the observed newer head. The controller
 checkpoints this preservation before any remaining child effects. It never
-comments on, labels, closes, retargets or merges the changed PR; its new work
-continues through ordinary queue discovery. Landing and admission records and
+comments on, labels, closes, retargets or merges the changed PR. Earlier landing
+annotations may remain as history; this recovery does not remove them. New work
+remains subject to ordinary queue discovery and readiness, including its current
+base branch; preservation does not retarget it. Landing and admission records and
 the original collapse progress remain unchanged. Transient provider failures retain the controller's
 retry classification and rate-limit reset evidence.
 
