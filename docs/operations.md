@@ -2993,6 +2993,10 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
 
 ## Odoo Admin Release Panel
 
+For restarting one service on its current artifact, use
+[the service restart action](lane-service-restart.md). It holds the same lane
+reservation as releases and verifies the current runtime before and after.
+
 On an Odoo product's prod environment page, the signed-in admin
 releases from the Release panel instead of a site workflow. Only the person the
 active policy names as administrator (by immutable GitHub id) can queue or cancel

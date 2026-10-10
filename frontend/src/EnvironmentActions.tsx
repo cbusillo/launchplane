@@ -18,6 +18,7 @@ import {
 import type { BrowserActionKind } from "./browser-operation";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { OdooReleasePanel } from "./OdooReleasePanel";
+import { ServiceRestartPanel } from "./ServiceRestartPanel";
 import { ProductPromotionFlow } from "./ProductPromotionFlow";
 import { EvidenceBadge, MissingEvidenceState, humanize } from "./ProductOps";
 import { EnvironmentReadinessPanel } from "./EnvironmentReadiness";
@@ -61,6 +62,10 @@ export function EnvironmentActionsView({
 
   return (
     <section className="environment-actions-view">
+      {detail.available_actions.some(action => action.action_id === "service_restart" && action.enabled) ? <ServiceRestartPanel
+        key={`restart:${detail.product}:${detail.context}:${detail.environment}`}
+        detail={detail} fixtureMode={!!fixtureMode} onRefresh={onRefresh}
+      /> : null}
       {detail.environment === "prod" && detail.driver_extensions.odoo ? (
         <OdooReleasePanel
           detail={detail}

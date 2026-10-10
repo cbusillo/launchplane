@@ -32,6 +32,18 @@ interface BrowserActionAdapter {
 
 const BROWSER_ACTION_ADAPTERS: BrowserActionAdapter[] = [
   {
+    actionId: "service_restart",
+    blocker: "The current service identity must be inspected before restarting.",
+    browserRoutePath: BROWSER_WRITE_ROUTES.laneServiceRestart,
+    diagnosticRoutePath: BROWSER_WRITE_ROUTES.laneServiceRestart,
+    driverId: "odoo",
+    kind: "apply",
+    method: "POST",
+    safety: "mutation",
+    scope: "instance",
+    support: "implemented",
+  },
+  {
     actionId: "prod_promotion",
     blocker: "The product-owned promotion dry-run is unavailable.",
     browserRoutePath: BROWSER_WRITE_ROUTES.productPromotionDryRun,

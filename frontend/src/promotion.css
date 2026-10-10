@@ -258,6 +258,7 @@
 }
 
 .promotion-field textarea,
+.promotion-field input,
 .promotion-field select {
   width: 100%;
   border: 1px solid var(--border);
@@ -279,13 +280,24 @@
   padding: 0 11px;
 }
 
+.promotion-field input {
+  min-height: 42px;
+  padding: 0 11px;
+}
+
+.service-restart-identity {
+  overflow-wrap: anywhere;
+}
+
 .promotion-field textarea:focus,
+.promotion-field input:focus,
 .promotion-field select:focus {
   border-color: var(--focus);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 18%, transparent);
 }
 
 .promotion-field textarea:disabled,
+.promotion-field input:disabled,
 .promotion-field select:disabled {
   cursor: not-allowed;
   opacity: 0.58;
