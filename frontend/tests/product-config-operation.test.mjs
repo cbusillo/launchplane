@@ -25,6 +25,7 @@ import {
 test("managed-secret values are consumed and cleared before request state is retained", async () => {
   const smtpIdentity = productConfigManagedSecretIdentity("runtime_environment", "SMTP_PASSWORD");
   const analyticsIdentity = productConfigManagedSecretIdentity("analytics", "ANALYTICS_TOKEN");
+  /** @type {Map<string, { value: string }>} */
   const inputs = new Map([
     [smtpIdentity, { value: "smtp-secret-value" }],
     [analyticsIdentity, { value: "analytics-secret-value" }],
@@ -62,6 +63,7 @@ test("managed-secret values are consumed and cleared before request state is ret
 test("managed-secret validation errors clear every plaintext input", () => {
   const smtpIdentity = productConfigManagedSecretIdentity("runtime_environment", "SMTP_PASSWORD");
   const analyticsIdentity = productConfigManagedSecretIdentity("analytics", "ANALYTICS_TOKEN");
+  /** @type {Map<string, { value: string }>} */
   const inputs = new Map([
     [smtpIdentity, { value: "smtp-secret-value" }],
     [analyticsIdentity, { value: "" }],
@@ -107,6 +109,7 @@ test("selecting an Owner submission sends its version and discards any typed val
 });
 
 test("route cleanup clears every managed-secret input", () => {
+  /** @type {Map<string, { value: string }>} */
   const inputs = new Map([
     ["SMTP_PASSWORD", { value: "smtp-secret-value" }],
     ["ANALYTICS_TOKEN", { value: "analytics-secret-value" }],

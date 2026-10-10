@@ -374,9 +374,7 @@ export function ManagedSecretsChangePanel({
   const draftLocked = productConfigDraftLocked(planOperation.state, applyOperation.state, reenterOriginalApply);
 
   useEffect(
-    () => () => {
-      clearManagedSecretInputs(secretInputs.current);
-    },
+    () => () => clearManagedSecretInputs(secretInputs.current),
     [],
   );
 
