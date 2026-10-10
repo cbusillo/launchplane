@@ -3119,7 +3119,15 @@ def _allow_reason(
     key_text = _semantic_full_key_text(key)
     if _is_codeowners_path(normalized):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
-    if normalized.startswith("docs/") or normalized in {"README.md", "AGENTS.md", "handoff.md"}:
+    if (
+        normalized.startswith("docs/")
+        or normalized in {"README.md", "AGENTS.md", "handoff.md"}
+        or re.fullmatch(
+            r"(?:\.github/)?pull_request_template(?:\.md|/[^/]+\.md)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    ):
         return ALLOW_REASON_DOCS_EXAMPLE
     if normalized.startswith("tests/") or "/test" in normalized:
         return ALLOW_REASON_TEST_FIXTURE

@@ -406,6 +406,37 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertIn("product_owned_addon", reasons)
         self.assertNotIn("", reasons)
 
+    def test_pr_template_documentation_links_pass_without_allowing_runtime_files(self) -> None:
+        cases = (
+            (".github/pull_request_template.md", "pass"),
+            ("PULL_REQUEST_TEMPLATE.md", "pass"),
+            (".github/PULL_REQUEST_TEMPLATE/release.md", "pass"),
+            ("PULL_REQUEST_TEMPLATE/bug.md", "pass"),
+            (".github/workflows/pull_request_template.yml", "fail"),
+            (".github/PULL_REQUEST_TEMPLATE/runtime.env", "fail"),
+            ("config/pull_request_template.md", "fail"),
+        )
+        for path, expected_status in cases:
+            with self.subTest(path=path), TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                _init_repo(root)
+                source = root / path
+                source.parent.mkdir(parents=True, exist_ok=True)
+                content = (
+                    "<!-- Release checklist instructions: "
+                    "https://github.com/example/control-plane/blob/main/docs/release-review.md -->\n"
+                )
+                if source.suffix == ".yml":
+                    content = "env:\n  PRODUCT_DOMAIN: https://runtime.example.test\n"
+                elif source.suffix == ".env":
+                    content = "PRODUCT_DOMAIN=https://runtime.example.test\n"
+                source.write_text(content, encoding="utf-8")
+                _commit_all(root)
+                payload = build_config_authority_audit(control_plane_root=root)
+                gate = evaluate_config_authority_gate(payload, profile="product-repo")
+                self.assertTrue(_findings(payload), payload)
+                self.assertEqual(gate["status"], expected_status, gate)
+
     def test_import_material_is_not_allowed_runtime_authority(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
