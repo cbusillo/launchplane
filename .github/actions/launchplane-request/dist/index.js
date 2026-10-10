@@ -522,7 +522,10 @@ async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options)
       });
       ({ responseBody, responseText } = await readJsonResponse(response));
     } catch (error) {
-      if (!options.pollUntilPath || !options.pollRetryOnRequestError) {
+      // A failed latest attempt may have dispatched. Clear an earlier pending
+      // response so callers cannot mistake stale progress for a pre-effect stop.
+      options.onPollResponse?.(null, "");
+      if (!pollPath || !options.pollRetryOnRequestError) {
         throw error;
       }
       lastPollValue = describeError(error);
@@ -540,6 +543,7 @@ async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options)
       await sleep(pollIntervalMs);
       continue;
     }
+    options.onPollResponse?.(responseBody, String(response.status));
     if (!response.ok && (!options.pollUntilPath || !options.pollRetryOnUnexpectedStatus)) {
       return { response, responseBody, responseText };
     }
@@ -689,7 +693,13 @@ async function main() {
   const { response, responseBody, responseText } = await requestLaunchplaneUntilComplete(
     requestUrl,
     () => requestInit(payload, idempotencyKey),
-    options,
+    {
+      ...options,
+      onPollResponse: (body, status) => {
+        writeResponseOutputFile(body);
+        setOutput("status-code", status);
+      },
+    },
   );
 
   setOutput("launchplane-url", requestUrl);

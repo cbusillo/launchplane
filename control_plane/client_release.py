@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict
 
 from control_plane.child_process_errors import redact_untrusted_text
 from control_plane.operation_status_read import safe_operation_error_code
+from control_plane.service_deploy_drain import ServiceDeployDraining
 
 from control_plane.contracts.deployment_record import DeploymentRecord, deployment_record_passed
 from control_plane.contracts.generic_web_rollback import (
@@ -547,6 +548,10 @@ def read_client_release_run(
     else:
         state = "waiting"
     blocked_reason = ""
+    from control_plane.service_deploy_drain import read_status
+
+    if state in {"waiting", "running"} and read_status(store).get("admission_paused"):
+        blocked_reason = "Launchplane is draining admitted release steps before replacement. Pending steps will resume on the replacement worker."
     if profile.driver_id == "odoo" and state == "waiting":
         try:
             pin_odoo_release_recovery_target(store, decision, _prod_context(profile))
@@ -804,6 +809,9 @@ def advance_client_releases(
                 "client release not advanced product=%s reason=%s", profile.product, reason
             )
             continue
+        except ServiceDeployDraining:
+            # Admission raced the self-deploy fence; the pending step is untouched.
+            continue
         except OdooStableLaneOperationConflictError:
             continue
         except Exception as error:
@@ -841,6 +849,10 @@ def _advance(
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
 ) -> str:
+    from control_plane.service_deploy_drain import read_status
+
+    if read_status(store).get("admission_paused"):
+        return ""
     context = _prod_context(profile)
     previous: object | None = None
     for step in client_release_steps(decision.release_start):
