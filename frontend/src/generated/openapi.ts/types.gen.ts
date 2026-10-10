@@ -110,6 +110,7 @@ export type ArtifactIdentityManifest = ({
     image: ArtifactImageReference;
     odoo_install_modules: Array<string>;
     openupgrade_inputs: ArtifactOpenUpgradeInputs;
+    release_compatibility?: ArtifactReleaseCompatibility | null;
     schema_version: 1 | 2;
     source_build: ArtifactSourceBuild | null;
     source_commit: string;
@@ -148,6 +149,14 @@ export type ArtifactPythonPackageSource = {
     commit: string;
     kind: 'registry' | 'vcs';
     repository: string;
+};
+
+export type ArtifactReleaseCompatibility = {
+    complete: boolean;
+    modules: Array<ReleaseModuleDeclaration>;
+    read_write_compatible: boolean;
+    schema_version: 1;
+    sources: Array<ReleaseSourceInventory>;
 };
 
 export type ArtifactSourceBuild = {
@@ -3911,6 +3920,7 @@ export type RecordFailure = {
 export type ReleaseChecklist = {
     additional_changes: Array<string>;
     candidate: ReleaseVersion;
+    database_compatibility?: ReleaseDatabaseCompatibility | null;
     items: Array<ReleaseReviewItem>;
     owner_github_id: string;
     product: string;
@@ -3919,6 +3929,47 @@ export type ReleaseChecklist = {
     shared_sources?: Array<SharedSourceReview>;
     testing_url: string;
     untracked_commits: Array<string>;
+};
+
+export type ReleaseDatabaseCompatibility = {
+    candidate_artifact_id: string;
+    candidate_image: string;
+    candidate_manifest_sha256: string;
+    changed_modules: Array<string>;
+    changes: Array<ReleaseInputChange>;
+    classification: 'compatible' | 'database_changing';
+    install_modules: Array<string>;
+    module_plan_complete: boolean;
+    preserve_noupdate: true;
+    production_artifact_id: string;
+    production_image: string;
+    production_manifest_sha256: string;
+    reasons: Array<string>;
+    retain_previous_assets: boolean;
+    update_modules: Array<string>;
+    warm_assets: boolean;
+};
+
+export type ReleaseInputChange = {
+    after_sha256: string;
+    before_sha256: string;
+    input_name: string;
+    kind: 'static' | 'code' | 'manifest_assets' | 'database_data' | 'model' | 'migration' | 'dependency' | 'docs_ci' | 'unknown';
+    module: string;
+    path: string;
+};
+
+export type ReleaseInputFile = {
+    kind: 'static' | 'code' | 'manifest_assets' | 'database_data' | 'model' | 'migration' | 'dependency' | 'docs_ci' | 'unknown';
+    manifest_database_sha256: string;
+    module: string;
+    path: string;
+    sha256: string;
+};
+
+export type ReleaseModuleDeclaration = {
+    depends: Array<string>;
+    name: string;
 };
 
 export type ReleaseReviewDecisionEnvelope = {
@@ -3976,6 +4027,13 @@ export type ReleaseReviewStatus = {
     latest_decision: ReleaseReviewDecisionRecord | null;
     required: boolean;
     unavailable_reason: 'testing_lane_missing' | 'source_control_access_unavailable' | 'production_identity_missing' | 'candidate_identity_missing' | 'release_record_missing' | 'github_read_failed' | null;
+};
+
+export type ReleaseSourceInventory = {
+    commit: string;
+    files: Array<ReleaseInputFile>;
+    input_name: string;
+    repository: string;
 };
 
 export type ReleaseTupleRecord = {
