@@ -323,11 +323,14 @@ def build_merge_train_dry_run_result(
     )
     eligible_entries = tuple(entry for entry in queue if entry.eligible)
     if batch_landing:
-        # An admitted, accepted feature must not wait behind another feature
-        # whose current head still needs review or engineering repair. Keep
-        # those heads visible in the queue, but out of this landing candidate.
+        # Accepted features start a batch; remaining planned heads keep its
+        # exclusions stable after earlier members land. Client heads needing
+        # review or repair stay visible, but outside this landing candidate.
         if any(
-            entry.owner_review_required
+            (
+                entry.owner_review_required
+                or (entry.number, entry.head_sha) in planned_dependency_heads
+            )
             and entry.required_checks_status == "pass"
             and entry.mergeable != "conflicting"
             for entry in eligible_entries

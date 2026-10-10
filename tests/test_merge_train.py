@@ -94,17 +94,24 @@ class MergeTrainDryRunTests(unittest.TestCase):
         remaining = _pull_request(2, created_at="2026-05-08T11:00:00Z").model_copy(
             update={"owner_review_required": True, "mergeable": "unknown"}
         )
-        result = build_merge_train_dry_run_result(
-            policy=build_test_merge_train_policy(),
-            snapshot=MergeTrainDryRunSnapshot(
-                repository="cbusillo/sellyouroutboard",
-                base_branch="main",
-                pull_requests=(waiting, remaining),
-            ),
-            batch_landing=True,
-            planned_dependency_heads=frozenset({(remaining.number, remaining.head_sha)}),
-        )
-        self.assertEqual(result.queue_order, (remaining.number,))
+        # After the last accepted feature lands in a rolling batch, a planned
+        # engineering member must retain the same exclusions too.
+        for client_feature in (True, False):
+            with self.subTest(client_feature=client_feature):
+                result = build_merge_train_dry_run_result(
+                    policy=build_test_merge_train_policy(),
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository="cbusillo/sellyouroutboard",
+                        base_branch="main",
+                        pull_requests=(
+                            waiting,
+                            remaining.model_copy(update={"owner_review_required": client_feature}),
+                        ),
+                    ),
+                    batch_landing=True,
+                    planned_dependency_heads=frozenset({(remaining.number, remaining.head_sha)}),
+                )
+                self.assertEqual(result.queue_order, (remaining.number,))
 
     def test_planned_accepted_head_retains_queue_position_during_unknown_mergeability(self) -> None:
         features = tuple(

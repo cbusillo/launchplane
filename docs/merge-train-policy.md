@@ -404,6 +404,8 @@ and base. Client features with pending, failed or unknown checks, or conflicts, 
 in the queue but outside that candidate; they do not delay accepted siblings.
 The existing CODEOWNERS individual-landing boundary still applies. Combined
 merge-commit candidates preserve member heads without a branch refresh between them.
+Admission keeps these exclusions for a ready remaining planned head, including
+an engineering member after the last feature in a rolling landing has merged.
 The release invitation expands the recorded landing's members as described in
 [release review](release-review.md).
 
