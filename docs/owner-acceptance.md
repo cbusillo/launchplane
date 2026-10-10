@@ -69,7 +69,9 @@ when all of these hold:
   comparing either head. Hunk positions are ignored. Outside a recorded train
   refresh, surrounding context, hunk boundaries and section names must also
   match: moving identical added lines into a different function needs a fresh
-  Accept. Train-recorded refreshes can incorporate base context changes without
+  Accept. Complete source-control tree evidence must also show the same file
+  modes, so changing an executable bit or symlink does not carry. Train-recorded
+  refreshes can incorporate base context changes without
   asking again. Any difference in a line the feature adds or removes prevents
   either kind of carry. A file without a patch
   (binary or too large) or a list of 300 files or more cannot be compared and

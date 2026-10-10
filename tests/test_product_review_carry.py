@@ -2,7 +2,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import patch as mock_patch
+from urllib.parse import quote
 
 from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
@@ -57,6 +58,11 @@ class _GitHub:
         self.head_sha = _REFRESHED_HEAD
         self.base_branch = "main"
         self.base_sha = _BASE_COMMIT
+        self.file_modes = {
+            head: {"website/views/home.xml": "100644"}
+            for head in (_ACCEPTED_HEAD, _REFRESHED_HEAD, _OTHER_MERGE_HEAD, _SECOND_REFRESH_HEAD)
+        }
+        self.tree_truncated = False
         # Commits on the base branch, and each head's change against a base commit.
         self.on_base = {_BASE_COMMIT, _NEWER_BASE_COMMIT}
         self.changes: dict[tuple[str, str], list[dict[str, object]]] = {
@@ -75,8 +81,17 @@ class _GitHub:
         body: dict[str, object] | None = None,
     ) -> object:
         repository_path = f"/repos/{_REPOSITORY}"
-        if path == f"{repository_path}/branches/{self.base_branch}":
+        if path == f"{repository_path}/branches/{quote(self.base_branch, safe='')}":
             return {"commit": {"sha": self.base_sha}} if self.base_sha in self.on_base else {}
+        if path.startswith(f"{repository_path}/git/trees/"):
+            head = path.rsplit("/", 1)[1].split("?")[0]
+            return {
+                "truncated": self.tree_truncated,
+                "tree": [
+                    {"path": filename, "mode": mode, "type": "blob"}
+                    for filename, mode in self.file_modes[head].items()
+                ],
+            }
         if path == f"{repository_path}/pulls/{_PULL_REQUEST}":
             return {
                 "head": {"sha": self.head_sha},
@@ -268,7 +283,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
             (_NEWER_BASE_COMMIT, _ACCEPTED_HEAD): _change(),
             (_NEWER_BASE_COMMIT, _SECOND_REFRESH_HEAD): _change(blob="b" * 40),
         }
-        with patch(
+        with mock_patch(
             "control_plane.product_review_carry.optional_merge_train_branch_refresh_read_store",
             return_value=None,
         ):
@@ -301,6 +316,32 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         )
 
         self.assertEqual(self._publish()["state"], "success")
+
+    def test_file_mode_changes_and_incomplete_mode_evidence_do_not_carry(self) -> None:
+        for mode in ("100755", "120000", ""):
+            with self.subTest(mode=mode):
+                self.github.file_modes[_REFRESHED_HEAD]["website/views/home.xml"] = mode
+                self.assert_waits_for_the_client(self._publish())
+        self.github.file_modes[_REFRESHED_HEAD]["website/views/home.xml"] = "100644"
+        self.github.tree_truncated = True
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_a_rebase_after_a_train_refresh_uses_the_strict_nontrain_proof(self) -> None:
+        self._train_refreshed()
+        self.github.head_sha = _OTHER_MERGE_HEAD
+        self.assertEqual(self._publish()["state"], "success")
+        carry = self._decisions()[0].carried_from
+        assert carry is not None
+        self.assertEqual(carry.reason, "unchanged_patch_base_update")
+        self.assertEqual(carry.refresh_record_ids, ())
+
+    def test_nontrain_carry_on_a_base_branch_containing_a_slash(self) -> None:
+        self.github.base_branch = "release/1.0"
+        self.store.write_product_review_decision_record(
+            self.accepted.model_copy(update={"base_branch": self.github.base_branch})
+        )
+        self.assertEqual(self._publish()["state"], "success")
+        self.assertEqual(self._decisions()[0].base_branch, self.github.base_branch)
 
     def test_base_moving_between_reads_does_not_change_the_comparison_base(self) -> None:
         comparisons: list[str] = []

@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 _COMPARE_FILE_LIMIT: Final = 300
 SourceControlRead = Callable[[str], object]
-ChangeFingerprint = tuple[tuple[str, str, str, str, str], ...]
+ChangeFingerprint = tuple[tuple[str, str, str, str, str, str], ...]
 
 
 def change_fingerprint(
@@ -19,6 +19,7 @@ def change_fingerprint(
     include_blobs: bool = True,
     changed_lines_only: bool = False,
     ignore_hunk_positions: bool = False,
+    include_file_modes: bool = False,
 ) -> ChangeFingerprint | None:
     """The pull request's change against `base`: from their merge base to `head`.
 
@@ -34,6 +35,8 @@ def change_fingerprint(
     equal. With ignore_hunk_positions=True, ignore only hunk line numbers; retain
     context, hunk boundaries and section names so relocating a change during a
     rebase cannot carry merely because its added and removed lines are the same.
+    With include_file_modes=True, require a complete head tree and compare each
+    feature file's mode too; an executable-bit or symlink change is a new patch.
     """
 
     comparison = _object(
@@ -42,10 +45,26 @@ def change_fingerprint(
     files = comparison.get("files")
     if not isinstance(files, list) or len(files) >= _COMPARE_FILE_LIMIT:
         return None
-    fingerprint: list[tuple[str, str, str, str, str]] = []
+    file_modes = (
+        _head_file_modes(repository=repository, head=head, read=read) if include_file_modes else {}
+    )
+    if file_modes is None:
+        return None
+    fingerprint: list[tuple[str, str, str, str, str, str]] = []
     for item in files:
         entry = _object(item)
         status = _text(entry.get("status"))
+        filename = _text(entry.get("filename"))
+        file_mode = ""
+        if include_file_modes:
+            if status == "removed":
+                if filename in file_modes:
+                    return None
+                file_mode = "removed"
+            else:
+                file_mode = file_modes.get(filename, "")
+                if file_mode not in {"100644", "100755", "120000"}:
+                    return None
         patch = entry.get("patch")
         pure_rename = status == "renamed" and entry.get("changes") == 0
         if not isinstance(patch, str) and not pure_rename:
@@ -58,14 +77,37 @@ def change_fingerprint(
             text = re.sub(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", "@@", text, flags=re.MULTILINE)
         fingerprint.append(
             (
-                _text(entry.get("filename")),
+                filename,
                 _text(entry.get("previous_filename")),
                 status,
                 blob,
                 text,
+                file_mode,
             )
         )
     return tuple(sorted(fingerprint))
+
+
+def _head_file_modes(
+    *, repository: str, head: str, read: SourceControlRead
+) -> dict[str, str] | None:
+    tree = _object(
+        read(
+            f"/repos/{_path(repository)}/git/trees/{quote(head.strip().lower(), safe='')}?recursive=1"
+        )
+    )
+    entries = tree.get("tree")
+    if tree.get("truncated") is not False or not isinstance(entries, list):
+        return None
+    modes: dict[str, str] = {}
+    for item in entries:
+        entry = _object(item)
+        if entry.get("type") == "blob":
+            path = _text(entry.get("path"))
+            if path in modes:
+                return None
+            modes[path] = _text(entry.get("mode"))
+    return modes
 
 
 def _changed_lines(patch: str) -> str:

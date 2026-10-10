@@ -113,6 +113,7 @@ def carry_owner_acceptance(
         include_blobs=False,
         changed_lines_only=reason == "merge_train_base_refresh",
         ignore_hunk_positions=reason == "unchanged_patch_base_update",
+        include_file_modes=reason == "unchanged_patch_base_update",
     )
     if not accepted_change or accepted_change != _change_fingerprint(
         repository=profile.repository,
@@ -122,6 +123,7 @@ def carry_owner_acceptance(
         include_blobs=False,
         changed_lines_only=reason == "merge_train_base_refresh",
         ignore_hunk_positions=reason == "unchanged_patch_base_update",
+        include_file_modes=reason == "unchanged_patch_base_update",
     ):
         return None
     with store.product_review_lock(
