@@ -300,6 +300,6 @@ def register_service_restart_route(
         summary="Restart one lane service on its current artifact",
         responses={
             status: {"model": dependencies.error_response_model}
-            for status in (400, 401, 403, 404, 409, 422, 503)
+            for status in (400, 401, 403, 404, 409, 503)
         },
     )
