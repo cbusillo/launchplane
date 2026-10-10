@@ -1293,6 +1293,7 @@ export type MergeTrainControllerRecordSummary = {
     blocked_count: number;
     candidate_sha: string;
     held_out: Array<MergeTrainHeldOutSummary>;
+    historical: boolean;
     merged_count: number;
     planned_count: number;
     policy_key: string;

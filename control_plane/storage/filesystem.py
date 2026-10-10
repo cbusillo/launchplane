@@ -2470,6 +2470,7 @@ class FilesystemRecordStore:
         status: str = "",
         record_id: str = "",
         limit: int | None = None,
+        batch_id: str = "",
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
         records = [
             record
@@ -2481,6 +2482,7 @@ class FilesystemRecordStore:
             and (not base_branch or record.landing_plan.base_branch == base_branch)
             and (not status or record.status == status)
             and (not record_id or record.record_id == record_id)
+            and (not batch_id or record.landing_plan.batch_id == batch_id)
         ]
         records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
         if limit is not None:
