@@ -13301,6 +13301,11 @@
             "title": "Docker Image Reference",
             "type": "string"
           },
+          "release_drain": {
+            "additionalProperties": true,
+            "title": "Release Drain",
+            "type": "object"
+          },
           "schema_migration_target_revision": {
             "title": "Schema Migration Target Revision",
             "type": "string"

@@ -301,6 +301,62 @@ while a release is running still returns the original decision.
 The stable worker advances Client releases on one background thread per replica,
 so a generic-web deploy or rollback wait does not block queued Odoo operations.
 Shutdown finishes an admitted operation and starts no further product release.
+
+### A control-plane replacement drains release effects first
+
+The shared self-deploy route records a database admission fence before changing
+the provider. Its transaction lock also covers backup and Odoo release claims
+(including failure recovery) and generic-web release reservations. A Client can
+accept while replacement is preparing; that decision and pending steps remain
+durable, but no new release effect starts behind the fence. Operations admitted
+before it finish their backup, deployment, drill, post-checks or compensation and
+commit normally. The API remains available during this drain. Completed step IDs
+are reused after replacement, so polling or a worker restart cannot duplicate
+their effects. The release read explains the pause; the engineering runtime read
+exposes `runtime.release_drain` and its running operation IDs.
+
+`POST /v1/drivers/launchplane/self-deploy` uses its existing authorization and a
+fresh `deploy.oauth_env.LAUNCHPLANE_DEPLOYMENT_MARKER`. While operations run it
+returns `result.deploy_state=draining`, without changing provider configuration
+or caching that poll as a completed idempotent response. Repeat the same payload
+and key until it returns `requested`. The Deploy Launchplane workflow does this
+with its existing request action. Each drain poll renews a two-minute pre-effect
+fence; an abandoned drain expires without stranding pending Client releases.
+Final admission rechecks the fence and running operations under the same lock.
+
+Provider dispatch is recorded before its first effect and never automatically
+replayed after an uncertain response. Only startup of the exact requested image
+and deployment marker confirms the replacement. The requested fence does not
+expire, and old worker processes remain fenced even after confirmation. Pending
+operations then run on the matching replacement workers. A changed candidate,
+revocation or admin release hold still refuses forward release work. A lost self-deploy dispatch response returns
+`self_deploy_reconciliation_required` on replay; matching replacement startup
+can settle it without another dispatch. Uncertain release outcomes retain their
+existing stopped or reconciliation state and are never retried by replacement.
+The reconciliation routes described below remain their supported recovery path.
+
+The workflow prepares separate drain and deployment-observation budgets before
+any provider effect. After `release_drain_complete=true`, image, marker and health
+waits share a new deadline using deployment/health budgets and other Compose worker
+graces. The release workers' drain allowance is excluded because their admitted
+operations already committed. A broken replacement therefore consumes the
+deployment budget rather than a two-hour capture window. Failed-image recovery
+retains the existing service rollback and gated break-glass paths in
+[operations](operations.md#launchplane-service-deploy-posture).
+
+First rollout must still occur with no active or invited Client release:
+containers running earlier code do not enforce this fence. Qualify the installed
+service and both worker families before the Supervisor retires its temporary
+Client-invitation landing hold. This protects planned service replacements, not
+arbitrary host loss or a forced kill of an unsafe provider effect; those remain
+truthfully interrupted and require the existing reconciliation path. The isolated
+rehearsal is `tests.test_client_release_redeploy`; it drains during each step for
+both drivers, reopens storage, resumes the drill once, and preserves failed
+forward outcomes after automatic recovery. PostgreSQL integration separately
+proves both admission-versus-drain race orders with real database locks.
+
+### Interrupted provider operations
+
 Failures before any provider effect are recorded as terminal failures for this
 release rather than silently retried. An expired promotion lease is shown as
 `reconciliation_required`; the provider fence stays in place. The deploy recovery

@@ -105,6 +105,43 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                     else:
                         self.assertEqual(actual, 1)
 
+    def test_finished_drain_starts_short_observation_deadline_then_later_wait_consumes_it(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            response = directory / "self-deploy.json"
+            response.write_text(json.dumps({"result": {"release_drain_complete": True}}))
+            result = self._run_step(
+                "deploy",
+                "Resolve deploy_runtime_wait remaining wait",
+                {
+                    "WAIT_DEADLINE_EPOCH": str(int(time.time()) - 10),
+                    "SELF_DEPLOY_RESPONSE_FILE": str(response),
+                    "DRAINED_WAIT_TIMEOUT_SECONDS": "17",
+                },
+                directory,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(
+                line.split("=", 1) for line in (directory / "output").read_text().splitlines()
+            )
+            self.assertGreater(int(values["timeout_ms"]), 0)
+            self.assertLessEqual(int(values["timeout_ms"]), 17000)
+            deadline = values["deadline_epoch"]
+            (directory / "output").unlink()
+            result = self._run_step(
+                "deploy",
+                "Resolve deploy_marker_wait remaining wait",
+                {"WAIT_DEADLINE_EPOCH": deadline},
+                directory,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            later = dict(
+                line.split("=", 1) for line in (directory / "output").read_text().splitlines()
+            )
+            self.assertLessEqual(int(later["timeout_ms"]), int(values["timeout_ms"]))
+
     def test_rendered_worker_changes_and_same_image_rollback_are_exact(self) -> None:
         base = {
             "BOOTSTRAP_SECRET_OPERATION": "preserve",

@@ -1128,6 +1128,13 @@ class Base(DeclarativeBase):
     pass
 
 
+class LaunchplaneServiceDeployDrainRow(Base):
+    __tablename__ = "launchplane_service_deploy_drains"
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneBackupGateRow(Base):
     __tablename__ = "launchplane_backup_gates"
     __table_args__ = (
@@ -8032,6 +8039,17 @@ class PostgresRecordStore(HumanSessionStore):
         try:
             with self._session_factory() as session:
                 self._begin_serialized_write(session)
+                if normalized_scope == "client-release":
+                    from control_plane.service_deploy_drain import (
+                        ServiceDeployDraining,
+                        admission_allowed,
+                        lock,
+                    )
+
+                    if not self.database_url.startswith("sqlite"):
+                        lock(self, session)
+                    if not admission_allowed(session, self._database_mutation_timestamp(session)):
+                        raise ServiceDeployDraining("Launchplane is draining release effects.")
                 observed_at = self._database_mutation_timestamp(session)
                 reservation = build_launchplane_mutation_reservation(
                     scope=scope,
@@ -8055,6 +8073,17 @@ class PostgresRecordStore(HumanSessionStore):
 
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if normalized_scope == "client-release":
+                from control_plane.service_deploy_drain import (
+                    ServiceDeployDraining,
+                    admission_allowed,
+                    lock,
+                )
+
+                if not self.database_url.startswith("sqlite"):
+                    lock(self, session)
+                if not admission_allowed(session, self._database_mutation_timestamp(session)):
+                    raise ServiceDeployDraining("Launchplane is draining release effects.")
             row = session.scalar(
                 self._idempotency_statement(
                     scope=normalized_scope,
@@ -10587,8 +10616,11 @@ class PostgresRecordStore(HumanSessionStore):
         if not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update(skip_locked=True)
         with self._session_factory() as session:
-            if self.database_url.startswith("sqlite"):
-                self._lock_odoo_stable_lane(session, product="", context="", instance="")
+            from control_plane.service_deploy_drain import admission_allowed, lock
+
+            lock(self, session)
+            if not admission_allowed(session, self._database_mutation_timestamp(session)):
+                return None
             for row in cast(list[Any], session.scalars(statement).all()):
                 record = self._read_payload(model_type=model_type, payload=row.payload)
                 if not source_read_retry_ready(record, claimed_at):
@@ -11878,6 +11910,11 @@ class PostgresRecordStore(HumanSessionStore):
         if not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update(skip_locked=True)
         with self._session_factory() as session:
+            from control_plane.service_deploy_drain import admission_allowed, lock
+
+            lock(self, session)
+            if not admission_allowed(session, self._database_mutation_timestamp(session)):
+                return None
             row = session.scalar(statement)
             if row is None:
                 return None

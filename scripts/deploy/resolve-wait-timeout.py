@@ -21,7 +21,13 @@ def duration_seconds(value: str) -> int:
     )
 
 
-def wait_timeout(compose_file: Path, deploy_seconds: int, health_seconds: int) -> int:
+def wait_timeout(
+    compose_file: Path,
+    deploy_seconds: int,
+    health_seconds: int,
+    *,
+    release_drain_complete: bool = False,
+) -> int:
     if deploy_seconds < 1 or health_seconds < 1:
         raise ValueError("Deploy and health observation budgets must be positive.")
     compose = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
@@ -31,6 +37,10 @@ def wait_timeout(compose_file: Path, deploy_seconds: int, health_seconds: int) -
             duration_seconds(str(service["stop_grace_period"]))
             for service in compose["services"].values()
             if "stop_grace_period" in service
+            and not (
+                release_drain_complete
+                and service.get("labels", {}).get("launchplane.release-worker") == "true"
+            )
         ),
         default=0,
     )
@@ -40,12 +50,14 @@ def wait_timeout(compose_file: Path, deploy_seconds: int, health_seconds: int) -
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compose-file", type=Path, default=Path("docker-compose.yml"))
+    parser.add_argument("--release-drain-complete", action="store_true")
     args = parser.parse_args()
     print(
         wait_timeout(
             args.compose_file,
             int(os.environ.get("LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS") or "600"),
             int(os.environ.get("LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS") or "180"),
+            release_drain_complete=args.release_drain_complete,
         )
     )
 

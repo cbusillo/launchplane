@@ -1037,6 +1037,69 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             no_cache=False,
         )
 
+    async def test_shared_self_deploy_polls_drain_without_replaying_or_duplicating_dispatch(
+        self,
+    ) -> None:
+        from tests.test_client_release import ClientReleaseTests
+
+        fixture = ClientReleaseTests(methodName="runTest")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.switch("promote")
+        fixture.accept()
+        (backup_id,) = fixture.advance()
+        from datetime import UTC, datetime, timedelta
+
+        fixture.store.claim_next_verireel_prod_backup_gate_operation_record(
+            lease_owner="admitted-backup",
+            claimed_at=datetime.now(UTC).isoformat(),
+            lease_expires_at=(datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(self._identity()),
+            authz_policy=self._policy(),
+            record_store_factory=lambda: fixture.store,
+            control_plane_root_path=fixture.root,
+        )
+        with (
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.example", "synthetic"),
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
+                return_value=self._compose_target(self._BOOTSTRAP_ENV),
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
+            ) as update,
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
+            ) as deploy,
+        ):
+            payload = self._payload(
+                oauth_env={"LAUNCHPLANE_DEPLOYMENT_MARKER": "isolated-replacement"}
+            )
+            for _ in range(2):
+                response = await _post_launchplane_self_deploy(
+                    app, payload, idempotency_key="isolated-drain"
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(response.json()["result"]["deploy_state"], "draining")
+                self.assertEqual(response.json()["result"]["running_operation_ids"], [backup_id])
+                deploy.assert_not_called()
+                update.assert_not_called()
+            fixture.finish(backup_id)
+            for _ in range(2):
+                response = await _post_launchplane_self_deploy(
+                    app, payload, idempotency_key="isolated-drain"
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(response.json()["result"]["deploy_state"], "requested")
+                self.assertTrue(response.json()["result"]["release_drain_complete"])
+            deploy.assert_called_once()
+            update.assert_called_once()
+
     async def test_self_deploy_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

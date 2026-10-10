@@ -1748,6 +1748,7 @@ class LaunchplaneRuntimeStatus(BaseModel):
     schema_migration_target_revision: str
     service_audience: str
     storage_backend: str
+    release_drain: dict[str, Any] = Field(default_factory=dict)
 
 
 class LaunchplaneRuntimeResponse(BaseModel):
@@ -4151,6 +4152,10 @@ def create_launchplane_fastapi_app(
         try:
             if health_monitor_scheduler is not None:
                 await run_in_threadpool(health_monitor_scheduler.start)
+            if isinstance(shared_record_store, PostgresRecordStore):
+                from control_plane.service_deploy_drain import confirm_startup
+
+                await run_in_threadpool(confirm_startup, shared_record_store)
             yield
         finally:
             if health_monitor_scheduler is not None:
@@ -5246,6 +5251,10 @@ def create_launchplane_fastapi_app(
                 authz_policy_source=resolved_authz_policy_runtime.source,
             )
         )
+        if isinstance(record_store, PostgresRecordStore):
+            from control_plane.service_deploy_drain import read_status
+
+            runtime.release_drain = read_status(record_store)
         return LaunchplaneRuntimeResponse(trace_id=trace_id, runtime=runtime)
 
     def read_odoo_stable_operation_worker_status(
@@ -10518,11 +10527,25 @@ def create_launchplane_fastapi_app(
                 return replay_response
 
         try:
-            driver_result = execute_launchplane_self_deploy(
+            driver_result = await run_in_threadpool(
+                execute_launchplane_self_deploy,
                 control_plane_root_path=resolved_control_plane_root,
                 request=self_deploy_request.deploy,
+                record_store=record_store,
+                request_fingerprint=payload_fingerprint,
             )
         except (ValueError, click.ClickException) as error:
+            from control_plane.service_deploy_drain import (
+                ServiceDeployOutcomeUnknown,
+            )
+
+            if isinstance(error, ServiceDeployOutcomeUnknown):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="self_deploy_reconciliation_required",
+                    message=str(error),
+                ) from error
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,
@@ -10535,6 +10558,9 @@ def create_launchplane_fastapi_app(
             records=launchplane_self_deploy_records(driver_result),
             result=driver_result.model_dump(mode="json"),
         )
+        if driver_result.deploy_state == "draining":
+            # The next POST must re-read live progress, rather than replay this poll.
+            return response
         store_apply_idempotency(
             record_store=record_store,
             identity=identity,

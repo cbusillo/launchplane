@@ -3417,6 +3417,92 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_self_deploy_fence_and_release_admission_serialize_in_both_orders(self) -> None:
+        from control_plane.service_deploy_drain import ServiceDeployDraining, prepare
+
+        for admission_first in (True, False):
+            with self.subTest(admission_first=admission_first), _head_postgres_database() as url:
+                store = PostgresRecordStore(database_url=url)
+                held = threading.Event()
+                release = threading.Event()
+                timestamp = store._database_mutation_timestamp
+
+                def paused_timestamp(session: Any) -> str:
+                    if threading.current_thread().name.startswith("first") and not held.is_set():
+                        held.set()
+                        if not release.wait(10):
+                            raise AssertionError("Fixture never released the admission lock")
+                    return timestamp(session)
+
+                def admit() -> Any:
+                    return store.reserve_mutation(
+                        scope="client-release",
+                        route_path="/isolated",
+                        idempotency_key="race",
+                        request_fingerprint="release",
+                        lease_owner="worker",
+                    )
+
+                def drain() -> Any:
+                    return prepare(
+                        store,
+                        request_fingerprint="replace",
+                        target_type="compose",
+                        target_id="isolated",
+                        image_reference="example.invalid/image@sha256:" + "a" * 64,
+                        deployment_marker="replacement",
+                    )
+
+                try:
+                    with (
+                        patch.object(
+                            store, "_database_mutation_timestamp", side_effect=paused_timestamp
+                        ),
+                        ThreadPoolExecutor(max_workers=1, thread_name_prefix="first") as first,
+                        ThreadPoolExecutor(max_workers=1, thread_name_prefix="second") as second,
+                    ):
+                        initial = first.submit(admit if admission_first else drain)
+                        self.assertTrue(held.wait(10))
+                        contender = second.submit(drain if admission_first else admit)
+                        try:
+                            # Observe the real PostgreSQL lock wait, rather than sleep
+                            # and mistake thread starvation for serialization proof.
+                            deadline = time.monotonic() + 10
+                            waiting = False
+                            while time.monotonic() < deadline:
+                                with store._engine.connect() as connection:
+                                    waiting = bool(
+                                        connection.scalar(
+                                            text(
+                                                "select exists(select 1 from pg_locks where locktype = 'advisory' "
+                                                "and not granted and database = (select oid from pg_database "
+                                                "where datname = current_database()))"
+                                            )
+                                        )
+                                    )
+                                if waiting:
+                                    break
+                            self.assertTrue(
+                                waiting, "contender never reached the transaction fence"
+                            )
+                        finally:
+                            release.set()
+                        if admission_first:
+                            reservation = initial.result(10)
+                            record, running, dispatch = contender.result(10)
+                            self.assertEqual(record.state, "draining")
+                            self.assertEqual(running, (reservation.record.record_id,))
+                            self.assertFalse(dispatch)
+                        else:
+                            _, running, dispatch = initial.result(10)
+                            self.assertTrue(dispatch)
+                            self.assertFalse(running)
+                            with self.assertRaises(ServiceDeployDraining):
+                                contender.result(10)
+                finally:
+                    release.set()
+                    store.close()
+
     def test_expired_delivery_history_allows_approved_native_retirement(self) -> None:
         from tests.test_delivery_administration_retirement import (
             _approve,

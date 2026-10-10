@@ -219,6 +219,9 @@ class LaunchplaneSelfDeployResult(BaseModel):
     target_type: Literal["compose", "application"]
     target_id: str
     image_reference: str
+    deploy_state: Literal["draining", "requested", "confirmed"] = "requested"
+    running_operation_ids: tuple[str, ...] = ()
+    release_drain_complete: bool = False
     image_reference_changed: bool
     authz_policy_changed: bool
     authz_policy_sha256: str = ""
@@ -233,6 +236,8 @@ def execute_launchplane_self_deploy(
     *,
     control_plane_root_path: Path,
     request: LaunchplaneSelfDeployRequest,
+    record_store: object | None = None,
+    request_fingerprint: str = "",
 ) -> LaunchplaneSelfDeployResult:
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root_path)
     target_payload = dokploy_api.fetch_dokploy_target_payload(
@@ -289,6 +294,34 @@ def execute_launchplane_self_deploy(
     )
     updated_env_map = dokploy_api.parse_dokploy_env_text(updated_env_text)
     _validate_bootstrap_target_env(updated_env_map)
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    release_drain_complete = False
+    if isinstance(record_store, PostgresRecordStore):
+        from control_plane.service_deploy_drain import prepare
+
+        if not request_fingerprint:
+            request_fingerprint = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
+        drain, blockers, dispatch = prepare(
+            record_store,
+            request_fingerprint=request_fingerprint,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            image_reference=request.image_reference,
+            deployment_marker=request.oauth_env.get(LAUNCHPLANE_DEPLOYMENT_MARKER_ENV_KEY, ""),
+        )
+        if not dispatch:
+            return LaunchplaneSelfDeployResult(
+                target_type=request.target_type,
+                target_id=request.target_id,
+                image_reference=request.image_reference,
+                image_reference_changed=False,
+                authz_policy_changed=False,
+                deploy_state=cast(Literal["draining", "requested", "confirmed"], drain.state),
+                running_operation_ids=blockers,
+                release_drain_complete=drain.state != "draining",
+            )
+        release_drain_complete = True
     if updated_env_map != previous_env_map:
         dokploy_api.update_dokploy_target_env(
             host=host,
@@ -306,10 +339,15 @@ def execute_launchplane_self_deploy(
         target_id=request.target_id,
         no_cache=request.no_cache,
     )
+    if isinstance(record_store, PostgresRecordStore):
+        from control_plane.service_deploy_drain import record_dispatch
+
+        record_dispatch(record_store, request_fingerprint)
     return LaunchplaneSelfDeployResult(
         target_type=request.target_type,
         target_id=request.target_id,
         image_reference=request.image_reference,
+        release_drain_complete=release_drain_complete,
         image_reference_changed=previous_env_map.get(LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY, "")
         != request.image_reference,
         authz_policy_changed=bool(request.policy_b64)
