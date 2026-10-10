@@ -87,7 +87,8 @@ COPY --from=frontend-build /app/control_plane/ui_static /app/control_plane/ui_st
 
 RUN uv sync --frozen --no-dev
 
-ENV PATH="/app/.venv/bin:${PATH}"
+ENV PATH="/app/.venv/bin:${PATH}" \
+    UV_NO_SYNC=1
 
 EXPOSE 8080
 
