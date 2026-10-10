@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from collections import Counter
 from pathlib import Path
+import re
 import unittest
 
 from control_plane.repository_evidence import (
@@ -149,6 +151,131 @@ class _GitHubApi:
                 },
             ]
         raise AssertionError(f"unexpected GitHub path {path}")
+
+
+class _RepeatingEvidenceApi(_GitHubApi):
+    def __init__(self) -> None:
+        super().__init__()
+        self.repository_id = 1001
+        self.base_sha = BASE_SHA
+        self.head_suffix = 0
+        self.confirmation_changes = False
+        self.tree_unavailable = False
+
+    def __call__(self, *, path: str, token: str, method: str = "GET") -> object:
+        if path == f"/repos/{REPOSITORY}":
+            self.paths.append(path)
+            return {**_repository_payload(), "id": self.repository_id}
+        if re.fullmatch(rf"/repos/{REPOSITORY}/pulls/\d+", path):
+            self.paths.append(path)
+            self.pull_request_reads += 1
+            number = int(path.rsplit("/", 1)[1])
+            suffix = self.head_suffix
+            if self.confirmation_changes and self.pull_request_reads % 2 == 0:
+                suffix += 1
+            payload = _pull_request_payload(f"{number + suffix:040x}", base_sha=self.base_sha)
+            payload["base"] = {
+                "sha": self.base_sha,
+                "ref": BASE_REF,
+                "repo": {"id": self.repository_id, "full_name": REPOSITORY},
+            }
+            return payload
+        if "/git/commits/" in path:
+            self.paths.append(path)
+            if self.tree_unavailable:
+                return {"tree": {}}
+            return {"tree": {"sha": path.rsplit("/", 1)[1]}}
+        normalized_path = re.sub(r"/pulls/\d+/", "/pulls/2000/", path)
+        return super().__call__(path=normalized_path, token=token, method=method)
+
+
+class RepeatedRepositoryEvidenceTests(unittest.TestCase):
+    def _provider(
+        self, api: _RepeatingEvidenceApi, *, reuse_commit_trees: bool = True
+    ) -> GitHubRepositoryEvidenceProvider:
+        return GitHubRepositoryEvidenceProvider(
+            control_plane_root=Path("."),
+            github_token=lambda **_: "train-token",
+            github_api=api,
+            github_token_scope=lambda **_: nullcontext("train-token"),
+            token_context="launchplane",
+            reuse_commit_trees=reuse_commit_trees,
+        )
+
+    def _target(self, number: int = 2000) -> RepositoryTargetReference:
+        return RepositoryTargetReference(repository=REPOSITORY, pull_request_number=number)
+
+    def test_repeated_batch_evidence_reuses_only_immutable_tree_reads(self) -> None:
+        members = tuple(self._target(number) for number in range(2000, 2007))
+        # Protected-batch preflight and admission each evaluate every member.
+        evaluations = 2 * len(members)
+        baseline_api, cached_api = _RepeatingEvidenceApi(), _RepeatingEvidenceApi()
+        baseline = self._provider(baseline_api, reuse_commit_trees=False)
+        cached = self._provider(cached_api)
+        for _ in range(evaluations):
+            for member in members:
+                self.assertEqual(cached.resolve(member), baseline.resolve(member))
+
+        def tree_path(path: str) -> bool:
+            return "/git/commits/" in path
+
+        self.assertEqual(
+            sum(tree_path(path) for path in baseline_api.paths), evaluations * len(members)
+        )
+        self.assertEqual(sum(tree_path(path) for path in cached_api.paths), len(members))
+        self.assertEqual(
+            Counter(path for path in cached_api.paths if not tree_path(path)),
+            Counter(path for path in baseline_api.paths if not tree_path(path)),
+        )
+        self.assertEqual(cached_api.revoked, [])
+
+    def test_changed_head_and_repository_identity_require_new_tree_reads(self) -> None:
+        api = _RepeatingEvidenceApi()
+        provider = self._provider(api)
+        first = provider.resolve(self._target())
+        api.head_suffix += 1
+        second = provider.resolve(self._target())
+        self.assertNotEqual(first.target.tree_sha, second.target.tree_sha)
+        api.repository_id += 1
+        third = provider.resolve(self._target())
+        self.assertNotEqual(second.target.repository_id, third.target.repository_id)
+        self.assertEqual(sum("/git/commits/" in path for path in api.paths), 3)
+
+    def test_base_files_and_authorship_stay_fresh_with_a_warm_tree(self) -> None:
+        api = _RepeatingEvidenceApi()
+        provider = self._provider(api)
+        first = provider.resolve(self._target())
+        api.base_sha = "c" * 40
+        api.commits = (_commit_payload(author_id=None, committer_id=None),)
+        second = provider.resolve(self._target())
+        self.assertNotEqual(first.base, second.base)
+        assert second.authorship is not None
+        self.assertEqual(second.authorship.resolution, "unresolved")
+        self.assertEqual(sum("/git/commits/" in path for path in api.paths), 1)
+        self.assertEqual(sum("/files?" in path for path in api.paths), 2)
+        self.assertEqual(api.pull_request_reads, 4)
+
+    def test_confirmation_still_refuses_a_changed_head_with_a_warm_tree(self) -> None:
+        api = _RepeatingEvidenceApi()
+        provider = self._provider(api)
+        provider.resolve(self._target())
+        api.confirmation_changes = True
+        with self.assertRaises(RepositoryEvidenceStaleError):
+            provider.resolve(self._target())
+        self.assertEqual(sum("/git/commits/" in path for path in api.paths), 1)
+
+    def test_failed_tree_reads_are_retried_and_new_readers_start_empty(self) -> None:
+        api = _RepeatingEvidenceApi()
+        provider = self._provider(api)
+        api.tree_unavailable = True
+        for _ in range(2):
+            with self.assertRaises(RepositoryEvidenceError):
+                provider.resolve(self._target())
+        api.tree_unavailable = False
+        provider.resolve(self._target())
+        provider.resolve(self._target())
+        self._provider(api).resolve(self._target())
+        self.assertEqual(sum("/git/commits/" in path for path in api.paths), 4)
 
 
 class ChangeImpactGitHubEvidenceProviderTests(unittest.TestCase):
