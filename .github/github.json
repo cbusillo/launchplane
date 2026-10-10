@@ -19,6 +19,7 @@
     "driverDescriptors": "docs/driver-descriptors.md",
     "driverDevelopment": "docs/driver-development.md",
     "previewWorkflowContract": "docs/preview-workflow-contract.md",
+    "legacyPreviewReconciliation": "docs/legacy-preview-reconciliation.md",
     "productRepoContract": "docs/product-repo-contract.md",
     "newProductRepo": "docs/new-product-repo.md",
     "operatorExperience": "docs/operator-experience.md",

@@ -433,19 +433,20 @@ h3 {
   box-shadow: inset 0 0 0 2px var(--prod-soft);
 }
 
-.product-trust-dots > span[data-trust="verified"] {
+.product-trust-dots > span[data-tone="verified"] {
   background: var(--prod);
 }
 
-.product-trust-dots > span[data-trust="recorded"] {
+.product-trust-dots > span[data-tone="recorded"] {
   background: var(--preview);
 }
 
-.product-trust-dots > span[data-trust="stale"] {
+.product-trust-dots > span[data-tone="stale"],
+.product-trust-dots > span[data-tone="warning"] {
   background: var(--warning);
 }
 
-.product-trust-dots > span[data-trust="missing"] {
+.product-trust-dots > span[data-tone="danger"] {
   background: var(--danger);
 }
 

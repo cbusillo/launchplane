@@ -1376,7 +1376,7 @@ def _lineage_change_retires_landing(
     for explicit reconciliation.
     """
     return (
-        reason_code == "landing_lineage_changed"
+        reason_code in {"landing_lineage_changed", "head_check_reuse_unavailable"}
         and landing_record.ordinary_job_binding is None
         and not has_stack_collapse
         and all(entry.status == "planned" for entry in landing_record.landing_plan.entries)
@@ -1842,6 +1842,7 @@ def _reconcile_completed_landing_after_policy_change(
         )
     # Historical plans are evidence of an already-landed effect, never authority
     # for another collapse or merge. Verify every child before any provider write.
+    verified_records = []
     for record in unfinished:
         if record.ordinary_job_binding is not None:
             return blocked(
@@ -1860,14 +1861,15 @@ def _reconcile_completed_landing_after_policy_change(
             if root.merge_method == "merge"
             else (root.expected_head_sha,)
         )
+        dispositions = []
         for child in record.plan.child_dispositions:
-            if child.status == "closed":
+            if child.completed:
+                dispositions.append(child)
                 continue  # A completed disposition cannot close a later reopened head.
             try:
-                github_client.pull_request_is_closed(
+                observed_head, observed_state = github_client.read_pull_request_head(
                     repository=request.repository,
                     pull_request_number=child.pull_request_number,
-                    expected_head_sha=child.expected_head_sha,
                 )
                 contained = all(
                     github_client.branch_contains_commit(
@@ -1876,11 +1878,6 @@ def _reconcile_completed_landing_after_policy_change(
                         commit_sha=child.expected_head_sha,
                     )
                     for root_ref in root_refs
-                )
-            except MergeTrainGitHubStaleHeadError:
-                return blocked(
-                    "completed_landing_stack_child_head_changed",
-                    f"Stack child PR #{child.pull_request_number} no longer matches recorded history.",
                 )
             except MergeTrainGitHubError as error:
                 if error.rate_limited or error.status_code is None or error.status_code >= 500:
@@ -1894,7 +1891,27 @@ def _reconcile_completed_landing_after_policy_change(
                     "completed_landing_stack_child_not_contained",
                     f"Stack child PR #{child.pull_request_number} is not contained in the landed root.",
                 )
-    for record in unfinished:
+            if observed_head != child.expected_head_sha:
+                child = type(child).model_validate(
+                    {
+                        **child.model_dump(),
+                        "status": "preserved",
+                        "preserved_head_sha": observed_head,
+                        "preserved_state": observed_state,
+                        "detail": f"Recorded child head landed; changed PR preserved {observed_state} without further provider effects",
+                    }
+                )
+            dispositions.append(child)
+        verified_records.append(
+            record.model_copy(
+                update={
+                    "plan": record.plan.model_copy(
+                        update={"child_dispositions": tuple(dispositions)}
+                    )
+                }
+            )
+        )
+    for record in verified_records:
         reconciled = _reconcile_landed_stack_children(
             collapse_record=record,
             landed_record=landed_record,
@@ -1956,7 +1973,7 @@ def _annotate_historical_closed_stack_children(
             continue
         for child in plan.child_dispositions:
             identity = (child.pull_request_number, child.expected_head_sha)
-            if child.status == "closed" or identity in annotated:
+            if child.completed or identity in annotated:
                 continue
             try:
                 closed = github_client.pull_request_is_closed(
@@ -2077,7 +2094,7 @@ def _reconcile_landed_stack_children(
             (
                 disposition
                 for disposition in progress_plan.child_dispositions
-                if disposition.status != "closed"
+                if not disposition.completed
             ),
             None,
         )
@@ -2093,8 +2110,7 @@ def _reconcile_landed_stack_children(
             step_payload={
                 **lease.record.step_payload,
                 "completed_disposition_count": sum(
-                    disposition.status == "closed"
-                    for disposition in progress_plan.child_dispositions
+                    disposition.completed for disposition in progress_plan.child_dispositions
                 ),
             },
         )
@@ -2394,8 +2410,10 @@ def _advance_active_candidate_record(
     candidate_build_error: MergeTrainGitHubStaleHeadError | None = None
     construction_evidence = (
         {
-            "construction_ref": merge_train_construction_ref(
+            "construction_ref": (
                 active_candidate_record.candidate.candidate_ref
+                if active_candidate_record.candidate.head_check_reuse is not None
+                else merge_train_construction_ref(active_candidate_record.candidate.candidate_ref)
             )
         }
         if active_candidate_record.ordinary_job_binding is None
@@ -2788,6 +2806,26 @@ def _advance_passed_candidate_record(
         },
     )
     batch_pull_request_number = None
+    if passed_candidate_record.candidate.head_check_reuse is not None:
+        refreshed = github_client.observe_batch_candidate_checks(
+            candidate=passed_candidate_record.candidate
+        )
+        refreshed_record = build_merge_train_batch_candidate_record(
+            candidate=refreshed,
+            source=f"service:controller:head-check-revalidation:{trace_id}",
+            updated_at=recorded_at,
+        )
+        candidate_store.write_merge_train_batch_candidate_record(refreshed_record)
+        if refreshed.status != "passed":
+            return {
+                "repository": request.repository,
+                "base_branch": request.base_branch,
+                "mode": "observe_candidate",
+                "controller_action": "observe_candidate",
+                "merge_train_batch_candidate_record_id": refreshed_record.record_id,
+                "candidate": refreshed.model_dump(mode="json"),
+            }
+        passed_candidate_record = refreshed_record
     if (
         lease.record.ordinary_job_binding is None
         and len(passed_candidate_record.candidate.entries) > 1
@@ -4743,7 +4781,14 @@ def _controller_exception_reconciliation_detail(error: Exception) -> str:
                 if quota_error.retry_after_seconds is not None
                 else ""
             )
-            return "retryable:github_rate_limited" + suffix + reset + retry_after
+            primary_exhausted = (
+                f"; primary_exhausted:{str(quota_error.primary_quota_exhausted).lower()}"
+                if quota_error.primary_quota_exhausted is not None
+                else ""
+            )
+            return (
+                "retryable:github_rate_limited" + suffix + reset + retry_after + primary_exhausted
+            )
         if error.status_code is None or error.status_code >= 500:
             return "retryable:github_request_failed" + suffix
         return "operator_required:github_request_rejected" + suffix
