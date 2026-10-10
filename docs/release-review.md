@@ -341,6 +341,7 @@ latest drain response is retained on timeout; a later failed request clears that
 response to retain uncertainty. Rollback skips only positively pre-effect
 outcomes. The authorized runtime read reconfirms its own matching image/marker
 when repair refusal restored a request whose startup raced the repair.
+The workflow performs this authorized read even after deployment or repair failure.
 Keyed and keyless self-deploys use the same canonical request fingerprint;
 per-caller idempotency response ownership is unchanged. A definite,
 non-retryable 4xx refusal of the first environment write records `refused`, frees
@@ -366,7 +367,10 @@ new key, a compatible immutable image, a fresh marker, and
 `deploy.supersedes_deployment_marker` equal to the stuck fence's marker from
 `runtime.release_drain`. The target must also match that fence. This deliberately
 requests one new service replacement; it never replays the original dispatch
-or clears the fence before healthy matching startup. Automatic service rollback
+or clears the fence before matching API process startup. Confirmation precedes
+the container health checks; failed deployment health starts a new repair fence,
+and already admitted effects must still finish before that replacement.
+Automatic service rollback
 uses the same marker-bound repair, including same-image configuration failures.
 For a cancelled run, manually dispatch Deploy Launchplane with the compatible
 `image_reference`, a new `self_deploy_idempotency_key` and the exact

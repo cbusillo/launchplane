@@ -1263,7 +1263,6 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
         shell: bash
         env:
-          BOOTSTRAP_SECRET_OPERATION: ${{ steps.prep.outputs.bootstrap_secret_operation }}
           PREVIOUS_IMAGE_REFERENCE: ${{ steps.rollback_request.outputs.previous_image_reference }}
           ROLLBACK_MARKER_OUTCOME: ${{ steps.rollback_marker.outcome }}
           ROLLBACK_MARKER_RESPONSE_FILE: ${{ runner.temp }}/launchplane-rollback-marker-wait.json
@@ -1275,8 +1274,7 @@ jobs:
           set -euo pipefail
 
           marker_succeeded="true"
-          if [ "$BOOTSTRAP_SECRET_OPERATION" != "preserve" ] \
-            && [ "${ROLLBACK_MARKER_OUTCOME:-failure}" != "success" ]; then
+          if [ "${ROLLBACK_MARKER_OUTCOME:-failure}" != "success" ]; then
             marker_succeeded="false"
           fi
           if [ "${ROLLBACK_RUNTIME_OUTCOME:-failure}" = "success" ] \
@@ -1452,6 +1450,7 @@ jobs:
           log-response-body: "false"
 
       - name: Read deployed Launchplane runtime
+        if: always() && steps.service.outputs.service_url != ''
         id: deployed_runtime
         continue-on-error: true
         uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request

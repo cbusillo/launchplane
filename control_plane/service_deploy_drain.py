@@ -310,7 +310,7 @@ def record_pre_effect_refusal(store: Any, request_fingerprint: str) -> None:
 
 
 def confirm_startup(store: Any) -> None:
-    """Only the replacement's healthy startup releases admission on that worker image."""
+    """Only matching API process startup releases admission on that worker image."""
     with store._session_factory() as session:
         lock(store, session)
         _, record = _read(session)

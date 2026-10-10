@@ -182,6 +182,26 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                     (directory / "launchplane-self-deploy-rollback-payload.json").exists()
                 )
 
+    def test_rollback_requires_matching_marker_even_when_preserving_bootstrap(self) -> None:
+        for marker_outcome in ("success", "failure"):
+            with self.subTest(marker_outcome=marker_outcome), TemporaryDirectory() as name:
+                directory = Path(name)
+                result = self._run_step(
+                    "deploy",
+                    "Check Launchplane rollback runtime image",
+                    {
+                        "BOOTSTRAP_SECRET_OPERATION": "preserve",
+                        "PREVIOUS_IMAGE_REFERENCE": "registry.invalid/service@sha256:abc",
+                        "ROLLBACK_MARKER_OUTCOME": marker_outcome,
+                        "ROLLBACK_RUNTIME_OUTCOME": "success",
+                        "GITHUB_STEP_SUMMARY": str(directory / "summary"),
+                    },
+                    directory,
+                )
+                self.assertEqual(result.returncode, 0 if marker_outcome == "success" else 1)
+                if marker_outcome != "success":
+                    self.assertNotIn("Rolled Launchplane back", result.stdout)
+
     def test_rendered_worker_changes_and_same_image_rollback_are_exact(self) -> None:
         base = {
             "BOOTSTRAP_SECRET_OPERATION": "preserve",
