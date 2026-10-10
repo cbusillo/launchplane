@@ -490,7 +490,7 @@ def land_protected_batch(
             ),
             observed_base_sha=base_sha,
             observed_base_tree_sha=base_tree_sha,
-            observed_at=recorded_at,
+            observed_at=admission_guard.observation_time_provider(),
         )
         if batch_pull_request.get("state") != "open":
             raise MergeTrainGitHubStaleHeadError(
@@ -618,7 +618,9 @@ def land_protected_batch(
                 provider_checkpoint(plan, plan.entries[-1])
         except Exception:
             for admission in admissions:
-                admission_guard.record_not_dispatched(admission=admission, observed_at=recorded_at)
+                admission_guard.record_not_dispatched(
+                    admission=admission, observed_at=admission_guard.observation_time_provider()
+                )
             raise
         try:
             merge_sha = client.merge_pull_request(
@@ -630,7 +632,9 @@ def land_protected_batch(
         except Exception as error:
             for admission in admissions:
                 admission_guard.record_provider_failure(
-                    admission=admission, error=error, observed_at=recorded_at
+                    admission=admission,
+                    error=error,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
             raise
     else:
@@ -652,7 +656,7 @@ def land_protected_batch(
                 admission=admission,
                 reason="landing_evidence_incomplete",
                 message=message,
-                observed_at=recorded_at,
+                observed_at=admission_guard.observation_time_provider(),
             )
         raise MergeAdmissionReconciliationRequiredError(message) from error
     for index, entry in enumerate(entries):
@@ -662,7 +666,7 @@ def land_protected_batch(
                 observed_base_sha=observed_base_sha,
                 observed_base_tree_sha=observed_base_tree_sha,
                 provider_effect_attempted=True,
-                observed_at=recorded_at,
+                observed_at=admission_guard.observation_time_provider(),
             )
         else:
             admission_guard.record_landed(
@@ -672,7 +676,7 @@ def land_protected_batch(
                 observed_base_tree_sha=observed_base_tree_sha,
                 base_contains_merge_commit=True,
                 provider_effect_attempted=True,
-                observed_at=recorded_at,
+                observed_at=admission_guard.observation_time_provider(),
             )
         progress = _validated_model_update(
             plan, entries=entries[: index + 1] + plan.entries[index + 1 :]

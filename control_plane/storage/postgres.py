@@ -5823,6 +5823,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
         self._provider_evidence_context = local()
         self._release_review_publication_context = local()
+        self._merge_train_feedback_context = local()
 
     @property
     def backend_name(self) -> str:
@@ -18345,19 +18346,38 @@ class PostgresRecordStore(HumanSessionStore):
             idempotency_record=stored_completion,
         )
 
-    def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> None:
-        self._write_row(
-            LaunchplaneMergeTrainPrFeedbackRow(
-                feedback_id=record.feedback_id,
-                repository=record.repository,
-                base_branch=record.base_branch,
-                pull_request_number=record.pull_request_number,
-                event=record.event,
-                delivery_status=record.delivery_status,
-                recorded_at=record.recorded_at,
-                payload=self._payload_dict(record),
+    @contextmanager
+    def merge_train_feedback_delivery_lock(
+        self, *, repository: str, pull_request_number: int
+    ) -> Iterator[None]:
+        with self._session_factory() as session, session.begin():
+            self._lock_landing_authority(
+                session,
+                f"merge-train-feedback-delivery:{repository.casefold()}#{pull_request_number}",
             )
+            self._merge_train_feedback_context.session = session
+            try:
+                yield
+            finally:
+                self._merge_train_feedback_context.session = None
+
+    def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> None:
+        row = LaunchplaneMergeTrainPrFeedbackRow(
+            feedback_id=record.feedback_id,
+            repository=record.repository,
+            base_branch=record.base_branch,
+            pull_request_number=record.pull_request_number,
+            event=record.event,
+            delivery_status=record.delivery_status,
+            recorded_at=record.recorded_at,
+            payload=self._payload_dict(record),
         )
+        session = getattr(self._merge_train_feedback_context, "session", None)
+        if session is not None:
+            session.merge(row)
+            session.flush()
+        else:
+            self._write_row(row)
 
     def list_merge_train_pr_feedback_records(
         self,
@@ -18366,24 +18386,85 @@ class PostgresRecordStore(HumanSessionStore):
         base_branch: str = "",
         pr_number: int | None = None,
         limit: int | None = None,
+        latest_per_pr: bool = False,
+        delivery_status: str = "",
+        terminal_retry_candidates: bool = False,
+        provider_backoff_only: bool = False,
     ) -> tuple[MergeTrainPrFeedbackRecord, ...]:
-        filters: list[object] = []
+        filters: list[Any] = []
         if repository:
             filters.append(LaunchplaneMergeTrainPrFeedbackRow.repository == repository)
         if base_branch:
             filters.append(LaunchplaneMergeTrainPrFeedbackRow.base_branch == base_branch)
         if pr_number is not None:
             filters.append(LaunchplaneMergeTrainPrFeedbackRow.pull_request_number == pr_number)
-        return self._list_models(
-            model_type=MergeTrainPrFeedbackRecord,
-            orm_model=LaunchplaneMergeTrainPrFeedbackRow,
-            filters=filters,
-            order_by=(
-                LaunchplaneMergeTrainPrFeedbackRow.recorded_at.desc(),
-                LaunchplaneMergeTrainPrFeedbackRow.feedback_id.desc(),
-            ),
-            limit=limit,
+        row = LaunchplaneMergeTrainPrFeedbackRow
+        created_order = func.coalesce(
+            sql_cast(row.payload["created_at_ns"].as_string(), BigInteger), 0
         )
+        if latest_per_pr:
+            ranked = (
+                select(
+                    row.payload,
+                    row.delivery_status,
+                    row.recorded_at,
+                    row.feedback_id,
+                    row.event,
+                    func.row_number()
+                    .over(
+                        partition_by=(row.repository, row.base_branch, row.pull_request_number),
+                        order_by=(
+                            row.recorded_at.desc(),
+                            created_order.desc(),
+                            row.feedback_id.desc(),
+                        ),
+                    )
+                    .label("feedback_rank"),
+                )
+                .where(*filters)
+                .subquery()
+            )
+            query = select(ranked.c.payload).where(ranked.c.feedback_rank == 1)
+            if delivery_status:
+                query = query.where(ranked.c.delivery_status == delivery_status)
+            if terminal_retry_candidates:
+                query = query.where(
+                    ranked.c.event.in_(("completed", "stale_policy")),
+                    func.coalesce(ranked.c.payload["retryable"].as_boolean(), True),
+                )
+            query = query.order_by(
+                func.coalesce(ranked.c.payload["retry_at"].as_string(), "").asc(),
+                ranked.c.recorded_at.asc(),
+                ranked.c.feedback_id.asc(),
+            )
+            if provider_backoff_only:
+                query = (
+                    query.where(ranked.c.payload["provider_retry_at"].as_string() != "")
+                    .order_by(None)
+                    .order_by(ranked.c.payload["provider_retry_at"].as_string().desc())
+                )
+            if limit is not None:
+                query = query.limit(limit)
+        else:
+            if delivery_status:
+                filters.append(row.delivery_status == delivery_status)
+            query = (
+                select(row.payload)
+                .where(*filters)
+                .order_by(row.recorded_at.desc(), created_order.desc(), row.feedback_id.desc())
+            )
+            if limit is not None:
+                query = query.limit(limit)
+        held_session = getattr(self._merge_train_feedback_context, "session", None)
+        with (
+            nullcontext(held_session)
+            if held_session is not None
+            else self._session_factory() as session
+        ):
+            return tuple(
+                MergeTrainPrFeedbackRecord.model_validate(payload)
+                for payload in session.scalars(query)
+            )
 
     @staticmethod
     def _ordinary_agent_active_progress(
@@ -19090,6 +19171,7 @@ class PostgresRecordStore(HumanSessionStore):
         status: str = "",
         record_id: str = "",
         limit: int | None = None,
+        batch_id: str = "",
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
         filters: list[object] = []
         if repository:
@@ -19103,6 +19185,8 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.status == status)
         if record_id:
             filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.record_id == record_id)
+        if batch_id:
+            filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.batch_id == batch_id)
         return self._list_models(
             model_type=MergeTrainBatchLandingPlanRecord,
             orm_model=LaunchplaneMergeTrainBatchLandingPlanRow,
