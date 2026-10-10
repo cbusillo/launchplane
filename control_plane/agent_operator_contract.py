@@ -18,6 +18,7 @@ from control_plane.openapi_export import (
     build_deterministic_export_app,
     canonical_openapi_document,
 )
+from control_plane.legacy_preview_reconciliation import LEGACY_PREVIEW_RECONCILIATION_ROUTE
 
 
 SCHEMA_VERSION = 1
@@ -205,6 +206,15 @@ OPERATION_SPECS = (
         ("dry-run", "apply"),
         "apply",
         ("reviewed_dry_run",),
+    ),
+    OperationSpec(
+        "POST",
+        LEGACY_PREVIEW_RECONCILIATION_ROUTE,
+        "Inspect, plan or reconcile one provider-absent legacy generic-web preview.",
+        ("agent_helper", "service_api"),
+        ("inspect", "plan", "apply"),
+        "plan_and_apply",
+        ("reviewed_plan", "expected_plan_digest", "plan_idempotency_key"),
     ),
     OperationSpec(
         "POST",
