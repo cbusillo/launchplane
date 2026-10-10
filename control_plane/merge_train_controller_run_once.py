@@ -1897,7 +1897,7 @@ def _reconcile_completed_landing_after_policy_change(
                         **child.model_dump(),
                         "status": "preserved",
                         "preserved_head_sha": observed_head,
-                        "detail": "Recorded child head landed; changed PR preserved without provider effects",
+                        "detail": "Recorded child head landed; changed PR preserved without further provider effects",
                     }
                 )
             dispositions.append(child)

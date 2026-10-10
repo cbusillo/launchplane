@@ -44,6 +44,14 @@ continues through ordinary queue discovery. Landing and admission records and
 the original collapse progress remain unchanged. Transient provider failures retain the controller's
 retry classification and rate-limit reset evidence.
 
+Preservation records require a reader that understands `preserved` and
+`preserved_head_sha`. Older images reject that evidence; an unchanged stack
+disposition keeps its earlier wire shape. For a source rollback after preservation
+has run, retain the disposition reader and terminal-state handling while reverting
+the recovery writer, or repair by rolling forward. The Supervisor qualifies the
+chosen rollback build against recorded preservation history before deployment;
+this source recovery does not qualify an earlier image as a rollback target.
+
 Missing or incompatible recorded stack history stays fenced with
 `completed_landing_stack_reconciliation_required`. Missing current disposition
 configuration, unavailable child evidence and missing

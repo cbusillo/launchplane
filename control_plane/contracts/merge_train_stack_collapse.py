@@ -99,7 +99,7 @@ class MergeTrainStackChildDisposition(BaseModel):
     pull_request_number: int = Field(gt=0)
     expected_head_sha: str
     status: MergeTrainStackChildDispositionStatus = "planned"
-    preserved_head_sha: str = ""
+    preserved_head_sha: str = Field(default="", exclude_if=lambda value: not value)
     comment_url: str = ""
     detail: str = ""
 

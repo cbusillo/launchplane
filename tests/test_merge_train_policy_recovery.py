@@ -444,11 +444,14 @@ class MergeTrainPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         for problem, reason in (
             ("missing", "completed_landing_stack_child_evidence_unavailable"),
             ("containment", "completed_landing_stack_child_not_contained"),
+            ("unchanged_containment", "completed_landing_stack_child_not_contained"),
         ):
             with self.subTest(problem=problem):
-                transport.children[3]["head"] = {"sha": "9" * 40}
+                transport.children[3]["head"] = {
+                    "sha": "3" * 40 if problem == "unchanged_containment" else "9" * 40
+                }
                 transport.child_read_failure = problem == "missing"
-                transport.child_contained = problem != "containment"
+                transport.child_contained = problem == "missing"
                 result = self._run().accepted_result
                 self.assertEqual(result["reason_code"], reason)
                 details = result["details"]
