@@ -453,8 +453,7 @@ class MergeTrainSchedulerPassTests(TestCase):
         )
         for changes in scenarios:
             with self.subTest(changes=changes):
-                self.mocks["build_merge_train_pr_feedback_record"].reset_mock()
-                self.record_store.write_merge_train_pr_feedback_record.reset_mock()
+                self.mocks["write_merge_train_pr_feedback_record"].reset_mock()
                 self.mocks["resolve_merge_train_policy_record"].return_value = policy
                 self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
                     "admitted"
@@ -476,7 +475,7 @@ class MergeTrainSchedulerPassTests(TestCase):
                     branch_client = MagicMock()
                     response["branch_update_result"] = apply_merge_train_branch_update_intent(
                         dry_run_result=queue,
-                        branch_client=cast(MergeTrainBranchClient, branch_client),
+                        branch_client=cast(MergeTrainBranchClient, cast(object, branch_client)),
                     ).model_dump(mode="json")
                     branch_client.update_pull_request_branch.assert_called_once()
                 self.mocks[
@@ -488,7 +487,7 @@ class MergeTrainSchedulerPassTests(TestCase):
                 (result,) = self._run()
 
                 self.assertEqual(result.feedback_delivered, 1)
-                request = self.mocks["build_merge_train_pr_feedback_record"].call_args.kwargs[
+                request = self.mocks["write_merge_train_pr_feedback_record"].call_args.kwargs[
                     "request"
                 ]
                 self.assertEqual(request.pull_request_number, selected.number)
@@ -499,16 +498,20 @@ class MergeTrainSchedulerPassTests(TestCase):
                 if queue.intended_next_action == "update_branch":
                     self.assertIn("updated", request.message.lower())
                 self.assertEqual(request.event, "waiting")
-                self.record_store.write_merge_train_pr_feedback_record.assert_called_once()
+                self.mocks["write_merge_train_pr_feedback_record"].assert_called_once()
+                self.assertIs(
+                    self.mocks["write_merge_train_pr_feedback_record"].call_args.kwargs["store"],
+                    self.record_store,
+                )
 
                 # The same candidate-less result must never deliver in a dry run.
-                self.mocks["build_merge_train_pr_feedback_record"].reset_mock()
+                self.mocks["write_merge_train_pr_feedback_record"].reset_mock()
                 self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
                     ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
                 )
                 (dry_run,) = self._run()
                 self.assertEqual(dry_run.feedback_delivered, 0)
-                self.mocks["build_merge_train_pr_feedback_record"].assert_not_called()
+                self.mocks["write_merge_train_pr_feedback_record"].assert_not_called()
 
     def test_level1_target_runs_the_level1_step(self) -> None:
         self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
