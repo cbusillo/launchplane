@@ -2,11 +2,12 @@
 
 # Run packaged entrypoints against disposable PostgreSQL with no external network.
 set -euo pipefail
-if [ "$#" -ne 1 ] || [ -z "$1" ]; then
-  echo "Usage: $0 EXISTING_TEST_IMAGE" >&2
+if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then
+  echo "Usage: $0 EXISTING_TEST_IMAGE POSTGRES_TEST_IMAGE" >&2
   exit 2
 fi
 image="$1"
+postgres_image="$2"
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 scratch_root="${RUNNER_TEMP:-$repo_root/state}"
 mkdir -p "$scratch_root"
@@ -32,7 +33,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 docker image inspect "$image" >/dev/null
-docker pull postgres:18 >/dev/null
+docker pull "$postgres_image" >/dev/null
 if [ -n "$(docker ps --all --quiet --filter "label=com.docker.compose.project=$project")" ]; then
   echo "Refusing to reuse an existing Compose project." >&2
   exit 1
@@ -49,7 +50,7 @@ DOCKER_IMAGE_REFERENCE="$image" LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK=unused-fixt
   docker compose --project-name "$project" --project-directory "$fixture_dir" \
     --env-file "$fixture_dir/.env" --file "$repo_root/docker-compose.yml" \
     config --no-env-resolution --format json |
-  jq --arg image "$image" --arg env_file "$fixture_dir/.env" '
+  jq --arg image "$image" --arg postgres_image "$postgres_image" --arg env_file "$fixture_dir/.env" '
     {services: (.services | with_entries(select(.key == "launchplane" or
       .key == "launchplane-odoo-workers" or .key == "launchplane-verireel-workers") |
       .value.image = $image | .value.pull_policy = "never" | .value.restart = "no" |
@@ -57,19 +58,56 @@ DOCKER_IMAGE_REFERENCE="$image" LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK=unused-fixt
       .value.environment.DOCKER_IMAGE_REFERENCE = $image)),
       volumes: .volumes, networks: {qualification: {internal: true}}} |
     .services.postgres = {
-      image: "postgres:18", pull_policy: "never", networks: ["qualification"],
+      image: $postgres_image, pull_policy: "never", networks: ["qualification"],
       environment: {POSTGRES_HOST_AUTH_METHOD: "trust"},
       tmpfs: ["/var/lib/postgresql"],
       healthcheck: {test: ["CMD-SHELL", "pg_isready -U postgres"],
         interval: "1s", timeout: "5s", retries: 30}} |
     .services.launchplane.depends_on.postgres = {condition: "service_healthy"}' \
-    >"$fixture_dir/compose.json"
+    >"$fixture_dir/compose.next.json"
+mv "$fixture_dir/compose.next.json" "$fixture_dir/compose.json"
 # Source volume names stay project-scoped, never attaching an installed volume.
 jq --arg prefix "$project" '.volumes |= with_entries(.value = {name: ($prefix + "-" + .key)})' \
   "$fixture_dir/compose.json" >"$fixture_dir/compose.next.json"
 mv "$fixture_dir/compose.next.json" "$fixture_dir/compose.json"
 
+check_workers() {
+  local service container_id worker_ip
+  for service in "${services[@]:1}"; do
+    container_id="$("${compose[@]}" ps --quiet "$service")"
+    test -n "$container_id"
+    worker_ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container_id")"
+    "${compose[@]}" exec -T -e QUALIFICATION_WORKER_IP="$worker_ip" launchplane /app/.venv/bin/python - <<'PY'
+import os
+import time
+from sqlalchemy import text
+from control_plane.storage.postgres import PostgresRecordStore
+store = PostgresRecordStore(database_url=os.environ["LAUNCHPLANE_DATABASE_URL"])
+try:
+    deadline = time.monotonic() + 30
+    for observation in range(2):
+        while True:
+            with store._engine.connect() as connection:
+                ready = connection.scalar(text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND client_addr = CAST(:address AS inet))"
+                ), {"address": os.environ["QUALIFICATION_WORKER_IP"]})
+            if ready:
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError("Packaged worker never connected to the fixture database")
+            time.sleep(0.2)
+        if observation == 0:
+            time.sleep(2)
+finally:
+    store.close()
+PY
+    test "$(docker inspect --format '{{.State.Running}}' "$container_id")" = true
+  done
+}
+
 "${compose[@]}" up --detach --no-build --pull never --wait --wait-timeout 120
+check_workers
 before="$("${compose[@]}" ps --quiet "${services[@]}" | sort)"
 "${compose[@]}" exec -T launchplane /app/.venv/bin/python - <<'PY'
 import os
@@ -89,11 +127,12 @@ finally:
     store.close()
 PY
 printf '%s\n' 'LAUNCHPLANE_DEPLOYMENT_MARKER=qualification-replacement' >>"$fixture_dir/.env"
-"${compose[@]}" up --detach --no-deps --no-build --pull never --force-recreate \
+"${compose[@]}" up --detach --no-deps --no-build --pull never --force-recreate --timeout 10 \
   --wait --wait-timeout 120 "${services[@]}"
 after="$("${compose[@]}" ps --quiet "${services[@]}" | sort)"
 test -n "$after"
-test "$before" != "$after"
+test -z "$(comm -12 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
+check_workers
 "${compose[@]}" exec -T launchplane /app/.venv/bin/python - <<'PY'
 import json
 import os
@@ -117,5 +156,4 @@ for service in "${services[@]}"; do
   container_id="$("${compose[@]}" ps --quiet "$service")"
   test -n "$container_id"
   test "$(docker inspect --format '{{.State.Running}}' "$container_id")" = true
-  test "$(docker inspect --format '{{.RestartCount}}' "$container_id")" = 0
 done
