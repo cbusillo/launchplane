@@ -541,17 +541,21 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                 self.assertEqual(evaluate().readiness.state, "ready")
                 self.assertEqual(evaluate().readiness.state, "ready")
                 self.assertEqual((snapshot_reader.read_count, len(resolutions)), (1, 1))
+                # A refresh rereads both the queue and member evidence.
+                refresh()
+                evaluate()
+                self.assertEqual((snapshot_reader.read_count, len(resolutions)), (2, 2))
                 # A queue change after the shared read is seen once refreshed.
                 snapshot_reader.snapshot = snapshot.model_copy(update={"base_sha": "f" * 40})
                 refresh()
                 with self.assertRaisesRegex(MergeAdmissionDeniedError, "Live merge queue"):
                     evaluate()
-                self.assertEqual(snapshot_reader.read_count, 2)
+                self.assertEqual(snapshot_reader.read_count, 3)
             snapshot_reader.snapshot = snapshot
             # Outside a batch scope every evaluation reads fresh again.
             evaluate()
             evaluate()
-        self.assertEqual((snapshot_reader.read_count, len(resolutions)), (4, 3))
+        self.assertEqual((snapshot_reader.read_count, len(resolutions)), (5, 4))
 
     def test_a_conversation_opened_after_planning_blocks_with_its_own_reason(self) -> None:
         with TemporaryDirectory() as directory:
