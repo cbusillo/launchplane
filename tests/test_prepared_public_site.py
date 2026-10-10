@@ -1,12 +1,15 @@
 import base64
-import sqlite3
 import unittest
-from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from control_plane.contracts.prepared_public_site import CapturedPublicResponse
+from control_plane.contracts.prepared_public_site import (
+    CapturedPublicResponse,
+    PublicPauseRecord,
+    PublicSitePlan,
+)
 from control_plane.prepared_public_pause import PreparedPublicPause
 from control_plane.prepared_public_site import prepare_public_site, prepared_public_app
 from control_plane.prepared_public_storage import (
@@ -24,6 +27,7 @@ class PreparedPublicSiteTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.fixture = WebsiteFixture(self.root)
+        self.addCleanup(self.fixture.engine.dispose)
         self.site = prepare_public_site(self.fixture.plan, self.fixture)
         self.store = FilePublicPauseStore(self.root / "state")
 
@@ -34,6 +38,7 @@ class PreparedPublicSiteTests(unittest.IsolatedAsyncioTestCase):
         pause = PreparedPublicPause(site, self.store, self.fixture)
         pause.begin()
         self.fixture.update_database()
+        self.fixture.engine.dispose()
         self.fixture.database.unlink()
         before = tuple(self.fixture.capture_paths)
         async with lifespan_client(prepared_public_app(site)) as client:
@@ -44,7 +49,7 @@ class PreparedPublicSiteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("set-cookie", response.headers)
                 self.assertNotIn("x-csrf-token", response.headers)
                 self.assertEqual(
-                    response.headers["x-launchplane-reduced-service"], "writers-paused"
+                    response.headers["x-launchplane-reduced-service"], "public-writes-paused"
                 )
             page = await request(client, "GET", "/prices/repair")
             self.assertIn("Representative repair prices", page.text)
@@ -68,8 +73,8 @@ class PreparedPublicSiteTests(unittest.IsolatedAsyncioTestCase):
                 ("DELETE", "/assets/old.css", {}),
                 ("GET", "/my", {}),
                 ("GET", "/editor/page", {}),
-                ("GET", "/", {"Cookie": "session_id=personal"}),
-                ("GET", "/", {"Authorization": "Bearer personal"}),
+                ("GET", "/my", {"Cookie": "session_id=personal"}),
+                ("GET", "/editor/page", {"Authorization": "Bearer personal"}),
             ):
                 response = await request(
                     client, method, path, headers=headers, raw_body=b"secret-csrf"
@@ -78,6 +83,15 @@ class PreparedPublicSiteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("paused", response.text)
             response = await request(client, "GET", "/?editor=1")
             self.assertEqual(response.status_code, 404)
+            anonymous = await request(client, "GET", "/")
+            for headers in (
+                {"Cookie": "session_id=personal"},
+                {"Authorization": "Bearer personal"},
+            ):
+                public = await request(client, "GET", "/", headers=headers)
+                self.assertEqual(public.status_code, 200)
+                self.assertEqual(public.content, anonymous.content)
+                self.assertNotIn("set-cookie", public.headers)
         self.assertEqual(tuple(self.fixture.capture_paths), before)
 
     def test_incomplete_coverage_fails_before_any_writer_pause(self) -> None:
@@ -129,9 +143,8 @@ class PreparedPublicSiteTests(unittest.IsolatedAsyncioTestCase):
         self.fixture.bad_publication = True
         with self.assertRaisesRegex(ValueError, "publication"):
             PreparedPublicPause(self.site, self.store, self.fixture).begin()
-        record = self.store.load(
-            sorted((self.root / "state").glob("*.json"), key=lambda p: p.stat().st_mtime)[-1].stem
-        )
+        record = self.store.load(self.fixture.published_pause_id)
+        self.assertEqual(record.served_mode, "unverified")
         with self.assertRaisesRegex(ValueError, "observed"):
             PreparedPublicPause(self.site, self.store, self.fixture).drain(record.pause_id)
 
@@ -148,11 +161,7 @@ class PreparedPublicSiteTests(unittest.IsolatedAsyncioTestCase):
         record = pause.begin()
         for writer in self.fixture.plan.writers:
             self.assertFalse(self.fixture.write(writer.writer_id))
-        with closing(sqlite3.connect(self.fixture.database)) as connection:
-            self.assertEqual(
-                connection.execute("SELECT count(*) FROM writes").fetchone()[0],
-                len(self.fixture.plan.writers),
-            )
+        self.assertEqual(self.fixture.committed_write_count(), len(self.fixture.plan.writers))
         self.fixture.update_database()
         restarted = PreparedPublicPause(
             self.site, FilePublicPauseStore(self.root / "state"), self.fixture, clock=clock
@@ -200,3 +209,79 @@ class PreparedPublicSiteTests(unittest.IsolatedAsyncioTestCase):
             prepare_public_site(
                 self.fixture.plan.model_copy(update={"max_resources": 1}), self.fixture
             )
+
+    def test_public_coverage_never_retains_session_or_csrf_query_tokens(self) -> None:
+        for path in (
+            "/?csrf_token=private",
+            "/assets/a.js?session_id=private",
+            "/web/image?access_token=private",
+        ):
+            with (
+                self.subTest(path=path),
+                self.assertRaisesRegex(ValueError, "credential parameters"),
+            ):
+                PublicSitePlan.model_validate(
+                    {
+                        **self.fixture.plan.model_dump(),
+                        "public_routes": (path,),
+                    }
+                )
+
+    def test_unknown_completion_reobserves_recovery_without_resuming_twice(self) -> None:
+        pause = PreparedPublicPause(self.site, self.store, self.fixture)
+        record = pause.begin()
+        original_save = self.store.save
+
+        def fail_completion(updated: PublicPauseRecord) -> None:
+            if updated.state == "complete":
+                raise OSError("fixture completion commit failed")
+            original_save(updated)
+
+        with patch.object(self.store, "save", side_effect=fail_completion):
+            with self.assertRaises(OSError):
+                pause.finish(record.pause_id, expected=self.fixture.binding)
+        self.assertEqual(self.fixture.resume_count, 1)
+        self.assertEqual(self.store.load(record.pause_id).state, "resuming")
+        self.assertIsNone(self.store.load(record.pause_id).ended_at)
+        recovered = PreparedPublicPause(self.site, self.store, self.fixture).finish(
+            record.pause_id, expected=self.fixture.binding
+        )
+        self.assertEqual(recovered.state, "complete")
+        self.assertEqual(self.fixture.resume_count, 1)
+
+    async def test_css_imports_escapes_and_svg_remain_usable_with_local_closure(self) -> None:
+        self.fixture.pages["/assets/site.css"] = (
+            "text/css",
+            b'/*! generated bundle */ @import "more.css"; .icon:before{content:"\\f015"} .hero{background:u\\72l("/assets/bg.png")}',
+        )
+        self.fixture.pages["/assets/more.css"] = (
+            "text/css",
+            b'.logo{background-image:image-set("logo.svg" 1x)}',
+        )
+        self.fixture.pages["/assets/logo.svg"] = (
+            "image/svg+xml",
+            b'<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="blue"/></svg>',
+        )
+        site = prepare_public_site(self.fixture.plan, self.fixture)
+        self.assertIn("/assets/more.css", self.fixture.capture_paths)
+        self.assertIn("/assets/logo.svg", self.fixture.capture_paths)
+        self.fixture.engine.dispose()
+        self.fixture.database.unlink()
+        async with lifespan_client(prepared_public_app(site)) as client:
+            for path in ("/assets/site.css", "/assets/more.css", "/assets/logo.svg"):
+                response = await request(client, "GET", path)
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.content)
+
+    def test_css_import_remote_and_executable_svg_fail_before_pause(self) -> None:
+        for content_type, body in (
+            ("text/css", b'@import url("https://untrusted.invalid/x.css");'),
+            (
+                "image/svg+xml",
+                b'<svg xmlns="http://www.w3.org/2000/svg"><script>send()</script></svg>',
+            ),
+        ):
+            self.fixture.pages["/assets/old.css"] = (content_type, body)
+            with self.assertRaises(ValueError):
+                prepare_public_site(self.fixture.plan, self.fixture)
+            self.assertEqual(self.fixture.fenced, set())

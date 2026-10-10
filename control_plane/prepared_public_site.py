@@ -16,6 +16,7 @@ from control_plane.contracts.prepared_public_site import (
     validate_public_path,
 )
 from control_plane.prepared_public_html import PassivePublicHTML, css_references, local_reference
+from control_plane.prepared_public_assets import prepare_svg
 
 CSP = (
     "default-src 'none'; script-src 'none'; connect-src 'none'; form-action 'none'; "
@@ -32,6 +33,7 @@ PASSIVE_TYPES = frozenset(
         "image/gif",
         "image/webp",
         "image/avif",
+        "image/svg+xml",
         "image/x-icon",
         "image/vnd.microsoft.icon",
         "font/woff",
@@ -82,6 +84,7 @@ def prepare_public_site(
     pending = set(plan.public_routes) | set(plan.retained_assets)
     resources: dict[str, PreparedResource] = {}
     total = 0
+    captured_total = 0
     while pending:
         if len(resources) + len(pending) > plan.max_resources:
             raise ValueError("public copy exceeds resource budget")
@@ -99,6 +102,9 @@ def prepare_public_site(
         ):
             raise ValueError("personalized response cannot enter public copy")
         body = response.body
+        captured_total += len(body)
+        if captured_total > plan.max_total_bytes:
+            raise ValueError("captured public copy exceeds total byte budget")
         if len(body) > plan.max_resource_bytes:
             raise ValueError("public resource exceeds byte budget")
         content_type = response.content_type.split(";")[0].strip().lower()
@@ -117,7 +123,7 @@ def prepare_public_site(
             if content_type != "text/html":
                 raise ValueError("public page must be HTML or a supported redirect")
             parser = PassivePublicHTML(plan, path)
-            body = parser.render(body.decode("utf-8")).encode()
+            body = parser.render(body.decode()).encode()
             if not parser.links <= set(plan.public_routes):
                 raise ValueError(
                     f"unconfigured linked public routes: {sorted(parser.links - set(plan.public_routes))}"
@@ -126,7 +132,10 @@ def prepare_public_site(
         elif content_type not in PASSIVE_TYPES:
             raise ValueError(f"unsupported public asset content type: {content_type}")
         elif content_type == "text/css":
-            references.update(css_references(plan, path, body.decode("utf-8")))
+            references.update(css_references(plan, path, body.decode()))
+        elif content_type == "image/svg+xml":
+            body, svg_references = prepare_svg(plan, path, body)
+            references.update(svg_references)
         if "content-language" in headers:
             kept_headers.append(("content-language", headers["content-language"]))
         # Never copy Set-Cookie, CSRF/session headers, CSP, tracking or upstream cache headers.
@@ -176,16 +185,14 @@ def prepared_public_app(site: PreparedPublicSite) -> FastAPI:
             "X-Content-Type-Options": "nosniff",
             "Referrer-Policy": "no-referrer",
             "X-Launchplane-Served-Mode": "prepared-public",
-            "X-Launchplane-Reduced-Service": "writers-paused",
+            "X-Launchplane-Reduced-Service": "public-writes-paused",
             "X-Launchplane-Public-Copy": site.content_digest,
+            "X-Launchplane-Session-Mode": "anonymous-public-copy",
         }
         if request.method not in {"GET", "HEAD"}:
             return Response("Submissions temporarily paused.", status_code=423, headers=headers)
-        # Never serve authenticated/personalized variants from public content, even anonymously.
-        if "authorization" in request.headers or "cookie" in request.headers:
-            return Response(
-                "Signed-in activity temporarily paused.", status_code=423, headers=headers
-            )
+        # Existing anonymous visitors also carry Odoo cookies. Ignore session/auth
+        # input on public routes; every reader gets this same passive public copy.
         path = request.url.path + ("?" + request.url.query if request.url.query else "")
         if site.plan.excluded(path):
             return Response(

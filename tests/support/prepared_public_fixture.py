@@ -1,11 +1,10 @@
 """Inert, database-backed public website and writer adapter for isolated proof."""
 
-import sqlite3
-from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from fastapi import FastAPI
+from sqlalchemy import Column, MetaData, Table, Text, create_engine, func, select
 
 from control_plane.contracts.prepared_public_site import (
     WRITER_KINDS,
@@ -39,14 +38,17 @@ class WebsiteFixture:
             public_routes=("/", "/contact", "/prices/repair", "/old-prices"),
             retained_assets=("/assets/old.css",),
             excluded_prefixes=("/my", "/web", "/metrics", "/editor"),
-            writers=tuple(WriterTarget(writer_id=kind, kind=kind) for kind in sorted(WRITER_KINDS)),
+            writers=tuple(WriterTarget(writer_id=kind, kind=kind) for kind in WRITER_KINDS),
             notice="We are updating the site. Browsing is available; forms and signed-in activity are temporarily paused.",
         )
         self.database = root / "website.sqlite"
-        with closing(sqlite3.connect(self.database)) as connection, connection:
-            connection.execute("CREATE TABLE content (value TEXT)")
-            connection.execute("INSERT INTO content VALUES ('Representative repair prices')")
-            connection.execute("CREATE TABLE writes (writer TEXT)")
+        self.engine = create_engine(f"sqlite+pysqlite:///{self.database}")
+        metadata = MetaData()
+        self.content = Table("content", metadata, Column("value", Text))
+        self.writes = Table("writes", metadata, Column("writer", Text))
+        metadata.create_all(self.engine)
+        with self.engine.begin() as connection:
+            connection.execute(self.content.insert().values(value="Representative repair prices"))
         self.assets = root / "assets"
         self.assets.mkdir()
         (self.assets / "old.css").write_text(".legacy {color: purple}")
@@ -71,16 +73,18 @@ class WebsiteFixture:
         self.fenced: set[str] = set()
         self.active: dict[str, int] = {writer.writer_id: 0 for writer in self.plan.writers}
         self.published = ""
+        self.published_pause_id = ""
         self.resume_count = 0
         self.fail_resume = False
         self.bad_publication = False
         self.owner_count = 1
         self.recovered = False
+        self.resume_receipts: dict[str, PublicRecoveryObservation] = {}
 
     def capture(self, path: str) -> CapturedPublicResponse:
         self.capture_paths.append(path)
-        with closing(sqlite3.connect(self.database)) as connection, connection:
-            content = str(connection.execute("SELECT value FROM content").fetchone()[0])
+        with self.engine.connect() as connection:
+            content = str(connection.execute(select(self.content.c.value)).scalar_one())
         headers = {
             "Set-Cookie": "session_id=never-retain",
             "Content-Language": "en",
@@ -131,16 +135,23 @@ class WebsiteFixture:
     def write(self, writer_id: str) -> bool:
         if writer_id in self.fenced:
             return False
-        with closing(sqlite3.connect(self.database)) as connection, connection:
-            connection.execute("INSERT INTO writes VALUES (?)", (writer_id,))
+        with self.engine.begin() as connection:
+            connection.execute(self.writes.insert().values(writer=writer_id))
         return True
+
+    def committed_write_count(self) -> int:
+        with self.engine.connect() as connection:
+            return int(
+                connection.execute(select(func.count()).select_from(self.writes)).scalar_one()
+            )
 
     def publish(self, site: PreparedPublicSite, pause_id: str) -> str:
         self.published = "wrong" if self.bad_publication else site.content_digest
+        self.published_pause_id = pause_id
         return self.published
 
     def observed_public_copy(self, pause_id: str) -> str:
-        return self.published
+        return self.published if pause_id == self.published_pause_id else ""
 
     def fence_and_drain(
         self, site: PreparedPublicSite, pause_id: str
@@ -163,10 +174,15 @@ class WebsiteFixture:
     ) -> PublicRecoveryObservation:
         if self.fail_resume:
             raise RuntimeError("fixture recovery unavailable")
+        if pause_id in self.resume_receipts:
+            return self.resume_receipts[pause_id]
+        if expected != self.binding:
+            raise RuntimeError("fixture serving runtime does not match expected recovery")
+        self.capture("/")
         self.resume_count += 1
         self.fenced.clear()
         self.recovered = True
-        return PublicRecoveryObservation(
+        observation = PublicRecoveryObservation(
             binding=expected,
             pause_id=pause_id,
             serving_evidence_id="fixture-verified-serving",
@@ -174,14 +190,21 @@ class WebsiteFixture:
                 (writer.writer_id, self.owner_count) for writer in site.plan.writers
             ),
         )
+        self.resume_receipts[pause_id] = observation
+        return observation
 
     def update_database(self) -> None:
         if self.fenced != {writer.writer_id for writer in self.plan.writers}:
             raise RuntimeError("migration without complete fence")
-        with closing(sqlite3.connect(self.database)) as connection, connection:
-            connection.execute("DROP TABLE content")
-            connection.execute("CREATE TABLE content (value TEXT, new_column TEXT)")
-            connection.execute("INSERT INTO content VALUES ('Updated repair prices', 'migration')")
+        self.content.drop(self.engine)
+        self.content = Table(
+            "content", MetaData(), Column("value", Text), Column("new_column", Text)
+        )
+        self.content.create(self.engine)
+        with self.engine.begin() as connection:
+            connection.execute(
+                self.content.insert().values(value="Updated repair prices", new_column="migration")
+            )
         (self.assets / "old.css").unlink()
         self.pages.pop("/assets/old.css")
 
@@ -195,6 +218,7 @@ def browser_app() -> FastAPI:
     pause.begin()
     fixture.update_database()
     # Even losing the authoritative DB after migration cannot affect prepared serving.
+    fixture.engine.dispose()
     fixture.database.unlink()
     app = prepared_public_app(site)
     app.state.fixture_temporary = temporary

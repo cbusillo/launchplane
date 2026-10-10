@@ -29,9 +29,11 @@ markup/content type or resource budget failure aborts preparation before a write
 pause can begin. A homepage 200 never establishes coverage.
 
 The supported document grammar is explicit balanced HTML with local styles,
-fonts, raster images and audio/video. CSS escapes, comments and imports and
-SVG assets currently fail preparation; the adapter must not hide that failure
-or silently omit those references. Dynamic page content must already be rendered
+fonts, raster/passive SVG images and audio/video. CSS resource discovery uses the
+[tinycss2 parser](https://doc.courtbouillon.org/tinycss2/stable/api_reference.html)
+for comments, escapes, imports, nested rules and image sets. Imported CSS and
+SVG dependencies join the same local closure; executable SVG and invalid or
+off-origin references fail preparation. Dynamic page content must already be rendered
 in the capture. A site's browser coverage proof must confirm navigation and
 content work without its scripts before marking preparation ready. A plan for
 an unsupported site fails rather than claiming browsing continuity.
@@ -42,8 +44,10 @@ notice and disabled submission control. Script execution, connections, frames,
 objects and form actions are denied by the serving CSP. JS forms and live metrics
 therefore cannot produce requests. Only safe response headers are retained;
 Set-Cookie, CSRF/session headers and upstream cache/security policies are never
-stored. Prepared serving rejects every non-GET/HEAD method, cookies,
-authorization and excluded paths with 423. Unknown paths/queries get 404 and
+stored. Prepared serving ignores cookies/authorization on public routes so
+returning readers receive the same anonymous content, without session forwarding
+or personalization. Every non-GET/HEAD method and excluded path gets 423.
+Unknown paths/queries get 404 and
 never fall back to Odoo. Public HTML/assets and redirects are served from the
 immutable bundle, with no capture/provider/database handle in the serving app.
 
@@ -58,14 +62,16 @@ into prepared serving.
 `PreparedPublicPause` accepts a record-store interface and a provider capability.
 Persist `fencing` and `began_at` before publishing prepared serving or blocking
 forms. Publication must read back the bundle digest; drain independently reads
-current serving authority again. The provider fences and drains every configured
+current serving authority again. Until that readback, the record reports
+`unverified` serving, including a failed or uncertain publication. The provider fences and drains every configured
 web, cron, queue, mail, integration and asset-GC target. Every observation must
 match the release and pause, report a fence, zero active jobs and a durable
 provider evidence ID. Missing, duplicate, stale or in-flight writer evidence
 prevents the `drained` state and therefore prevents maintenance admission.
 
-A failure leaves the pause open and writers visibly paused; it cannot invent an
-end time. Recovery persists `resuming` and its exact expected recovered artifact
+A failure leaves the pause open; it cannot invent serving confirmation or an
+end time. Public write blocking stays in place after verified publication.
+Recovery persists `resuming` and its exact expected recovered artifact
 binding before the provider resumes. The provider must privately verify the
 recovered authoritative runtime, switch/read back serving, and resume exactly
 one owner per configured target using an idempotent pause operation. Binding,

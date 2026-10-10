@@ -85,6 +85,8 @@ class PreparedPublicPause:
             raise ValueError("pause is not awaiting writer drain")
         if self.provider.observed_public_copy(pause_id) != record.content_digest:
             raise ValueError("prepared serving must be observed before writer drain")
+        record = record.model_copy(update={"served_mode": "prepared-public"})
+        self.store.save(record)
         observations = self.provider.fence_and_drain(self.site, pause_id)
         if (
             len(observations) != len(self.site.plan.writers)

@@ -2,14 +2,12 @@
 
 from datetime import datetime
 from typing import Literal, Self
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 WriterKind = Literal["web", "cron", "queue", "mail", "integration", "asset_gc"]
-WRITER_KINDS: frozenset[WriterKind] = frozenset(
-    {"web", "cron", "queue", "mail", "integration", "asset_gc"}
-)
+WRITER_KINDS: tuple[WriterKind, ...] = ("web", "cron", "queue", "mail", "integration", "asset_gc")
 
 
 class FrozenRecord(BaseModel):
@@ -32,6 +30,11 @@ class WriterTarget(FrozenRecord):
 
 def validate_public_path(value: str) -> str:
     parts = urlsplit(value)
+    if any(
+        key.casefold() in {"csrf", "csrf_token", "session_id", "access_token", "token", "password"}
+        for key, _ in parse_qsl(parts.query)
+    ):
+        raise ValueError("session and credential parameters cannot enter public coverage")
     if (
         not value.startswith("/")
         or value.startswith("//")
@@ -80,7 +83,7 @@ class PublicSitePlan(FrozenRecord):
             raise ValueError("page and asset inventories overlap")
         if any(self.excluded(path) for path in (*self.public_routes, *self.retained_assets)):
             raise ValueError("personal/editor paths cannot be public coverage")
-        if {writer.kind for writer in self.writers} != WRITER_KINDS:
+        if {writer.kind for writer in self.writers} != set(WRITER_KINDS):
             raise ValueError("writer inventory must cover every authoritative writer kind")
         if len({writer.writer_id for writer in self.writers}) != len(self.writers):
             raise ValueError("writer identities must be unique")
@@ -138,7 +141,7 @@ class PublicPauseRecord(FrozenRecord):
     ended_at: datetime | None = None
     duration_seconds: float | None = None
     state: Literal["fencing", "drained", "resuming", "complete"] = "fencing"
-    served_mode: Literal["prepared-public"] = "prepared-public"
+    served_mode: Literal["unverified", "prepared-public"] = "unverified"
     reduced_service: Literal[True] = True
     writers: tuple[WriterObservation, ...] = ()
     recovery_binding: PublicSiteBinding | None = None

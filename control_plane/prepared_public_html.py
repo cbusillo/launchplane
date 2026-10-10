@@ -1,9 +1,23 @@
 """Project public HTML to a passive document; never reuse the site's scripts."""
 
-import re
+from collections.abc import Sequence
 from html import escape
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit
+
+import tinycss2
+from tinycss2.ast import (
+    AtKeywordToken,
+    CurlyBracketsBlock,
+    FunctionBlock,
+    Node,
+    ParenthesesBlock,
+    ParseError,
+    SquareBracketsBlock,
+    StringToken,
+    URLToken,
+    WhitespaceToken,
+)
 
 from control_plane.contracts.prepared_public_site import PublicSitePlan, validate_public_path
 
@@ -31,31 +45,63 @@ def local_reference(plan: PublicSitePlan, base: str, value: str) -> str | None:
     parsed = urlsplit(urljoin(plan.origin + base, value))
     if f"{parsed.scheme}://{parsed.netloc}" != plan.origin:
         raise ValueError("referenced resources must be local to the declared origin")
-    return validate_public_path(urlunsplit(("", "", parsed.path or "/", parsed.query, "")))
+    path = parsed.path or "/"
+    return validate_public_path(path + ("?" + parsed.query if parsed.query else ""))
 
 
 def css_references(plan: PublicSitePlan, base: str, text: str) -> set[str]:
-    # Escapes and comments can conceal URL syntax; unsupported CSS fails preparation.
-    if "\\" in text or "/*" in text or re.search(r"@import|expression\s*\(", text, re.I):
-        raise ValueError("CSS requires a plain, explicit local resource closure")
-    refs = set()
-    for match in re.finditer(r"url\(\s*(['\"]?)(.*?)\1\s*\)", text, re.I):
-        value = match.group(2)
-        if value.startswith("data:"):
-            continue
+    refs: set[str] = set()
+
+    def add(value: str, *, imported: bool = False) -> None:
+        if value.lower().startswith("data:") and not imported:
+            return
         ref = local_reference(plan, base, value)
         if ref:
             refs.add(ref)
-    if len(re.findall(r"url\s*\(", text, re.I)) != len(
-        re.findall(r"url\(\s*(['\"]?)(.*?)\1\s*\)", text, re.I)
-    ):
-        raise ValueError("unsupported CSS URL syntax")
+
+    def walk(nodes: Sequence[Node]) -> None:
+        for index, node in enumerate(nodes):
+            if isinstance(node, ParseError):
+                raise ValueError("invalid CSS resource syntax")
+            if isinstance(node, URLToken):
+                add(node.value)
+            elif isinstance(node, AtKeywordToken) and node.lower_value == "import":
+                target = next(
+                    (n for n in nodes[index + 1 :] if not isinstance(n, WhitespaceToken)), None
+                )
+                if isinstance(target, StringToken):
+                    add(target.value, imported=True)
+                elif isinstance(target, URLToken):
+                    add(target.value, imported=True)
+                elif isinstance(target, FunctionBlock) and target.lower_name == "url":
+                    values = [n for n in target.arguments if not isinstance(n, WhitespaceToken)]
+                    if len(values) != 1 or not isinstance(values[0], StringToken):
+                        raise ValueError("invalid CSS import URL")
+                    add(values[0].value, imported=True)
+                else:
+                    raise ValueError("unsupported CSS import target")
+            elif isinstance(node, FunctionBlock):
+                if node.lower_name == "url":
+                    args = [n for n in node.arguments if not isinstance(n, WhitespaceToken)]
+                    if len(args) != 1 or not isinstance(args[0], StringToken):
+                        raise ValueError("invalid CSS URL function")
+                    add(args[0].value)
+                else:
+                    if node.lower_name in {"image-set", "-webkit-image-set"}:
+                        for argument in node.arguments:
+                            if isinstance(argument, StringToken):
+                                add(argument.value)
+                    walk(node.arguments)
+            elif isinstance(node, (CurlyBracketsBlock, ParenthesesBlock, SquareBracketsBlock)):
+                walk(node.content)
+
+    walk(tinycss2.parse_component_value_list(text, skip_comments=True))
     return refs
 
 
 class PassivePublicHTML(HTMLParser):
     def __init__(self, plan: PublicSitePlan, path: str) -> None:
-        super().__init__(convert_charrefs=True)
+        super().__init__()
         self.plan = plan
         self.path = path
         self.parts: list[str] = []
@@ -107,9 +153,12 @@ class PassivePublicHTML(HTMLParser):
                 safe.append((name, ", ".join(entries)))
             elif name in URL_ATTRIBUTES:
                 if tag == "a":
-                    if value.startswith(
-                        ("https://", "http://", "mailto:", "tel:")
-                    ) and not value.startswith(self.plan.origin + "/"):
+                    if urlsplit(value).scheme in {
+                        "https",
+                        "http",
+                        "mailto",
+                        "tel",
+                    } and not value.startswith(self.plan.origin + "/"):
                         safe.append((name, value))
                         continue
                     ref = local_reference(self.plan, self.path, value)
@@ -127,9 +176,7 @@ class PassivePublicHTML(HTMLParser):
                 safe.append((name, value))
         if tag == "link" and values.get("rel") not in {"stylesheet", "icon"}:
             return
-        self.parts.append(
-            "<" + tag + "".join(f' {n}="{escape(v, quote=True)}"' for n, v in safe) + ">"
-        )
+        self.parts.append("<" + tag + "".join(f' {n}="{escape(v)}"' for n, v in safe) + ">")
         if tag not in VOID_TAGS:
             self.stack.append(tag)
         if tag == "style":
