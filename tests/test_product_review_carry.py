@@ -75,8 +75,8 @@ class _GitHub:
         body: dict[str, object] | None = None,
     ) -> object:
         repository_path = f"/repos/{_REPOSITORY}"
-        if path == f"{repository_path}/commits/{self.base_branch}":
-            return {"sha": self.base_sha} if self.base_sha in self.on_base else {}
+        if path == f"{repository_path}/branches/{self.base_branch}":
+            return {"commit": {"sha": self.base_sha}} if self.base_sha in self.on_base else {}
         if path == f"{repository_path}/pulls/{_PULL_REQUEST}":
             return {
                 "head": {"sha": self.head_sha},
@@ -280,6 +280,27 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         )
 
         self.assert_waits_for_the_client(self._publish())
+
+    def test_nontrain_update_moving_the_change_to_another_function_needs_acceptance(self) -> None:
+        accepted_patch = (
+            "@@ -10,3 +10,4 @@ def delete_user():\n request = parse_request()\n"
+            "+ require_admin(request)\n remove_user(request)"
+        )
+        moved_patch = (
+            "@@ -40,3 +40,4 @@ def list_users():\n request = parse_request()\n"
+            "+ require_admin(request)\n return users"
+        )
+        self.github.changes[(_BASE_COMMIT, _ACCEPTED_HEAD)] = _change(patch=accepted_patch)
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change(patch=moved_patch)
+
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_nontrain_update_can_shift_hunk_positions_without_changing_context(self) -> None:
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change(
+            patch=_PATCH.replace("@@ -1 +1 @@", "@@ -120 +120 @@"), blob="b" * 40
+        )
+
+        self.assertEqual(self._publish()["state"], "success")
 
     def test_base_moving_between_reads_does_not_change_the_comparison_base(self) -> None:
         comparisons: list[str] = []

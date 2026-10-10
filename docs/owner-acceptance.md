@@ -66,10 +66,12 @@ when all of these hold:
   in source-control comparisons from the same immutable base commit. A recorded
   train refresh supplies its merged base commit after branch membership is
   verified; otherwise Launchplane pins the current base branch's commit before
-  comparing either head. Hunk positions and
-  context lines are not compared, so a base edit that moves or surrounds the
-  change in a file the pull request also changes still carries; any difference in
-  a line the pull request adds or removes does not. A file without a patch
+  comparing either head. Hunk positions are ignored. Outside a recorded train
+  refresh, surrounding context, hunk boundaries and section names must also
+  match: moving identical added lines into a different function needs a fresh
+  Accept. Train-recorded refreshes can incorporate base context changes without
+  asking again. Any difference in a line the feature adds or removes prevents
+  either kind of carry. A file without a patch
   (binary or too large) or a list of 300 files or more cannot be compared and
   does not carry.
 - The newest decision is that acceptance, made by the product's current Client,
@@ -84,7 +86,8 @@ as a new decision record with `carried_from` naming the decision and head it cam
 from, the reason, the immutable comparison base, and any train refresh records,
 so it reads as carried, not
 re-decided. The `launchplane/owner-review` check on the new head says
-"Accepted by @client (carried from `<short head>` after a base-only refresh)",
+which earlier acceptance was carried and whether it was a train refresh or an
+unchanged-feature base update;
 the review page shows which version it was carried from, and the ready preview
 comment says the change is accepted rather than asking the Client again. The
 carry is checked when the status is next written: on the ready preview comment

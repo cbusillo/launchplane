@@ -1,6 +1,7 @@
 """Exact source-control change comparisons used when carrying decisions across base merges."""
 
 from collections.abc import Callable
+import re
 from typing import Final
 from urllib.parse import quote
 
@@ -17,6 +18,7 @@ def change_fingerprint(
     read: SourceControlRead,
     include_blobs: bool = True,
     changed_lines_only: bool = False,
+    ignore_hunk_positions: bool = False,
 ) -> ChangeFingerprint | None:
     """The pull request's change against `base`: from their merge base to `head`.
 
@@ -29,7 +31,9 @@ def change_fingerprint(
     name, status, and the lines the change adds and removes, in order, without
     hunk positions, context lines, or blobs (a pure rename compares by name), so
     a base edit that only moves or surrounds the change in the same file leaves it
-    equal.
+    equal. With ignore_hunk_positions=True, ignore only hunk line numbers; retain
+    context, hunk boundaries and section names so relocating a change during a
+    rebase cannot carry merely because its added and removed lines are the same.
     """
 
     comparison = _object(
@@ -50,6 +54,8 @@ def change_fingerprint(
         blob = _text(entry.get("sha")) if include_blobs or not text else ""
         if changed_lines_only:
             blob, text = "", _changed_lines(text)
+        elif ignore_hunk_positions:
+            text = re.sub(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", "@@", text, flags=re.MULTILINE)
         fingerprint.append(
             (
                 _text(entry.get("filename")),

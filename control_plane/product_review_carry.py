@@ -9,8 +9,8 @@ protects nothing. The acceptance carries to the new head only when all hold:
    including rebases, use a pinned commit read from that same base branch.
 2. The pull request's change against its base is the same at both heads: every
    changed file has the same name, status, and added and removed lines, in order.
-   Hunk positions and context lines are not compared, so a base edit that moves or
-   surrounds the change in a file it also changes does not stop the carry.
+   Hunk positions are ignored. Outside the train, context and section names must
+   also match; recorded train refreshes can incorporate base context edits.
 3. The carry is saved as its own decision record naming the decision and head it
    came from and the comparison base, so it reads as carried, not re-decided.
 
@@ -98,7 +98,9 @@ def carry_owner_acceptance(
         refresh_record_ids = ()
         branch = quote(base_branch.strip(), safe="")
         base_commit = _text(
-            _object(read(f"/repos/{_path(profile.repository)}/commits/{branch}")).get("sha")
+            _object(read(f"/repos/{_path(profile.repository)}/branches/{branch}"), "commit").get(
+                "sha"
+            )
         ).lower()
         if re.fullmatch(r"[0-9a-f]{40}", base_commit) is None:
             return None
@@ -108,14 +110,18 @@ def carry_owner_acceptance(
         base=base_commit,
         head=accepted.head_sha,
         read=read,
-        changed_lines_only=True,
+        include_blobs=False,
+        changed_lines_only=reason == "merge_train_base_refresh",
+        ignore_hunk_positions=reason == "unchanged_patch_base_update",
     )
     if not accepted_change or accepted_change != _change_fingerprint(
         repository=profile.repository,
         base=base_commit,
         head=head,
         read=read,
-        changed_lines_only=True,
+        include_blobs=False,
+        changed_lines_only=reason == "merge_train_base_refresh",
+        ignore_hunk_positions=reason == "unchanged_patch_base_update",
     ):
         return None
     with store.product_review_lock(
