@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import unquote
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapsePlanRecord
@@ -265,6 +265,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with (
             TemporaryDirectory() as directory,
             patch.dict("os.environ", {}, clear=True),
+            patch.dict("control_plane.merge_train_github_token._TOKEN_CACHE", {}, clear=True),
             patch(
                 "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
                 return_value="test-private-key",

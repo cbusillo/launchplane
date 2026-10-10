@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from email.message import Message
+from urllib.error import HTTPError
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -21,7 +23,7 @@ from control_plane.github_app_identity import (
 )
 from control_plane.merge_train_github_token import resolve_merge_train_github_token
 from control_plane.github_read_cache import GitHubReadCache
-from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
+from control_plane.merge_train_github import MergeTrainGitHubError, UrllibMergeTrainGitHubTransport
 from tests.test_merge_train_read_cost import _Provider
 
 
@@ -184,6 +186,34 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                 method="GET", path="/value"
             )
             self.assertEqual(http.used, 2)
+
+    def test_auth_failures_refresh_issued_token_but_quota_failures_preserve_it(self) -> None:
+        for status, quota_limited in ((401, False), (403, False), (403, True)):
+            with (
+                self.subTest(status=status, quota_limited=quota_limited),
+                patch.dict("control_plane.merge_train_github_token._TOKEN_CACHE", {}, clear=True),
+                patch(
+                    "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                    return_value=self.private_key,
+                ),
+                patch(
+                    "control_plane.github_app_identity._github_api_request",
+                    side_effect=self.provider,
+                ),
+            ):
+                first = self.resolve()
+                headers = Message()
+                if quota_limited:
+                    headers["X-RateLimit-Remaining"] = "0"
+                    headers["X-RateLimit-Reset"] = "1800000000"
+                failure = HTTPError("https://api.github.com/value", status, "denied", headers, None)
+                with patch("control_plane.merge_train_github.urlopen", side_effect=failure):
+                    with self.assertRaises(MergeTrainGitHubError) as raised:
+                        UrllibMergeTrainGitHubTransport(token=first).request(
+                            method="GET", path="/value"
+                        )
+                self.assertEqual(raised.exception.rate_limited, quota_limited)
+                self.assertEqual(self.resolve() == first, quota_limited)
 
     def test_native_token_refreshes_before_expiry_and_repository_scope_does_not_share(self) -> None:
         with (

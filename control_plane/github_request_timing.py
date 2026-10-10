@@ -85,7 +85,7 @@ def github_request_tally(
         _ACTIVE_TALLY.reset(token)
         elapsed = clock() - started
         _LOGGER.info(
-            "GitHub request tally: %s; requests=%d not_modified=%d charged_upper_bound=%d seconds=%.1f",
+            "GitHub request tally: %s; requests=%d not_modified=%d instrumented_charged_upper_bound=%d seconds=%.1f",
             operation,
             tally.count,
             tally.not_modified,

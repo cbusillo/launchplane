@@ -29,6 +29,14 @@ _TOKEN_CACHE_CAPACITY = 256
 _TOKEN_REFRESH_MARGIN = timedelta(minutes=5)
 
 
+def invalidate_cached_merge_train_github_token(token: str) -> None:
+    """Discard an issued credential after a conclusive provider auth failure."""
+    with _TOKEN_CACHE_LOCK:
+        for key, issued in tuple(_TOKEN_CACHE.items()):
+            if issued.token == token:
+                del _TOKEN_CACHE[key]
+
+
 def resolve_merge_train_github_token(
     *, source: MergeTrainGitHubTokenSource, control_plane_root: Path, repository: str = ""
 ) -> str:

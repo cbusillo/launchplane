@@ -304,9 +304,16 @@ class UrllibMergeTrainGitHubTransport:
             if error.code == 304 and cached is not None and method == "GET":
                 notify_github_quota_response_headers(self.response_headers_observer, error.headers)
                 return cached.payload
-            raise _github_http_error(
+            provider_error = _github_http_error(
                 method=method, path=path, status_code=error.code, error=error
-            ) from error
+            )
+            if error.code == 401 or (error.code == 403 and not provider_error.rate_limited):
+                from control_plane.merge_train_github_token import (
+                    invalidate_cached_merge_train_github_token,
+                )
+
+                invalidate_cached_merge_train_github_token(self.token)
+            raise provider_error from error
         except (URLError, OSError) as error:
             raise MergeTrainGitHubError(f"GitHub API request failed for {path}: {error}") from error
         except json.JSONDecodeError as error:
@@ -2891,7 +2898,8 @@ class GitHubMergeTrainSnapshotReader:
         base_branch: str,
         base_sha: str,
     ) -> DependencyUpdateClass:
-        # A read failure only withholds label-free admission; it must not stop the train.
+        # Ordinary read failures withhold label-free admission. Quota failures
+        # retain their controller backoff evidence and stop this pass.
         key = (repository_path, pull_request_number, head_sha, base_sha)
         if key in self._dependency_classes:
             return self._dependency_classes[key]
