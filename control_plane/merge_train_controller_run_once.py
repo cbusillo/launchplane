@@ -4350,6 +4350,9 @@ def _recover_failed_merge_train_candidate(
         failures = github_client.read_candidate_check_failures(candidate=failed)
     except MergeTrainGitHubError:
         return None
+    if not failures.conclusive:
+        # A re-run in progress or a failure no longer visible blames nobody yet.
+        return None
     details: dict[str, object] = {
         "failed_checks": [
             {"name": check.name, "conclusion": check.conclusion, "url": check.url}

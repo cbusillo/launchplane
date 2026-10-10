@@ -802,8 +802,9 @@ candidate's check runs, commit statuses and the annotations of failed runs:
   `unittest-shard run` does this under GitHub Actions.
 
 A batch with two broken pull requests isolates and blocks each in turn. When the
-failure evidence cannot be read, the failed candidate stays stopped and the next
-pass reads it again. The retired ordinary-agent job path keeps its
+failure evidence cannot be read, shows no failed run, or a check on the
+candidate is still running (for example a manual re-run), the failed candidate
+stays stopped and the next pass reads it again. The retired ordinary-agent job path keeps its
 earlier stop behavior.
 
 If the eligible queue changes, for example because a new queued PR repairs

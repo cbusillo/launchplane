@@ -45,6 +45,13 @@ class CandidateCheckFailure:
 @dataclass(frozen=True)
 class CandidateCheckFailures:
     checks: tuple[CandidateCheckFailure, ...]
+    # A check run is still queued or running, for example a re-run of a failed job.
+    checks_pending: bool = False
+
+    @property
+    def conclusive(self) -> bool:
+        """Whether this evidence can justify a retry, a split or a block."""
+        return bool(self.checks) and not self.checks_pending
 
     @property
     def infrastructure_only(self) -> bool:
@@ -86,11 +93,13 @@ def classify_candidate_check_failures(
     """
     failures: list[CandidateCheckFailure] = []
     annotated = 0
+    checks_pending = False
     for check_run in check_runs:
         name = str(check_run.get("name") or "")
         if is_launchplane_projected_check(name):
             continue
         if str(check_run.get("status") or "").strip().lower() != "completed":
+            checks_pending = True
             continue
         conclusion = str(check_run.get("conclusion") or "").strip().lower()
         if conclusion not in INFRASTRUCTURE_CONCLUSIONS | FAILURE_CONCLUSIONS:
@@ -136,7 +145,7 @@ def classify_candidate_check_failures(
                     source="commit_status",
                 )
             )
-    return CandidateCheckFailures(checks=tuple(failures))
+    return CandidateCheckFailures(checks=tuple(failures), checks_pending=checks_pending)
 
 
 def candidate_failure_summary(failures: CandidateCheckFailures) -> str:

@@ -15,6 +15,10 @@ from control_plane.merge_train_batch_pull_request import (
     batch_pull_request_body,
     changed_closed_batch_body,
 )
+from control_plane.merge_train_candidate_failures import (
+    CandidateCheckFailure,
+    CandidateCheckFailures,
+)
 from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_controller_run_once import try_reflow_failed_merge_train_candidate
 from control_plane.merge_train_github import GitHubMergeTrainClient
@@ -65,6 +69,9 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         client = Mock(wraps=self.client)
         client.read_merge_train_snapshot.return_value = self.snapshot
         client.probe_batch_entry_conflicts.return_value = conflicts
+        client.read_candidate_check_failures.return_value = CandidateCheckFailures(
+            checks=(CandidateCheckFailure(name="ci-gate", conclusion="failure", url=""),)
+        )
         self.reflow_client = client
         result = try_reflow_failed_merge_train_candidate(
             candidate_store=store,

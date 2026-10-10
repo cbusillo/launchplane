@@ -375,6 +375,15 @@ class CulpritIsolationTests(unittest.TestCase):
     def test_unreadable_failure_evidence_keeps_the_batch_stopped(self) -> None:
         from control_plane.merge_train_github import MergeTrainGitHubError
 
+        for evidence in (
+            MergeTrainGitHubError("unavailable", status_code=503),
+            CandidateCheckFailures(checks=()),
+            CandidateCheckFailures(checks=TEST_FAILURE.checks, checks_pending=True),
+        ):
+            with self.subTest(evidence=type(evidence).__name__):
+                self._assert_stopped_without_blame(evidence)
+
+    def _assert_stopped_without_blame(self, evidence: object) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
             train = _TrainSimulation(self, store, 2)
@@ -393,9 +402,10 @@ class CulpritIsolationTests(unittest.TestCase):
             store.write_merge_train_batch_candidate_record(failed_record)
             client = Mock()
             client.read_merge_train_snapshot.return_value = train.snapshot
-            client.read_candidate_check_failures.side_effect = MergeTrainGitHubError(
-                "unavailable", status_code=503
-            )
+            if isinstance(evidence, Exception):
+                client.read_candidate_check_failures.side_effect = evidence
+            else:
+                client.read_candidate_check_failures.return_value = evidence
             with patch(
                 "control_plane.merge_train_controller_run_once.changed_closed_batch_body",
                 return_value=False,
@@ -529,6 +539,17 @@ class CandidateFailureClassificationTests(unittest.TestCase):
         )
         self.assertFalse(failures.infrastructure_only)
         self.assertIn("external/gate", failures.check_names)
+
+    def test_a_rerun_in_progress_makes_the_evidence_inconclusive(self) -> None:
+        failures = self._classify(
+            [
+                _check_run(1, "test_shard (0)", "", status="in_progress"),
+                _check_run(2, "ci-gate", "failure"),
+            ],
+            {2: [_exit_code()]},
+        )
+        self.assertTrue(failures.checks_pending)
+        self.assertFalse(failures.conclusive)
 
     def test_untrusted_names_and_test_ids_are_not_echoed(self) -> None:
         failures = self._classify(
