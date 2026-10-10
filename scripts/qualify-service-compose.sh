@@ -19,9 +19,10 @@ services=(launchplane launchplane-odoo-workers launchplane-verireel-workers)
 cleanup() {
   local result="$?"
   trap - EXIT
+  trap '' INT TERM
   if [ -f "$fixture_dir/compose.json" ]; then
-    if [ "$result" -ne 0 ]; then "${compose[@]}" logs --tail 30 >&2 || true; fi
-    if ! "${compose[@]}" down --volumes --remove-orphans --timeout 10; then
+    if [ "$result" -ne 0 ] && [ "$result" -ne 130 ]; then "${compose[@]}" logs --tail 30 >&2 || true; fi
+    if ! "${compose[@]}" down --volumes --remove-orphans --timeout 2; then
       echo "Fixture cleanup failed for project $project; retained $fixture_dir." >&2
       exit 1
     fi
@@ -60,7 +61,7 @@ DOCKER_IMAGE_REFERENCE="$image" LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK=unused-fixt
     .services.postgres = {
       image: $postgres_image, pull_policy: "never", networks: ["qualification"],
       environment: {POSTGRES_HOST_AUTH_METHOD: "trust"},
-      tmpfs: ["/var/lib/postgresql"],
+      tmpfs: ["/var/lib/postgresql/data"],
       healthcheck: {test: ["CMD-SHELL", "pg_isready -U postgres"],
         interval: "1s", timeout: "5s", retries: 30}} |
     .services.launchplane.depends_on.postgres = {condition: "service_healthy"}' \
