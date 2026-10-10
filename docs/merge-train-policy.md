@@ -1562,3 +1562,11 @@ fresh current-policy controller discovery: current Git ancestry prevents another
 an already-contained child, and the fresh collapse owns disposition of its
 remaining open children. A carried child GitHub already merged indirectly stays
 closed; this recovery does not restore its Launchplane landing annotations.
+
+Terminal feedback recovery and current feedback delivery serialize the managed
+comment for each repository/PR through the record-store lock. Recovery rechecks
+the latest stored status while holding that lock; a newer status cannot be
+overwritten by a concurrent replay. PostgreSQL uses the same held session for
+feedback reads and writes, so delivery does not require a second pooled connection.
+The lock affects comment delivery only, and does not replace merge authority or
+the controller lease.

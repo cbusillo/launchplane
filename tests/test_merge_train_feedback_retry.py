@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from datetime import datetime, timezone
 from email.message import Message
 from pathlib import Path
@@ -21,6 +23,7 @@ from control_plane.merge_train_pr_feedback import (
     MergeTrainPrFeedbackEnvelope,
     build_merge_train_pr_feedback_record,
     feedback_retry_is_due,
+    write_merge_train_pr_feedback_record,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -58,6 +61,92 @@ def _record(
 
 
 class MergeTrainFeedbackRetryTests(TestCase):
+    def test_retry_and_new_status_serialize_one_managed_comment(self) -> None:
+        policy = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        )
+        retry_entered, release_retry, new_started, new_delivered = (Event() for _ in range(4))
+        bodies: list[str] = []
+        with TemporaryDirectory() as directory:
+            old_store = FilesystemRecordStore(Path(directory))
+            new_store = FilesystemRecordStore(Path(directory))
+            with patch(
+                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                side_effect=_failure(URLError("temporary outage")),
+            ):
+                old_store.write_merge_train_pr_feedback_record(_record())
+
+            def deliver(**kwargs: object) -> dict[str, object]:
+                body = str(kwargs["body"])
+                if "Saved terminal landing evidence." in body:
+                    retry_entered.set()
+                    if not release_retry.wait(5):
+                        raise AssertionError("retry was not released")
+                else:
+                    new_delivered.set()
+                bodies.append(body)
+                return {
+                    "action": "updated_comment",
+                    "comment_id": 123,
+                    "comment_url": "https://example.test/comment",
+                }
+
+            def retry() -> tuple[int, int]:
+                return merge_train_scheduler._deliver_controller_feedback(
+                    record_store=old_store,
+                    policy_record=policy,
+                    repository_policy=policy.policy.policies[0],
+                    token="test-token",
+                    trace_id="retry",
+                    response={
+                        "result": {
+                            "controller_action": "idle",
+                            "repository": "cbusillo/alpha",
+                            "base_branch": "main",
+                        }
+                    },
+                    now=lambda: "2026-10-01T06:02:00Z",
+                )
+
+            def newer() -> MergeTrainPrFeedbackRecord:
+                new_started.set()
+                return write_merge_train_pr_feedback_record(
+                    store=new_store,
+                    request=MergeTrainPrFeedbackEnvelope(
+                        repository="cbusillo/alpha",
+                        pull_request_number=7,
+                        event="waiting",
+                        message="New checks are waiting.",
+                    ),
+                    policy_key="test",
+                    policy_sha256="digest",
+                    token="test-token",
+                    recorded_at="2026-10-01T06:02:01Z",
+                    response_trace_id="new-status",
+                )
+
+            with (
+                patch(
+                    "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                    side_effect=deliver,
+                ),
+                ThreadPoolExecutor(max_workers=2) as executor,
+            ):
+                first = executor.submit(retry)
+                try:
+                    self.assertTrue(retry_entered.wait(5))
+                    second = executor.submit(newer)
+                    self.assertTrue(new_started.wait(5))
+                    self.assertFalse(new_delivered.wait(0.1), "new status raced the old PATCH")
+                finally:
+                    release_retry.set()
+                self.assertEqual(first.result(timeout=5), (1, 0))
+                self.assertEqual(second.result(timeout=5).delivery_status, "delivered")
+            self.assertIn("New checks are waiting.", bodies[-1])
+            self.assertEqual(
+                new_store.list_merge_train_pr_feedback_records(limit=1)[0].event, "waiting"
+            )
+
     def test_scheduled_terminal_failure_recovers_after_idle_without_duplicate_delivery(
         self,
     ) -> None:

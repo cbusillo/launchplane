@@ -2149,6 +2149,15 @@ class FilesystemRecordStore:
                 status="written", current_record=replacement_record
             )
 
+    @contextmanager
+    def merge_train_feedback_delivery_lock(
+        self, *, repository: str, pull_request_number: int
+    ) -> Iterator[None]:
+        with self._exclusive_record_lock(
+            "merge-train-feedback-delivery", f"{repository.casefold()}#{pull_request_number}"
+        ):
+            yield
+
     def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> Path:
         return self._write_model("launchplane_merge_train_pr_feedback", record.feedback_id, record)
 

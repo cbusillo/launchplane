@@ -60,7 +60,7 @@ from control_plane.merge_train_policy_source import (
 )
 from control_plane.merge_train_pr_feedback import (
     MergeTrainPrFeedbackEnvelope,
-    build_merge_train_pr_feedback_record,
+    write_merge_train_pr_feedback_record,
     deliver_merge_train_pr_feedback_record,
     feedback_retry_is_due,
     require_merge_train_pr_feedback_record_store,
@@ -441,7 +441,8 @@ def _deliver_controller_feedback(
     if quota_records and not feedback_retry_is_due(quota_records[0], now=now()):
         backoff = quota_records[0].provider_retry_at
     for payload in payloads:
-        feedback_record = build_merge_train_pr_feedback_record(
+        feedback_record = write_merge_train_pr_feedback_record(
+            store=feedback_store,
             request=MergeTrainPrFeedbackEnvelope.model_validate(payload),
             policy_key=repository_policy.policy_key,
             policy_sha256=policy_record.policy_sha256,
@@ -450,7 +451,6 @@ def _deliver_controller_feedback(
             response_trace_id=trace_id,
             defer_until=backoff,
         )
-        feedback_store.write_merge_train_pr_feedback_record(feedback_record)
         if feedback_record.delivery_status == "failed":
             failed += 1
             if feedback_record.provider_retry_at:
@@ -474,27 +474,30 @@ def _deliver_controller_feedback(
         attempted_at = now()
         if not feedback_retry_is_due(record, now=attempted_at):
             continue
-        latest = feedback_store.list_merge_train_pr_feedback_records(
-            repository=record.repository,
-            base_branch=record.base_branch,
-            pr_number=record.pull_request_number,
-            limit=2,
-        )
-        if not latest or latest[0].feedback_id != record.feedback_id:
-            continue
-        if (
-            not record.created_at_ns
-            and len(latest) > 1
-            and latest[1].recorded_at == record.recorded_at
+        with feedback_store.merge_train_feedback_delivery_lock(
+            repository=record.repository, pull_request_number=record.pull_request_number
         ):
-            # Legacy second-resolution ties have no proven causal order.
-            continue
-        recovered = deliver_merge_train_pr_feedback_record(
-            record=record,
-            token=token,
-            attempted_at=attempted_at,
-        )
-        feedback_store.write_merge_train_pr_feedback_record(recovered)
+            latest = feedback_store.list_merge_train_pr_feedback_records(
+                repository=record.repository,
+                base_branch=record.base_branch,
+                pr_number=record.pull_request_number,
+                limit=2,
+            )
+            if not latest or latest[0].feedback_id != record.feedback_id:
+                continue
+            if (
+                not record.created_at_ns
+                and len(latest) > 1
+                and latest[1].recorded_at == record.recorded_at
+            ):
+                # Legacy second-resolution ties have no proven causal order.
+                continue
+            recovered = deliver_merge_train_pr_feedback_record(
+                record=record,
+                token=token,
+                attempted_at=attempted_at,
+            )
+            feedback_store.write_merge_train_pr_feedback_record(recovered)
         if recovered.delivery_status == "delivered":
             delivered += 1
         elif recovered.delivery_status == "failed":

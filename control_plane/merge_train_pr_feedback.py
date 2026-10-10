@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from time import time_ns
 from urllib.error import HTTPError, URLError
-from typing import Protocol, cast
+from typing import ContextManager, Protocol, cast
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -47,6 +47,10 @@ class MergeTrainPrFeedbackEnvelope(BaseModel):
 
 
 class MergeTrainPrFeedbackRecordStore(Protocol):
+    def merge_train_feedback_delivery_lock(
+        self, *, repository: str, pull_request_number: int
+    ) -> ContextManager[None]: ...
+
     def write_merge_train_pr_feedback_record(
         self, record: MergeTrainPrFeedbackRecord
     ) -> object: ...
@@ -73,6 +77,33 @@ def require_merge_train_pr_feedback_record_store(
     ):
         return cast(MergeTrainPrFeedbackRecordStore, record_store)
     raise TypeError("record store does not support merge train PR feedback records")
+
+
+def write_merge_train_pr_feedback_record(
+    *,
+    store: MergeTrainPrFeedbackRecordStore,
+    request: MergeTrainPrFeedbackEnvelope,
+    policy_key: str,
+    policy_sha256: str,
+    token: str,
+    recorded_at: str,
+    response_trace_id: str,
+    defer_until: str = "",
+) -> MergeTrainPrFeedbackRecord:
+    with store.merge_train_feedback_delivery_lock(
+        repository=request.repository, pull_request_number=request.pull_request_number
+    ):
+        record = build_merge_train_pr_feedback_record(
+            request=request,
+            policy_key=policy_key,
+            policy_sha256=policy_sha256,
+            token=token,
+            recorded_at=recorded_at,
+            response_trace_id=response_trace_id,
+            defer_until=defer_until,
+        )
+        store.write_merge_train_pr_feedback_record(record)
+        return record
 
 
 def build_merge_train_pr_feedback_record(

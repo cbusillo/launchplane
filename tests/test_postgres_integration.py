@@ -1158,6 +1158,62 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_feedback_recovery_orders_jsonb_receipts_and_supersedes_same_second_failure(
+        self,
+    ) -> None:
+        from email.message import Message
+        from urllib.error import HTTPError
+        from tests.test_merge_train_feedback_retry import _failure, _record
+
+        with _store_for_fresh_head_database() as store:
+            headers = Message()
+            headers["Retry-After"] = "120"
+            error = HTTPError("https://example.test/comment", 429, "quota", headers, None)
+            with patch(
+                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                side_effect=_failure(error),
+            ):
+                failed = _record()
+                superseded = _record(number=8)
+            with patch(
+                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                return_value={"action": "updated_comment", "comment_id": 123, "comment_url": ""},
+            ):
+                newer = _record(number=8, event="waiting")
+            # A delivery lock must leave feedback operations usable with a single
+            # pooled connection, including the legacy/non-ranked latest-status read.
+            from sqlalchemy.pool import QueuePool
+
+            store._engine.dispose()
+            store._engine.pool = QueuePool(
+                store._engine.pool._creator, pool_size=1, max_overflow=0, timeout=0.5
+            )
+            with store.merge_train_feedback_delivery_lock(
+                repository=failed.repository, pull_request_number=failed.pull_request_number
+            ):
+                for record in (failed, superseded, newer):
+                    store.write_merge_train_pr_feedback_record(record)
+                retries = store.list_merge_train_pr_feedback_records(
+                    repository=failed.repository,
+                    base_branch=failed.base_branch,
+                    latest_per_pr=True,
+                    delivery_status="failed",
+                    terminal_retry_candidates=True,
+                    limit=1,
+                )
+                self.assertEqual([record.feedback_id for record in retries], [failed.feedback_id])
+                quota = store.list_merge_train_pr_feedback_records(
+                    repository=failed.repository,
+                    base_branch=failed.base_branch,
+                    latest_per_pr=True,
+                    delivery_status="failed",
+                    provider_backoff_only=True,
+                    limit=1,
+                )
+                self.assertEqual(quota[0].provider_retry_at, failed.provider_retry_at)
+                latest = store.list_merge_train_pr_feedback_records(pr_number=8, limit=1)
+                self.assertEqual(latest[0].feedback_id, newer.feedback_id)
+
     def test_compose_source_completion_holds_ownership_across_provider_update(self) -> None:
         with _store_for_fresh_head_database() as store:
             profile = _public_ingress_profile().model_copy(
