@@ -171,7 +171,9 @@ class RecordedPreviewNotesTests(unittest.TestCase):
             store=cast(ReleaseReviewStore, self.store), profile=profile(), read=github_read
         )
         assert review.checklist is not None
-        historical = review.checklist.model_dump(mode="json")
+        historical = review.checklist.model_copy(
+            update={"database_compatibility": None}
+        ).model_dump(mode="json")
         self.assertNotIn("preview_era_notes", historical["items"][0])
         for item in historical["items"]:
             item.pop("already_reviewed")

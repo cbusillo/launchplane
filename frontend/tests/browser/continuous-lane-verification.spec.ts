@@ -16,12 +16,12 @@ for (const detail of [false, true]) test(`an open ${detail ? "environment" : "wo
     : page.locator(".signal-tile").filter({ hasText: /^Testing/i });
   await expect(signal).toHaveAttribute("data-tone", detail ? "pass" : "verified");
   const sidebarDot = page.locator('.rail-product-link[data-active="true"] [data-lane="testing"]');
-  await expect(sidebarDot).toHaveAttribute("data-trust", "verified");
+  await expect(sidebarDot).toHaveAttribute("data-tone", "verified");
   await page.clock.runFor(2000);
   await expect(signal).toHaveAttribute("data-tone", "warning");
   if (!detail) await expect(signal).toContainText("Review warning");
   await expect(signal).toContainText("Stale");
-  await expect(sidebarDot).toHaveAttribute("data-trust", "stale");
+  await expect(sidebarDot).toHaveAttribute("data-tone", "warning");
 });
 
 test("historical runtime match cannot show green without current monitor proof", async ({ page }) => {

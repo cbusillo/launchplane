@@ -19,6 +19,7 @@
     "driverDescriptors": "docs/driver-descriptors.md",
     "driverDevelopment": "docs/driver-development.md",
     "previewWorkflowContract": "docs/preview-workflow-contract.md",
+    "legacyPreviewReconciliation": "docs/legacy-preview-reconciliation.md",
     "productRepoContract": "docs/product-repo-contract.md",
     "newProductRepo": "docs/new-product-repo.md",
     "operatorExperience": "docs/operator-experience.md",
@@ -52,6 +53,7 @@
     "eventDrivenDeploys": "docs/event-driven-deploys.md",
     "releaseReview": "docs/release-review.md",
     "productionBackupProvider": "docs/production-backup-provider.md",
+    "odooOnlineBackups": "docs/odoo-online-backups.md",
     "style": ["docs/style/python.md", "docs/style/testing.md"],
     "policies": ["docs/policies/coding-standards.md"]
   },
