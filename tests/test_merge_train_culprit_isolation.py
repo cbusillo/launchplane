@@ -192,7 +192,7 @@ class _TrainSimulation:
                     lease=Mock(),
                 )
             assert result is not None
-            self.reason_codes.append(str(result.get("reason_code")))
+            self.reason_codes.append(cast(str, result.get("reason_code")))
             if result["controller_action"] == "block":
                 labelled = [
                     call.kwargs["pull_request_number"]
@@ -448,8 +448,8 @@ def _exit_code() -> dict[str, object]:
 
 
 class CandidateFailureClassificationTests(unittest.TestCase):
+    @staticmethod
     def _classify(
-        self,
         check_runs: list[dict[str, object]],
         annotations: dict[int, list[dict[str, object]]],
         statuses: list[dict[str, object]] | None = None,

@@ -322,7 +322,7 @@ def _isolated_failure_message(result: dict[str, Any]) -> str:
         if name and name not in seen:
             seen.add(name)
             checks.append(f"[{name}]({url})" if url.startswith("https://") else name)
-    tests = [f"`{test}`" for test in _as_list(details.get("failed_tests")) if _string(test)]
+    tests = [f"`{test}`" for test in map(_string, _as_list(details.get("failed_tests"))) if test]
     named = ""
     if checks:
         named += " Failing checks: " + ", ".join(checks[:_MAX_NAMED]) + _more(len(checks)) + "."

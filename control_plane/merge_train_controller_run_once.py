@@ -4498,7 +4498,7 @@ def _plan_failed_candidate_replacement(
         batch_id = candidate.batch_id + "-infrastructure-retry"
         candidate = MergeTrainBatchCandidate.model_validate(
             {
-                **candidate.model_dump(mode="python"),
+                **candidate.model_dump(),
                 "batch_id": batch_id,
                 "candidate_ref": build_merge_train_batch_candidate_ref(
                     repository=repository, base_branch=base_branch, batch_id=batch_id

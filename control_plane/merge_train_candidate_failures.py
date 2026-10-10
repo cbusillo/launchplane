@@ -28,7 +28,7 @@ FAILED_TEST_ANNOTATION_TITLE = "failed test"
 MAX_ANNOTATED_CHECK_RUNS = 20
 MAX_NAMED_FAILURES = 5
 _SAFE_CHECK_NAME = re.compile(r"[\w .:/(),-]{1,100}")
-_SAFE_TEST_ID = re.compile(r"[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+")
+_SAFE_TEST_ID = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
 
 
 @dataclass(frozen=True)
@@ -95,29 +95,29 @@ def classify_candidate_check_failures(
     annotated = 0
     checks_pending = False
     for check_run in check_runs:
-        name = str(check_run.get("name") or "")
+        name = _text(check_run.get("name"))
         if is_launchplane_projected_check(name):
             continue
-        if str(check_run.get("status") or "").strip().lower() != "completed":
+        if _text(check_run.get("status")).strip().lower() != "completed":
             checks_pending = True
             continue
-        conclusion = str(check_run.get("conclusion") or "").strip().lower()
+        conclusion = _text(check_run.get("conclusion")).strip().lower()
         if conclusion not in INFRASTRUCTURE_CONCLUSIONS | FAILURE_CONCLUSIONS:
             continue
         runner_lost = False
         failed_tests: list[str] = []
         check_run_id = check_run.get("id")
         if (
-            annotated < MAX_ANNOTATED_CHECK_RUNS
-            and isinstance(check_run_id, int)
+            isinstance(check_run_id, int)
             and not isinstance(check_run_id, bool)
+            and annotated < MAX_ANNOTATED_CHECK_RUNS
         ):
             annotated += 1
             for annotation in read_annotations(check_run_id):
-                message = str(annotation.get("message") or "").strip()
+                message = _text(annotation.get("message")).strip()
                 if any(signature in message.lower() for signature in RUNNER_LOSS_MESSAGES):
                     runner_lost = True
-                title = str(annotation.get("title") or "").strip().casefold()
+                title = _text(annotation.get("title")).strip().casefold()
                 if title == FAILED_TEST_ANNOTATION_TITLE and _SAFE_TEST_ID.fullmatch(message):
                     failed_tests.append(message)
         failures.append(
@@ -131,11 +131,11 @@ def classify_candidate_check_failures(
         )
     seen_contexts: set[str] = set()
     for status in commit_statuses:
-        context = str(status.get("context") or "")
+        context = _text(status.get("context"))
         if is_launchplane_projected_check(context) or context.casefold() in seen_contexts:
             continue
         seen_contexts.add(context.casefold())
-        state = str(status.get("state") or "").strip().lower()
+        state = _text(status.get("state")).strip().lower()
         if state in {"failure", "error"}:
             failures.append(
                 CandidateCheckFailure(
@@ -169,6 +169,10 @@ def _safe_check_name(name: str) -> str:
     return compact if _SAFE_CHECK_NAME.fullmatch(compact) else "unnamed check"
 
 
+def _text(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
 def _safe_url(value: object) -> str:
-    url = str(value or "").strip()
+    url = _text(value).strip()
     return url if url.startswith("https://") and " " not in url else ""
