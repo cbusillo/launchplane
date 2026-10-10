@@ -479,6 +479,12 @@ def product_config_has_undeclared_runtime_settings(
         )
         if values and set(key.strip() for key in values) - declared:
             return True
+        if (
+            isinstance(runtime_input, ProductConfigRuntimeInput)
+            and runtime_input.adopt_provider_keys
+            and set(key.strip() for key in runtime_input.adopt_provider_keys) - declared
+        ):
+            return True
     return False
 
 

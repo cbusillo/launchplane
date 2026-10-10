@@ -150,6 +150,29 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
             )
             self.assertEqual(applied.status_code, 202, applied.text)
 
+    async def test_generic_route_live_guard_refuses_undeclared_provider_adoption(self) -> None:
+        self.store.write_product_profile_record(_profile(production_use="live"))
+        for alias in ("runtime_env", "runtime_environment"):
+            for mode in ("dry-run", "apply"):
+                response = await _post_product_config_apply(
+                    self.app,
+                    {
+                        "schema_version": 2,
+                        "product": "example-site",
+                        "context": "example-site",
+                        "instance": "testing",
+                        "mode": mode,
+                        "confirmation": "APPLY example-site/testing",
+                        "reason": "Adopt a provider setting.",
+                        alias: {"env": {}, "adopt_provider_keys": ["SITE_MODE"]},
+                    },
+                    authorization=_TOKEN,
+                    idempotency_key=f"adopt-{alias}-{mode}",
+                )
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(response.json()["error"]["code"], "live_product_requires_operator")
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+
     async def test_generic_route_profile_change_at_commit_preserves_concurrent_state(self) -> None:
         settings = {"SITE_MODE": "public"}
         review = await self._submit_generic(mode="dry-run", settings=settings)
