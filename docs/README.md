@@ -24,6 +24,9 @@ not describe runtime authority until it is implemented, deployed, and activated.
   OIDC trust, and API contracts.
 - [dokploy-service-deployments.md](dokploy-service-deployments.md) — contract
   for simple image-backed services deployed through Dokploy applications.
+- [prepared-public-serving.md](prepared-public-serving.md) — isolated prepared
+  public pages/assets, writer fence/drain and measured pause capability for
+  database-changing releases; production integration remains separately tracked.
 - [new-product-repo.md](new-product-repo.md) — checklist for building a new
   website or service repo operated by Launchplane.
 - [product-repo-contract.md](product-repo-contract.md) — thin product repo
