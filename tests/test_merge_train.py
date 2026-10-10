@@ -87,6 +87,25 @@ class _FakeSnapshotReader:
 
 
 class MergeTrainDryRunTests(unittest.TestCase):
+    def test_remaining_planned_unknown_head_keeps_an_older_unaccepted_feature_out(self) -> None:
+        waiting = _pull_request(1, created_at="2026-05-08T10:00:00Z").model_copy(
+            update={"owner_review_required": True, "required_checks_status": "pending"}
+        )
+        remaining = _pull_request(2, created_at="2026-05-08T11:00:00Z").model_copy(
+            update={"owner_review_required": True, "mergeable": "unknown"}
+        )
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(waiting, remaining),
+            ),
+            batch_landing=True,
+            planned_dependency_heads=frozenset({(remaining.number, remaining.head_sha)}),
+        )
+        self.assertEqual(result.queue_order, (remaining.number,))
+
     def test_planned_accepted_head_retains_queue_position_during_unknown_mergeability(self) -> None:
         features = tuple(
             _pull_request(number, created_at=f"2026-05-08T10:{number:02}:00Z").model_copy(

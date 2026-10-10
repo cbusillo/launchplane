@@ -400,7 +400,7 @@ Successful review still requires all other current-head checks.
 
 When an admitted Client feature is ready on its current head, batch planning
 selects it together with the other ready admitted features for that repository
-and base. Pending, failed, unknown or conflicting Client features stay visible
+and base. Client features with pending, failed or unknown checks, or conflicts, stay visible
 in the queue but outside that candidate; they do not delay accepted siblings.
 The existing CODEOWNERS individual-landing boundary still applies. Combined
 merge-commit candidates preserve member heads without a branch refresh between them.

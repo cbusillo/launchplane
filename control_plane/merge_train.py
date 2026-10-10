@@ -329,7 +329,7 @@ def build_merge_train_dry_run_result(
         if any(
             entry.owner_review_required
             and entry.required_checks_status == "pass"
-            and entry.mergeable == "mergeable"
+            and entry.mergeable != "conflicting"
             for entry in eligible_entries
         ):
             queue = tuple(
