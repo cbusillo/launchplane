@@ -15,6 +15,7 @@ ContainerCommand = Callable[[tuple[str, ...], str | None], str]
 def maintenance_payload(plan: OdooCutoverPlan) -> dict[str, Any]:
     return {
         "database": plan.new.binding.database,
+        "database_uuid": plan.new.runtime_identity.database_uuid,
         "release": plan.compatibility.model_dump(mode="json"),
         "candidate_manifest": plan.candidate.model_dump(mode="json"),
         "production_manifest": plan.production.model_dump(mode="json"),
@@ -63,7 +64,19 @@ from pathlib import Path
 request = json.loads(sys.stdin.read())
 directory = Path(request['directory'])
 directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+# An independent, registry-free connection binds the selected physical DB.
+import psycopg2
+connection_args=dict(host=os.environ['ODOO_DB_HOST'],port=os.environ.get('ODOO_DB_PORT','5432'),dbname=request['payload']['database'],user=os.environ['ODOO_DB_USER'],password=os.environ['ODOO_DB_PASSWORD'])
+def boundary():
+    with psycopg2.connect(**connection_args) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT key,value FROM ir_config_parameter WHERE key IN ('database.uuid','odoo_devkit.credential_boundary_commit')")
+        values=dict(cursor.fetchall())
+    if values.get('database.uuid') != request['payload']['database_uuid']:
+        raise RuntimeError('selected database UUID differs from the release plan')
+    return values.get('odoo_devkit.credential_boundary_commit')
+previous_boundary=boundary()
 plan_file, receipt, attempt = (directory / name for name in ('plan.json', 'receipt.json', 'attempt.json'))
+attestation=directory/'boundary.json'
 payload = json.dumps(request['payload'], sort_keys=True, separators=(',', ':'))
 if plan_file.exists() and plan_file.read_text() != payload:
     raise RuntimeError('immutable maintenance plan changed')
@@ -85,22 +98,22 @@ if not attempt.exists():
         stream.flush(); os.fsync(stream.fileno())
     if result.returncode:
         raise RuntimeError('full planned maintenance failed')
+    committed=boundary()
+    if not committed or committed==previous_boundary:
+        raise RuntimeError('passing maintenance has no new committed boundary witness')
+    with os.fdopen(os.open(attestation,os.O_WRONLY | os.O_CREAT | os.O_EXCL,0o600),'w') as stream:
+        json.dump({'plan':payload,'credential_commit_id':committed},stream)
+        stream.flush();os.fsync(stream.fileno())
 if not receipt.is_file():
     raise RuntimeError('maintenance outcome is uncertain')
 result = json.loads(receipt.read_text())
 if result.get('state') != 'passed':
     raise RuntimeError('maintenance has no passing receipt')
-# SQL-only guard readback. The entrypoint already enforced its ordering.
-import psycopg2
-with psycopg2.connect(host=os.environ['ODOO_DB_HOST'], port=os.environ.get('ODOO_DB_PORT', '5432'),
-                     dbname=request['payload']['database'], user=os.environ['ODOO_DB_USER'],
-                     password=os.environ['ODOO_DB_PASSWORD']) as connection:
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT value FROM ir_config_parameter WHERE key = %s", ('odoo_devkit.credential_boundary_commit',))
-        guard = cursor.fetchone()
-if not guard or not guard[0]:
-    raise RuntimeError('committed credential boundary unavailable')
-print(json.dumps({'receipt': result, 'credential_commit_id': guard[0]}, sort_keys=True))
+# Replay requires the same run's sealed witness in the current database.
+proof=json.loads(attestation.read_text())
+if proof.get('plan') != payload or not proof.get('credential_commit_id') or boundary()!=proof['credential_commit_id']:
+    raise RuntimeError('committed boundary does not belong to this passing run')
+print(json.dumps({'receipt': result, 'credential_commit_id': proof['credential_commit_id']}, sort_keys=True))
 """
     output = execute(
         ("docker", "exec", "-i", runner_container, python, "-c", program, workflow), request

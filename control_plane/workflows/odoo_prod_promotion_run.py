@@ -27,6 +27,7 @@ from control_plane.workflows.odoo_prod_backup_gate import (
 )
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan
 
 from control_plane.workflows.odoo_prod_promotion import (
     OdooProdPromotionResult,
@@ -154,20 +155,15 @@ def execute_odoo_prod_promotion_run(
             error_message=admission.blocked_reason,
         )
     cutover_provider = None
-    if request.cutover_plan is not None:
-        plan = request.cutover_plan
-        if (
-            plan.candidate.artifact_id != inputs_result.artifact_id
-            or plan.new.binding.product_id != request.product
-            or plan.new.binding.environment_id != request.to_instance
-            or plan.new.runtime_identity.context != request.context
-        ):
-            return _result_from_inputs(
-                request=request,
-                inputs_result=inputs_result,
-                run_status="blocked",
-                error_message="Cutover plan differs from the admitted artifact/product/lane.",
-            )
+    cutover_plan = resolve_profile_cutover_plan(
+        record_store,
+        product=request.product,
+        context=request.context,
+        instance=request.to_instance,
+        artifact_id=inputs_result.artifact_id,
+        release_id=request.request_id,
+    )
+    if cutover_plan is not None:
         if cutover_provider_factory is None:
             return _result_from_inputs(
                 request=request,
@@ -175,21 +171,52 @@ def execute_odoo_prod_promotion_run(
                 run_status="blocked",
                 error_message="Two-slot release requires an activated lane-bound provider; in-place fallback is refused.",
             )
-        cutover_provider = cutover_provider_factory(request.cutover_plan)
+        cutover_provider = cutover_provider_factory(cutover_plan)
     record_phase("validated")
     if provider_effect_checkpoint is not None:
         provider_effect_checkpoint(ODOO_LOGICAL_BACKUP_EFFECT)
     record_phase("logical_backup_started")
-    backup_result = execute_odoo_prod_backup_gate(
-        control_plane_root=control_plane_root,
-        record_store=record_store,
-        request=OdooProdBackupGateRequest(
+    original_backup = None
+    if cutover_plan is not None:
+        from control_plane.odoo_cutover_plan import cutover_record_id
+
+        try:
+            previous = record_store.read_deployment_record(
+                "deployment-cutover-" + cutover_record_id(cutover_plan)
+            )
+            if previous.odoo_cutover is not None:
+                original_backup = record_store.read_backup_gate_record(
+                    inputs_result.backup_record_id
+                )
+        except FileNotFoundError:
+            pass
+    if original_backup is not None:
+        from control_plane.workflows.odoo_prod_backup_gate import BACKUP_GATE_SOURCE
+
+        if (
+            original_backup.status != "pass"
+            or original_backup.source != BACKUP_GATE_SOURCE
+            or original_backup.context != request.context
+            or original_backup.instance != request.to_instance
+        ):
+            raise ValueError("cutover resume has no original passing logical backup gate")
+        backup_result = OdooProdBackupGateResult(
             context=request.context,
             instance=request.to_instance,
-            backup_record_id=inputs_result.backup_record_id,
-            timeout_seconds=request.backup_timeout_seconds,
-        ),
-    )
+            backup_record_id=original_backup.record_id,
+            backup_status="pass",
+        )
+    else:
+        backup_result = execute_odoo_prod_backup_gate(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=OdooProdBackupGateRequest(
+                context=request.context,
+                instance=request.to_instance,
+                backup_record_id=inputs_result.backup_record_id,
+                timeout_seconds=request.backup_timeout_seconds,
+            ),
+        )
     if backup_result.backup_status != "pass":
         return _result_from_inputs(
             request=request,
@@ -222,11 +249,11 @@ def execute_odoo_prod_promotion_run(
             verify_health=request.verify_health,
             health_timeout_seconds=request.health_timeout_seconds,
             no_cache=request.no_cache,
-            cutover_plan=request.cutover_plan,
         ),
         provider_effect_checkpoint=provider_effect_checkpoint,
         hold_uncertain_effects=hold_uncertain_effects,
         cutover_provider=cutover_provider,
+        cutover_plan=cutover_plan,
     )
     run_status: Literal["pass", "fail"] = (
         "pass"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
@@ -33,9 +34,11 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
+    TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
     execute_odoo_stable_target_replacement_apply,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane.workflows.odoo_cutover_deployment import (
     OdooCutoverApplyResult,
@@ -330,6 +333,7 @@ def execute_odoo_prod_rollback(
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     hold_uncertain_effects: bool = False,
     cutover_provider: OdooCutoverProvider | None = None,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> OdooProdRollbackResult:
     """Roll prod back; a queued rollback passes the ``target`` it fixed at enqueue."""
 
@@ -385,20 +389,48 @@ def execute_odoo_prod_rollback(
         "fail" if request.verify_health else "skipped"
     )
     try:
-        inventory = _read_prod_inventory(record_store=typed_record_store, request=request)
-        current_deployment = typed_record_store.read_deployment_record(
-            inventory.deployment_record_id
+        attempts = tuple(
+            record
+            for record in typed_record_store.list_deployment_records(
+                context_name=request.context, instance_name=request.instance
+            )
+            if record.odoo_cutover is not None
+            and record.odoo_cutover.step not in {"complete", "rolled_back"}
         )
-        if current_deployment.odoo_cutover is not None:
+        current_deployment = None
+        if attempts:
+            current_deployment = max(
+                attempts,
+                key=lambda record: (
+                    record.odoo_cutover.began_at
+                    if record.odoo_cutover
+                    else datetime.min.replace(tzinfo=UTC)
+                ),
+            )
+        else:
+            try:
+                inventory = typed_record_store.read_environment_inventory(
+                    context_name=request.context, instance_name=request.instance
+                )
+                current_deployment = typed_record_store.read_deployment_record(
+                    inventory.deployment_record_id
+                )
+            except FileNotFoundError:
+                # Legacy pinned Client recovery predates inventory; a full
+                # lane read above proves there is no unresolved cutover to bypass.
+                current_deployment = None
+        if current_deployment is not None and current_deployment.odoo_cutover is not None:
             if current_deployment.odoo_cutover.plan.compatibility.classification != "compatible":
                 raise click.ClickException(
                     "Database-changing cutover recovery requires the authorized coherent image/DB/filestore backup restore workflow; image-only rollback is refused."
                 )
+            if cutover_provider is None and cutover_provider_factory is not None:
+                cutover_provider = cutover_provider_factory(current_deployment.odoo_cutover.plan)
             if cutover_provider is None:
                 raise click.ClickException(
                     "Compatible cutover rollback requires its bound slot provider; in-place fallback is refused."
                 )
-            before_provider_effect("cutover_switch_back")
+            before_provider_effect(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
             replacement_result = execute_odoo_cutover_rollback_deployment(
                 deployment=current_deployment,
                 record_store=typed_record_store,

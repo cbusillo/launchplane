@@ -705,6 +705,17 @@ def run_odoo_stable_operation_worker_once(
         if promotion_store is not None
         else None
     )
+    if (
+        promotion_operation is None
+        and cutover_provider_factory is not None
+        and isinstance(record_store, PostgresRecordStore)
+    ):
+        promotion_operation = record_store.claim_odoo_cutover_reconciliation_record(
+            lease_owner=normalized_lease_owner,
+            lease_expires_at=claim_expires_at,
+            claimed_at=claim_started_at,
+            max_attempts=max_attempts,
+        )
     if promotion_store is not None and promotion_operation is not None:
         terminal_write_committed = _execute_prod_promotion_operation(
             record_store=promotion_store,
@@ -736,6 +747,7 @@ def run_odoo_stable_operation_worker_once(
             record_store=rollback_store,
             control_plane_root_path=control_plane_root_path,
             operation=rollback_operation,
+            cutover_provider_factory=cutover_provider_factory,
             lease_owner=normalized_lease_owner,
             lease_seconds=lease_seconds,
             heartbeat_seconds=heartbeat_seconds,
@@ -795,7 +807,6 @@ def reconcile_stale_odoo_stable_operation_records(
     *,
     record_store: OdooStableOperationWorkerStore,
     max_attempts: int = DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
-    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
     now: str | None = None,
 ) -> OdooStableOperationReconcileResult:
     if max_attempts < 1:
@@ -1714,6 +1725,7 @@ def _execute_prod_rollback_operation(
     lease_owner: str,
     lease_seconds: int,
     heartbeat_seconds: int,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> bool:
     def run(
         checkpoint_phase: Callable[[str], None],
@@ -1738,6 +1750,7 @@ def _execute_prod_rollback_operation(
             target=operation.target,
             provider_effect_checkpoint=before_effect,
             hold_uncertain_effects=True,
+            cutover_provider_factory=cutover_provider_factory,
         )
 
     def terminal(

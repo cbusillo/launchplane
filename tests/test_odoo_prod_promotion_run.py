@@ -42,9 +42,12 @@ class OdooProdPromotionRunTests(unittest.TestCase):
                 context="fixture",
                 product=plan.new.binding.product_id,
                 request_id="cutover",
-                cutover_plan=plan,
             )
             with (
+                patch(
+                    "control_plane.workflows.odoo_prod_promotion_run.resolve_profile_cutover_plan",
+                    return_value=plan,
+                ),
                 patch(
                     "control_plane.workflows.odoo_prod_promotion_run.resolve_odoo_prod_promotion_inputs",
                     return_value=_inputs_result().model_copy(

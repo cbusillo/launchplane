@@ -81,6 +81,9 @@ def _require_route(route: OdooRouteObservation, plan: OdooCutoverPlan, slot: Odo
         or route.slot_id != slot.slot_id
         or route.binding != slot.binding
         or route.runtime_identity != slot.runtime_identity
+        or route.public_health is None
+        or not route.public_health.verified
+        or route.public_health.status != "pass"
     ):
         raise ValueError("applied route/public identity differs from expected slot")
 
@@ -127,6 +130,11 @@ def execute_odoo_cutover(
         if record.plan != plan:
             raise ValueError("cannot change an uncertain cutover's immutable release plan")
         if record.step in {"complete", "rolled_back"}:
+            slot = plan.new if record.step == "complete" else plan.old
+            route = provider.current_route(plan)
+            _require_route(route, plan, slot)
+            record = record.model_copy(update={"route": route, "updated_at": clock()})
+            store.save(record)
             return record
         if record.step == "rolling_back":
             raise ValueError("recorded rollback must resume through the rollback executor")
@@ -182,8 +190,11 @@ def execute_odoo_cutover(
                     raise ValueError(
                         "backup is not the coherent current image/database/filestore tuple"
                     )
-                if record.pause and backup.recovery_point_at < record.pause.began_at:
-                    raise ValueError("database-changing backup predates writer pause")
+                earliest = record.pause.drained_at if record.pause else record.began_at
+                if earliest is None or not earliest <= backup.recovery_point_at <= clock():
+                    raise ValueError(
+                        "backup recovery point must follow verified drain/release start"
+                    )
                 advance("maintaining", backup=backup)
             if record.step in {"maintaining", "ready", "switching", "resuming", "draining"}:
                 if record.backup is None or record.backup.binding != plan.old.binding:
@@ -204,9 +215,7 @@ def execute_odoo_cutover(
                     or receipt.candidate_manifest_sha256
                     != plan.compatibility.candidate_manifest_sha256
                     or not set(receipt.install_modules) <= set(plan.compatibility.install_modules)
-                    or not set(plan.compatibility.update_modules)
-                    - set(plan.compatibility.install_modules)
-                    <= set(receipt.update_modules)
+                    or not set(receipt.update_modules) <= set(plan.compatibility.update_modules)
                     or (
                         plan.compatibility.classification == "compatible"
                         and (receipt.install_modules or receipt.update_modules)
@@ -273,10 +282,10 @@ def rollback_compatible_cutover(
         if record.step == "rolled_back":
             _require_route(provider.current_route(plan), plan, plan.old)
             return record
-        if record.step not in {"complete", "rolling_back"}:
-            raise ValueError("unfinished cutover requires recorded recovery, not a new rollback")
-        if record.step == "complete":
-            _require_route(provider.current_route(plan), plan, plan.new)
+        if record.step != "rolling_back":
+            route = provider.current_route(plan)
+            slot = plan.old if route.slot_id == plan.old.slot_id else plan.new
+            _require_route(route, plan, slot)
             record = record.model_copy(update={"step": "rolling_back", "updated_at": clock()})
             store.save(record)
         route = provider.current_route(plan)
@@ -285,6 +294,7 @@ def rollback_compatible_cutover(
             _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
             route = provider.switch(plan, plan.old)
         _require_route(route, plan, plan.old)
+        _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
         provider.handoff_writers(plan, plan.old)
         record = record.model_copy(
             update={"step": "rolled_back", "route": route, "updated_at": clock()}

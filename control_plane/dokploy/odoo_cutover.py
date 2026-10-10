@@ -9,6 +9,9 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 
+from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
+from control_plane.contracts.promotion_record import HealthcheckEvidence
+
 from control_plane.contracts.odoo_cutover import (
     OdooCutoverPlan,
     OdooMaintenanceReceipt,
@@ -25,7 +28,6 @@ from control_plane.contracts.prepared_public_site import (
 )
 from control_plane.dokploy.traefik_cutover import TraefikFileRoute
 from control_plane.prepared_public_site import verify_snapshot
-from control_plane.contracts.runtime_identity import RuntimeIdentity
 
 
 @dataclass(frozen=True)
@@ -45,14 +47,16 @@ class OdooSlotDriver:
     maintenance: Callable[[OdooCutoverPlan], OdooMaintenanceReceipt]
     readiness: Callable[[OdooCutoverPlan, OdooSlot], OdooSlotReadiness]
     observe_public: Callable[
-        [OdooCutoverPlan, str], tuple[str, PublicSiteBinding, RuntimeIdentity | None]
+        [OdooCutoverPlan, str], tuple[str, PublicSiteBinding, HealthcheckEvidence | None]
     ]
     stage_public: Callable[[PreparedPublicSite, str], str]
     observe_prepared: Callable[[str], str]
     fence_and_drain: Callable[[PreparedPublicSite, str], tuple[WriterObservation, ...]]
     handoff_writers: Callable[[OdooCutoverPlan, OdooSlot], tuple[tuple[str, int], ...]]
     drain_old: Callable[[OdooCutoverPlan], bool]
-    prepared_origin: str
+    load_prepared: Callable[[str], PreparedPublicSite]
+    lane: OdooCutoverLane
+    verify_endpoint: Callable[[OdooCutoverPlan, OdooSlot], HealthcheckEvidence]
 
 
 class DokployOdooCutoverProvider:
@@ -66,6 +70,17 @@ class DokployOdooCutoverProvider:
     ) -> None:
         if route.target.route_id != plan.route_id or route.target.host != plan.host:
             raise ValueError("provider route does not belong to the release lane")
+        lane = driver.lane
+        if (
+            lane.route_id != plan.route_id
+            or lane.host != plan.host
+            or lane.database != plan.old.binding.database
+            or lane.database_uuid != plan.old.runtime_identity.database_uuid
+            or lane.writers != plan.writers
+            or {(slot.slot_id, slot.compose_id, slot.private_url) for slot in lane.slots}
+            != {(slot.slot_id, slot.compose_id, slot.private_url) for slot in (plan.old, plan.new)}
+        ):
+            raise ValueError("release request coordinates differ from the admitted lane record")
         self.plan, self.driver, self.route = plan, driver, route
         self.pause_id = pause_id
         self.prepared_url: str | None = None
@@ -88,7 +103,7 @@ class DokployOdooCutoverProvider:
 
     def current_route(self, plan: OdooCutoverPlan) -> OdooRouteObservation:
         target = self.route.observed_target()
-        slot_id, binding, identity = self.driver.observe_public(plan, target)
+        slot_id, binding, health = self.driver.observe_public(plan, target)
         return OdooRouteObservation(
             route_id=plan.route_id,
             host=plan.host,
@@ -97,15 +112,16 @@ class DokployOdooCutoverProvider:
             binding=binding,
             evidence_id=self.route.evidence_id(),
             applied=True,
-            public_identity=True,
             authoritative_router_count=1,
-            runtime_identity=identity,
+            public_health=health,
         )
 
     def publish(self, site: PreparedPublicSite, pause_id: str) -> str:
         verify_snapshot(site)
+        if pause_id != self.pause_id or site.plan.binding != self.plan.old.binding:
+            raise ValueError("prepared publication differs from its persisted pause binding")
         self.prepared_url = self.driver.stage_public(site, pause_id)
-        if pause_id != self.pause_id or self.prepared_url != self.driver.prepared_origin:
+        if pause_id != self.pause_id or self.prepared_url != self.driver.lane.prepared_origin:
             raise ValueError("prepared endpoint/pause differs from its authoritative binding")
         self.route.publish(self.prepared_url, expected=(self.plan.old.private_url,))
         return self.observed_public_copy(pause_id)
@@ -113,9 +129,14 @@ class DokployOdooCutoverProvider:
     def observed_public_copy(self, pause_id: str) -> str:
         # Read the prepared server itself and the applied route, not memory.
         target = self.route.observed_target()
-        if target != self.driver.prepared_origin or pause_id != self.pause_id:
+        if target != self.driver.lane.prepared_origin or pause_id != self.pause_id:
             return ""
-        return self.driver.observe_prepared(pause_id)
+        site = self.driver.load_prepared(pause_id)
+        verify_snapshot(site)
+        if site.plan.binding != self.plan.old.binding:
+            raise ValueError("prepared record crosses the release binding")
+        digest = self.driver.observe_prepared(pause_id)
+        return digest if digest == site.content_digest else ""
 
     def fence_and_drain(
         self, site: PreparedPublicSite, pause_id: str
@@ -129,7 +150,17 @@ class DokployOdooCutoverProvider:
         return self.driver.maintenance(plan)
 
     def readiness(self, plan: OdooCutoverPlan, slot: OdooSlot) -> OdooSlotReadiness:
-        return self.driver.readiness(plan, slot)
+        ready = self.driver.readiness(plan, slot)
+        health = self.driver.verify_endpoint(plan, slot)
+        if (
+            not health.verified
+            or health.status != "pass"
+            or health.observed_runtime_identity != slot.runtime_identity
+            or not health.urls
+            or not all(url.startswith(slot.private_url.rstrip("/") + "/") for url in health.urls)
+        ):
+            raise ValueError("private route endpoint differs from the ready immutable container")
+        return ready
 
     def switch(self, plan: OdooCutoverPlan, slot: OdooSlot) -> OdooRouteObservation:
         expected: tuple[str, ...] = (plan.old.private_url, plan.new.private_url)
@@ -138,8 +169,8 @@ class DokployOdooCutoverProvider:
         # Restart has no local prepared_url: recover it from applied authority
         # only after the driver verifies the exact prepared pause bundle.
         observed = self.route.observed_target()
-        if observed not in expected:
-            if observed != self.driver.prepared_origin or not self.driver.observe_prepared(
+        if observed == self.driver.lane.prepared_origin or observed not in expected:
+            if observed != self.driver.lane.prepared_origin or not self.observed_public_copy(
                 self.pause_id
             ):
                 raise ValueError("unknown route is not a verified prepared public copy")

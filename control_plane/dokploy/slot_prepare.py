@@ -28,6 +28,15 @@ def prepare_dokploy_odoo_slot(
         or candidate.get("domains")
     ):
         raise ValueError("candidate must be a separate private app project without public domains")
+    # Compatible maintenance may reapply managed settings to the shared DB.
+    # Compare their authoritative values in memory; never log or copy them.
+    if plan.compatibility.classification == "compatible":
+        old_env = api.parse_dokploy_env_text(str(old.get("env") or ""))
+        candidate_env = api.parse_dokploy_env_text(str(candidate.get("env") or ""))
+        for environment in (old_env, candidate_env):
+            environment.pop("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", None)
+        if old_env != candidate_env:
+            raise ValueError("compatible slots require identical managed runtime settings")
     title = "launchplane-cutover-" + payload_digest(maintenance_payload(plan))
     rendered = render_odoo_app_slot_compose(
         plan, data_volume=data_volume, private_network=private_network
@@ -35,6 +44,13 @@ def prepare_dokploy_odoo_slot(
     previous = api.deployment_for_target_by_title(
         host=host, token=token, target_type="compose", target_id=plan.new.compose_id, title=title
     )
+    if previous is not None:
+        if candidate.get("composeFile") != rendered or candidate.get("sourceType") != "raw":
+            raise ValueError("recorded candidate deployment differs from its immutable definition")
+        if api.deployment_status(previous) in {"error", "failed", "cancelled", "canceled"}:
+            raise ValueError(
+                "candidate preparation failed; recover its recorded deployment before retry"
+            )
     known = frozenset(
         api.deployment_key(item)
         for item in api.list_deployments_for_target(

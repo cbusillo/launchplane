@@ -14,6 +14,7 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane.workflows.odoo_cutover_deployment import (
     OdooCutoverApplyResult,
@@ -50,6 +51,9 @@ from control_plane.workflows.production_promotion_backup import (
 
 class OdooProdPromotionStore(OdooStableTargetReplacementStore, Protocol):
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[DeploymentRecord, ...]: ...
 
     def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
 
@@ -83,7 +87,6 @@ class OdooProdPromotionRequest(BaseModel):
     verify_health: bool = True
     health_timeout_seconds: int | None = Field(default=None, ge=1)
     no_cache: bool = False
-    cutover_plan: OdooCutoverPlan | None = None
 
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooProdPromotionRequest":
@@ -141,6 +144,8 @@ def execute_odoo_prod_promotion(
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     hold_uncertain_effects: bool = False,
     cutover_provider: OdooCutoverProvider | None = None,
+    cutover_plan: OdooCutoverPlan | None = None,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> OdooProdPromotionResult:
     del state_dir, database_url
     product = _resolve_product_profile_key(product=request.product, context=request.context)
@@ -160,6 +165,21 @@ def execute_odoo_prod_promotion(
     infrastructure_backup = None
     backup_checkpoint = None
     try:
+        artifact_manifest = record_store.read_artifact_manifest(request.artifact_id)
+        source_tuple = _read_source_tuple(record_store=record_store, request=request)
+        if cutover_plan is None:
+            cutover_plan = resolve_profile_cutover_plan(
+                record_store,
+                product=product,
+                context=request.context,
+                instance=request.to_instance,
+                artifact_id=request.artifact_id,
+                release_id=promotion_record_id,
+            )
+        if cutover_plan is not None:
+            from control_plane.odoo_cutover_plan import cutover_record_id
+
+            promotion_record_id = "promotion-cutover-" + cutover_record_id(cutover_plan)
         infrastructure_backup = require_production_promotion_backup(
             record_store=record_store,
             product=product,
@@ -168,8 +188,16 @@ def execute_odoo_prod_promotion(
             promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
             backup_record_id=request.infrastructure_backup_record_id,
         )
-        artifact_manifest = record_store.read_artifact_manifest(request.artifact_id)
-        source_tuple = _read_source_tuple(record_store=record_store, request=request)
+        if cutover_plan is None and any(
+            item.odoo_cutover is not None
+            and item.odoo_cutover.step not in {"complete", "rolled_back"}
+            for item in record_store.list_deployment_records(
+                context_name=request.context, instance_name=request.to_instance
+            )
+        ):
+            raise click.ClickException(
+                "Unfinished cutover requires its persisted plan/provider or coherent recovery; in-place promotion is refused."
+            )
         backup_gate = record_store.read_backup_gate_record(request.backup_record_id)
         if (
             backup_gate.source != BACKUP_GATE_SOURCE
@@ -199,8 +227,10 @@ def execute_odoo_prod_promotion(
             pending_promotion=pending_record,
         ) as backup_checkpoint:
             replacement_result: OdooCutoverApplyResult | OdooStableTargetReplacementApplyResult
-            if request.cutover_plan is not None:
-                plan = request.cutover_plan
+            if cutover_plan is not None:
+                plan = cutover_plan
+                if cutover_provider is None and cutover_provider_factory is not None:
+                    cutover_provider = cutover_provider_factory(plan)
                 if cutover_provider is None:
                     raise click.ClickException(
                         "Two-slot provider/runtime binding is unavailable; refusing in-place fallback."
@@ -212,6 +242,7 @@ def execute_odoo_prod_promotion(
                     plan.candidate != artifact_manifest
                     or plan.production
                     != record_store.read_artifact_manifest(production_tuple.artifact_id)
+                    and production_tuple.artifact_id != plan.candidate.artifact_id
                     or plan.new.binding.product_id != product
                     or plan.new.binding.environment_id != request.to_instance
                 ):

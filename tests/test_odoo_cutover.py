@@ -18,7 +18,7 @@ from control_plane.contracts.odoo_cutover import (
 )
 from control_plane.contracts.prepared_public_site import PublicRecoveryObservation
 from control_plane.contracts.runtime_identity import RuntimeIdentity
-from control_plane.contracts.promotion_record import DeploymentEvidence
+from control_plane.contracts.promotion_record import DeploymentEvidence, HealthcheckEvidence
 from control_plane.odoo_cutover_storage import DeploymentCutoverStore
 from control_plane.prepared_public_site import prepare_public_site
 from control_plane.release_compatibility import classify_release_database_compatibility
@@ -110,9 +110,15 @@ class IsolatedCutoverProvider(WebsiteFixture):
             binding=self.target.binding,
             evidence_id="fixture-applied-route",
             applied=True,
-            public_identity=True,
             authoritative_router_count=1,
-            runtime_identity=self.target.runtime_identity,
+            public_health=HealthcheckEvidence(
+                verified=True,
+                status="pass",
+                urls=("http://fixture.invalid/launchplane/health",),
+                timeout_seconds=10,
+                observed_runtime_identity=self.target.runtime_identity,
+                runtime_identity_status="match",
+            ),
         )
 
     def prepare_candidate(self, plan: OdooCutoverPlan) -> None:

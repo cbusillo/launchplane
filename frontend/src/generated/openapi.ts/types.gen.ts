@@ -1556,6 +1556,19 @@ export type OdooConfigParameterOverride = {
     value: OdooOverrideValue;
 };
 
+export type OdooCutoverLane = {
+    database: string;
+    database_uuid: string;
+    host: string;
+    prepared_origin: string;
+    route_id: string;
+    slots: [
+        OdooSlotCoordinates,
+        OdooSlotCoordinates
+    ];
+    writers: Array<WriterTarget>;
+};
+
 export type OdooCutoverPlan = {
     candidate: ArtifactIdentityManifest;
     compatibility: ReleaseDatabaseCompatibility;
@@ -1658,7 +1671,6 @@ export type OdooProdPromotionRunEnvelope = {
 export type OdooProdPromotionRunRequest = {
     backup_timeout_seconds?: number | null;
     context: string;
-    cutover_plan?: OdooCutoverPlan | null;
     expected_artifact_id?: string;
     from_instance?: string;
     health_timeout_seconds?: number | null;
@@ -1779,9 +1791,8 @@ export type OdooRouteObservation = {
     binding: PublicSiteBinding;
     evidence_id: string;
     host: string;
-    public_identity: true;
+    public_health: HealthcheckEvidence | null;
     route_id: string;
-    runtime_identity: RuntimeIdentity | null;
     slot_id: string;
     target_url: string;
 };
@@ -1792,6 +1803,12 @@ export type OdooSlot = {
     image: string;
     private_url: string;
     runtime_identity: RuntimeIdentity;
+    slot_id: string;
+};
+
+export type OdooSlotCoordinates = {
+    compose_id: string;
+    private_url: string;
     slot_id: string;
 };
 
@@ -3257,6 +3274,7 @@ export type ProductLaneProfile = {
     health_monitoring: ProductLaneHealthMonitoringPolicy;
     health_url: string;
     instance: string;
+    odoo_cutover?: OdooCutoverLane | null;
     odoo_data_policy: ProductOdooLaneDataPolicy;
     odoo_prelaunch_rebuild: ProductOdooPrelaunchRebuildPolicy;
     odoo_stable_bootstrap: ProductOdooStableBootstrapPolicy;
@@ -4032,6 +4050,7 @@ export type PublicPauseRecord = {
     began_at: string;
     binding: PublicSiteBinding;
     content_digest: string;
+    drained_at: string | null;
     duration_seconds: number | null;
     ended_at: string | null;
     pause_id: string;

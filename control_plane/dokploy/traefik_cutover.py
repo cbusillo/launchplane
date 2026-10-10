@@ -3,6 +3,9 @@
 import hashlib
 import json
 import os
+import re
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -10,6 +13,7 @@ from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 from pydantic import Field, model_validator
+import yaml
 
 from control_plane.contracts.prepared_public_site import FrozenRecord
 
@@ -73,8 +77,11 @@ class TraefikFileRoute:
     A rename alone is never evidence that Traefik applied a route.
     """
 
-    def __init__(self, target: TraefikRouteTarget) -> None:
+    def __init__(self, target: TraefikRouteTarget, *, apply_timeout_seconds: float = 30) -> None:
+        if apply_timeout_seconds <= 0:
+            raise ValueError("route application requires a positive deadline")
         self.target = target
+        self.apply_timeout_seconds = apply_timeout_seconds
 
     def _api(self, suffix: str) -> Any:
         with build_opener(ProxyHandler({})).open(
@@ -83,9 +90,37 @@ class TraefikFileRoute:
             return json.loads(response.read(2_000_000))
 
     def observed_target(self) -> str:
-        routers = self._api("/api/http/routers")
+        raw = self._api("/api/rawdata")
+        routers = [{**router, "name": name} for name, router in raw.get("routers", {}).items()]
         host_rule = f"Host(`{self.target.host}`)"
-        matches = [router for router in routers if host_rule in router.get("rule", "")]
+        # Traefik v3 rawdata is unpaginated; it also includes disabled and
+        # provider-qualified routers which must not silently become authority.
+        matches = []
+        for router in routers:
+            rule = router.get("rule", "")
+            if not set(router.get("entryPoints", [])) & set(self.target.entrypoints):
+                continue
+            host_arguments = re.findall(r"Host\(([^)]*)\)", rule)
+            hosts = [
+                host
+                for arguments in host_arguments
+                for host in re.findall(r'[`"]([^`"]+)[`"]', arguments)
+            ]
+            regexes = re.findall(r'HostRegexp\(\s*[`"]([^`"]+)[`"]\s*\)', rule)
+            try:
+                regex_matches = any(
+                    re.search(pattern, self.target.host, re.IGNORECASE) for pattern in regexes
+                )
+            except re.error as error:
+                raise ValueError("host expression cannot establish lane exclusivity") from error
+            if "HostRegexp(" in rule and not regexes:
+                raise ValueError("host expression cannot establish lane exclusivity")
+            if (
+                self.target.host.casefold() in {host.casefold() for host in hosts}
+                or regex_matches
+                or not (hosts or regexes)
+            ):
+                matches.append(router)
         if len(matches) != 1:
             raise ValueError("missing or duplicate authoritative public router")
         router = matches[0]
@@ -118,6 +153,11 @@ class TraefikFileRoute:
             return observed
         if observed not in expected:
             raise ValueError("route authority changed; refusing a stale traffic switch")
+        # A watched file belongs to this route alone. Never replace a shared
+        # dynamic configuration and silently retire its other routers/services.
+        owned = yaml.safe_load(self.target.route_file.read_text())
+        if owned != json.loads(json.dumps(route_payload(self.target, observed))):
+            raise ValueError("route file is not the exact single-route owned configuration")
         payload = json.dumps(route_payload(self.target, backend), sort_keys=True)
         temporary: str | None = None
         try:
@@ -145,9 +185,18 @@ class TraefikFileRoute:
                 Path(temporary).unlink(missing_ok=True)
         # Asynchronous provider application may not be observable yet. The
         # controller records switching and reconciles instead of claiming pass.
-        if self.observed_target() != backend:
-            raise ValueError("publication is not yet verified applied by Traefik")
-        return backend
+        deadline = time.monotonic() + self.apply_timeout_seconds
+        while True:
+            observed = self.observed_target()
+            if observed == backend:
+                return backend
+            if observed not in expected:
+                raise ValueError("foreign route appeared during publication readback")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("published route has no verified applied outcome")
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
 
     def evidence_id(self) -> str:
-        return hashlib.sha256(self.observed_target().encode()).hexdigest()
+        return hashlib.sha256(
+            (self.observed_target() + datetime.now(UTC).isoformat()).encode()
+        ).hexdigest()

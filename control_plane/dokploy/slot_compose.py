@@ -15,12 +15,12 @@ def slot_runtime_identity(plan: OdooCutoverPlan, identity: RuntimeIdentity) -> d
     ):
         raise ValueError("runtime identity does not match the candidate source artifact")
     payload = identity.model_dump(mode="json")
+    payload["source_revision"] = payload.pop("source_git_ref")
     payload.update(
         {
             "slot": plan.new.slot_id,
             "release_id": plan.release_id,
             "image_digest": plan.new.binding.image_digest,
-            "source_revision": identity.source_git_ref,
         }
     )
     return payload
@@ -54,7 +54,14 @@ def render_odoo_app_slot_compose(
         "networks": ["private"],
         "volumes": ["data:/volumes/data"],
         "labels": {"traefik.enable": "false"},
-        "environment": {"ODOO_MAX_CRON_THREADS": "0", "ODOO_DB_NAME": plan.new.binding.database},
+        "healthcheck": {"disable": True},
+        "environment": {
+            "ODOO_MAX_CRON_THREADS": "0",
+            "ODOO_DB_NAME": plan.new.binding.database,
+            "LAUNCHPLANE_RUNTIME_IDENTITY_JSON": json.dumps(
+                slot_runtime_identity(plan, plan.new.runtime_identity), sort_keys=True
+            ),
+        },
         "entrypoint": ["/bin/sh", "-c"],
     }
     return json.dumps(

@@ -16688,6 +16688,68 @@
         "title": "OdooConfigParameterOverride",
         "type": "object"
       },
+      "OdooCutoverLane": {
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "minLength": 1,
+            "title": "Database",
+            "type": "string"
+          },
+          "database_uuid": {
+            "minLength": 1,
+            "title": "Database Uuid",
+            "type": "string"
+          },
+          "host": {
+            "pattern": "^[a-zA-Z0-9.-]+$",
+            "title": "Host",
+            "type": "string"
+          },
+          "prepared_origin": {
+            "minLength": 1,
+            "title": "Prepared Origin",
+            "type": "string"
+          },
+          "route_id": {
+            "pattern": "^[a-zA-Z0-9_-]+$",
+            "title": "Route Id",
+            "type": "string"
+          },
+          "slots": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/OdooSlotCoordinates"
+              },
+              {
+                "$ref": "#/components/schemas/OdooSlotCoordinates"
+              }
+            ],
+            "title": "Slots",
+            "type": "array"
+          },
+          "writers": {
+            "items": {
+              "$ref": "#/components/schemas/WriterTarget"
+            },
+            "title": "Writers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "database",
+          "database_uuid",
+          "host",
+          "prepared_origin",
+          "route_id",
+          "slots",
+          "writers"
+        ],
+        "title": "OdooCutoverLane",
+        "type": "object"
+      },
       "OdooCutoverPlan": {
         "additionalProperties": false,
         "properties": {
@@ -17308,16 +17370,6 @@
           "context": {
             "title": "Context",
             "type": "string"
-          },
-          "cutover_plan": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/OdooCutoverPlan"
-              },
-              {
-                "type": "null"
-              }
-            ]
           },
           "expected_artifact_id": {
             "default": "",
@@ -18004,24 +18056,19 @@
             "title": "Host",
             "type": "string"
           },
-          "public_identity": {
-            "const": true,
-            "title": "Public Identity",
-            "type": "boolean"
-          },
-          "route_id": {
-            "title": "Route Id",
-            "type": "string"
-          },
-          "runtime_identity": {
+          "public_health": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/RuntimeIdentity"
+                "$ref": "#/components/schemas/HealthcheckEvidence"
               },
               {
                 "type": "null"
               }
             ]
+          },
+          "route_id": {
+            "title": "Route Id",
+            "type": "string"
           },
           "slot_id": {
             "title": "Slot Id",
@@ -18038,9 +18085,8 @@
           "binding",
           "evidence_id",
           "host",
-          "public_identity",
+          "public_health",
           "route_id",
-          "runtime_identity",
           "slot_id",
           "target_url"
         ],
@@ -18086,6 +18132,33 @@
           "slot_id"
         ],
         "title": "OdooSlot",
+        "type": "object"
+      },
+      "OdooSlotCoordinates": {
+        "additionalProperties": false,
+        "properties": {
+          "compose_id": {
+            "minLength": 1,
+            "title": "Compose Id",
+            "type": "string"
+          },
+          "private_url": {
+            "minLength": 1,
+            "title": "Private Url",
+            "type": "string"
+          },
+          "slot_id": {
+            "pattern": "^[a-zA-Z0-9_-]+$",
+            "title": "Slot Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "compose_id",
+          "private_url",
+          "slot_id"
+        ],
+        "title": "OdooSlotCoordinates",
         "type": "object"
       },
       "OdooSlotReadiness": {
@@ -26702,6 +26775,17 @@
             "title": "Instance",
             "type": "string"
           },
+          "odoo_cutover": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooCutoverLane"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "odoo_data_policy": {
             "$ref": "#/components/schemas/ProductOdooLaneDataPolicy"
           },
@@ -31440,6 +31524,18 @@
             "title": "Content Digest",
             "type": "string"
           },
+          "drained_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drained At"
+          },
           "duration_seconds": {
             "anyOf": [
               {
@@ -31516,6 +31612,7 @@
           "began_at",
           "binding",
           "content_digest",
+          "drained_at",
           "duration_seconds",
           "ended_at",
           "pause_id",

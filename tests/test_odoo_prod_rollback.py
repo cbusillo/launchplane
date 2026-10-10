@@ -212,6 +212,33 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
             self.assertIn("image-only rollback is refused", result.error_message)
             legacy.assert_not_called()
 
+            # A failed readiness check after updating the database can leave
+            # inventory pointing at the old deployment. History, rather than
+            # that stale pointer, must prevent the image-only fallback.
+            failed = _deployment_record().model_copy(
+                update={
+                    "odoo_cutover": cutover.model_copy(
+                        update={"step": "ready", "error": "ValueError"}
+                    )
+                }
+            )
+            records.list_deployment_records.return_value = (failed,)
+            records.read_deployment_record.return_value = _deployment_record()
+            with patch(
+                "control_plane.workflows.odoo_prod_rollback.execute_odoo_stable_target_replacement_apply"
+            ) as legacy:
+                result = execute_odoo_prod_rollback(
+                    control_plane_root=Path(directory),
+                    record_store=records,
+                    product="fixture",
+                    request=OdooProdRollbackRequest(
+                        context="opw", artifact_id=provider.cutover.production.artifact_id
+                    ),
+                )
+            self.assertEqual(result.rollback_status, "fail")
+            self.assertIn("image-only rollback is refused", result.error_message)
+            legacy.assert_not_called()
+
     def test_rollback_request_accepts_profile_owned_context(self) -> None:
         request = OdooProdRollbackRequest(context=" New-Site ")
 
@@ -277,9 +304,7 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(inventory.promotion_record_id, _promotion_record().record_id)
         self.assertEqual(inventory.promoted_from_instance, "previous-deployment")
         self.assertEqual(result.source_channel, "previous-deployment")
-        record_store.list_deployment_records.assert_called_once_with(
-            context_name="opw", instance_name="prod"
-        )
+
         record_store.read_artifact_manifest.assert_called_once_with("artifact-opw-847c71c1db61785c")
         final_promotion = record_store.write_promotion_record.call_args_list[-1].args[0]
         self.assertEqual(final_promotion.rollback.status, "pass")
@@ -334,7 +359,6 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(result.rollback_status, "pass")
         self.assertEqual(result.source_channel, "artifact")
         self.assertEqual(result.artifact_id, "artifact-opw-previous-prod")
-        record_store.list_deployment_records.assert_not_called()
         replacement_request = replacement_apply.call_args.kwargs["request"]
         self.assertEqual(replacement_request.artifact_id, "artifact-opw-previous-prod")
         self.assertEqual(
@@ -362,7 +386,6 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
                 ),
             )
 
-        record_store.list_deployment_records.assert_not_called()
         record_store.write_promotion_record.assert_not_called()
 
     def test_rollback_without_an_earlier_passing_deployment_is_refused(self) -> None:

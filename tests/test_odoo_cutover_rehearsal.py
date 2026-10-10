@@ -1,9 +1,9 @@
 """Opt-in combined Odoo/devkit/Traefik/browser proof on empty local data."""
 
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -21,10 +21,22 @@ from uuid import uuid4
 
 import uvicorn
 
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.promotion_record import DeploymentEvidence
+from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.odoo_cutover_storage import DeploymentCutoverStore
+from control_plane.odoo_cutover_plan import cutover_record_id, resolve_profile_cutover_plan
+from control_plane.dokploy.cutover_factory import DokployOdooCutoverProviderFactory
+from tests.support.profiles import _odoo_preview_profile_payload
+from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane, OdooSlotCoordinates
+from control_plane.contracts.promotion_record import HealthcheckEvidence
+
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_cutover import (
     OdooCutoverPlan,
-    OdooCutoverRecord,
     OdooMaintenanceReceipt,
     OdooSlotReadiness,
     OdooRecoveryTuple,
@@ -43,7 +55,7 @@ from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
     runtime_identity_from_health_payload,
 )
-from control_plane.dokploy.odoo_cutover import DokployOdooCutoverProvider, OdooSlotDriver
+from control_plane.dokploy.odoo_cutover import OdooSlotDriver
 from control_plane.dokploy.post_deploy import (
     _build_dokploy_odoo_backup_gate_script,
     _build_dokploy_odoo_backup_verification_script,
@@ -51,6 +63,7 @@ from control_plane.dokploy.post_deploy import (
     extract_odoo_backup_verification_result,
 )
 from control_plane.dokploy.slot_compose import render_odoo_app_slot_compose
+from control_plane.dokploy.slot_writers import ContainerSlotWriters, SlotWriterContainer
 from control_plane.dokploy.slot_maintenance import (
     maintenance_payload,
     payload_digest,
@@ -68,19 +81,6 @@ from control_plane.workflows.odoo_cutover import execute_odoo_cutover, rollback_
 from tests.support.odoo_cutover_images import docker
 
 
-class RehearsalStore:
-    def __init__(self, root: Path):
-        self.root = root
-
-    def load(self, record_id: str) -> OdooCutoverRecord:
-        return OdooCutoverRecord.model_validate_json(
-            (self.root / (record_id + ".json")).read_text()
-        )
-
-    def save(self, record: OdooCutoverRecord) -> None:
-        (self.root / (record.record_id + ".json")).write_text(record.model_dump_json())
-
-
 @unittest.skipUnless(
     os.environ.get("LAUNCHPLANE_TEST_CUTOVER_MANIFESTS")
     and os.environ.get("LAUNCHPLANE_TEST_TRAEFIK_IMAGE"),
@@ -93,6 +93,11 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
         self.prefix = "lp-3266-" + uuid4().hex[:10]
         self.root = Path("state/cutover-rehearsal").resolve() / self.prefix
         self.root.mkdir()
+        self.control_store = PostgresRecordStore(
+            database_url=f"sqlite+pysqlite:///{self.root}/control.sqlite"
+        )
+        self.control_store.ensure_schema()
+        self.addCleanup(self.control_store.close)
         self.data = self.root / "data"
         self.data.mkdir()
         self.data.chmod(0o777)
@@ -192,6 +197,8 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
         self.wait_web(self.old_web)
         self.old_origin = self.origin(self.old_web, 8069)
         self.old_url = "http://" + self.old_web + ":8069"
+        self.worker_containers: dict[tuple[str, str], str] = {}
+        self.writer_ticks: dict[str, int] = {}
         self.owner = "old"
         self.samples: list[str] = []
         self.errors: list[str] = []
@@ -210,7 +217,7 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
         for manifest, db_change in ((static, False), (changed, True)):
             release = self.prefix + ("-db" if db_change else "-compatible")
             self.plan = self.make_plan(old, manifest, release)
-            self.record_id = hashlib.sha256(release.encode()).hexdigest()[:32]
+            self.record_id = cutover_record_id(self.plan)
             self.new_runner = self.start_runner(manifest, "runner-" + release, guard=True)
             self.new_web = ""
             self.private_origin = ""
@@ -228,12 +235,47 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
                 fence_and_drain=self.fence,
                 handoff_writers=self.handoff,
                 drain_old=self.drain,
-                prepared_origin="http://host.docker.internal:" + str(self.prepared_port),
+                lane=OdooCutoverLane(
+                    route_id=self.plan.route_id,
+                    host=self.plan.host,
+                    database="fixture",
+                    database_uuid=self.database_uuid,
+                    prepared_origin="http://host.docker.internal:" + str(self.prepared_port),
+                    slots=cast(
+                        tuple[OdooSlotCoordinates, OdooSlotCoordinates],
+                        tuple(
+                            OdooSlotCoordinates(
+                                slot_id=slot.slot_id,
+                                compose_id=slot.compose_id,
+                                private_url=slot.private_url,
+                            )
+                            for slot in (self.plan.old, self.plan.new)
+                        ),
+                    ),
+                    writers=self.plan.writers,
+                ),
+                verify_endpoint=self.verify_endpoint,
+                load_prepared=self.load_prepared,
             )
-            provider = DokployOdooCutoverProvider(
-                self.plan, driver, self.route, pause_id=self.record_id
+            factory = DokployOdooCutoverProviderFactory(
+                self.control_store, driver=lambda plan, lane: driver, route=lambda lane: self.route
             )
-            store = RehearsalStore(self.root)
+            provider = factory(self.plan)
+            store = DeploymentCutoverStore(
+                self.control_store,
+                DeploymentRecord(
+                    record_id=self.plan.new.runtime_identity.deployment_record_id,
+                    context="fixture",
+                    instance="isolated",
+                    source_git_ref=self.plan.candidate.source_commit,
+                    deploy=DeploymentEvidence(
+                        deploy_mode="atomic-two-slot",
+                        target_type="compose",
+                        target_name=self.plan.new.slot_id,
+                    ),
+                ),
+            )
+            self.cutover_store = store
             result = None
             for _attempt in range(8):
                 try:
@@ -352,6 +394,7 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             "ODOO_DB_HOST": "database",
             "ODOO_DB_USER": "odoo",
             "ODOO_DB_PASSWORD": "inert-fixture-password",
+            "ODOO_MASTER_PASSWORD": "isolated-fixture-master-passphrase-3266",
             "ODOO_ADMIN_PASSWORD": "isolated-fixture-admin-passphrase-3266",
             "ODOO_DB_NAME": "fixture",
             "ODOO_FILESTORE_PATH": "/volumes/data/filestore",
@@ -410,6 +453,7 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
         *,
         initialize: bool = False,
         project: str = "",
+        command: str = "",
     ) -> str:
         container = self.prefix + "-" + name
         self.containers.append(container)
@@ -466,10 +510,12 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             str(self.data) + ":/volumes/data",
             *self.environment(identity is not None and identity.slot != "old"),
             *extra,
+            "--health-cmd",
+            "true",
             "--entrypoint",
-            "/odoo/odoo-bin",
+            "/bin/sh" if command else "/odoo/odoo-bin",
             self.image(manifest),
-            *arguments,
+            *(["-c", command] if command else arguments),
         )
         docker("network", "connect", self.network, container)
         return container
@@ -548,7 +594,7 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
                     runtime_identity=identity,
                 )
             )
-        return OdooCutoverPlan(
+        provisional = OdooCutoverPlan(
             release_id=release,
             route_id="fixture",
             host="fixture.invalid",
@@ -559,6 +605,76 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             new=slots[1],
             writers=tuple(WriterTarget(writer_id=kind, kind=kind) for kind in WRITER_KINDS),
         )
+
+        config = OdooCutoverLane(
+            route_id=provisional.route_id,
+            host=provisional.host,
+            database="fixture",
+            database_uuid=self.database_uuid,
+            prepared_origin="http://host.docker.internal:" + str(self.prepared_port),
+            slots=(
+                OdooSlotCoordinates(
+                    **slots[0].model_dump(include={"slot_id", "compose_id", "private_url"})
+                ),
+                OdooSlotCoordinates(
+                    **slots[1].model_dump(include={"slot_id", "compose_id", "private_url"})
+                ),
+            ),
+            writers=provisional.writers,
+        )
+        profile = _odoo_preview_profile_payload("fixture")
+        profile["preview"] = {"enabled": False}
+        profile["lanes"] = [
+            {
+                "context": "fixture",
+                "instance": "isolated",
+                "base_url": "http://fixture.invalid",
+                "health_url": "http://fixture.invalid/launchplane/health",
+                "odoo_cutover": config.model_dump(mode="json"),
+            }
+        ]
+        self.control_store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(profile)
+        )
+        for manifest in (old, new):
+            self.control_store.write_artifact_manifest(manifest)
+        self.control_store.write_environment_inventory(
+            EnvironmentInventory(
+                context="fixture",
+                instance="isolated",
+                source_git_ref=old.source_commit,
+                deploy=DeploymentEvidence(
+                    deploy_mode="atomic-two-slot",
+                    target_type="compose",
+                    target_name="old",
+                    status="pass",
+                ),
+                runtime_identity=self.old_identity,
+                updated_at=datetime.now().isoformat(),
+                deployment_record_id=self.old_identity.deployment_record_id,
+            )
+        )
+        self.control_store.write_release_tuple_record(
+            ReleaseTupleRecord(
+                tuple_id="old-" + release,
+                context="fixture",
+                channel="isolated",
+                artifact_id=old.artifact_id,
+                repo_shas={"example/fixture": old.source_commit},
+                provenance="ship",
+                minted_at=datetime.now().isoformat(),
+            )
+        )
+        compiled = resolve_profile_cutover_plan(
+            self.control_store,
+            product="fixture",
+            context="fixture",
+            instance="isolated",
+            artifact_id=new.artifact_id,
+            release_id=release,
+        )
+        assert compiled is not None
+        return compiled
 
     @contextmanager
     def exclusive(self, plan: OdooCutoverPlan) -> Iterator[None]:
@@ -597,7 +713,6 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             "--providers.file.directory=/dynamic",
             "--providers.file.watch=true",
             "--entrypoints.web.address=:80",
-            "--providers.providersthrottleduration=100ms",
         )
         docker("network", "connect", self.network, proxy)
         self.public = self.origin(proxy, 80)
@@ -643,28 +758,15 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             render_odoo_app_slot_compose(plan, data_volume="fixture", private_network=self.network)
         )
         command = payload["services"]["web"]["command"].replace("$$", "$")
-        guard = self.prefix + "-guard-" + plan.release_id
-        self.containers.append(guard)
-        docker(
-            "run",
-            "-d",
-            "--pull=never",
-            "--name",
-            guard,
-            "--network",
-            self.network,
-            "-v",
-            str(self.data) + ":/volumes/data",
-            "--entrypoint",
-            "/bin/sh",
-            plan.new.image,
-            "-c",
-            command,
+        self.new_web = self.start_web(
+            plan.candidate, plan.new.slot_id, plan.new.runtime_identity, command=command
         )
         time.sleep(0.3)
-        self.assertEqual(docker("inspect", "--format", "{{.State.Running}}", guard), "true")
-        self.assertEqual(docker("logs", guard), "")
-        docker("stop", guard)
+        self.assertEqual(docker("inspect", "--format", "{{.State.Running}}", self.new_web), "true")
+        self.assertEqual(docker("logs", self.new_web), "")
+        self.writers = self.writer_control(plan)
+        self.writers.handoff(plan.old)
+        self.wait_writer_ticks(plan.old)
 
     def capture(self, path: str) -> CapturedPublicResponse:
         status, body, headers = self.http(self.old_origin + path)
@@ -690,6 +792,11 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
         )
         site = prepare_public_site(public, self)
         return site
+
+    def load_prepared(self, pause_id: str) -> PreparedPublicSite:
+        record = self.cutover_store.load(pause_id)
+        assert record.public_site is not None
+        return record.public_site
 
     def stage_public(self, site: PreparedPublicSite, pause_id: str) -> str:
         if not self.servers:
@@ -729,26 +836,26 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
         )
 
     def fence(self, site: PreparedPublicSite, pause_id: str) -> tuple[WriterObservation, ...]:
-        docker("stop", self.old_web)
-        self.assertEqual(docker("inspect", "--format", "{{.State.Running}}", self.old_web), "false")
+        observations = self.writers.fence(site, pause_id)
         self.assertEqual(
             self.sql(
                 "SELECT count(*) FROM pg_stat_activity WHERE datname='fixture' AND pid<>pg_backend_pid()"
             ),
             "0",
         )
-        self.owner = ""
-        return tuple(
-            WriterObservation(
-                binding=site.plan.binding,
-                pause_id=pause_id,
-                writer=writer,
-                fenced=True,
-                active_jobs=0,
-                evidence_id="stopped-old-and-pg-drained-" + writer.writer_id,
+        self.writer_ticks = {
+            writer.writer_id: int(
+                self.sql(
+                    "SELECT count(*) FROM cutover_worker_ticks WHERE writer='"
+                    + writer.writer_id
+                    + "'"
+                )
             )
-            for writer in site.plan.writers
-        )
+            for writer in self.plan.writers
+            if writer.kind != "web"
+        }
+        self.owner = ""
+        return observations
 
     def backup(self, plan: OdooCutoverPlan) -> OdooRecoveryTuple:
         name = plan.release_id
@@ -759,10 +866,15 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             filestore_path="/volumes/data/filestore",
             backup_root="/volumes/data/backups",
             backup_record_id=name,
+            expected_web_state="exited"
+            if plan.compatibility.classification == "database_changing"
+            else "running",
         )
-        output = subprocess.run(
-            ["bash", "-s"], input=script, text=True, capture_output=True, check=True, timeout=80
-        ).stdout
+        captured_process = subprocess.run(
+            ["bash", "-s"], input=script, text=True, capture_output=True, timeout=80
+        )
+        self.assertEqual(captured_process.returncode, 0, captured_process.stderr)
+        output = captured_process.stdout
         captured = extract_odoo_backup_gate_result(output)
         backup = "/volumes/data/backups/fixture/" + name
         verification = _build_dokploy_odoo_backup_verification_script(
@@ -807,13 +919,74 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             infrastructure_record_id="isolated-replica-" + name,
             database_dump_sha256=hashes["fixture.dump"],
             filestore_archive_sha256=hashes["fixture-filestore.tar.gz"],
-            recovery_point_at=datetime.now(UTC),
+            recovery_point_at=datetime.fromisoformat(str(captured["recovery_point_at"])),
             coherence_verified=True,
             restore_verified=True,
             independent_backup_verified=True,
         )
 
     def maintenance(self, plan: OdooCutoverPlan) -> OdooMaintenanceReceipt:
+        events = self.sql("SELECT count(*) FROM cutover_hook_events", database="postgres")
+        wrong = plan.model_copy(
+            update={
+                "old": plan.old.model_copy(
+                    update={
+                        "runtime_identity": plan.old.runtime_identity.model_copy(
+                            update={"database_uuid": "other-physical-database"}
+                        )
+                    }
+                ),
+                "new": plan.new.model_copy(
+                    update={
+                        "runtime_identity": plan.new.runtime_identity.model_copy(
+                            update={"database_uuid": "other-physical-database"}
+                        )
+                    }
+                ),
+            }
+        )
+        with self.assertRaisesRegex(RuntimeError, "selected database UUID"):
+            run_planned_slot_maintenance(
+                wrong, runner_container=self.new_runner, execute=self.execute
+            )
+        fake_id = plan.release_id + "-fake-footer"
+        fake = plan.model_copy(
+            update={
+                "release_id": fake_id,
+                "old": plan.old.model_copy(
+                    update={"binding": plan.old.binding.model_copy(update={"release_id": fake_id})}
+                ),
+                "new": plan.new.model_copy(
+                    update={
+                        "binding": plan.new.binding.model_copy(update={"release_id": fake_id}),
+                        "runtime_identity": plan.new.runtime_identity.model_copy(
+                            update={"release_id": fake_id}
+                        ),
+                    }
+                ),
+            }
+        )
+        payload = maintenance_payload(fake)
+        directory = "/volumes/data/.launchplane-cutovers/" + payload_digest(payload)
+        self.execute(
+            (
+                "docker",
+                "exec",
+                "-i",
+                self.new_runner,
+                "/venv/bin/python",
+                "-c",
+                "import sys,json;from pathlib import Path;r=json.load(sys.stdin);p=Path(r['directory']);p.mkdir(parents=True,exist_ok=True);(p/'plan.json').write_text(json.dumps(r['payload'],sort_keys=True,separators=(',',':')));(p/'attempt.json').write_text('started');(p/'receipt.json').write_text(json.dumps({'state':'passed'}))",
+            ),
+            json.dumps({"directory": directory, "payload": payload}),
+        )
+        with self.assertRaisesRegex(RuntimeError, "boundary.json"):
+            run_planned_slot_maintenance(
+                fake, runner_container=self.new_runner, execute=self.execute
+            )
+        self.assertEqual(
+            self.sql("SELECT count(*) FROM cutover_hook_events", database="postgres"), events
+        )
         if plan.compatibility.classification == "database_changing":
             self.assertEqual(
                 docker("inspect", "--format", "{{.State.Running}}", self.old_web), "false"
@@ -839,7 +1012,16 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
         self.assertEqual(
             self.sql("SELECT count(*) FROM cutover_hook_events", database="postgres"), events
         )
-        self.new_web = self.start_web(plan.candidate, plan.new.slot_id, plan.new.runtime_identity)
+        for writer_id, count in self.writer_ticks.items():
+            self.assertEqual(
+                int(
+                    self.sql(
+                        "SELECT count(*) FROM cutover_worker_ticks WHERE writer='" + writer_id + "'"
+                    )
+                ),
+                count,
+            )
+        docker("start", self.new_web)
         self.wait_web(self.new_web)
         self.private_origin = self.origin(self.new_web, 8069)
         return receipt
@@ -1006,9 +1188,29 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             else self.http(self.private_origin + "/cutover_probe/static/site.css")[0] == 200,
         )
 
+    def verify_endpoint(self, plan: OdooCutoverPlan, slot: OdooSlot) -> HealthcheckEvidence:
+        program = (
+            "import json,urllib.request; request=urllib.request.Request("
+            + repr(slot.private_url + "/launchplane/health")
+            + ",headers={'Host':"
+            + repr(plan.host)
+            + "}); response=urllib.request.urlopen(request,timeout=10); assert response.status==200; print(response.read().decode())"
+        )
+        payload = json.loads(docker("exec", self.old_runner, "/venv/bin/python", "-c", program))
+        observed = runtime_identity_from_health_payload(payload)
+        self.assertEqual(observed, slot.runtime_identity)
+        return HealthcheckEvidence(
+            verified=True,
+            status="pass",
+            urls=(slot.private_url + "/launchplane/health",),
+            timeout_seconds=10,
+            runtime_identity_status="match",
+            observed_runtime_identity=observed,
+        )
+
     def observe_public(
         self, plan: OdooCutoverPlan, target: str
-    ) -> tuple[str, PublicSiteBinding, RuntimeIdentity | None]:
+    ) -> tuple[str, PublicSiteBinding, HealthcheckEvidence | None]:
         if target == plan.old.private_url:
             slot = plan.old
         elif target == plan.new.private_url:
@@ -1023,44 +1225,138 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
         observed = runtime_identity_from_health_payload(json.loads(body))
         if observed != slot.runtime_identity:
             raise ValueError("wrong public identity")
-        return slot.slot_id, slot.binding, observed
+        return (
+            slot.slot_id,
+            slot.binding,
+            HealthcheckEvidence(
+                verified=True,
+                status="pass",
+                urls=(self.public + "/launchplane/health",),
+                timeout_seconds=15,
+                observed_runtime_identity=observed,
+                runtime_identity_status="match",
+            ),
+        )
 
     def handoff(self, plan: OdooCutoverPlan, slot: OdooSlot) -> tuple[tuple[str, int], ...]:
-        # Registry fixture has no enabled cron/queue/mail/integration/GC jobs;
-        # one PostgreSQL row is the sole scheduling authority for those targets.
-        predecessor = self.new_web if slot.slot_id == "old" else self.old_web
-        if (
-            predecessor
-            and docker("inspect", "--format", "{{.State.Running}}", predecessor) == "true"
-        ):
-            docker("stop", predecessor)
-        self.sql(
-            "CREATE TABLE IF NOT EXISTS cutover_writer_owner(writer text PRIMARY KEY,slot text NOT NULL)"
-        )
-        for writer in plan.writers:
-            self.sql(
-                "INSERT INTO cutover_writer_owner VALUES ('"
-                + writer.writer_id
-                + "','"
-                + slot.slot_id
-                + "') ON CONFLICT(writer) DO UPDATE SET slot=EXCLUDED.slot"
-            )
+        owners = self.writers.handoff(slot)
+        self.wait_writer_ticks(slot)
+        # Replaying the handoff observes the same live processes; no duplicate
+        # container or database advisory-lock owner can be created.
+        self.assertEqual(self.writers.handoff(slot), owners)
         self.owner = slot.slot_id
-        return tuple(
-            (
-                writer.writer_id,
+        return owners
+
+    def writer_control(self, plan: OdooCutoverPlan) -> ContainerSlotWriters:
+        self.sql(
+            "CREATE TABLE IF NOT EXISTS cutover_worker_ticks(writer text,slot text,process integer,at timestamptz default clock_timestamp())"
+        )
+        targets = []
+        for slot, web in ((plan.old, self.old_web), (plan.new, self.new_web)):
+            for writer in plan.writers:
+                if writer.kind == "web":
+                    container = web
+                else:
+                    key = (slot.slot_id, writer.writer_id)
+                    if key not in self.worker_containers:
+                        container = (
+                            self.prefix
+                            + "-writer-"
+                            + hashlib.sha256(repr(key).encode()).hexdigest()[:12]
+                        )
+                        self.containers.append(container)
+                        program = Path("tests/support/cutover_worker.py.in").read_text()
+                        docker(
+                            "create",
+                            "--pull=never",
+                            "--name",
+                            container,
+                            "--network",
+                            self.network,
+                            "-v",
+                            str(self.data) + ":/volumes/data",
+                            *self.environment(slot != plan.old),
+                            "-e",
+                            "CUTOVER_WRITER=" + writer.writer_id,
+                            "-e",
+                            "CUTOVER_SLOT=" + slot.slot_id,
+                            "-e",
+                            "CUTOVER_WORKER_KIND=" + writer.kind,
+                            "--entrypoint",
+                            "/venv/bin/python",
+                            slot.image,
+                            "-c",
+                            program,
+                        )
+                        self.worker_containers[key] = container
+                    container = self.worker_containers[key]
+                targets.append(
+                    SlotWriterContainer(
+                        writer=writer, slot_id=slot.slot_id, container=container, image=slot.image
+                    )
+                )
+        return ContainerSlotWriters(plan, tuple(targets), self.execute, self.active_writer_jobs)
+
+    def active_writer_jobs(self, target: SlotWriterContainer) -> int:
+        if target.writer.kind == "web":
+            # All registry-capable writers use this DB; the full pause below
+            # additionally verifies that no sessions survive the entire fence.
+            return (
+                0
+                if docker("inspect", "--format", "{{.State.Running}}", target.container) == "false"
+                else 1
+            )
+        application = target.slot_id + ":" + target.writer.writer_id
+        return int(
+            self.sql(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname='fixture' AND application_name='"
+                + application
+                + "'"
+            )
+        )
+
+    def wait_writer_ticks(self, slot: OdooSlot) -> None:
+        deadline = time.monotonic() + 30
+        for writer in self.plan.writers:
+            if writer.kind == "web":
+                continue
+            before = int(
+                self.sql(
+                    "SELECT count(*) FROM cutover_worker_ticks WHERE writer='"
+                    + writer.writer_id
+                    + "' AND slot='"
+                    + slot.slot_id
+                    + "'"
+                )
+            )
+            while (
                 int(
                     self.sql(
-                        "SELECT count(*) FROM cutover_writer_owner WHERE writer='"
+                        "SELECT count(*) FROM cutover_worker_ticks WHERE writer='"
                         + writer.writer_id
                         + "' AND slot='"
                         + slot.slot_id
                         + "'"
                     )
+                )
+                <= before
+            ):
+                if time.monotonic() > deadline:
+                    raise AssertionError(
+                        "fixture writer failed: "
+                        + docker("logs", self.worker_containers[(slot.slot_id, writer.writer_id)])
+                    )
+                time.sleep(0.1)
+            self.assertEqual(
+                self.active_writer_jobs(
+                    next(
+                        target
+                        for target in self.writers.targets
+                        if target.slot_id == slot.slot_id and target.writer == writer
+                    )
                 ),
+                1,
             )
-            for writer in plan.writers
-        )
 
     def drain(self, plan: OdooCutoverPlan) -> bool:
         # docker stop completed after public traffic moved; the retained project

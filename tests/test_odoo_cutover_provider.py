@@ -6,12 +6,66 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
-from control_plane.dokploy.traefik_cutover import TraefikFileRoute, TraefikRouteTarget
+from control_plane.dokploy.traefik_cutover import (
+    TraefikFileRoute,
+    TraefikRouteTarget,
+    route_payload,
+)
+import json
 from control_plane.dokploy.slot_prepare import prepare_dokploy_odoo_slot
 from tests.test_odoo_cutover import IsolatedCutoverProvider
 
 
 class OdooCutoverProviderTests(unittest.TestCase):
+    def test_single_route_switch_never_deletes_another_service_in_its_file(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "route.yaml"
+            target = TraefikRouteTarget(
+                route_id="lane",
+                host="fixture.invalid",
+                entrypoints=("web",),
+                route_file=path,
+                api_url="http://fixture.invalid",
+                tls=False,
+            )
+            payload = route_payload(target, "http://old:8069")
+            payload["http"]["services"]["other"] = {
+                "loadBalancer": {"servers": [{"url": "http://other:8069"}]}
+            }
+            path.write_text(json.dumps(payload))
+            original = path.read_bytes()
+            route = TraefikFileRoute(target)
+            with (
+                patch.object(route, "observed_target", return_value="http://old:8069"),
+                self.assertRaisesRegex(ValueError, "single-route"),
+            ):
+                route.publish("http://new:8069", expected=("http://old:8069",))
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_compatible_candidate_cannot_change_shared_managed_credentials(self) -> None:
+        with TemporaryDirectory() as temporary:
+            provider = IsolatedCutoverProvider(Path(temporary))
+            self.addCleanup(provider.engine.dispose)
+            with (
+                patch(
+                    "control_plane.dokploy.slot_prepare.api.fetch_dokploy_target_payload",
+                    side_effect=[
+                        {"appName": "old", "env": "INERT_FIXTURE_KEY=old"},
+                        {"appName": "new", "env": "INERT_FIXTURE_KEY=new"},
+                    ],
+                ),
+                patch("control_plane.dokploy.slot_prepare.api.dokploy_request") as write,
+                self.assertRaisesRegex(ValueError, "identical managed"),
+            ):
+                prepare_dokploy_odoo_slot(
+                    provider.cutover,
+                    host="fixture.invalid",
+                    token="inert",
+                    data_volume="fixture",
+                    private_network="fixture",
+                )
+            write.assert_not_called()
+
     def test_foreign_duplicate_or_wrong_tls_route_is_never_overwritten(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -43,7 +97,11 @@ class OdooCutoverProviderTests(unittest.TestCase):
             ):
                 with (
                     self.subTest(routers=routers),
-                    patch.object(route, "_api", return_value=routers),
+                    patch.object(
+                        route,
+                        "_api",
+                        return_value={"routers": {router["name"]: router for router in routers}},
+                    ),
                     self.assertRaises(ValueError),
                 ):
                     route.publish("http://new:8069", expected=("http://old:8069",))
@@ -53,7 +111,7 @@ class OdooCutoverProviderTests(unittest.TestCase):
                     route,
                     "_api",
                     side_effect=[
-                        [base],
+                        {"routers": {"lane@file": base}},
                         {
                             "status": "enabled",
                             "loadBalancer": {"servers": [{"url": "http://foreign:8069"}]},

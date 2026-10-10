@@ -6,8 +6,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.odoo_cutover import OdooCutoverPlan
-
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
     DurableOperationCancellation,
@@ -37,9 +35,6 @@ class OdooProdPromotionRunRequest(BaseModel):
     wait: bool = True
     verify_health: bool = True
     no_cache: bool = False
-    cutover_plan: OdooCutoverPlan | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
 
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooProdPromotionRunRequest":

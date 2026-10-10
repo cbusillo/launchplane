@@ -1,6 +1,5 @@
 """Adapt the cutover executor to the existing promotion/deployment record path."""
 
-import hashlib
 from collections.abc import Callable
 from typing import Literal
 
@@ -11,9 +10,9 @@ from control_plane.contracts.odoo_cutover import OdooCutoverPlan
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
-    HealthcheckEvidence,
     PostDeployUpdateEvidence,
 )
+from control_plane.odoo_cutover_plan import cutover_record_id
 from control_plane.odoo_cutover_storage import DeploymentCutoverStore, DeploymentStore
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider, execute_odoo_cutover
 from control_plane.workflows.odoo_cutover import rollback_compatible_cutover
@@ -40,8 +39,8 @@ def execute_odoo_cutover_deployment(
 ) -> OdooCutoverApplyResult:
     if context != plan.new.runtime_identity.context or instance != plan.new.binding.environment_id:
         raise ValueError("deployment envelope differs from cutover context/lane")
-    record_id = hashlib.sha256(plan.release_id.encode()).hexdigest()[:32]
-    deployment_id = "deployment-cutover-" + record_id
+    record_id = cutover_record_id(plan)
+    deployment_id = plan.new.runtime_identity.deployment_record_id
     deployment = DeploymentRecord(
         record_id=deployment_id,
         context=context,
@@ -83,12 +82,8 @@ def execute_odoo_cutover_deployment(
             "classification": plan.compatibility.classification,
         },
     )
-    persisted.destination_health = HealthcheckEvidence(
-        verified=True,
-        status="pass",
-        urls=("https://" + plan.host,),
-        timeout_seconds=60,
-    )
+    assert record.route.public_health is not None
+    persisted.destination_health = record.route.public_health
     record_store.write_deployment_record(persisted)
     return OdooCutoverApplyResult(
         deployment_record_id=deployment_id,
@@ -118,6 +113,9 @@ def execute_odoo_cutover_rollback_deployment(
             "odoo_cutover": None,
             "artifact_identity": ArtifactIdentityReference(artifact_id=artifact_id),
             "runtime_identity": old.runtime_identity,
+            "runtime_source": {
+                "retained_deployment_record_id": old.runtime_identity.deployment_record_id
+            },
             "source_git_ref": rolled.plan.production.source_commit,
             "resolved_target": ResolvedTargetEvidence(
                 target_type="compose", target_id=old.compose_id, target_name=old.slot_id
@@ -130,6 +128,7 @@ def execute_odoo_cutover_rollback_deployment(
                 deployment_id=record.plan.release_id,
             ),
             "post_deploy_update": PostDeployUpdateEvidence(attempted=False, status="skipped"),
+            "destination_health": rolled.route.public_health if rolled.route else None,
         }
     )
     record_store.write_deployment_record(previous)

@@ -98,7 +98,6 @@ class TraefikCutoverRehearsalTests(unittest.TestCase):
                     "--providers.file.directory=/dynamic",
                     "--providers.file.watch=true",
                     "--entrypoints.web.address=:80",
-                    "--providers.providersthrottleduration=100ms",
                 )
                 docker("network", "connect", network, proxy)
                 ports = json.loads(

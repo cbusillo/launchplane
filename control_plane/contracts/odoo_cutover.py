@@ -8,6 +8,7 @@ from pydantic import Field, model_validator
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.artifact_release_compatibility import ReleaseDatabaseCompatibility
 from control_plane.contracts.prepared_public_site import (
+    WRITER_KINDS,
     FrozenRecord,
     PreparedPublicSite,
     PublicPauseRecord,
@@ -16,6 +17,7 @@ from control_plane.contracts.prepared_public_site import (
 )
 from control_plane.release_compatibility import classify_release_database_compatibility
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.promotion_record import HealthcheckEvidence
 
 
 class OdooSlot(FrozenRecord):
@@ -76,14 +78,7 @@ class OdooCutoverPlan(FrozenRecord):
             raise ValueError("slot contexts differ")
         if len({writer.writer_id for writer in self.writers}) != len(self.writers):
             raise ValueError("duplicate authoritative writer target")
-        if {writer.kind for writer in self.writers} != {
-            "web",
-            "cron",
-            "queue",
-            "mail",
-            "integration",
-            "asset_gc",
-        }:
+        if {writer.kind for writer in self.writers} != set(WRITER_KINDS):
             raise ValueError("all authoritative writer kinds must be inventoried")
         return self
 
@@ -114,9 +109,12 @@ class OdooRouteObservation(FrozenRecord):
     evidence_id: str = Field(min_length=1)
     # Read applied proxy authority and public runtime identity independently.
     applied: Literal[True]
-    public_identity: Literal[True]
     authoritative_router_count: Literal[1]
-    runtime_identity: RuntimeIdentity | None = None
+    public_health: HealthcheckEvidence | None = None
+
+    @property
+    def runtime_identity(self) -> RuntimeIdentity | None:
+        return self.public_health.observed_runtime_identity if self.public_health else None
 
 
 class OdooMaintenanceReceipt(FrozenRecord):
