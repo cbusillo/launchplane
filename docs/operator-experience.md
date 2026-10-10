@@ -547,10 +547,18 @@ immediate request local variable. The UI clears those inputs before dispatch and
 again on secret-input validation failure, request failure, route change, and
 unmount. Apply requires the admin to re-enter the same values; retained
 browser operation state contains only a fingerprint, idempotency key, redacted
-result, trace, and failure evidence. An uncertain apply locks every editable
-draft field so the only mutation retry preserves the original operation key and
-payload. Live-target endpoints returned in `next_actions` are rendered as
+result, trace, and failure evidence. An uncertain apply initially locks the draft
+and offers original-request re-entry, including after reload. Re-entry enables
+the existing fields only to reconstruct that request; its retained fingerprint
+rejects a different payload before dispatch. New dry-runs and Start over remain
+unavailable until that Apply settles. Secret values are cleared again after each
+retry, including a rejected mismatch. Live-target endpoints returned in `next_actions` are rendered as
 inspect-only evidence until they have a separate generated browser adapter.
+For both configuration forms, a server or gateway 5xx after dispatch keeps the
+Apply uncertain even when the error response is valid JSON. The retained key and
+fingerprint survive navigation/reload; a pre-dispatch failure or explicit client
+refusal remains definitive. A retry that began uncertain still requires evidence
+that the original operation settled before its identity can be discarded.
 
 The environment Managed secrets form can also select a credential supplied by the
 named Client. The Client receives the focused `/ui/owner-secrets` page, containing
