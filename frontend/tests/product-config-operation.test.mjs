@@ -1,24 +1,34 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createBrowserOperationState, prepareBrowserOperation } from "../src/browser-operation.ts";
+import {
+  beginBrowserOperation, completeBrowserOperation, createBrowserOperationState,
+  failBrowserOperation, markBrowserOperationDispatched, persistBrowserOperationState,
+  prepareBrowserOperation, recoverBrowserOperationState, resetBrowserOperation,
+  retryBrowserOperation,
+} from "../src/browser-operation.ts";
+import { LaunchplaneApiError } from "../src/api.ts";
 import {
   clearManagedSecretInputs,
   consumeManagedSecretValues,
   productConfigDraftLocked,
+  productConfigFailureCertainty,
+  productConfigOperationFailure,
   productConfigManagedSecretIdentity,
   productConfigRuntimeChange,
   productConfigRuntimeChangeKey,
   productConfigSelectionKey,
+  ProductConfigRecoveryStorageUnavailable,
+  validateProductConfigApplyReplay,
 } from "../src/product-config-operation.ts";
 
 test("managed-secret values are consumed and cleared before request state is retained", async () => {
   const smtpIdentity = productConfigManagedSecretIdentity("runtime_environment", "SMTP_PASSWORD");
   const analyticsIdentity = productConfigManagedSecretIdentity("analytics", "ANALYTICS_TOKEN");
-  const inputs = new Map([
-    [smtpIdentity, { value: "smtp-secret-value" }],
-    [analyticsIdentity, { value: "analytics-secret-value" }],
-  ]);
+  /** @type {Map<string, { value: string }>} */
+  const inputs = new Map();
+  inputs.set(smtpIdentity, { value: "smtp-secret-value" });
+  inputs.set(analyticsIdentity, { value: "analytics-secret-value" });
 
   const secrets = consumeManagedSecretValues(
     [
@@ -52,10 +62,10 @@ test("managed-secret values are consumed and cleared before request state is ret
 test("managed-secret validation errors clear every plaintext input", () => {
   const smtpIdentity = productConfigManagedSecretIdentity("runtime_environment", "SMTP_PASSWORD");
   const analyticsIdentity = productConfigManagedSecretIdentity("analytics", "ANALYTICS_TOKEN");
-  const inputs = new Map([
-    [smtpIdentity, { value: "smtp-secret-value" }],
-    [analyticsIdentity, { value: "" }],
-  ]);
+  /** @type {Map<string, { value: string }>} */
+  const inputs = new Map();
+  inputs.set(smtpIdentity, { value: "smtp-secret-value" });
+  inputs.set(analyticsIdentity, { value: "" });
 
   assert.throws(
     () =>
@@ -97,10 +107,10 @@ test("selecting an Owner submission sends its version and discards any typed val
 });
 
 test("route cleanup clears every managed-secret input", () => {
-  const inputs = new Map([
-    ["SMTP_PASSWORD", { value: "smtp-secret-value" }],
-    ["ANALYTICS_TOKEN", { value: "analytics-secret-value" }],
-  ]);
+  /** @type {Map<string, { value: string }>} */
+  const inputs = new Map();
+  inputs.set("SMTP_PASSWORD", { value: "smtp-secret-value" });
+  inputs.set("ANALYTICS_TOKEN", { value: "analytics-secret-value" });
 
   clearManagedSecretInputs(inputs);
 
@@ -171,5 +181,70 @@ test("uncertain apply continuity locks every editable draft field", () => {
   };
 
   assert.equal(productConfigDraftLocked(idle, uncertain), true);
+  assert.equal(productConfigDraftLocked(idle, uncertain, true), false);
+  assert.equal(productConfigDraftLocked(idle, { ...uncertain, phase: "submitting" }, true), true);
   assert.equal(productConfigDraftLocked(idle, idle), false);
+});
+
+test("a JSON gateway failure after Apply preserves exact-operation recovery", async () => {
+  for (const kind of ["runtime-settings", "managed-secrets"]) {
+    const scope = `example:testing:${kind}:apply`;
+    const request = kind === "runtime-settings"
+      ? { runtime_settings: { SITE_TITLE: "Example" } }
+      : { managed_secrets: [{ binding_key: "SMTP_PASSWORD", value: "inert-test-secret" }] };
+    const prepared = await prepareBrowserOperation(scope, request);
+    const dispatched = markBrowserOperationDispatched(beginBrowserOperation(prepared));
+    // The service committed this identity; only the response was replaced by a gateway error.
+    const committedKey = dispatched.identity.idempotencyKey;
+    const error = new LaunchplaneApiError("Gateway unavailable", 502, "gateway-trace", "gateway_error");
+    const failed = failBrowserOperation(dispatched, productConfigOperationFailure(error),
+      productConfigFailureCertainty(error, true));
+    assert.equal(productConfigDraftLocked(createBrowserOperationState(), failed), true);
+    assert.throws(() => resetBrowserOperation(failed), /uncertain/);
+    const values = new Map();
+    const storage = { getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => values.set(key, value), removeItem: (key) => values.delete(key) };
+    persistBrowserOperationState(scope, failed, storage);
+    assert.equal([...values.values()].some((value) => value.includes("inert-test-secret")), false);
+    const recovered = recoverBrowserOperationState(scope, storage);
+    await assert.rejects(prepareBrowserOperation(scope, { replacement: true }, recovered), /uncertain/);
+    const retry = retryBrowserOperation(recovered);
+    assert.equal((await prepareBrowserOperation(scope, request, retry)).identity.idempotencyKey, committedKey);
+    const replay = completeBrowserOperation(markBrowserOperationDispatched(beginBrowserOperation(retry)),
+      { trace_id: "retry-trace", original_trace_id: "commit-trace", replayed: true });
+    persistBrowserOperationState(scope, replay, storage);
+    assert.equal(replay.requiresIdempotencyContinuity, false);
+    assert.equal(replay.receipt.replayed, true);
+    assert.equal(recoverBrowserOperationState(scope, storage).phase, "idle");
+  }
+});
+
+test("configuration failure certainty distinguishes dispatch from proven refusals", () => {
+  for (const status of [500, 502, 503]) {
+    const error = new LaunchplaneApiError("Unavailable", status, "trace", "unavailable");
+    assert.equal(productConfigFailureCertainty(error, true), "uncertain");
+    assert.equal(productConfigFailureCertainty(error, false), "definitive");
+  }
+  for (const status of [400, 403, 409, 422]) {
+    assert.equal(productConfigFailureCertainty(
+      new LaunchplaneApiError("Refused", status, "trace", "refused"), true), "definitive");
+  }
+  for (const code of ["secret_configuration_required", "secret_storage_unavailable"]) {
+    assert.equal(productConfigFailureCertainty(
+      new LaunchplaneApiError("Readiness refused", 503, "trace", code), true), "definitive");
+  }
+  assert.equal(productConfigFailureCertainty(new ProductConfigRecoveryStorageUnavailable("Not sent"), true), "definitive");
+});
+
+test("a rejected re-entry leaves original uncertainty evidence intact", async () => {
+  const scope = "example:testing:managed-secrets:apply";
+  const request = { managed_secrets: [{ binding_key: "SMTP_PASSWORD", value: "inert-secret" }] };
+  const dispatched = markBrowserOperationDispatched(beginBrowserOperation(await prepareBrowserOperation(scope, request)));
+  const original = failBrowserOperation(dispatched, { code: "gateway_error", message: "Unavailable", statusCode: 502, traceId: "original-trace" }, "uncertain");
+  await assert.rejects(validateProductConfigApplyReplay(scope, { replacement: true }, original), /uncertain/);
+  assert.equal(original.failure.traceId, "original-trace");
+  await validateProductConfigApplyReplay(scope, request, original);
+  const retry = markBrowserOperationDispatched(beginBrowserOperation(retryBrowserOperation(original)));
+  const prewrite = new LaunchplaneApiError("Storage unavailable", 503, "retry", "secret_storage_unavailable");
+  assert.equal(failBrowserOperation(retry, productConfigOperationFailure(prewrite), productConfigFailureCertainty(prewrite, true)).requiresIdempotencyContinuity, true);
 });
