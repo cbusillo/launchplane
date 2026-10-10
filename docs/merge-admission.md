@@ -194,6 +194,11 @@ ordered authoritatively by admission plus observation sequence, with timestamps
 retained only as metadata. Exact replay is idempotent; conflicting replay fails
 closed.
 
+New landing outcomes capture `observed_at` after the provider result or exact
+reconciliation has been processed, using a clock separate from the controller
+pass start. Existing immutable outcomes retain their recorded time. In the
+governance view, a legacy time that predates its matching admission is labeled
+"Recorded time (unqualified)"; the outcome and merge identity remain visible.
 
 ## Rolling branch identity and PR projections
 

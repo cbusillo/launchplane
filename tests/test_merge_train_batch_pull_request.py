@@ -175,6 +175,9 @@ class _BatchProvider:
 
 class _BatchGuard:
     def __init__(self, candidate_record: Any, landing_record: Any) -> None:
+        from control_plane.merge_admission import _utc_now_timestamp
+
+        self.observation_time_provider = _utc_now_timestamp
         self.candidate_record = candidate_record
         self.landing_plan_record = landing_record
         self.admissions: dict[int, SimpleNamespace] = {}

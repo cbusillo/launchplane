@@ -110,6 +110,9 @@ class _RecordingSemanticEffectExecutor:
 
 class _PermissiveMergeAdmissionGuard:
     def __init__(self) -> None:
+        from control_plane.merge_admission import _utc_now_timestamp
+
+        self.observation_time_provider = _utc_now_timestamp
         self.admit_calls: list[dict[str, object]] = []
         self.landed_calls: list[dict[str, object]] = []
         self.reconcile_required_calls: list[dict[str, object]] = []
