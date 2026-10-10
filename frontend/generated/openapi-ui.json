@@ -14977,7 +14977,8 @@
               "poll_interval_elapsed",
               "poll_interval_pending",
               "backoff_elapsed",
-              "backoff_pending"
+              "backoff_pending",
+              "github_rate_limit_pending"
             ],
             "title": "Reason Code",
             "type": "string"
@@ -24928,6 +24929,14 @@
             "title": "Monitoring Intent",
             "type": "string"
           },
+          "open_incidents": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductIncidentSummary"
+            },
+            "title": "Open Incidents",
+            "type": "array"
+          },
           "provenance": {
             "$ref": "#/components/schemas/DataProvenance"
           },
@@ -24951,6 +24960,7 @@
         "required": [
           "checks",
           "monitoring_intent",
+          "open_incidents",
           "provenance",
           "public_incident_eligible",
           "trust_state"

@@ -151,7 +151,17 @@ export function productsForFixture(
   if (fixture === "missing") {
     return [missingEvidenceProduct];
   }
-  return [atlasProduct, missingEvidenceProduct];
+  return [atlasProduct, missingEvidenceProduct].map((site) => ({
+    ...site,
+    environments: site.environments.map((environment) => {
+      const incident = incidentSummaryForFixture({
+        ...environment, product: site.product, display_name: site.display_name,
+      });
+      return { ...environment, health_monitoring: {
+        ...environment.health_monitoring, open_incidents: incident ? [incident] : [],
+      } };
+    }),
+  }));
 }
 
 export function environmentForFixture(
@@ -2306,7 +2316,7 @@ function incidentFixtureState(open: boolean) {
 }
 
 function incidentSummaryForFixture(
-  detail: ProductEnvironmentDetail,
+  detail: ProductEnvironmentSummary & Pick<ProductSiteOverview, "product" | "display_name">,
 ): ProductIncidentSummary | null {
   const ingress = detail.public_ingress;
   const check = detail.health_monitoring.checks.find(
@@ -2409,6 +2419,7 @@ function environmentFixture({
     available_actions: actionsForEnvironment(environment),
     driver_extensions: { odoo: null },
     health_monitoring: {
+      open_incidents: [],
       monitoring_intent: "public",
       public_incident_eligible: true,
       checks: [
@@ -2675,6 +2686,7 @@ function missingEnvironmentFixture(
     available_actions: [],
     driver_extensions: { odoo: null },
     health_monitoring: {
+      open_incidents: [],
       monitoring_intent: "prelaunch",
       public_incident_eligible: false,
       checks: [
