@@ -96,6 +96,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [operations.md](operations.md) — admin workflows and runtime boundary rules.
 - [production-backup-provider.md](production-backup-provider.md) — typed
   Proxmox/PBS capture, host boundary, evidence and rollout prerequisites.
+- [odoo-online-backups.md](odoo-online-backups.md) — coherent online logical
+  snapshots, attachment retention and isolated restore proof.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — standing public-source posture,
   image and secret boundary, and ongoing public hygiene.
