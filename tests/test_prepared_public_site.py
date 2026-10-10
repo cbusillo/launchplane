@@ -285,3 +285,57 @@ class PreparedPublicSiteTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 prepare_public_site(self.fixture.plan, self.fixture)
             self.assertEqual(self.fixture.fenced, set())
+
+    async def test_review_markup_cases_preserve_images_mobile_metadata_and_content_after_forms(
+        self,
+    ) -> None:
+        original = self.fixture.capture
+        viewport = "width=device-width, initial-scale=1"
+        data_image = (
+            "data:image/png;base64,"
+            + base64.b64encode(self.fixture.pages["/assets/bg.png"][1]).decode()
+        )
+
+        def capture(path: str) -> CapturedPublicResponse:
+            response = original(path)
+            if path in self.fixture.plan.public_routes and response.status == 200:
+                body = (
+                    response.body.replace(
+                        b"</head>",
+                        (
+                            '<meta charset="utf-8"><meta name="viewport" content="'
+                            + viewport
+                            + '">'
+                            '<meta name="csrf-token" content="private-meta-token">'
+                            '<meta http-equiv="refresh" content="0;url=/metrics"></head>'
+                        ).encode(),
+                    )
+                    .replace(
+                        b"</form>",
+                        b'<embed src="ignored"></form><p>Public content after the form</p>',
+                    )
+                    .replace(
+                        b'src="/assets/bg.png"',
+                        ('src="' + data_image + '"').encode(),
+                    )
+                    .replace(
+                        b"</main>",
+                        b'<a href="//outside.invalid/public">External resource</a></main>',
+                    )
+                )
+                return response.model_copy(update={"body": body})
+            return response
+
+        self.fixture.capture = capture  # type: ignore[method-assign]
+        site = prepare_public_site(self.fixture.plan, self.fixture)
+        self.fixture.engine.dispose()
+        self.fixture.database.unlink()
+        response = await request(prepared_public_app(site), "GET", "/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(viewport, response.text)
+        self.assertIn(data_image, response.text)
+        self.assertIn("Public content after the form", response.text)
+        self.assertIn("//outside.invalid/public", response.text)
+        self.assertNotIn("private-meta-token", response.text)
+        self.assertNotIn("http-equiv", response.text)
+        self.assertNotIn("<embed", response.text)

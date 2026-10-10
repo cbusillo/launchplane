@@ -38,6 +38,8 @@ in the capture. A site's browser coverage proof must confirm navigation and
 content work without its scripts before marking preparation ready. A plan for
 an unsupported site fails rather than claiming browsing continuity.
 
+Safe UTF-8 charset and viewport metadata and embedded image data remain visible.
+Refresh and other metadata are removed with session/CSRF-bearing attributes.
 All executable site scripts, inline handlers, session/CSRF-bearing data
 attributes, hidden inputs and forms are removed. The page contains a visible
 notice and disabled submission control. Script execution, connections, frames,
@@ -74,7 +76,7 @@ end time. Public write blocking stays in place after verified publication.
 Recovery persists `resuming` and its exact expected recovered artifact
 binding before the provider resumes. The provider must privately verify the
 recovered authoritative runtime, switch/read back serving, and resume exactly
-one owner per configured target using an idempotent pause operation. Binding,
+one lease holder per configured target using an idempotent pause operation. Binding,
 pause ID, serving evidence and writer ownership read back before completion.
 An uncertain retry cannot change the recovery target. A controller restart
 loads the same record; `finish` retries the recorded target idempotently and a

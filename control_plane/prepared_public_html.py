@@ -114,7 +114,7 @@ class PassivePublicHTML(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if self.dropped:
-            if tag in DROP_TAGS:
+            if tag in DROP_TAGS and tag != "embed":
                 self.dropped.append(tag)
             return
         values = dict(attrs)
@@ -129,7 +129,15 @@ class PassivePublicHTML(HTMLParser):
             if tag not in {"embed"}:
                 self.dropped.append(tag)
             return
-        if tag in {"input", "button", "meta"}:
+        if tag == "meta":
+            if str(values.get("charset", "")).lower() == "utf-8":
+                self.parts.append('<meta charset="utf-8">')
+            elif str(values.get("name", "")).lower() == "viewport" and values.get("content"):
+                self.parts.append(
+                    f'<meta name="viewport" content="{escape(str(values["content"]))}">'
+                )
+            return
+        if tag in {"input", "button"}:
             return
         if tag not in DISPLAY_TAGS:
             raise ValueError(f"unsupported public markup: {tag}")
@@ -153,12 +161,12 @@ class PassivePublicHTML(HTMLParser):
                 safe.append((name, ", ".join(entries)))
             elif name in URL_ATTRIBUTES:
                 if tag == "a":
-                    if urlsplit(value).scheme in {
-                        "https",
-                        "http",
-                        "mailto",
-                        "tel",
-                    } and not value.startswith(self.plan.origin + "/"):
+                    joined = urlsplit(urljoin(self.plan.origin + self.path, value))
+                    origin = urlsplit(self.plan.origin)
+                    if joined.scheme in {"mailto", "tel"} or (
+                        joined.scheme in {"https", "http"}
+                        and (joined.scheme, joined.netloc) != (origin.scheme, origin.netloc)
+                    ):
                         safe.append((name, value))
                         continue
                     ref = local_reference(self.plan, self.path, value)
@@ -168,6 +176,9 @@ class PassivePublicHTML(HTMLParser):
                     if ref:
                         self.links.add(ref)
                 else:
+                    if tag in {"img", "source"} and value.lower().startswith("data:image/"):
+                        safe.append((name, value))
+                        continue
                     ref = local_reference(self.plan, self.path, value)
                     if ref:
                         self.assets.add(ref)
