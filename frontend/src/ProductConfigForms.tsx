@@ -77,6 +77,7 @@ export function RuntimeSettingsChangePanel({
     config.product,
     config.environment,
     fixtureMode,
+    true,
   );
   const applyOperation = useProductConfigOperation(
     `${config.product}:${config.environment}:runtime-settings:apply`,
@@ -327,6 +328,7 @@ export function ManagedSecretsChangePanel({
     config.product,
     config.environment,
     fixtureMode,
+    true,
   );
   const applyOperation = useProductConfigOperation(
     `${config.product}:${config.environment}:managed-secrets:apply`,
@@ -1019,6 +1021,7 @@ function useProductConfigOperation(
   product: string,
   environment: string,
   fixtureMode: DevFixtureMode,
+  readOnly = false,
 ): ProductConfigOperationController {
   async function execute(
     payload: EnvironmentConfigRequest,
@@ -1039,6 +1042,7 @@ function useProductConfigOperation(
   }
   return useBrowserOperationController({
     execute,
+    readOnly,
     failureCertainty: productConfigFailureCertainty,
     failureFor: productConfigOperationFailure,
     scope,
