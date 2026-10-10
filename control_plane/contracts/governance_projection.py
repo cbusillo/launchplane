@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.repository_evidence import (
     RepositoryTarget,
+    RepositoryTargetReference,
 )
 from control_plane.contracts.merge_admission_record import (
     MergeAdmissionRecord,
@@ -30,7 +31,7 @@ GovernanceReadinessReason = Literal[
     "current_evidence_unavailable",
 ]
 GovernanceAdvisoryObservationScope = Literal["current_readiness", "admission_readiness"]
-GovernanceEvidenceTargetStatus = Literal["current", "historical", "none"]
+GovernanceEvidenceTargetStatus = Literal["current", "historical", "unknown", "none"]
 
 
 class GovernanceOwnerHistoryEntry(BaseModel):
@@ -90,6 +91,12 @@ class GovernanceMergeReadinessFacet(BaseModel):
     availability: GovernanceReadinessAvailability
     reason_code: GovernanceReadinessReason
     result: MergeReadinessResult | None = None
+    detail: str | None = Field(
+        default=None,
+        max_length=280,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_facet(self) -> "GovernanceMergeReadinessFacet":
@@ -113,6 +120,7 @@ class GovernanceMergeAdmissionFacet(BaseModel):
         "not_recorded",
         "admitted_current_target",
         "admitted_historical_target",
+        "admitted_unknown_target",
     ]
     current_effect_authority: Literal[False] = False
     authorizes: tuple[Literal["one_exact_merge_attempt"], ...] = ()
@@ -153,7 +161,9 @@ class GovernanceLandingOutcomeFacet(BaseModel):
         if self.record is None and self.target_status != "none":
             raise ValueError("Missing landing outcome evidence requires target_status=none")
         if self.record is not None and self.target_status == "none":
-            raise ValueError("Landing outcome evidence requires a current or historical target")
+            raise ValueError(
+                "Landing outcome evidence requires current, historical or unknown target applicability"
+            )
         return self
 
 
@@ -179,7 +189,13 @@ class GovernanceProjection(BaseModel):
     mode: Literal["read_only_projection"] = "read_only_projection"
     authoritative: Literal[False] = False
     authorizes: tuple[str, ...] = ()
-    target: RepositoryTarget
+    target: RepositoryTarget | None
+    requested_target: RepositoryTargetReference | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+        description="Requested lookup scope; not evidence of current repository identity or head.",
+    )
     owner_judgment: GovernanceOwnerJudgmentFacet | None = None
     merge_readiness: GovernanceMergeReadinessFacet
     merge_admission: GovernanceMergeAdmissionFacet
@@ -191,6 +207,21 @@ class GovernanceProjection(BaseModel):
     def _validate_projection(self) -> "GovernanceProjection":
         if self.authorizes:
             raise ValueError("The governance read model authorizes no effect")
+        if self.target is None:
+            if self.requested_target is None or self.merge_readiness.availability != "unavailable":
+                raise ValueError(
+                    "Unknown current target requires requested scope and unavailable readiness"
+                )
+            if (
+                self.merge_admission.record is not None
+                and self.merge_admission.status != "admitted_unknown_target"
+            ):
+                raise ValueError("Unknown current target cannot classify admission applicability")
+            if (
+                self.landing_outcome.record is not None
+                and self.landing_outcome.target_status != "unknown"
+            ):
+                raise ValueError("Unknown current target cannot classify landing applicability")
         object.__setattr__(
             self,
             "advisory_observations",

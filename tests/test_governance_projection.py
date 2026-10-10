@@ -446,6 +446,8 @@ class GovernanceProjectionTests(unittest.TestCase):
             )
 
         self.assertEqual(provider.calls, 1)
+        self.assertIsNotNone(projection.target)
+        assert projection.target is not None
         self.assertEqual(projection.target.head_sha, _repository_evidence().target.head_sha)
         self.assertIsNone(projection.owner_judgment)
 

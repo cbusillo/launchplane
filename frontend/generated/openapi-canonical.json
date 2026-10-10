@@ -11317,6 +11317,7 @@
             "enum": [
               "current",
               "historical",
+              "unknown",
               "none"
             ],
             "title": "Target Status",
@@ -11381,7 +11382,8 @@
             "enum": [
               "not_recorded",
               "admitted_current_target",
-              "admitted_historical_target"
+              "admitted_historical_target",
+              "admitted_unknown_target"
             ],
             "title": "Status",
             "type": "string"
@@ -11418,6 +11420,19 @@
             ],
             "title": "Availability",
             "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "maxLength": 280,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail",
+            "x-launchplane-optional-response": true
           },
           "level": {
             "const": 2,
@@ -11595,6 +11610,18 @@
               }
             ]
           },
+          "requested_target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepositoryTargetReference"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Requested lookup scope; not evidence of current repository identity or head.",
+            "x-launchplane-optional-response": true
+          },
           "schema_version": {
             "const": 1,
             "default": 1,
@@ -11602,7 +11629,14 @@
             "type": "integer"
           },
           "target": {
-            "$ref": "#/components/schemas/RepositoryTarget"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RepositoryTarget"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [

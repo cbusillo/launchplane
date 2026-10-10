@@ -29,3 +29,11 @@ repository policy's configured GitHub token source and performs no writes.
 readiness, recorded admission, landing outcome, and GitHub observations. It keeps
 technical-check reasons, cached evidence, unavailable state and access refusal
 visible on desktop and narrow viewports. It has no mutation controls.
+
+When the current repository provider is unavailable, an authorized read still
+returns stored admission and outcome evidence for the requested repository, base
+branch and PR. `target` is null and `requested_target` identifies only the lookup
+scope. Current readiness is unavailable; recorded evidence has unknown target
+applicability. An absent admission or outcome stays absent. This does not grant
+current merge authority, and repository policy/read authorization is checked
+before stored evidence is returned.

@@ -230,6 +230,7 @@ function GovernanceReadinessFacet({
         />
         <p className="governance-authority-note">
           No reusable authority exists. Reason: <code>{projection.merge_readiness.reason_code}</code>.
+          {projection.merge_readiness.detail ? ` ${projection.merge_readiness.detail}` : null}
         </p>
       </section>
     );
@@ -290,6 +291,8 @@ function GovernanceAdmissionFacet({ projection }: { projection: GovernanceProjec
       ? "Recorded for current target"
       : admission.status === "admitted_historical_target"
         ? "Historical admission"
+        : admission.status === "admitted_unknown_target"
+          ? "Recorded admission · target unknown"
         : "No admission recorded";
   return (
     <section className="governance-facet" aria-label="Level 3 immutable merge admission">
