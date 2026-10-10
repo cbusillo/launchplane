@@ -2149,6 +2149,15 @@ class FilesystemRecordStore:
                 status="written", current_record=replacement_record
             )
 
+    @contextmanager
+    def merge_train_feedback_delivery_lock(
+        self, *, repository: str, pull_request_number: int
+    ) -> Iterator[None]:
+        with self._exclusive_record_lock(
+            "merge-train-feedback-delivery", f"{repository.casefold()}#{pull_request_number}"
+        ):
+            yield
+
     def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> Path:
         return self._write_model("launchplane_merge_train_pr_feedback", record.feedback_id, record)
 
@@ -2159,6 +2168,10 @@ class FilesystemRecordStore:
         base_branch: str = "",
         pr_number: int | None = None,
         limit: int | None = None,
+        latest_per_pr: bool = False,
+        delivery_status: str = "",
+        terminal_retry_candidates: bool = False,
+        provider_backoff_only: bool = False,
     ) -> tuple[MergeTrainPrFeedbackRecord, ...]:
         records = [
             record
@@ -2170,7 +2183,32 @@ class FilesystemRecordStore:
             and (not base_branch or record.base_branch == base_branch)
             and (pr_number is None or record.pull_request_number == pr_number)
         ]
-        records.sort(key=lambda record: (record.recorded_at, record.feedback_id), reverse=True)
+        records.sort(
+            key=lambda record: (record.recorded_at, record.created_at_ns, record.feedback_id),
+            reverse=True,
+        )
+        if latest_per_pr:
+            latest: dict[tuple[str, str, int], MergeTrainPrFeedbackRecord] = {}
+            for record in records:
+                latest.setdefault(
+                    (record.repository, record.base_branch, record.pull_request_number), record
+                )
+            records = list(latest.values())
+        if delivery_status:
+            records = [record for record in records if record.delivery_status == delivery_status]
+        if terminal_retry_candidates:
+            records = [
+                record
+                for record in records
+                if record.event in {"completed", "stale_policy"} and record.retryable
+            ]
+        if latest_per_pr:
+            records.sort(
+                key=lambda record: (record.retry_at, record.recorded_at, record.feedback_id)
+            )
+        if provider_backoff_only:
+            records = [record for record in records if record.provider_retry_at]
+            records.sort(key=lambda record: record.provider_retry_at, reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)
