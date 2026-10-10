@@ -3495,7 +3495,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
 
                 (comment,) = self.comments.on(number)
                 body = cast(str, comment["body"])
-                self.assertIn(f"preview is ready for PR #{number}", body)
+                self.assertEqual(feedback["status"], "ready")
                 self.assertEqual(feedback.get("owner_review"), owner_review)
                 if owner_review == "mentioned":
                     self.assertIn("@site-owner this change is ready for you to look at.", body)
