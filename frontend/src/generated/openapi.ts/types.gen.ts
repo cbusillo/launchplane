@@ -2991,7 +2991,6 @@ export type ProductHealthMonitoringSummary = {
     open_incidents: Array<ProductIncidentSummary>;
     provenance: DataProvenance;
     public_incident_eligible: boolean;
-    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
 
 export type ProductImageProfile = {
