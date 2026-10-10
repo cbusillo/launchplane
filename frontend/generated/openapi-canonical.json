@@ -16540,6 +16540,12 @@
             "title": "Held Out",
             "type": "array"
           },
+          "historical": {
+            "default": false,
+            "description": "Stored lineage has no remaining controller action; not current effect authority.",
+            "title": "Historical",
+            "type": "boolean"
+          },
           "merged_count": {
             "default": 0,
             "title": "Merged Count",
