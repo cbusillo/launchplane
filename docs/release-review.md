@@ -138,7 +138,8 @@ the checklist. Admins get a separate **Admin Approval Override** section
 and approval-justification field explaining that their decision supplies
 approval under their own identity and replaces an earlier
 request for changes. A saved decision whose release record has not been
-published shows that pending state beside the decision. Only the Client's
+published shows that pending state beside the decision. In the implemented
+normal release path, only the Client's
 acceptance can start a release, and only as described under
 [Acceptance starts the release](#acceptance-starts-the-release); every other
 decision is recorded without deploying.
