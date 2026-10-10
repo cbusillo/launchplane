@@ -15439,7 +15439,7 @@ def create_launchplane_fastapi_app(
             )
         try:
             request_payload = canonical_product_config_request_payload(
-                product_config_request.model_dump(mode="json", exclude_none=True)
+                product_config_request.model_dump(mode="json", exclude_none=True, exclude_unset=True)
             )
         except control_plane_product_config.ProductConfigError as error:
             product_config_error = (
@@ -15507,7 +15507,7 @@ def create_launchplane_fastapi_app(
             isinstance(identity, LocalOperatorIdentity)
             and config_profile.production_use == "live"
             and product_config_has_undeclared_runtime_settings(
-                profile=config_profile, request=product_config_request
+                profile=config_profile, payload=request_payload
             )
         ):
             raise _launchplane_http_error(

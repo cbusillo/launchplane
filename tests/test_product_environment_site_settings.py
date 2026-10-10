@@ -173,6 +173,48 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                 self.assertEqual(response.json()["error"]["code"], "live_product_requires_operator")
         self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
 
+    async def test_live_guard_checks_the_canonical_flat_and_extra_runtime_values(self) -> None:
+        self.store.write_product_profile_record(_profile(production_use="live"))
+        for alias in ("runtime_env", "runtime_environment"):
+            for runtime_input in (
+                {"scope": None, "SITE_MODE": "public"},
+                {"adopt_provider_keys": ["APP_MODE"], "SITE_MODE": "public"},
+            ):
+                for mode in ("dry-run", "apply"):
+                    response = await _post_product_config_apply(
+                        self.app,
+                        {
+                            "schema_version": 2,
+                            "product": "example-site",
+                            "context": "example-site",
+                            "instance": "testing",
+                            "mode": mode,
+                            "reason": "Check canonical settings.",
+                            "confirmation": "APPLY example-site/testing",
+                            alias: runtime_input,
+                        },
+                        authorization=_TOKEN,
+                        idempotency_key=f"extras-{alias}-{mode}",
+                    )
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(
+                        response.json()["error"]["code"], "live_product_requires_operator"
+                    )
+            review = await _post_product_config_apply(
+                self.app,
+                {
+                    "product": "example-site",
+                    "context": "example-site",
+                    "instance": "testing",
+                    "mode": "dry-run",
+                    "reason": "Check supported flat targeting.",
+                    alias: {"context": "example-site", "instance": "testing", "APP_MODE": "public"},
+                },
+                authorization=_TOKEN,
+            )
+            self.assertEqual(review.status_code, 202, review.text)
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+
     async def test_generic_route_profile_change_at_commit_preserves_concurrent_state(self) -> None:
         settings = {"SITE_MODE": "public"}
         review = await self._submit_generic(mode="dry-run", settings=settings)

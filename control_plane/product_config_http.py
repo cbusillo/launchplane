@@ -451,13 +451,14 @@ class ProductEnvironmentConfigRefused(ValueError):
 
 
 def product_config_has_undeclared_runtime_settings(
-    *, profile: LaunchplaneProductProfileRecord, request: ProductConfigApplyEnvelope
+    *, profile: LaunchplaneProductProfileRecord, payload: dict[str, object]
 ) -> bool:
     lane = next(
         (
             lane
             for lane in profile.lanes
-            if lane.context.strip() == request.context and lane.instance.strip() == request.instance
+            if lane.context.strip() == payload["context"]
+            and lane.instance.strip() == payload["instance"]
         ),
         None,
     )
@@ -471,21 +472,11 @@ def product_config_has_undeclared_runtime_settings(
             lane=lane,
         )
     }
-    for runtime_input in (request.runtime_env, request.runtime_environment):
-        values = (
-            runtime_input.env
-            if isinstance(runtime_input, ProductConfigRuntimeInput)
-            else runtime_input
-        )
-        if values and set(key.strip() for key in values) - declared:
-            return True
-        if (
-            isinstance(runtime_input, ProductConfigRuntimeInput)
-            and runtime_input.adopt_provider_keys
-            and set(key.strip() for key in runtime_input.adopt_provider_keys) - declared
-        ):
-            return True
-    return False
+    # The shared normalizer owns flat input, aliases, extra fields and target keys.
+    runtime_input = cast(dict[str, object], payload["runtime_env"])
+    values = cast(dict[str, ScalarValue], runtime_input["env"])
+    adopted_keys = cast(tuple[str, ...], runtime_input.get("adopt_provider_keys") or ())
+    return bool((set(values) | set(adopted_keys)) - declared)
 
 
 def product_environment_config_apply_request(
