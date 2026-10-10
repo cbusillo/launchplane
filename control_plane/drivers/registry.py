@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Literal, Protocol, cast
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -582,6 +583,17 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/app-maintenance",
             authz_action="odoo_app_maintenance.execute",
             writes_records=("odoo_instance_override",),
+        ),
+        _action(
+            "service_restart",
+            "Restart a service (same version)",
+            "Inspect and restart one container on its recorded current artifact, excluding release runs.",
+            safety="mutation",
+            scope="instance",
+            route_path=SERVICE_RESTART_ROUTE,
+            authz_action="live_target_runtime.apply",
+            alternate_authz_actions=("live_target_runtime.plan",),
+            writes_records=("service_restart",),
         ),
         _action(
             "post_deploy",

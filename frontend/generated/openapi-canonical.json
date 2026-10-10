@@ -12723,6 +12723,240 @@
         "type": "object"
       },
       "JsonValue": {},
+      "LaneServiceRestartPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_record_id": {
+            "default": "",
+            "title": "Acceptance Record Id",
+            "type": "string"
+          },
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "app_name": {
+            "title": "App Name",
+            "type": "string"
+          },
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "before": {
+            "$ref": "#/components/schemas/RestartContainerIdentity"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "deployment_record_id": {
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "driver_id": {
+            "title": "Driver Id",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "server_id": {
+            "default": "",
+            "title": "Server Id",
+            "type": "string"
+          },
+          "service": {
+            "title": "Service",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "service",
+          "actor",
+          "reason",
+          "driver_id",
+          "target_id",
+          "app_name",
+          "artifact_id",
+          "deployment_record_id",
+          "before"
+        ],
+        "title": "LaneServiceRestartPlan",
+        "type": "object"
+      },
+      "LaneServiceRestartRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          },
+          "service": {
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+            "title": "Service",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "service",
+          "reason"
+        ],
+        "title": "LaneServiceRestartRequest",
+        "type": "object"
+      },
+      "LaneServiceRestartResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id",
+            "x-launchplane-optional-response": true
+          },
+          "records": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Records",
+            "type": "object"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed",
+            "x-launchplane-optional-response": true
+          },
+          "result": {
+            "$ref": "#/components/schemas/LaneServiceRestartResult"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "LaneServiceRestartResponse",
+        "type": "object"
+      },
+      "LaneServiceRestartResult": {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RestartContainerIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error_message": {
+            "default": "",
+            "title": "Error Message",
+            "type": "string"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/LaneServiceRestartPlan"
+          },
+          "plan_sha256": {
+            "title": "Plan Sha256",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "pass",
+              "fail",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "plan",
+          "plan_sha256"
+        ],
+        "title": "LaneServiceRestartResult",
+        "type": "object"
+      },
       "LaunchplaneActiveAuthzPolicyResponse": {
         "additionalProperties": false,
         "properties": {
@@ -37964,6 +38198,60 @@
         "title": "ResolvedTargetEvidence",
         "type": "object"
       },
+      "RestartContainerIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "configuration_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Configuration Sha256",
+            "type": "string"
+          },
+          "container_id": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Container Id",
+            "type": "string"
+          },
+          "health": {
+            "title": "Health",
+            "type": "string"
+          },
+          "image_id": {
+            "pattern": "^sha256:[a-f0-9]{64}$",
+            "title": "Image Id",
+            "type": "string"
+          },
+          "image_reference": {
+            "title": "Image Reference",
+            "type": "string"
+          },
+          "running": {
+            "title": "Running",
+            "type": "boolean"
+          },
+          "runtime_identity_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Runtime Identity Sha256",
+            "type": "string"
+          },
+          "started_at": {
+            "minLength": 1,
+            "title": "Started At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "container_id",
+          "image_id",
+          "image_reference",
+          "configuration_sha256",
+          "started_at",
+          "running",
+          "health",
+          "runtime_identity_sha256"
+        ],
+        "title": "RestartContainerIdentity",
+        "type": "object"
+      },
       "RollbackExecutionEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -60882,6 +61170,86 @@
           }
         },
         "summary": "Execute Odoo prod rollback"
+      }
+    },
+    "/v1/drivers/odoo/service-restart": {
+      "post": {
+        "operationId": "restart_lane_service",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LaneServiceRestartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaneServiceRestartResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Restart one lane service on its current artifact"
       }
     },
     "/v1/drivers/odoo/stable-bootstrap": {
@@ -90389,6 +90757,7 @@
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation"
   },
   "x-launchplane-ui-write-operations": {
+    "/v1/drivers/odoo/service-restart": "restart_lane_service",
     "/v1/odoo-prod-promotions": "enqueue_odoo_prod_promotion",
     "/v1/odoo-prod-rollbacks": "enqueue_odoo_prod_rollback",
     "/v1/ordinary-agent-connections/{principal_id}/disconnect": "disconnect_ordinary_agent_principal",

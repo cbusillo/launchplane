@@ -1,0 +1,89 @@
+import { useState } from "react";
+import { LaunchplaneApiError, restartLaneService } from "./api";
+import type { LaneServiceRestartResponse, ProductEnvironmentDetail, RestartLaneServiceData } from "./generated/openapi.ts";
+
+type PendingRestart = { payload: RestartLaneServiceData["body"]; key: string };
+
+export function ServiceRestartPanel({ detail, fixtureMode, onRefresh }: {
+  detail: ProductEnvironmentDetail; fixtureMode: boolean; onRefresh: () => void;
+}) {
+  const storageKey = `launchplane:service-restart:${detail.product}:${detail.context}:${detail.environment}`;
+  const [service, setService] = useState("web");
+  const [reason, setReason] = useState("");
+  const [review, setReview] = useState<LaneServiceRestartResponse | null>(null);
+  const [pending, setPending] = useState<PendingRestart | null>(() => {
+    try {
+      const value = sessionStorage.getItem(storageKey);
+      if (!value) return null;
+      const saved = JSON.parse(value) as PendingRestart;
+      if (saved.payload.product === detail.product && saved.payload.context === detail.context
+        && saved.payload.instance === detail.environment && saved.payload.mode === "apply"
+        && saved.key && saved.payload.reviewed_plan_sha256) return saved;
+    } catch { /* Storage may be unavailable. */ }
+    return null;
+  });
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState(pending ? "The previous restart has not settled. Resume only that request." : "");
+  const [confirmed, setConfirmed] = useState(false);
+  const blocked = fixtureMode || busy || !!pending;
+
+  function clearReview() { setReview(null); setConfirmed(false); setMessage(""); }
+
+  async function inspect() {
+    setBusy(true); setMessage("");
+    try {
+      setReview(await restartLaneService({ product: detail.product, context: detail.context,
+        instance: detail.environment, service, reason, mode: "dry-run" }));
+      setConfirmed(false);
+    } catch (error) { setReview(null); setMessage(error instanceof Error ? error.message : "Restart inspection failed."); }
+    finally { setBusy(false); }
+  }
+
+  async function restart() {
+    if (!pending && (!review || !confirmed)) return;
+    const attempt = pending ?? { key: crypto.randomUUID(), payload: {
+      product: detail.product, context: detail.context, instance: detail.environment,
+      service, reason, mode: "apply", reviewed_plan_sha256: review!.result.plan_sha256,
+    } } satisfies PendingRestart;
+    setPending(attempt); setBusy(true); setMessage("Restarting; verifying the same artifact and health…");
+    try { sessionStorage.setItem(storageKey, JSON.stringify(attempt)); } catch { /* Server also fences unknown effects. */ }
+    try {
+      const response = await restartLaneService(attempt.payload, attempt.key);
+      setMessage(response.result.status === "pass" ? "Restart verified. Same version; service healthy."
+        : response.result.error_message || "Restart did not verify. Inspect product activity before another attempt.");
+      setReview(null); setConfirmed(false); setPending(null);
+      try { sessionStorage.removeItem(storageKey); } catch { /* Optional browser storage. */ }
+      onRefresh();
+    } catch (error) {
+      const refused = error instanceof LaunchplaneApiError && (
+        [400, 401, 403, 404, 422].includes(error.statusCode)
+        || ["restart_refused", "restart_identity_changed", "idempotency_key_reused"].includes(error.code)
+      );
+      if (refused) {
+        setPending(null); setReview(null); setConfirmed(false);
+        try { sessionStorage.removeItem(storageKey); } catch { /* Optional browser storage. */ }
+      }
+      setMessage(`${error instanceof Error ? error.message : "Restart outcome is unknown."} ${refused
+        ? "The request was refused before a service change. Inspect again."
+        : "Resume this request to read its result; do not start another restart."}`);
+    } finally { setBusy(false); }
+  }
+
+  return <section className="promotion-control" aria-labelledby="service-restart-title">
+    <header className="promotion-control-header"><div>
+      <p className="eyebrow">Service recovery</p><h2 id="service-restart-title">Restart on the same version</h2>
+      <p>Briefly interrupts this service. Launchplane keeps its current artifact, configuration and volumes, and refuses while a release holds the lane.</p>
+    </div></header>
+    {fixtureMode ? <p>Restart controls are off in fixture mode.</p> : null}
+    <label className="promotion-field"><span>Service</span><input value={pending?.payload.service ?? service} disabled={blocked} onChange={event => { setService(event.target.value); clearReview(); }} /></label>
+    <label className="promotion-field"><span>Reason</span><input value={pending?.payload.reason ?? reason} maxLength={1000} disabled={blocked} onChange={event => { setReason(event.target.value); clearReview(); }} /></label>
+    <button className="secondary-button" type="button" disabled={blocked || !reason.trim() || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(service)} onClick={() => void inspect()}>Inspect restart</button>
+    {review ? <div>
+      <p className="service-restart-identity">Current artifact: {review.result.plan.artifact_id}. Service: {review.result.plan.service}. Container: {review.result.plan.before.container_id.slice(0, 12)}.</p>
+      <label><input type="checkbox" checked={confirmed} disabled={blocked} onChange={event => setConfirmed(event.target.checked)} />I confirm this service interruption on {detail.environment}.</label>
+      <button className="danger-button" type="button" disabled={blocked || !confirmed} onClick={() => void restart()}>Restart {service} (same version)</button>
+    </div> : null}
+    {pending ? <button className="secondary-button" type="button" disabled={fixtureMode || busy} onClick={() => void restart()}>Resume existing restart request</button> : null}
+    <p role="status">{message}</p>
+  </section>;
+}

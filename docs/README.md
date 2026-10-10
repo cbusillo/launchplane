@@ -91,6 +91,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [change-impact-policy.md](change-impact-policy.md) — retired classifier history and the
   independent repository-evidence boundary.
 - [operations.md](operations.md) — admin workflows and runtime boundary rules.
+- [lane-service-restart.md](lane-service-restart.md) — restart one Odoo lane
+  service on its current artifact through Product Ops or the bounded helper.
 - [production-backup-provider.md](production-backup-provider.md) — typed
   Proxmox/PBS capture, host boundary, evidence and rollout prerequisites.
 - [records.md](records.md) — persisted record formats and storage policy.

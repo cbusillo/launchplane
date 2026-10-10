@@ -7740,6 +7740,28 @@ class PostgresRecordStore(HumanSessionStore):
                 return None
             return self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
 
+    def list_lane_service_restart_reservations(
+        self, *, product: str, limit: int = 50
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        from control_plane.contracts.lane_service_restart import (
+            SERVICE_RESTART_ROUTE,
+            restart_activity_scope,
+        )
+
+        return self._list_models(
+            model_type=LaunchplaneIdempotencyRecord,
+            orm_model=LaunchplaneIdempotencyRow,
+            filters=(
+                LaunchplaneIdempotencyRow.scope == restart_activity_scope(product),
+                LaunchplaneIdempotencyRow.route_path == SERVICE_RESTART_ROUTE,
+            ),
+            order_by=(
+                LaunchplaneIdempotencyRow.created_at.desc(),
+                LaunchplaneIdempotencyRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
     def list_held_provider_target_reservations(
         self,
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:

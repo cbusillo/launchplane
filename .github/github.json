@@ -59,6 +59,7 @@
     "test": {
       "default": "uv run --extra dev launchplane ci unittest-shard local",
       "targeted": "uv run --extra dev python -m unittest {modules}",
+      "serviceRestartRehearsal": "LP_REHEARSAL_OPERATOR_HELPER=<installed-launchplane-skill>/scripts/launchplane-write-action.py uv run --extra dev python scripts/qualify-lane-service-restart.py",
       "postgresIntegration": "LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run --extra dev launchplane ci postgres-integration",
       "shardPlan": "uv run --extra dev launchplane ci unittest-shard plan --shard-count {shard_count} --timings-file {timings_file} --max-tests-per-target {max_tests_per_target} --max-seconds-per-target {max_seconds_per_target}",
       "shardRun": "uv run --extra dev launchplane ci unittest-shard run --shard-count {shard_count} --shard-index {shard_index} --timings-file {timings_file} --max-tests-per-target {max_tests_per_target} --max-seconds-per-target {max_seconds_per_target} --timings-output {timings_output}",

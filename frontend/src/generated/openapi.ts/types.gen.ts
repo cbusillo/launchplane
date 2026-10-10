@@ -842,6 +842,52 @@ export type IntegrationKeyReadbackFinding = {
     code: string;
 };
 
+export type LaneServiceRestartPlan = {
+    acceptance_record_id: string;
+    actor: string;
+    app_name: string;
+    artifact_id: string;
+    before: RestartContainerIdentity;
+    context: string;
+    deployment_record_id: string;
+    driver_id: string;
+    instance: string;
+    product: string;
+    reason: string;
+    server_id: string;
+    service: string;
+    target_id: string;
+};
+
+export type LaneServiceRestartRequest = {
+    context: string;
+    instance: string;
+    mode?: 'dry-run' | 'apply';
+    product: string;
+    reason: string;
+    reviewed_plan_sha256?: string;
+    service: string;
+};
+
+export type LaneServiceRestartResponse = {
+    original_trace_id?: string | null;
+    records: {
+        [key: string]: string;
+    };
+    replayed?: boolean | null;
+    result: LaneServiceRestartResult;
+    status: 'accepted';
+    trace_id: string;
+};
+
+export type LaneServiceRestartResult = {
+    after: RestartContainerIdentity | null;
+    error_message: string;
+    plan: LaneServiceRestartPlan;
+    plan_sha256: string;
+    status: 'ready' | 'pass' | 'fail' | 'unknown';
+};
+
 export type LaunchplaneAuthzPolicyOutput = {
     [key: string]: unknown;
 };
@@ -4046,6 +4092,17 @@ export type ResolvedTargetEvidence = {
     target_type: 'compose' | 'application';
 };
 
+export type RestartContainerIdentity = {
+    configuration_sha256: string;
+    container_id: string;
+    health: string;
+    image_id: string;
+    image_reference: string;
+    running: boolean;
+    runtime_identity_sha256: string;
+    started_at: string;
+};
+
 export type RollbackExecutionEvidence = {
     attempted: boolean;
     deployment_record_id: string;
@@ -5695,6 +5752,31 @@ export type ReadTenantAdmissionEvaluationResponses = {
 };
 
 export type ReadTenantAdmissionEvaluationResponse = ReadTenantAdmissionEvaluationResponses[keyof ReadTenantAdmissionEvaluationResponses];
+
+export type RestartLaneServiceData = {
+    body: LaneServiceRestartRequest;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/drivers/odoo/service-restart';
+};
+
+export type RestartLaneServiceErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type RestartLaneServiceError = RestartLaneServiceErrors[keyof RestartLaneServiceErrors];
+
+export type RestartLaneServiceResponses = {
+    200: LaneServiceRestartResponse;
+};
+
+export type RestartLaneServiceResponse = RestartLaneServiceResponses[keyof RestartLaneServiceResponses];
 
 export type EnqueueOdooProdPromotionData = {
     body: OdooProdPromotionRunEnvelope;
