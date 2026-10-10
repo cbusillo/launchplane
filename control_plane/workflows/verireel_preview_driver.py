@@ -1144,9 +1144,12 @@ def execute_verireel_preview_refresh(
     app_name = _preview_app_name(request.preview_slug)
     preview_host = _preview_url_host(preview_url)
     preview_domain = _preview_domain_from_url(preview_url)
-    existing_application = _find_application_by_name(
-        host=host, token=token, application_name=application_name
-    )
+    try:
+        existing_application = _find_application_by_name(
+            host=host, token=token, application_name=application_name
+        )
+    except click.ClickException as exc:
+        raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
     existing_snapshot = None
     if existing_application is not None:
         application_id = str(existing_application.get("applicationId") or "").strip()
@@ -1390,15 +1393,14 @@ def execute_verireel_preview_refresh(
         )
 
     finished_at = utc_now_timestamp()
-    resolved_application = _find_application_by_name(
-        host=host, token=token, application_name=application_name
-    )
+    # The successful create/reuse and health probe already identify this application.
+    # A second inventory read cannot strengthen that proof and can lose the receipt.
     return VeriReelPreviewRefreshResult(
         refresh_status="pass",
         refresh_started_at=started_at,
         refresh_finished_at=finished_at,
         application_name=application_name,
-        application_id=str((resolved_application or {}).get("applicationId") or "").strip(),
+        application_id=application_id,
         preview_url=preview_url,
         runtime_identity=observed_runtime_identity,
     )

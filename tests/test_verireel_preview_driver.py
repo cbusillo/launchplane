@@ -579,6 +579,42 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
 
         run_command.assert_not_called()
 
+    def test_refresh_maps_incomplete_inventory_to_transport_before_writes(self) -> None:
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.example", "fixture-token"),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                return_value=(
+                    _template_target(),
+                    {"env": "DATABASE_URL=postgresql://admin:password@db:5432/verireel"},
+                ),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._resolve_preview_url",
+                return_value="https://preview.example.invalid",
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.dokploy_api.dokploy_request",
+                return_value=[{"environments": None}],
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._run_application_command"
+            ) as database,
+            patch(
+                "control_plane.workflows.verireel_preview_driver._ensure_application"
+            ) as application,
+        ):
+            with self.assertRaises(VeriReelPreviewRefreshTransportError):
+                execute_verireel_preview_refresh(
+                    control_plane_root=Path(directory), request=_refresh_request()
+                )
+        database.assert_not_called()
+        application.assert_not_called()
+
     def test_preview_refresh_generates_its_own_secrets_and_copies_none_from_testing(
         self,
     ) -> None:
@@ -653,6 +689,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             )
 
         self.assertEqual(result.refresh_status, "pass")
+        self.assertEqual(result.application_id, "app-preview")
         self.assertNotEqual(captured_env["BETTER_AUTH_SECRET"], "template-auth-secret")
         self.assertNotEqual(captured_env["VERIREEL_CRON_SECRET"], "template-cron-secret")
         self.assertNotEqual(

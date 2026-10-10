@@ -1,4 +1,6 @@
 import unittest
+
+import click
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -13,6 +15,51 @@ from tests.test_generic_web_preview import _profile
 
 
 class PreviewLifecycleCleanupTests(unittest.TestCase):
+    def test_sweep_records_inventory_failures_and_continues_other_products(self) -> None:
+        from control_plane.preview_lifecycle_cleanup_routes import (
+            PreviewLifecycleSweepEnvelope,
+            build_preview_lifecycle_sweep,
+        )
+
+        first = _profile()
+        second = first.model_copy(update={"product": "other-example"})
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            with patch(
+                "control_plane.preview_lifecycle_cleanup_routes.execute_generic_web_preview_inventory",
+                side_effect=[
+                    click.ClickException("incomplete first inventory"),
+                    click.ClickException("incomplete second inventory"),
+                ],
+            ):
+                result = build_preview_lifecycle_sweep(
+                    control_plane_root=root,
+                    record_store=store,
+                    request=PreviewLifecycleSweepEnvelope(
+                        apply=True, destroy_reason="remove orphans"
+                    ),
+                    requested_profiles=(first, second),
+                )
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(
+            result["profiles"],
+            [
+                {
+                    "product": profile.product,
+                    "context": profile.preview.context,
+                    "driver_id": profile.driver_id,
+                    "cleanup_driver_id": "generic-web",
+                    "status": "fail",
+                    "error_message": message,
+                }
+                for profile, message in (
+                    (first, "incomplete first inventory"),
+                    (second, "incomplete second inventory"),
+                )
+            ],
+        )
+
     def test_generic_web_cleanup_destroys_orphan_with_matching_preview_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
