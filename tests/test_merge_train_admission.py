@@ -661,6 +661,42 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertEqual(result.admission.controller_action, "idle")
         self.assertTrue(all(summary.historical for summary in result.controller_records))
 
+    def test_completed_other_job_cannot_qualify_unfinished_candidate_as_history(self) -> None:
+        from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
+        from control_plane.contracts.merge_train_batch import (
+            build_ordinary_merge_train_candidate_ref,
+        )
+        from tests.test_merge_train_controller_ordinary_landing import (
+            OrdinaryLandingControllerTests,
+        )
+
+        fixture = OrdinaryLandingControllerTests()
+        fixture.setUp()
+        landed = fixture._terminal_record()
+        binding = OrdinaryAgentJobBinding(
+            request_id="next-job", scope_sha256="b" * 64, binding_revision=1
+        )
+        payload = fixture.candidate_record.model_dump(mode="json")
+        payload["ordinary_job_binding"] = binding.model_dump(mode="json")
+        payload["record_id"] = "next-job-candidate"
+        payload["candidate"]["candidate_ref"] = build_ordinary_merge_train_candidate_ref(
+            binding=binding, batch_id=fixture.candidate_record.candidate.batch_id
+        )
+        candidate = MergeTrainBatchCandidateRecord.model_validate(payload)
+        result = build_merge_train_controller_status_read_model(
+            store=_RunHistoryStore(
+                None, candidate_records=(candidate,), landing_plan_records=(landed,)
+            ),
+            repository=candidate.candidate.repository,
+            base_branch=candidate.candidate.base_branch,
+            generated_at=landed.updated_at,
+            current_policy_key=candidate.candidate.policy_key,
+            current_policy_sha256="replacement-policy",
+        )
+        summaries = {summary.record_id: summary for summary in result.controller_records}
+        self.assertTrue(summaries[landed.record_id].historical)
+        self.assertFalse(summaries[candidate.record_id].historical)
+
     def test_terminal_blocked_landing_is_history_but_unfinished_landing_is_not(self) -> None:
         candidate = _candidate_record(status="passed")
         for status, expected in (

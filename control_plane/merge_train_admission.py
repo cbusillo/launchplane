@@ -902,9 +902,14 @@ def _historical_controller_record_ids(
         else None
     )
     historical: set[str] = set()
-    for batch_id in {record.candidate.batch_id for record in records.candidate_records}:
+    for batch_id, binding in {
+        (record.candidate.batch_id, record.ordinary_job_binding)
+        for record in records.candidate_records
+    }:
         candidates = tuple(
-            record for record in records.candidate_records if record.candidate.batch_id == batch_id
+            record
+            for record in records.candidate_records
+            if record.candidate.batch_id == batch_id and record.ordinary_job_binding == binding
         )
         candidate = candidates[0].candidate
         # Completion can be outside the dashboard's recent-record window.
@@ -914,6 +919,7 @@ def _historical_controller_record_ids(
             status="active",
             batch_id=batch_id,
         )
+        landings = tuple(record for record in landings if record.ordinary_job_binding == binding)
         decision = decide_merge_train_controller_record_action(
             candidate_records=candidates,
             landing_plan_records=landings,
@@ -929,11 +935,14 @@ def _historical_controller_record_ids(
         )
         if decision.action in {"idle", "candidate_stopped"} or ordinary_complete:
             historical.update(record.record_id for record in candidates)
-    for plan_id in {record.landing_plan.plan_id for record in records.landing_plan_records}:
+    for plan_id, binding in {
+        (record.landing_plan.plan_id, record.ordinary_job_binding)
+        for record in records.landing_plan_records
+    }:
         landings = tuple(
             record
             for record in records.landing_plan_records
-            if record.landing_plan.plan_id == plan_id
+            if record.landing_plan.plan_id == plan_id and record.ordinary_job_binding == binding
         )
         decision = decide_merge_train_controller_record_action(
             candidate_records=(), landing_plan_records=landings, stack_collapse_plan_records=()
