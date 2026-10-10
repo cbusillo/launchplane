@@ -4,7 +4,7 @@ from hashlib import sha256
 import logging
 import re
 from time import sleep
-from typing import TYPE_CHECKING, Callable, Literal, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Callable, Literal, Protocol, TypeVar, cast, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -15,6 +15,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainHeadCheckReuse,
+    MergeTrainReusedCheck,
+    build_merge_train_batch_candidate_ref,
+)
 from control_plane.contracts.merge_train_branch_refresh_record import MergeTrainBranchRefreshRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchHeldOutEntry
@@ -671,6 +676,20 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     f"candidate_entry_merged:{entry_index}",
                 )
             candidate = progress_candidate
+        reuse = self.read_head_check_reuse(candidate=candidate)
+        if reuse is not None:
+            # Construction refs do not trigger candidate CI. Keep the verified
+            # merge commit reachable there until the ordinary landing cleanup.
+            candidate = _validated_model_update(
+                candidate,
+                candidate_ref=construction_ref,
+                head_check_reuse=reuse,
+                required_checks_status="pass",
+                status="passed",
+            )
+            if checkpoint is not None:
+                checkpoint(candidate, None, "head_checks_reused")
+            return candidate
         if checkpoint is not None:
             checkpoint(candidate, None, "publish_candidate_ref")
         resolved_effect_executor.prepare_candidate_ref(
@@ -800,6 +819,56 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     def observe_batch_candidate_checks(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainBatchCandidate:
+        if candidate.head_check_reuse is not None:
+            reuse = self.read_head_check_reuse(candidate=candidate)
+            if reuse is not None:
+                return _validated_model_update(
+                    candidate,
+                    head_check_reuse=reuse,
+                    required_checks_status="pass",
+                    status="passed",
+                )
+            # Reuse is no longer provable. Publish the same completed candidate
+            # through the normal path so it receives its own required checks.
+            canonical_ref = build_merge_train_batch_candidate_ref(
+                repository=candidate.repository,
+                base_branch=candidate.base_branch,
+                batch_id=candidate.batch_id,
+            )
+            self.semantic_effect_executor.prepare_candidate_ref(
+                CandidateRefPrepareEffect(
+                    lineage=MergeTrainEffectLineage(
+                        repository=candidate.repository,
+                        base_branch=candidate.base_branch,
+                        batch_id=candidate.batch_id,
+                    ),
+                    candidate_ref=canonical_ref,
+                    base_sha=candidate.candidate_sha,
+                )
+            )
+            _verify_candidate_publication(
+                transport=self.transport,
+                repository_path=_repository_path(candidate.repository),
+                candidate_ref=canonical_ref,
+                expected_sha=candidate.candidate_sha,
+            )
+            self.semantic_effect_executor.delete_candidate_ref(
+                CandidateRefDeleteEffect(
+                    lineage=MergeTrainEffectLineage(
+                        repository=candidate.repository,
+                        base_branch=candidate.base_branch,
+                        batch_id=candidate.batch_id,
+                    ),
+                    candidate_ref=candidate.candidate_ref,
+                )
+            )
+            return _validated_model_update(
+                candidate,
+                candidate_ref=canonical_ref,
+                head_check_reuse=None,
+                required_checks_status="pending",
+                status="ready_for_checks",
+            )
         repository_path = _repository_path(candidate.repository)
         candidate_sha = _required_value(
             candidate.candidate_sha,
@@ -821,6 +890,215 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             required_checks_status=check_status,
             status=candidate_status,
         )
+
+    def read_head_check_reuse(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> MergeTrainHeadCheckReuse | None:
+        if len(candidate.entries) != 1:
+            return None
+        canonical_ref = build_merge_train_batch_candidate_ref(
+            repository=candidate.repository,
+            base_branch=candidate.base_branch,
+            batch_id=candidate.batch_id,
+        )
+        if candidate.candidate_ref not in {
+            canonical_ref,
+            merge_train_construction_ref(canonical_ref),
+        }:
+            return None
+        entry = candidate.entries[0]
+        if not entry.head_tree_sha or entry.head_tree_sha != candidate.candidate_tree_sha:
+            return None
+        from control_plane.tenant_admission_controller import TenantAdmissionControllerError
+
+        repository_path = _repository_path(candidate.repository)
+        try:
+            if (
+                _base_branch_sha(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    base_branch=candidate.base_branch,
+                )
+                != candidate.base_sha
+            ):
+                return None
+            pull = _json_object(
+                self.transport.request(
+                    method="GET", path=f"/repos/{repository_path}/pulls/{entry.pull_request_number}"
+                ),
+                "GitHub pull request for head-check reuse",
+            )
+            head = _json_object(pull.get("head"), "GitHub pull request head")
+            base = _json_object(pull.get("base"), "GitHub pull request base")
+            base_repo = _json_object(base.get("repo"), "GitHub pull request base repository")
+            if (
+                pull.get("number") != entry.pull_request_number
+                or pull.get("state") != "open"
+                or pull.get("merged") is not False
+                or pull.get("draft") is not False
+                or head.get("sha") != entry.head_sha
+                or base.get("sha") != candidate.base_sha
+                or base.get("ref") != candidate.base_branch
+                or base_repo.get("full_name") != candidate.repository
+            ):
+                return None
+            if (
+                _git_commit_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    commit_sha=entry.head_sha,
+                )[1]
+                != candidate.candidate_tree_sha
+            ):
+                return None
+            if (
+                _git_commit_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    commit_sha=candidate.candidate_sha,
+                )[1]
+                != candidate.candidate_tree_sha
+            ):
+                return None
+            observed_at = datetime.now(timezone.utc).isoformat()
+            checks = self.read_technical_checks(
+                repository=candidate.repository,
+                base_branch=candidate.base_branch,
+                base_sha=candidate.base_sha,
+                head_sha=entry.head_sha,
+                evaluated_at=observed_at,
+            )
+            if checks.status != "pass":
+                return None
+            # Preserve the candidate path's complete required-check policy and
+            # vetoes, including requirements excluded from technical admission.
+            if (
+                _candidate_required_checks_status(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    base_branch=candidate.base_branch,
+                    encoded_head_sha=quote(entry.head_sha, safe=""),
+                )
+                != "pass"
+            ):
+                return None
+            if _required_branch_checks(
+                transport=self.transport,
+                repository_path=repository_path,
+                base_branch=candidate.base_branch,
+            ) != tuple((check.name, check.app_id) for check in checks.required_checks):
+                return None
+            # Confirm mutable head/base facts after reading the check evidence.
+            confirmed = _json_object(
+                self.transport.request(
+                    method="GET", path=f"/repos/{repository_path}/pulls/{entry.pull_request_number}"
+                ),
+                "GitHub pull request confirmation for head-check reuse",
+            )
+            confirmed_head = _json_object(confirmed.get("head"), "GitHub confirmed head")
+            confirmed_base = _json_object(confirmed.get("base"), "GitHub confirmed base")
+            confirmed_repo = _json_object(confirmed_base.get("repo"), "GitHub confirmed repository")
+            if (
+                confirmed.get("number") != entry.pull_request_number
+                or confirmed.get("state") != "open"
+                or confirmed.get("merged") is not False
+                or confirmed.get("draft") is not False
+                or confirmed_head.get("sha") != entry.head_sha
+                or confirmed_base.get("sha") != candidate.base_sha
+                or confirmed_base.get("ref") != candidate.base_branch
+                or confirmed_repo.get("full_name") != candidate.repository
+            ):
+                return None
+            if not self._head_check_reuse_base_history_is_unchanged(
+                repository_path=repository_path, pull_request_number=entry.pull_request_number
+            ):
+                return None
+            if (
+                _base_branch_sha(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    base_branch=candidate.base_branch,
+                )
+                != candidate.base_sha
+            ):
+                return None
+        except (MergeTrainGitHubError, TenantAdmissionControllerError, ValueError) as error:
+            if isinstance(error, MergeTrainGitHubError) and error.rate_limited:
+                raise
+            # Missing/unreadable evidence selects full CI, never a reusable pass.
+            return None
+        return MergeTrainHeadCheckReuse(
+            pull_request_number=entry.pull_request_number,
+            head_sha=entry.head_sha,
+            tree_sha=entry.head_tree_sha,
+            base_sha=candidate.base_sha,
+            candidate_sha=candidate.candidate_sha,
+            observed_at=observed_at,
+            required_checks=tuple(
+                MergeTrainReusedCheck(
+                    name=required.name,
+                    app_id=required.app_id,
+                    sources=cast(
+                        tuple[Literal["commit_status", "check_run"], ...],
+                        tuple(
+                            sorted(
+                                {
+                                    signal.source
+                                    for signal in checks.signals
+                                    if signal.name.casefold() == required.name.casefold()
+                                    and (
+                                        required.app_id is None or signal.app_id == required.app_id
+                                    )
+                                    and signal.state == "pass"
+                                }
+                            )
+                        ),
+                    ),
+                )
+                for required in checks.required_checks
+            ),
+        )
+
+    def _head_check_reuse_base_history_is_unchanged(
+        self, *, repository_path: str, pull_request_number: int
+    ) -> bool:
+        # Historical PR checks can test a merge-ref tree from a former base.
+        owner, repository = repository_path.split("/", 1)
+        payload = _json_object(
+            self.transport.request(
+                method="POST",
+                path="/graphql",
+                body={
+                    "query": """
+                    query($owner: String!, $name: String!, $number: Int!) {
+                      repository(owner: $owner, name: $name) {
+                        pullRequest(number: $number) {
+                          timelineItems(first: 1, itemTypes: [BASE_REF_CHANGED_EVENT,
+                            BASE_REF_FORCE_PUSHED_EVENT, AUTOMATIC_BASE_CHANGE_SUCCEEDED_EVENT]) {
+                            nodes { __typename }
+                            pageInfo { hasNextPage }
+                          }
+                        }
+                      }
+                    }
+                    """,
+                    "variables": {
+                        "owner": owner,
+                        "name": repository,
+                        "number": pull_request_number,
+                    },
+                },
+            ),
+            "GitHub base-history response",
+        )
+        if payload.get("errors"):
+            return False
+        data = _json_object(payload.get("data"), "GitHub base-history data")
+        repo = _json_object(data.get("repository"), "GitHub base-history repository")
+        pull = _json_object(repo.get("pullRequest"), "GitHub base-history pull request")
+        timeline = _json_object(pull.get("timelineItems"), "GitHub base-history timeline")
+        page = _json_object(timeline.get("pageInfo"), "GitHub base-history page info")
+        return timeline.get("nodes") == [] and page.get("hasNextPage") is False
 
     def read_technical_checks(
         self,
