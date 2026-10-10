@@ -754,7 +754,7 @@ export type GovernanceLandingOutcomeFacet = {
     mode: 'immutable_provider_observation';
     record: MergeLandingOutcomeRecord | null;
     status: 'not_observed' | 'landed' | 'rejected' | 'reconcile_required';
-    target_status: 'current' | 'historical' | 'none';
+    target_status: 'current' | 'historical' | 'unknown' | 'none';
 };
 
 export type GovernanceMergeAdmissionFacet = {
@@ -764,13 +764,14 @@ export type GovernanceMergeAdmissionFacet = {
     level: 3;
     mode: 'immutable_attempt_authorization';
     record: MergeAdmissionRecord | null;
-    status: 'not_recorded' | 'admitted_current_target' | 'admitted_historical_target';
+    status: 'not_recorded' | 'admitted_current_target' | 'admitted_historical_target' | 'admitted_unknown_target';
 };
 
 export type GovernanceMergeReadinessFacet = {
     authoritative: false;
     authorizes: Array<string>;
     availability: 'available' | 'not_active' | 'unavailable';
+    detail?: string | null;
     level: 2;
     mode: 'ephemeral';
     reason_code: 'current_evaluation_available' | 'no_active_merge_lineage' | 'current_evidence_unavailable';
@@ -802,8 +803,9 @@ export type GovernanceProjection = {
     merge_readiness: GovernanceMergeReadinessFacet;
     mode: 'read_only_projection';
     owner_judgment: GovernanceOwnerJudgmentFacet | null;
+    requested_target?: RepositoryTargetReference | null;
     schema_version: 1;
-    target: RepositoryTarget;
+    target: RepositoryTarget | null;
 };
 
 export type GovernanceProjectionResponse = {
@@ -4099,6 +4101,12 @@ export type RepositoryTarget = {
     repository_owner_id: string;
     schema_version: number;
     tree_sha: string;
+};
+
+export type RepositoryTargetReference = {
+    pull_request_number: number;
+    repository: string;
+    schema_version: number;
 };
 
 export type ResolvedTargetEvidence = {

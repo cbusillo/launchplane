@@ -232,22 +232,37 @@ def build_governance_projection(
     generated_at: str,
     repository_evidence: RepositoryEvidence | None = None,
     github_token_source: MergeTrainGitHubTokenSource | None = None,
+    repository_evidence_unavailable: bool = False,
 ) -> GovernanceProjection:
-    resolved_repository_evidence = repository_evidence or repository_evidence_provider.resolve(
-        target
+    resolved_repository_evidence = (
+        None
+        if repository_evidence_unavailable
+        else repository_evidence or repository_evidence_provider.resolve(target)
     )
-    readiness = current_readiness_provider(
-        store=store,
-        repository_evidence=resolved_repository_evidence,
-        base_branch=base_branch,
-        evaluated_at=generated_at,
-        github_token_source=github_token_source or MergeTrainGitHubTokenSource(),
+    readiness = (
+        GovernanceMergeReadinessFacet(
+            availability="unavailable",
+            reason_code="current_evidence_unavailable",
+            detail="Current repository evidence is unavailable.",
+        )
+        if resolved_repository_evidence is None
+        else current_readiness_provider(
+            store=store,
+            repository_evidence=resolved_repository_evidence,
+            base_branch=base_branch,
+            evaluated_at=generated_at,
+            github_token_source=github_token_source or MergeTrainGitHubTokenSource(),
+        )
     )
     admission_store = require_merge_admission_record_store(store)
     admissions = admission_store.list_merge_admission_records(
-        repository=resolved_repository_evidence.target.repository,
+        repository=resolved_repository_evidence.target.repository
+        if resolved_repository_evidence
+        else target.repository,
         base_branch=base_branch,
-        pull_request_number=resolved_repository_evidence.target.pull_request_number,
+        pull_request_number=resolved_repository_evidence.target.pull_request_number
+        if resolved_repository_evidence
+        else target.pull_request_number,
         limit=100,
     )
     admission = admissions[0] if admissions else None
@@ -265,7 +280,8 @@ def build_governance_projection(
     )
     outcome = outcomes[0] if outcomes else None
     return GovernanceProjection(
-        target=resolved_repository_evidence.target,
+        target=resolved_repository_evidence.target if resolved_repository_evidence else None,
+        requested_target=target if resolved_repository_evidence is None else None,
         merge_readiness=readiness,
         merge_admission=GovernanceMergeAdmissionFacet(
             status=(
@@ -275,6 +291,8 @@ def build_governance_projection(
                     "admitted_current_target"
                     if admission_target_status == "current"
                     else "admitted_historical_target"
+                    if admission_target_status == "historical"
+                    else "admitted_unknown_target"
                 )
             ),
             authorizes=("one_exact_merge_attempt",) if admission is not None else (),
@@ -310,10 +328,12 @@ class _ResolvedRepositoryEvidenceProvider:
 def _admission_target_status(
     *,
     admission: MergeAdmissionRecord | None,
-    repository_evidence: RepositoryEvidence,
-) -> Literal["current", "historical", "none"]:
+    repository_evidence: RepositoryEvidence | None,
+) -> Literal["current", "historical", "unknown", "none"]:
     if admission is None:
         return "none"
+    if repository_evidence is None:
+        return "unknown"
     if (
         admission.pull_request_head_sha == repository_evidence.target.head_sha
         and admission.pull_request_head_tree_sha == repository_evidence.target.tree_sha

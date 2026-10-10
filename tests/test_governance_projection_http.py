@@ -233,7 +233,7 @@ class GovernanceProjectionHttpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 400, response.text)
 
-    async def test_returns_503_when_repository_evidence_is_unavailable(self) -> None:
+    async def test_retains_unavailable_projection_without_fabricating_stored_history(self) -> None:
         class _UnavailableProvider:
             def resolve(self, target: RepositoryTargetReference) -> RepositoryEvidence:
                 raise RepositoryEvidenceError(f"unavailable: {target.repository}")
@@ -268,8 +268,80 @@ class GovernanceProjectionHttpTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
 
-        self.assertEqual(response.status_code, 503, response.text)
-        self.assertEqual(response.json()["detail"]["code"], "governance_evidence_unavailable")
+        self.assertEqual(response.status_code, 200, response.text)
+        projection = response.json()["projection"]
+        self.assertIsNone(projection["target"])
+        self.assertEqual(projection["requested_target"]["repository"], "example/web")
+        self.assertEqual(projection["merge_readiness"]["availability"], "unavailable")
+        self.assertIsNone(projection["merge_readiness"]["result"])
+        self.assertEqual(projection["merge_admission"]["status"], "not_recorded")
+        self.assertEqual(projection["landing_outcome"]["status"], "not_observed")
+        self.assertFalse(projection["landing_outcome"]["landed"])
+        self.assertFalse(projection["authoritative"])
+        self.assertEqual(projection["authorizes"], [])
+
+    async def test_retains_stored_landing_when_current_repository_evidence_fails(self) -> None:
+        class _UnavailableProvider:
+            def resolve(self, target: RepositoryTargetReference) -> RepositoryEvidence:
+                raise RepositoryEvidenceError(f"unavailable: {target.repository}")
+
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            from tests.test_merge_readiness import _merge_admission
+            from tests.test_merge_admission_records import _landed_outcome
+
+            admission = _merge_admission()
+            # The fixture's immutable scope is configured, rather than changing its binding.
+            store.write_merge_train_policy_record(
+                build_test_merge_train_policy_record(repository=admission.repository)
+            )
+            store.create_merge_admission_record_if_absent(admission)
+            outcome = _landed_outcome(observation_sequence=1, prior_outcome_id="")
+            store.create_merge_landing_outcome_record_if_absent(outcome)
+            common = ReadRouteDependencies(
+                read_identity=_human,
+                get_record_store=lambda: store,
+                next_trace_id=lambda: "trace-governance",
+                authorization_allows=lambda **_: True,
+                http_error=_http_error,
+                error_response_model=dict,  # type: ignore[arg-type]
+            )
+            app = FastAPI()
+            register_governance_projection_routes(
+                cast(ApiRouteRegistrar, app),
+                dependencies=GovernanceProjectionRouteDependencies(
+                    common=common,
+                    repository_evidence_provider=_UnavailableProvider(),
+                    current_readiness_provider=_readiness,
+                    now=lambda: "2026-08-12T05:00:00Z",
+                ),
+            )
+
+            async with lifespan_client(app) as client:
+                response = await client.get(
+                    GOVERNANCE_PROJECTION_ROUTE,
+                    params={
+                        "repository": admission.repository,
+                        "pull_request_number": admission.pull_request_number,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        projection = response.json()["projection"]
+        self.assertIsNone(projection["target"])
+        self.assertEqual(projection["requested_target"]["repository"], admission.repository)
+        self.assertEqual(projection["merge_readiness"]["availability"], "unavailable")
+        self.assertIsNone(projection["merge_readiness"]["result"])
+        self.assertEqual(projection["merge_admission"]["status"], "admitted_unknown_target")
+        self.assertEqual(
+            projection["merge_admission"]["record"]["admission_id"], admission.admission_id
+        )
+        self.assertEqual(projection["landing_outcome"]["status"], "landed")
+        self.assertEqual(projection["landing_outcome"]["target_status"], "unknown")
+        self.assertEqual(projection["landing_outcome"]["record"]["outcome_id"], outcome.outcome_id)
+        self.assertTrue(projection["landing_outcome"]["landed"])
+        self.assertFalse(projection["authoritative"])
+        self.assertEqual(projection["authorizes"], [])
 
     async def test_rejects_requested_base_branch_that_differs_from_pull_request(self) -> None:
         with TemporaryDirectory() as directory:
