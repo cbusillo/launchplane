@@ -177,9 +177,8 @@ class MergeTrainFeedbackRetryTests(TestCase):
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(Path(directory))
             with (
-                patch.object(
-                    merge_train_scheduler,
-                    "execute_merge_train_controller_run_once",
+                patch(
+                    "control_plane.merge_train_scheduler.execute_merge_train_controller_run_once",
                     side_effect=[terminal, idle, idle, idle],
                 ) as controller,
                 patch(
