@@ -16,7 +16,7 @@ import type {
 } from "./generated/openapi.ts";
 import type { ResourceState } from "./resource";
 import { useEvidenceExpiry } from "./ProductOps";
-import { expireProductEvidence } from "./product-environment-signal";
+import { environmentOperationalTone, expireProductEvidence } from "./product-environment-signal";
 import {
   environmentLabel,
   environmentViewLabel,
@@ -316,25 +316,31 @@ function ProductTrustDots({ product }: { product: ProductSiteOverview }) {
   const production = product.environments.find(
     (environment) => environment.environment === "prod",
   );
-  const testingTrust = testing?.trust_state ?? "missing";
-  const productionTrust = production?.trust_state ?? "missing";
+  const testingTone = environmentOperationalTone(testing ?? null);
+  const productionTone = environmentOperationalTone(production ?? null);
+  const testingDescription = testing
+    ? `Testing operational status: ${testingTone}`
+    : "Testing lane: absent (not recorded)";
+  const productionDescription = production
+    ? `Production operational status: ${productionTone}`
+    : "Production lane: absent (not recorded)";
   return (
     <span
-      aria-label={`Testing data trust: ${testingTrust}; Production data trust: ${productionTrust}`}
+      aria-label={`${testingDescription}; ${productionDescription}`}
       className="product-trust-dots"
       role="img"
     >
       <span
         aria-hidden="true"
         data-lane="testing"
-        data-trust={testingTrust}
-        title={`Testing data trust: ${testingTrust}`}
+        data-tone={testingTone}
+        title={testingDescription}
       />
       <span
         aria-hidden="true"
         data-lane="prod"
-        data-trust={productionTrust}
-        title={`Production data trust: ${productionTrust}`}
+        data-tone={productionTone}
+        title={productionDescription}
       />
     </span>
   );

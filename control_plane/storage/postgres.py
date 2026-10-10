@@ -53,6 +53,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_column, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
@@ -134,6 +135,7 @@ from control_plane.contracts.provider_delivery_readiness import (
 )
 
 if TYPE_CHECKING:
+    from control_plane.legacy_preview_reconciliation import LegacyPreviewReconciliationRequest
     from control_plane.product_retirement import BoundProductRetirement
     from control_plane.contracts.merge_train_historical_completion import (
         MergeTrainHistoricalCompletionProviderEvidence,
@@ -5697,8 +5699,11 @@ def _build_engine(
     connection_factory: ConnectionFactory | None = None,
     postgres_connect_timeout_seconds: int | None = None,
     postgres_statement_timeout_milliseconds: int | None = None,
+    unpooled: bool = False,
 ) -> Engine:
     engine_kwargs: dict[str, Any] = {}
+    if unpooled:
+        engine_kwargs["poolclass"] = NullPool
     if connection_factory is not None:
         engine_kwargs["creator"] = connection_factory
     connect_args = _engine_connect_args(
@@ -5799,6 +5804,15 @@ class PostgresRecordStore(HumanSessionStore):
             postgres_statement_timeout_milliseconds=postgres_statement_timeout_milliseconds,
         )
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
+        self._preview_lock_engine: Engine | None = None
+        if self._engine.dialect.name == "postgresql":
+            self._preview_lock_engine = _build_engine(
+                database_url,
+                connection_factory=connection_factory,
+                postgres_connect_timeout_seconds=postgres_connect_timeout_seconds,
+                postgres_statement_timeout_milliseconds=postgres_statement_timeout_milliseconds,
+                unpooled=True,
+            )
         self._provider_evidence_context = local()
         self._release_review_publication_context = local()
 
@@ -5897,6 +5911,8 @@ class PostgresRecordStore(HumanSessionStore):
 
     def close(self) -> None:
         self._engine.dispose()
+        if self._preview_lock_engine is not None:
+            self._preview_lock_engine.dispose()
 
     def __del__(self) -> None:
         with suppress(Exception):
@@ -12554,14 +12570,20 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
 
     @contextmanager
-    def serialize_preview_refresh(self, *, preview_id: str) -> Iterator[None]:
+    def serialize_preview_refresh(
+        self, *, preview_id: str, dedicated: bool = False
+    ) -> Iterator[None]:
         normalized_preview_id = preview_id.strip()
         if not normalized_preview_id:
             raise ValueError("Preview refresh serialization requires preview_id.")
         if self._engine.dialect.name != "postgresql":
             yield
             return
-        with self._session_factory() as session:
+        factory = self._session_factory
+        if dedicated:
+            assert self._preview_lock_engine is not None
+            factory = sessionmaker(self._preview_lock_engine, expire_on_commit=False)
+        with factory() as session:
             session.execute(
                 text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
                 {"lock_name": f"launchplane-preview-refresh:{normalized_preview_id}"},
@@ -35627,6 +35649,83 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             rows = session.scalars(statement).all()
             return tuple(self._read_product_profile_payload(row.payload) for row in rows)
+
+    def write_legacy_preview_plan(self, completion: LaunchplaneIdempotencyRecord) -> None:
+        """Never replace a reviewed plan when concurrent callers reuse its key."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            existing = session.scalar(
+                self._idempotency_statement(
+                    scope=completion.scope,
+                    route_path=completion.route_path,
+                    idempotency_key=completion.idempotency_key,
+                )
+            )
+            if existing is not None:
+                stored = LaunchplaneIdempotencyRecord.model_validate(existing.payload)
+                if (
+                    stored.request_fingerprint != completion.request_fingerprint
+                    or stored.response_payload.get("result")
+                    != completion.response_payload.get("result")
+                ):
+                    raise ValueError(
+                        "Legacy preview plan key is already bound to different evidence."
+                    )
+                return
+            session.add(self._idempotency_row(completion))
+            session.commit()
+
+    def commit_legacy_preview_reconciliation(
+        self,
+        *,
+        reconciliation: LegacyPreviewReconciliationRequest,
+        expected_authority_digest: str,
+        destroyed_at: str,
+        completion: LaunchplaneIdempotencyRecord,
+    ) -> None:
+        """Recheck authority and atomically close exactly one preview with its replay receipt."""
+        from control_plane.legacy_preview_reconciliation import bind_legacy_preview
+        from control_plane.workflows.launchplane import apply_preview_destroyed_transition
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_preview_authority_write(
+                session, preview=self.read_preview_record(reconciliation.preview_id)
+            )
+            if self._engine.dialect.name == "postgresql":
+                # Generation evidence flushes before its preview; the real race test guards this order.
+                tables = ", ".join(
+                    model.__tablename__
+                    for model in (
+                        LaunchplaneProductProfileRow,
+                        LaunchplaneProviderTargetRow,
+                        LaunchplaneDokployTargetIdRow,
+                        LaunchplaneDokployTargetRow,
+                        LaunchplanePreviewGenerationRow,
+                        LaunchplanePreviewRow,
+                        LaunchplaneProductReconcileRequestRow,
+                        LaunchplaneDeploymentRow,
+                    )
+                )
+                session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
+            current = bind_legacy_preview(self, reconciliation)
+            if current.digest != expected_authority_digest:
+                raise ValueError("Legacy preview authority changed before completion.")
+            closed = apply_preview_destroyed_transition(
+                preview=current.preview,
+                destroyed_at=destroyed_at,
+                destroy_reason=reconciliation.reason,
+            )
+            row = session.get(LaunchplanePreviewRow, closed.preview_id)
+            if row is None:
+                raise ValueError("Preview disappeared before completion.")
+            row.state = closed.state
+            row.updated_at = closed.updated_at
+            row.payload = self._payload_dict(closed)
+            session.add(self._idempotency_row(completion))
+            session.commit()
 
     def commit_no_target_retirement(
         self,

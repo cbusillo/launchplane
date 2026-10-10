@@ -21,6 +21,8 @@ from control_plane.contracts.merge_train_admission import (
 )
 from control_plane.contracts.merge_train_admission import evaluate_merge_train_admission
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.merge_train_quota import defer_for_recorded_github_quota
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
@@ -275,6 +277,7 @@ def evaluate_merge_train_admission_from_store(
     current_policy_sha256: str = "",
     poll_interval_seconds: int = 60,
     backoff_seconds: int = 300,
+    policy_record: MergeTrainPolicyRecord | None = None,
 ) -> MergeTrainAdmissionDecision:
     controller_records = _list_active_controller_records(
         store=store, repository=repository, base_branch=base_branch
@@ -300,7 +303,7 @@ def evaluate_merge_train_admission_from_store(
         landing_plan_records=actionable_records.landing_plan_records,
         stack_collapse_plan_records=actionable_records.stack_collapse_plan_records,
     )
-    return evaluate_merge_train_admission(
+    decision = evaluate_merge_train_admission(
         repository=repository,
         base_branch=base_branch,
         requested_at=requested_at,
@@ -308,6 +311,12 @@ def evaluate_merge_train_admission_from_store(
         controller_decision=controller_decision,
         poll_interval_seconds=poll_interval_seconds,
         backoff_seconds=backoff_seconds,
+    )
+    return defer_for_recorded_github_quota(
+        decision=decision,
+        controller_state=controller_state,
+        store=store,
+        policy_record=policy_record,
     )
 
 
@@ -321,6 +330,7 @@ def build_merge_train_controller_status_read_model(
     current_policy_sha256: str = "",
     poll_interval_seconds: int = 60,
     backoff_seconds: int = 300,
+    policy_record: MergeTrainPolicyRecord | None = None,
 ) -> MergeTrainControllerStatusReadModel:
     controller_records = _list_active_controller_records(
         store=store, repository=repository, base_branch=base_branch
@@ -354,6 +364,12 @@ def build_merge_train_controller_status_read_model(
         controller_decision=controller_decision,
         poll_interval_seconds=poll_interval_seconds,
         backoff_seconds=backoff_seconds,
+    )
+    admission = defer_for_recorded_github_quota(
+        decision=admission,
+        controller_state=controller_state,
+        store=store,
+        policy_record=policy_record,
     )
     latest_run_age_seconds: int | None = None
     if latest_run is not None:

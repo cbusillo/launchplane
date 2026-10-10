@@ -35,6 +35,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   without the product repository calling Launchplane.
 - [preview-workflow-contract.md](preview-workflow-contract.md) — reusable thin
   preview workflow event, idempotency, feedback, and lifecycle contract.
+- [legacy-preview-reconciliation.md](legacy-preview-reconciliation.md) — reviewed
+  reconciliation of provider-absent generic-web preview history.
 - [driver-descriptors.md](driver-descriptors.md) — provider-neutral driver
   descriptor, action safety, registry, and read-model endpoint contract.
 - [driver-development.md](driver-development.md) — when and how to add a new
