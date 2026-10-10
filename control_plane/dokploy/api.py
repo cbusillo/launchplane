@@ -2,7 +2,7 @@ import json
 import re
 import time
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
@@ -268,6 +268,40 @@ def fetch_dokploy_target_payload(
             f"Dokploy {target_type}.one returned an invalid response payload."
         )
     return payload_as_object
+
+
+def iter_dokploy_applications(raw_projects: object) -> Iterator[JsonObject]:
+    if not isinstance(raw_projects, list):
+        raise click.ClickException(
+            "Dokploy project inventory returned an invalid response payload."
+        )
+    for raw_project in raw_projects:
+        project = as_json_object(raw_project)
+        if project is None:
+            raise click.ClickException("Dokploy project inventory contains an invalid project.")
+        raw_environments = project.get("environments")
+        if not isinstance(raw_environments, list):
+            raise click.ClickException("Dokploy project inventory has incomplete environments.")
+        for raw_environment in raw_environments:
+            environment = as_json_object(raw_environment)
+            if environment is None:
+                raise click.ClickException(
+                    "Dokploy project inventory contains an invalid environment."
+                )
+            raw_applications = environment.get("applications")
+            if not isinstance(raw_applications, list):
+                raise click.ClickException("Dokploy project inventory has incomplete applications.")
+            for raw_application in raw_applications:
+                application = as_json_object(raw_application)
+                if application is None:
+                    raise click.ClickException(
+                        "Dokploy project inventory contains an invalid application."
+                    )
+                if not str(application.get("name") or "").strip():
+                    raise click.ClickException(
+                        "Dokploy project inventory contains an unnamed application."
+                    )
+                yield application
 
 
 def fetch_dokploy_projects(*, host: str, token: str) -> tuple[JsonObject, ...]:
