@@ -292,6 +292,7 @@ if __name__ == "__main__":
 
 def _promotion_store() -> Mock:
     store = Mock()
+    store.list_deployment_records.return_value = ()
     store.read_product_profile_record.return_value = LaunchplaneProductProfileRecord.model_validate(
         {
             **product_profile_payload("example-site"),
