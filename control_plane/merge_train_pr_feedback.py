@@ -221,6 +221,10 @@ def deliver_merge_train_pr_feedback_record(
     return record.model_copy(update=changes)
 
 
+def feedback_provider_backoff_is_active(*, record: MergeTrainPrFeedbackRecord, now: str) -> bool:
+    return bool(record.provider_retry_at) and _timestamp(now) < _timestamp(record.provider_retry_at)
+
+
 def feedback_retry_is_due(record: MergeTrainPrFeedbackRecord, *, now: str) -> bool:
     if record.delivery_status != "failed" or not record.retryable:
         return False

@@ -63,6 +63,7 @@ from control_plane.merge_train_pr_feedback import (
     write_merge_train_pr_feedback_record,
     deliver_merge_train_pr_feedback_record,
     feedback_retry_is_due,
+    feedback_provider_backoff_is_active,
     require_merge_train_pr_feedback_record_store,
 )
 from control_plane.merge_train_run_once import (
@@ -438,7 +439,7 @@ def _deliver_controller_feedback(
         limit=1,
     )
     backoff = ""
-    if quota_records and not feedback_retry_is_due(quota_records[0], now=now()):
+    if quota_records and feedback_provider_backoff_is_active(record=quota_records[0], now=now()):
         backoff = quota_records[0].provider_retry_at
     for payload in payloads:
         feedback_record = write_merge_train_pr_feedback_record(
