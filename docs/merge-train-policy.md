@@ -36,9 +36,8 @@ GitHub adapter:
 2. Build one combined batch candidate from the base branch plus queued pull
    requests in train order.
 3. Run required checks against that exact candidate commit.
-4. If the candidate passes, land the original pull requests in train order using
-   GitHub's normal pull request merge path so repository UI and audit hints stay
-   attached to each PR.
+4. If the candidate passes, use [PR-Native Landing](#pr-native-landing) for the
+   configured landing mode and its provider-completion evidence.
 5. If the candidate fails or cannot be built, split or reduce the batch to
    isolate blockers, then mark or requeue entries according to policy.
 
@@ -418,7 +417,7 @@ The batch train is the first full-train implementation target because it proves
 that many queued pull requests are compatible together while preserving normal
 GitHub pull request UX. It differs from merging every individually green PR: the
 batch candidate must pass required checks as a combined tree before Launchplane
-starts landing the original pull requests.
+starts [PR-Native Landing](#pr-native-landing).
 
 ### Candidate Construction
 
@@ -602,6 +601,14 @@ rejection of the recorded attempt, likewise remains fenced even when Git proves
 the code landed. It does not retroactively acquire a Launchplane admission. The
 generated PR explicitly instructs admins to let the controller merge it and
 to leave its generated branch unchanged.
+
+For original-PR landing paths, retries revalidate already-merged entries at
+their recorded head and target, including protected-base containment, before
+continuing later entries. Unrelated base movement or mismatched head evidence
+stops landing. Once all entries are confirmed and the base contains the final
+merge commit, recovery records terminal completion. A PR merged at a different
+head instead records a terminal stale plan, allowing fresh planning without
+claiming a successful Launchplane landing.
 
 ### Stacked Pull Requests
 
@@ -1272,33 +1279,17 @@ must keep the message public-safe: no tokens, raw headers, private API base URLs
 local paths, or unchecked provider responses.
 
 The batch-landing service endpoint
-`POST /v1/work-graph/merge-train/batch-landing/run-once` owns that PR-native
-landing phase. It accepts `mode: plan` with a passed candidate record id and
-writes a `launchplane_merge_train_batch_landing_plans` record, or `mode: land`
-with a landing-plan record id and merges the original pull requests in recorded
-queue order. Landing fails closed if the base branch head has moved from the
-candidate base SHA. Immediately before each merge, the PR must still be open at
-the recorded head SHA and target the recorded base ref. Rolling-base allowance
-comes only from the active unchanged landing plan plus structural provenance:
-every prior entry must be recorded landed at its exact head, and the observed
-base must equal the recorded prior landing result;
-the merge request also uses GitHub's head-SHA guard. Retried landing is
-idempotent across already-merged entries when GitHub shows the pull request was
-merged with the exact recorded head SHA into the recorded base ref and the
-target branch contains that merge commit. If the live base is already ahead of
-a persisted merged entry, Launchplane revalidates that entry's PR evidence and
-continues through later planned entries before deciding whether the landing plan
-is stale. Unrelated base movement or mismatched head evidence still stops the
-landing attempt. Stale landing evidence is reported as a merge-train stale-state
-conflict, while real GitHub transport/API failures include upstream status
-details for debugging. When every landing-plan entry is already merged with its
-recorded head SHA and the live base branch equals or descends from the recorded
-final merge commit, the retry writes terminal landing evidence instead of continuing to
-advertise the stale `land_batch` action. If GitHub proves a pull request merged
-with a different head SHA than the landing plan recorded, Launchplane writes
-terminal stale landing evidence for the plan. That stale evidence does not count
-as a successful Launchplane landing, but it does retire the stale plan so a fresh
-controller pass can read current GitHub state and admit later eligible work.
+`POST /v1/work-graph/merge-train/batch-landing/run-once` owns
+[PR-Native Landing](#pr-native-landing). It accepts `mode: plan` with a passed
+candidate record id and writes a `launchplane_merge_train_batch_landing_plans`
+record, or `mode: land`
+with a landing-plan record id. The linked section owns which PR is merged,
+the landing-mode exceptions, and the evidence required to finish or reconcile
+each mode. [Batch And Recovery](merge-admission.md#batch-and-recovery) owns
+admission and outcome reconciliation; [structural provenance](merge-train-structural-provenance.md)
+owns rolling-base evidence. Stale landing evidence is
+reported as a merge-train stale-state conflict, while real GitHub transport/API
+failures include upstream status details for debugging.
 After Launchplane persists a landing plan whose final merge commit remains in
 the target branch history, it
 enters a durable cleanup phase for the generated `launchplane/train/...`
