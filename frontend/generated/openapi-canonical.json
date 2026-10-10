@@ -33863,15 +33863,23 @@
       },
       "ProductReviewCarry": {
         "additionalProperties": false,
-        "description": "Where a carried acceptance came from: the Client decided on another head.\n\n`merge_train_base_refresh`: the merge train only merged the base branch into the\npull request, and the pull request's change against its base adds and removes\nthe same lines.",
+        "description": "The source acceptance and immutable evidence for an unchanged feature patch.",
         "properties": {
+          "comparison_base_sha": {
+            "default": "",
+            "title": "Comparison Base Sha",
+            "type": "string"
+          },
           "head_sha": {
             "title": "Head Sha",
             "type": "string"
           },
           "reason": {
-            "const": "merge_train_base_refresh",
             "default": "merge_train_base_refresh",
+            "enum": [
+              "merge_train_base_refresh",
+              "unchanged_patch_base_update"
+            ],
             "title": "Reason",
             "type": "string"
           },
@@ -33880,18 +33888,17 @@
             "type": "string"
           },
           "refresh_record_ids": {
+            "default": [],
             "items": {
               "type": "string"
             },
-            "minItems": 1,
             "title": "Refresh Record Ids",
             "type": "array"
           }
         },
         "required": [
           "record_id",
-          "head_sha",
-          "refresh_record_ids"
+          "head_sha"
         ],
         "title": "ProductReviewCarry",
         "type": "object"
