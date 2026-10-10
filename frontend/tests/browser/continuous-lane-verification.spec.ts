@@ -9,7 +9,9 @@ for (const detail of [false, true]) test(`an open ${detail ? "environment" : "wo
     const lane = product.environments.find((environment: { environment: string }) => environment.environment === "testing");
     return { product: product.product, expiry: Date.parse(lane.provenance.stale_after) };
   });
-  await page.clock.install({ time: new Date(expiry - 1000) });
+  // Pause one second before expiry so page load cannot spend the fresh window.
+  await page.clock.install({ time: new Date(expiry - 2000) });
+  await page.clock.pauseAt(new Date(expiry - 1000));
   await page.goto(`/ui/products/${product}${detail ? "/environments/testing" : ""}?fixture=products`);
   const signal = detail
     ? page.locator(".condition-tile").filter({ hasText: /^Runtime identity/i })
