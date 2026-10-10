@@ -243,7 +243,7 @@ def build_governance_projection(
         GovernanceMergeReadinessFacet(
             availability="unavailable",
             reason_code="current_evidence_unavailable",
-            detail="Current repository evidence is unavailable; stored attempt and outcome evidence is retained.",
+            detail="Current repository evidence is unavailable.",
         )
         if resolved_repository_evidence is None
         else current_readiness_provider(
@@ -281,7 +281,7 @@ def build_governance_projection(
     outcome = outcomes[0] if outcomes else None
     return GovernanceProjection(
         target=resolved_repository_evidence.target if resolved_repository_evidence else None,
-        requested_target=target,
+        requested_target=target if resolved_repository_evidence is None else None,
         merge_readiness=readiness,
         merge_admission=GovernanceMergeAdmissionFacet(
             status=(

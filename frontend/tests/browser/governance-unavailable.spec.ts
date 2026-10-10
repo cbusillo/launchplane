@@ -14,7 +14,7 @@ test("unavailable current evidence preserves stored history without granting aut
   projection.target = null;
   projection.merge_readiness = {
     ...projection.merge_readiness, availability: "unavailable", reason_code: "current_evidence_unavailable", result: null,
-    detail: "Current repository evidence is unavailable; stored attempt and outcome evidence is retained.",
+    detail: "Current repository evidence is unavailable.",
   };
   projection.merge_admission.status = "admitted_unknown_target";
   projection.landing_outcome.target_status = "unknown";
