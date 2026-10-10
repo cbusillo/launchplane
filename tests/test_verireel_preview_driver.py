@@ -15,6 +15,7 @@ from control_plane.workflows.verireel_preview_driver import VeriReelPreviewDestr
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshRequest
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshConfigError
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshTransportError
+from control_plane.workflows.verireel_preview_driver import _preview_application_name
 from control_plane.workflows.verireel_preview_driver import _build_preview_runtime_identity
 from control_plane.workflows.verireel_preview_driver import _build_preview_database_command
 from control_plane.workflows.verireel_preview_driver import _ensure_application
@@ -185,6 +186,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             anchor_pr_number=71, destroy_reason="pull request closed", preview_slug="pr-71"
         )
         inventories: tuple[object, ...] = (
+            [{"environments": [{"applications": [{"name": _preview_application_name("pr-71")}]}]}],
             {},
             [{"environments": [{"applications": None}]}],
             [
@@ -192,7 +194,10 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                     "environments": [
                         {
                             "applications": [
-                                {"name": "verireel-preview-pr-71", "applicationId": "preview"},
+                                {
+                                    "name": _preview_application_name("pr-71"),
+                                    "applicationId": "preview",
+                                },
                                 None,
                             ]
                         }

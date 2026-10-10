@@ -481,7 +481,14 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
     # A match or absence is authoritative only after the full inventory validates.
     for application in tuple(dokploy_api.iter_dokploy_applications(raw_projects)):
         if str(application.get("name") or "").strip() == application_name:
-            return application
+            application_id = str(
+                application.get("applicationId") or application.get("id") or ""
+            ).strip()
+            if not application_id:
+                raise click.ClickException(
+                    "Dokploy project inventory has incomplete application identity."
+                )
+            return {**application, "applicationId": application_id}
     return None
 
 
@@ -496,45 +503,26 @@ def execute_verireel_preview_inventory(
         token=token,
         path="/api/project.all",
     )
-    if not isinstance(raw_projects, list):
-        raise click.ClickException(
-            "Dokploy project inventory returned an invalid response payload."
-        )
     preview_items: list[VeriReelPreviewInventoryItem] = []
-    for raw_project in raw_projects:
-        project = dokploy_api.as_json_object(raw_project)
-        if project is None:
+    for application in dokploy_api.iter_dokploy_applications(raw_projects):
+        application_name = str(application.get("name") or "").strip()
+        preview_slug = _preview_slug_from_application_name(application_name)
+        if not preview_slug:
             continue
-        raw_environments = project.get("environments")
-        if not isinstance(raw_environments, list):
-            continue
-        for raw_environment in raw_environments:
-            environment = dokploy_api.as_json_object(raw_environment)
-            if environment is None:
-                continue
-            raw_applications = environment.get("applications")
-            if not isinstance(raw_applications, list):
-                continue
-            for raw_application in raw_applications:
-                application = dokploy_api.as_json_object(raw_application)
-                if application is None:
-                    continue
-                application_name = str(application.get("name") or "").strip()
-                preview_slug = _preview_slug_from_application_name(application_name)
-                if not preview_slug:
-                    continue
-                application_id = str(
-                    application.get("applicationId") or application.get("id") or ""
-                ).strip()
-                if not application_id:
-                    continue
-                preview_items.append(
-                    VeriReelPreviewInventoryItem(
-                        applicationId=application_id,
-                        applicationName=application_name,
-                        previewSlug=preview_slug,
-                    )
-                )
+        application_id = str(
+            application.get("applicationId") or application.get("id") or ""
+        ).strip()
+        if not application_id:
+            raise click.ClickException(
+                "Dokploy project inventory has incomplete application identity."
+            )
+        preview_items.append(
+            VeriReelPreviewInventoryItem(
+                applicationId=application_id,
+                applicationName=application_name,
+                previewSlug=preview_slug,
+            )
+        )
     return VeriReelPreviewInventoryResult(
         context=request.context,
         previews=tuple(sorted(preview_items, key=lambda item: item.previewSlug)),
