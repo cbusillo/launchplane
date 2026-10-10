@@ -91,6 +91,63 @@ class ProtectedBatchGuardTests(unittest.TestCase):
             observed_head_tree_sha=entry.expected_head_tree_sha,
         )
 
+    def test_observation_time_is_after_admission_and_provider_git_confirmation(self) -> None:
+        provider = _BatchProvider(self.fixture.candidate_record.candidate)
+        provider.number = 9000
+        client = GitHubMergeTrainClient(transport=provider)
+        client.ensure_batch_pull_request(candidate=provider.candidate)
+        pass_started_at = "2026-08-11T03:00:00Z"
+        observed_at = "2026-08-11T03:03:00.000000Z"
+
+        def observation_clock() -> str:
+            if not provider.merged:
+                return pass_started_at
+            self.assertTrue(
+                all(
+                    provider.pull_request(entry.pull_request_number)["merged"]
+                    for entry in self.fixture.plan.entries
+                )
+            )
+            return observed_at
+
+        self.guard.observation_time_provider = observation_clock
+
+        def checkpoint(_plan: Any, entry: Any, phase: str) -> None:
+            if phase == "merge_entry":
+                self.fixture.controller = self.fixture.controller.model_copy(
+                    update={"active_pull_request_number": entry.pull_request_number}
+                )
+                self.store.write_merge_train_controller_state_record(self.fixture.controller)
+
+        result = client.land_batch_candidate(
+            landing_plan=self.guard.landing_plan_record.landing_plan,
+            admission_guard=self.guard,
+            recorded_at=pass_started_at,
+            checkpoint=checkpoint,
+        )
+        outcomes = self.store.list_merge_landing_outcome_records()
+        admissions = {
+            record.admission_id: record for record in self.store.list_merge_admission_records()
+        }
+        self.assertTrue(all(entry.status == "merged" for entry in result.entries))
+        self.assertTrue(outcomes)
+        self.assertTrue(all(outcome.observed_at == observed_at for outcome in outcomes))
+        self.assertTrue(
+            all(
+                outcome.observed_at > admissions[outcome.admission_id].created_at
+                for outcome in outcomes
+            )
+        )
+        self.guard.observation_time_provider = lambda: "2026-08-11T03:04:00Z"
+        client.land_batch_candidate(
+            landing_plan=result,
+            admission_guard=self.guard,
+            recorded_at="2026-08-11T03:02:00Z",
+            checkpoint=checkpoint,
+        )
+        self.assertEqual(self.store.list_merge_landing_outcome_records(), outcomes)
+        self.assertEqual(len(provider.merge_calls), 1)
+
     def test_shared_merge_interruption_reconciles_both_real_stored_outcomes(self) -> None:
         provider = _BatchProvider(self.fixture.candidate_record.candidate)
         provider.number = 9000
@@ -118,6 +175,8 @@ class ProtectedBatchGuardTests(unittest.TestCase):
         admissions = self.store.list_merge_admission_records()
         self.assertEqual(len(admissions), 2)
         self.assertEqual(self.store.list_merge_landing_outcome_records(), ())
+        reconciled_at = "2026-08-11T03:04:00.000000Z"
+        self.guard.observation_time_provider = lambda: reconciled_at
         landed = land()
         self.assertTrue(all(entry.status == "merged" for entry in landed.entries))
         self.assertEqual(len(provider.merge_calls), 1)
@@ -126,6 +185,7 @@ class ProtectedBatchGuardTests(unittest.TestCase):
             {outcome.admission_id for outcome in outcomes}, {a.admission_id for a in admissions}
         )
         self.assertTrue(all(outcome.status == "landed" for outcome in outcomes))
+        self.assertTrue(all(outcome.observed_at == reconciled_at for outcome in outcomes))
         self.assertEqual({outcome.merge_commit_sha for outcome in outcomes}, {provider.merge_sha})
 
     def test_unready_second_member_does_not_append_prefix_admissions_each_pass(self) -> None:

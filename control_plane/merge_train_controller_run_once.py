@@ -410,6 +410,45 @@ def execute_merge_train_controller_with_client(
     admission_evaluator: MergeAdmissionEvaluator,
     before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
 ) -> MergeTrainControllerRunOnceResult:
+    github_client.begin_snapshot_pass(policy=repository_policy, read_only=not request.mutate)
+    try:
+        return _execute_merge_train_controller_with_client(
+            request=request,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            repository_policy=repository_policy,
+            github_client=github_client,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
+            candidate_store=candidate_store,
+            landing_store=landing_store,
+            stack_collapse_store=stack_collapse_store,
+            controller_state_store=controller_state_store,
+            admission_store=admission_store,
+            admission_evaluator=admission_evaluator,
+            before_release=before_release,
+        )
+    finally:
+        github_client.end_snapshot_pass()
+
+
+def _execute_merge_train_controller_with_client(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    policy: MergeTrainPolicy,
+    policy_sha256: str,
+    repository_policy: MergeTrainRepositoryPolicy,
+    github_client: GitHubMergeTrainClient,
+    trace_id: str,
+    recorded_at: str,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    landing_store: MergeTrainBatchLandingPlanRecordStore,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    controller_state_store: MergeTrainControllerStateRecordStore,
+    admission_store: MergeAdmissionRecordStore,
+    admission_evaluator: MergeAdmissionEvaluator,
+    before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
+) -> MergeTrainControllerRunOnceResult:
     """Internal controller core with an explicit caller-owned scoped provider client.
 
     This constructs no transport or credentials. Ordinary callers must supply
@@ -1454,7 +1493,7 @@ def _retire_changed_policy_landing(
             observed_head_sha=entry.expected_head_sha,
             observed_head_tree_sha=entry.expected_head_tree_sha,
             observed_pull_request_state="open",
-            observed_at=recorded_at,
+            observed_at=guard.observation_time_provider(),
         )
     lease.checkpoint(
         active_action="land_batch",
