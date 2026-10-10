@@ -1055,14 +1055,7 @@ Client identity directly. Do not introduce new GitHub-secret/workflow grants;
 use the native reviewed policy path for any separately authorized contraction.
 See [Client acceptance](owner-acceptance.md).
 
-The `manager-preview-approval` and `manager-preview-approval-retirement`
-selectors and wrapper jobs are removed, along with the
-`LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` reference,
-after the reviewed `operator.manager-preview-approval` contraction
-and independent empty-set readback recorded on #2006. Source retirement does
-not itself mutate authorization records or delete GitHub secrets. The Director
-deletes the unused managed-set secret by hand after the wiring removal lands.
-Other separately authorized contractions use the current reviewed
+Separately authorized contractions use the current reviewed
 [authorization surface](authorization-authority.md). The signed trusted-maintenance
 webhook and its independent `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`
 remain in use.
