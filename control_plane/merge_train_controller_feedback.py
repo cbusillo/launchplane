@@ -230,6 +230,11 @@ def _feedback_event(*, controller_action: str, result: dict[str, Any]) -> str:
         return "waiting"
     if controller_action in WAITING_ACTIONS:
         return "waiting"
+    if (
+        controller_action == "update_branch"
+        and _as_dict(result.get("branch_update_result")).get("status") == "updated"
+    ):
+        return "waiting"
     if controller_action in ATTENTION_ACTIONS:
         return "blocked"
     if controller_action in BUILDING_ACTIONS:
@@ -252,6 +257,13 @@ def _feedback_message(
         return "Launchplane finished the merge-train step for this pull request."
     if event == "stale_policy":
         return "Launchplane stopped using this train record because its stored evidence is stale."
+    if controller_action == "update_branch" and phase == "controller":
+        if _as_dict(result.get("branch_update_result")).get("status") == "updated":
+            return (
+                "Launchplane updated this pull request's branch and is waiting for "
+                "fresh mergeability and required checks."
+            )
+        return "Launchplane needs to refresh this pull request's branch before continuing."
     if event == "blocked":
         applied = _as_dict(result.get("block_result"))
         if applied.get("status") == "blocked":
@@ -368,15 +380,14 @@ def _held_out_messages(
 def _pull_request_numbers(
     result: dict[str, Any], *, controller_action: str, phase: str
 ) -> list[int]:
-    selected_actions = {"wait_for_checks", "block"}
-    if phase == "batch-candidate":
-        selected_actions.add("update_branch")
+    selected_actions = {"wait_for_checks", "block", "update_branch"}
     if controller_action in selected_actions and "candidate" not in result:
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
         number = selected.get("number")
-        # Client review waits are reported before a candidate exists, too.
+        # Ordinary waits and refreshes have a selected PR before any candidate exists.
         if (
-            phase == "batch-candidate"
+            controller_action in {"wait_for_checks", "update_branch"}
+            or phase == "batch-candidate"
             or "merge_train_batch_candidate_record_id" in result
             or selected.get("owner_review_required") is True
             or _as_dict(result.get("block_result")).get("status") == "blocked"

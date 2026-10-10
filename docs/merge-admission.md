@@ -28,6 +28,17 @@ and the expected effect SHA. It re-reads the active merge-train policy record
 and GitHub queue for every entry rather than treating request-start policy or
 stored candidate order as live evidence.
 
+The native controller route and scheduled controller create a repository-evidence
+reader per call. Within that reader they reuse up to 128 Git commit-to-tree
+results, keyed by repository ID and exact commit SHA. These immutable results
+cannot change with a PR update. Repository identity, PR metadata and confirmation,
+changed files, authorship, the live queue, active policy and technical checks are
+still read on every evaluation. Failed tree reads are never cached. The cache
+ends with the controller call; injected readers and the direct batch-landing
+endpoint retain their existing read behavior. This reduces one repeated read per
+unchanged member without treating prior admission or provider refusal as reusable
+authority.
+
 Before building that live queue, admission excludes the candidate's conflict
 hold-outs only while both the PR number and head match the recorded hold-out,
 as planning does. An unchanged held-out PR that sorts ahead of a planned entry

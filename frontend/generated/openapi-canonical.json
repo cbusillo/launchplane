@@ -13330,6 +13330,61 @@
         "title": "LaunchplaneRuntimeStatus",
         "type": "object"
       },
+      "LegacyPreviewReconciliationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_plan_digest": {
+            "default": "",
+            "title": "Expected Plan Digest",
+            "type": "string"
+          },
+          "mode": {
+            "default": "inspect",
+            "enum": [
+              "inspect",
+              "plan",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "plan_idempotency_key": {
+            "default": "",
+            "title": "Plan Idempotency Key",
+            "type": "string"
+          },
+          "preview_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Preview Id",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan": {
+            "default": false,
+            "title": "Reviewed Plan",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "product",
+          "preview_id",
+          "reason"
+        ],
+        "title": "LegacyPreviewReconciliationRequest",
+        "type": "object"
+      },
       "LegacyProductionBackupMigrationRequest": {
         "additionalProperties": false,
         "properties": {
@@ -16310,7 +16365,8 @@
               "poll_interval_elapsed",
               "poll_interval_pending",
               "backoff_elapsed",
-              "backoff_pending"
+              "backoff_pending",
+              "github_rate_limit_pending"
             ],
             "title": "Reason Code",
             "type": "string"
@@ -73278,6 +73334,106 @@
           }
         },
         "summary": "Discover preview desired state"
+      }
+    },
+    "/v1/previews/legacy-generic-web/reconciliation": {
+      "post": {
+        "operationId": "reconcile_legacy_generic_web_preview",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LegacyPreviewReconciliationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Inspect or reconcile one provider-absent legacy generic-web preview"
       }
     },
     "/v1/previews/lifecycle-cleanup": {
