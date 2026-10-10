@@ -32,8 +32,21 @@ test("landing progress uses total stored entries through refresh", async ({ page
   Object.assign(record, {status: "blocked", pull_request_numbers: [7, 8, 9, 10, 11],
     merged_count: 1, planned_count: 1, blocked_count: 1, stale_count: 1, skipped_count: 1});
   await page.getByRole("button", {name: "Refresh status", exact: true}).click();
-  await expect(row).toContainText("1/5 merged · 1 planned · 1 blocked · 1 stale · 1 skipped");
+  await expect(row).toContainText("1/5 merged · 1 planned · 0 in progress · 1 blocked · 1 stale · 1 skipped");
   await page.screenshot({path: testInfo.outputPath("partial-landing.png"), fullPage: true});
+  record.stale_count = 0;
+  await page.getByRole("button", {name: "Refresh status", exact: true}).click();
+  await expect(row).toContainText("1/5 merged · 1 planned · 1 in progress");
+  Object.assign(record, {record_type: "stack_collapse_plan", status: "ready_for_train",
+    pull_request_numbers: [7, 8, 9], merged_count: 2, planned_count: 0, blocked_count: 0, stale_count: 0, skipped_count: 0});
+  await page.getByRole("button", {name: "Refresh status", exact: true}).click();
+  await expect(row).toContainText("2 collapsed");
+  await expect(row).not.toContainText("merged");
+  record.record_type = "batch_candidate";
+  record.status = "waiting";
+  await page.getByRole("button", {name: "Refresh status", exact: true}).click();
+  await expect(row).not.toContainText("merged");
+  await expect(row).not.toContainText("collapsed");
   expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
   expect(mutations).toEqual([]);
   expect(errors).toEqual([]);

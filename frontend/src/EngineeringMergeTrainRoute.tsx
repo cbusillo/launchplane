@@ -528,6 +528,13 @@ function ControllerStatus({
 
 function ControllerRecord({ record }: { record: MergeTrainControllerRecordSummary }) {
   const tone = record.policy_status === "stale" ? "blocked" : "pending";
+  const inProgress = record.pull_request_numbers.length - record.merged_count -
+    record.planned_count - record.blocked_count - record.stale_count - record.skipped_count;
+  const progress = record.record_type === "batch_landing_plan"
+    ? `${record.merged_count}/${record.pull_request_numbers.length} merged · ${record.planned_count} planned · ${inProgress} in progress · ${record.blocked_count} blocked · ${record.stale_count} stale · ${record.skipped_count} skipped`
+    : record.record_type === "stack_collapse_plan"
+      ? `${record.merged_count} collapsed · ${record.planned_count} planned · ${record.blocked_count} blocked · ${record.stale_count} stale`
+      : "";
   return <li className="engineering-controller-record" data-policy={record.policy_status}>
       <StatusIcon status={tone} />
       <div>
@@ -544,10 +551,7 @@ function ControllerRecord({ record }: { record: MergeTrainControllerRecordSummar
           <span>{record.required_checks_status}</span>
          : null}
       </div>
-      <p>
-        {record.stale_reason ||
-          `${record.merged_count}/${record.pull_request_numbers.length} merged · ${record.planned_count} planned · ${record.blocked_count} blocked · ${record.stale_count} stale · ${record.skipped_count} skipped`}
-      </p>
+      {record.stale_reason || progress ? <p>{record.stale_reason || progress}</p> : null}
       <time dateTime={record.updated_at}>{formatTime(record.updated_at)}</time>
     </li>;
 }

@@ -1373,9 +1373,11 @@ policy; stale records remain visible in the summaries with a stale reason. It is
 also store-only, so it can power dashboards and status summaries without
 consuming GitHub API capacity or advancing the train.
 
-The workbench's merged fraction uses the stored PR-entry identities as its total;
+The workbench's landing fraction uses the stored PR-entry identities as its total;
 `planned_count` is the remaining planned partition, alongside merged, blocked,
-stale and skipped counts, and is not the denominator.
+stale and skipped counts. Remaining entries are shown as in progress. Candidate
+rows do not claim a landing fraction; collapse rows report mutated child entries
+as collapsed without treating the root as another mutation.
 
 For an unresolved `land_batch` controller fence, `reconciliation_diagnostics`
 adds bounded stored admission/outcome classifications for entries in the active
