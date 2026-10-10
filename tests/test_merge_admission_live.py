@@ -778,8 +778,22 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                 "dependency_update_class": "patch_or_minor",
             }
         )
-        for checks in ("pass", "fail"):
-            with self.subTest(checks=checks):
+        older_unknown_update = update.model_copy(
+            update={
+                "number": entry.pull_request_number - 1,
+                "head_sha": "d" * 40,
+                "created_at": "2026-08-11T02:59:00Z",
+                "mergeable": "unknown",
+            }
+        )
+        for checks, mergeable, head_sha, admitted in (
+            ("pass", "mergeable", HEAD_SHA, True),
+            ("pass", "unknown", HEAD_SHA, True),
+            ("fail", "unknown", HEAD_SHA, False),
+            ("pass", "conflicting", HEAD_SHA, False),
+            ("pass", "unknown", "e" * 40, False),
+        ):
+            with self.subTest(checks=checks, mergeable=mergeable, head_sha=head_sha):
                 evaluator = LiveMergeAdmissionEvaluator(
                     store=object(),
                     repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
@@ -791,7 +805,14 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                             base_branch="main",
                             base_sha=BASE_SHA,
                             pull_requests=(
-                                update.model_copy(update={"required_checks_status": checks}),
+                                older_unknown_update,
+                                update.model_copy(
+                                    update={
+                                        "required_checks_status": checks,
+                                        "mergeable": mergeable,
+                                        "head_sha": head_sha,
+                                    }
+                                ),
                             ),
                         )
                     ),
@@ -801,9 +822,7 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                     "_entry_evidence",
                     side_effect=_QueueAccepted("queue accepted"),
                 ):
-                    expected_error = (
-                        _QueueAccepted if checks == "pass" else MergeAdmissionDeniedError
-                    )
+                    expected_error = _QueueAccepted if admitted else MergeAdmissionDeniedError
                     with self.assertRaises(expected_error) as result:
                         evaluator.evaluate(
                             candidate_record=candidate,

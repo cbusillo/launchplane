@@ -303,13 +303,14 @@ class MergeTrainDryRunTests(unittest.TestCase):
                 self.assertEqual(failed.queue[0].head_sha, failed_head.head_sha)
                 self.assertTrue(failed.queue[0].ineligible_reasons)
 
-        for checks, expected_action in (
-            ("pending", "wait_for_checks"),
-            ("unknown", "wait_for_checks"),
-            ("pass", "merge"),
+        for checks, expected_action, head_sha in (
+            ("pending", "wait_for_checks", "new-dependency-head"),
+            ("unknown", "wait_for_checks", "new-dependency-head"),
+            ("pass", "merge", "new-dependency-head"),
+            ("pass", "merge", update.head_sha),
         ):
             new_head = update.model_copy(
-                update={"head_sha": "new-dependency-head", "required_checks_status": checks}
+                update={"head_sha": head_sha, "required_checks_status": checks}
             )
             fresh = build_merge_train_dry_run_result(
                 policy=policy,

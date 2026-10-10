@@ -414,9 +414,12 @@ also requalify it. An explicit enqueue label uses the normal block path above.
 Every existing block label remains a hold,
 including labels applied by earlier controller versions: no actor or historical
 record is used to guess that a generic hold may be cleared. Those PRs retain the
-supported remove-label path. The single-transition worker is unchanged.
+supported remove-label path. The single-transition worker and retained bound-job
+controller compatibility path are unchanged.
 
-Landing admission rereads the same queue rule. If an included dependency head
+Landing admission allows transient unknown mergeability only for exact PR/head
+pairs already in its verified plan; unplanned unknown heads remain held out. The
+base, recorded head/tree, policy and technical gates still apply. If an included dependency head
 starts failing or conflicting after candidate planning, its changed eligibility
 invalidates that landing lineage. A wholly unlanded plan can be retired/replanned;
 a partially landed plan retains its merged progress and blocks for requalification
