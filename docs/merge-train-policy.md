@@ -771,20 +771,27 @@ entries are bad. On the next pass over an unchanged queue and base, after the
 batch-body rebuild above when it applies, the controller reads the failed
 candidate's check runs, commit statuses and the annotations of failed runs:
 
-- **Infrastructure failure.** A run that was cancelled, went stale, failed to
-  start, or carries GitHub's runner-loss annotation (lost communication, a
-  shutdown signal, or a job never acquired by a runner) marks the failure as
-  infrastructure, provided no check names a failed test and no commit status
-  failed. Jobs that depend on the lost job fail with a generic exit-code
-  annotation, so they do not count against this. The controller rebuilds the
-  same members once on a new `-infrastructure-retry` candidate ref, recording
-  `infrastructure_retry_of`; nobody is blamed. A failure of that retry is
-  isolated as below.
+- **Infrastructure failure.** GitHub's runner-loss annotation on any failed or
+  cancelled run (lost communication, a shutdown signal, or a job never acquired
+  by a runner) marks the failure as infrastructure; jobs that depend on the lost
+  job fail with a generic exit-code annotation, so they do not count against it.
+  Runs that were cancelled, went stale or failed to start count only when no
+  run failed outright, because fail-fast also cancels the siblings of a real
+  failure. A named failed test or a failing commit status always rules
+  infrastructure out. The controller rebuilds the same members once on a new
+  `-infrastructure-retry` candidate ref, recording `infrastructure_retry_of`;
+  nobody is blamed. If the retry fails on infrastructure again, the candidate
+  stays stopped with `reason_code: infrastructure_retry_used` until the queue or
+  base changes, so a runner outage never blocks a pull request. A retry that
+  fails on a real check is isolated as below.
 - **Failure isolation.** Otherwise a failed candidate with several members is
   split: the first half is retested on the same base, and the rest wait as
-  `held_out` entries with reason `failure_isolation`. These holds last while the
-  base is unchanged. If the half passes, it lands and the base moves, so the
-  rest replan together on the next pass; if it fails, it is split again.
+  `held_out` entries with reason `failure_isolation`. A hold lasts only while
+  the base and its head are unchanged and every member of the candidate
+  retesting without it is still queued at its recorded head; if one leaves
+  the queue, the holds are released and the next pass replans. If the half
+  passes, it lands and the base moves, so the rest replan together on the next
+  pass; if it fails, it is split again.
 - **Culprit.** When a candidate with one member fails, that pull request is the
   one that breaks the tree. The controller retires the failed lineage, applies
   `blocked_label` to it, and the next pass plans the rest of the queue. The

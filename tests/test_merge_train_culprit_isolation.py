@@ -36,15 +36,12 @@ TEST_FAILURE = CandidateCheckFailures(
             name="test_shard (0)",
             conclusion="failure",
             url="https://github.com/cbusillo/sellyouroutboard/actions/runs/1/job/2",
-            infrastructure=False,
             failed_tests=("tests.test_widget.WidgetTests.test_renders",),
         ),
     )
 )
 RUNNER_LOSS = CandidateCheckFailures(
-    checks=(
-        CandidateCheckFailure(name="ci-gate", conclusion="cancelled", url="", infrastructure=True),
-    )
+    checks=(CandidateCheckFailure(name="ci-gate", conclusion="cancelled", url=""),)
 )
 
 
@@ -84,6 +81,7 @@ class _TrainSimulation:
         self.blocked: list[int] = []
         self.candidates: list[tuple[int, ...]] = []
         self.reason_codes: list[str] = []
+        self.stopped: dict[str, Any] | None = None
 
     def _plan_from_queue(self) -> MergeTrainBatchCandidateRecord:
         candidate = build_merge_train_batch_candidate(
@@ -142,6 +140,7 @@ class _TrainSimulation:
         culprits: set[int],
         infrastructure_failure: Any = lambda: None,
         max_passes: int = 20,
+        settle: bool = True,
     ) -> None:
         record: MergeTrainBatchCandidateRecord | None = None
         for _ in range(max_passes):
@@ -206,13 +205,17 @@ class _TrainSimulation:
                 )
                 record = None
                 continue
+            if result["controller_action"] == "candidate_failed":
+                self.stopped = result
+                return
             self.test.assertEqual(result["controller_action"], "plan_candidate", result)
             record = next(
                 active
                 for active in self.store.list_merge_train_batch_candidate_records(status="active")
                 if active.record_id == result["merge_train_batch_candidate_record_id"]
             )
-        self.test.fail("simulation did not settle")
+        if settle:
+            self.test.fail("simulation did not settle")
 
 
 class CulpritIsolationTests(unittest.TestCase):
@@ -247,12 +250,74 @@ class CulpritIsolationTests(unittest.TestCase):
         self.assertEqual(train.reason_codes, ["infrastructure_retry"])
         self.assertTrue(retry.candidate_ref.endswith("-infrastructure-retry"))
 
-    def test_repeated_infrastructure_failure_falls_back_to_isolation(self) -> None:
+    def test_repeated_infrastructure_failure_stops_without_blame(self) -> None:
         with TemporaryDirectory() as directory:
             train = _TrainSimulation(self, FilesystemRecordStore(state_dir=Path(directory)), 2)
-            train.run(culprits={2}, infrastructure_failure=lambda: RUNNER_LOSS)
+            train.run(culprits=set(), infrastructure_failure=lambda: RUNNER_LOSS)
+        self.assertEqual(train.reason_codes, ["infrastructure_retry", "infrastructure_retry_used"])
+        self.assertEqual(train.blocked, [])
+        assert train.stopped is not None
+        self.assertEqual(train.stopped["controller_action"], "candidate_failed")
+
+    def test_infrastructure_retry_failing_on_a_real_test_is_isolated(self) -> None:
+        outcomes = iter((RUNNER_LOSS,))
+        with TemporaryDirectory() as directory:
+            train = _TrainSimulation(self, FilesystemRecordStore(state_dir=Path(directory)), 2)
+            train.run(culprits={2}, infrastructure_failure=lambda: next(outcomes, None))
         self.assertEqual(train.reason_codes[:2], ["infrastructure_retry", "failure_isolation"])
-        self.assertIn(2, train.blocked)
+        self.assertEqual(train.blocked, [2])
+        self.assertEqual(train.landed, [1])
+
+    def test_isolation_holds_release_when_a_retested_member_leaves(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            train = _TrainSimulation(self, store, 2)
+            # Stop after [1, 2] fails and the train retests [1] while 2 waits.
+            train.run(culprits={1}, max_passes=1, settle=False)
+            child = store.list_merge_train_batch_candidate_records(status="active")
+            self.assertEqual(
+                [entry.pull_request_number for entry in child[0].candidate.entries], [1]
+            )
+            # Its author closes #1 before the retest runs.
+            train.snapshot = train.snapshot.model_copy(
+                update={"pull_requests": train.snapshot.pull_requests[1:]}
+            )
+            failed_child = build_merge_train_batch_candidate_record(
+                candidate=child[0].candidate.model_copy(
+                    update={
+                        "candidate_sha": "candidate-2",
+                        "status": "failed",
+                        "required_checks_status": "fail",
+                    }
+                ),
+                source="test",
+                updated_at="2026-10-10T12:02:00Z",
+            )
+            store.write_merge_train_batch_candidate_record(failed_child)
+            client = Mock()
+            client.read_merge_train_snapshot.return_value = train.snapshot
+            client.probe_batch_entry_conflicts.return_value = ()
+            result = try_reflow_failed_merge_train_candidate(
+                candidate_store=store,
+                stack_collapse_store=store,
+                active_candidate_record=failed_child,
+                policy=train.policy,
+                policy_sha256="policy-digest",
+                transport=object(),  # type: ignore[arg-type]
+                github_client=cast(GitHubMergeTrainClient, client),
+                repository=train.snapshot.repository,
+                base_branch=train.snapshot.base_branch,
+                merge_method="merge",
+                recorded_at="2026-10-10T12:03:00Z",
+                trace_id="isolation",
+                mutate=True,
+                lease=Mock(),
+            )
+        assert result is not None
+        self.assertEqual(result["controller_action"], "plan_candidate")
+        replacement = MergeTrainBatchCandidate.model_validate(result["candidate"])
+        self.assertEqual([entry.pull_request_number for entry in replacement.entries], [2])
+        self.assertEqual(replacement.held_out, ())
 
     def test_dry_run_reports_isolation_without_writing(self) -> None:
         with TemporaryDirectory() as directory:
@@ -441,6 +506,16 @@ class CandidateFailureClassificationTests(unittest.TestCase):
         self.assertFalse(failures.infrastructure_only)
         self.assertEqual(failures.failed_tests, ("tests.test_widget.WidgetTests.test_renders",))
 
+    def test_fail_fast_cancellation_beside_a_real_failure_is_not_infrastructure(self) -> None:
+        failures = self._classify(
+            [
+                _check_run(1, "lint (3.13)", "failure"),
+                _check_run(2, "lint (3.12)", "cancelled"),
+            ],
+            {1: [_exit_code()], 2: [{"message": "The operation was canceled."}]},
+        )
+        self.assertFalse(failures.infrastructure_only)
+
     def test_ordinary_failure_and_failing_status_are_not_infrastructure(self) -> None:
         self.assertFalse(
             self._classify(
@@ -471,7 +546,7 @@ class CandidateFailureClassificationTests(unittest.TestCase):
         self.assertEqual(failures.check_names, ("unnamed check",))
         self.assertEqual(failures.failed_tests, ())
 
-    def test_client_reads_annotations_only_for_failed_runs(self) -> None:
+    def test_client_reads_annotations_for_failed_and_cancelled_runs(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 {
@@ -489,6 +564,7 @@ class CandidateFailureClassificationTests(unittest.TestCase):
                         "message": "tests.test_widget.WidgetTests.test_renders",
                     }
                 ],
+                [],
             )
         )
         candidate = MergeTrainBatchCandidate.model_validate(
@@ -514,7 +590,10 @@ class CandidateFailureClassificationTests(unittest.TestCase):
         ]
         self.assertEqual(
             annotation_paths,
-            ["/repos/cbusillo/sellyouroutboard/check-runs/11/annotations?per_page=50"],
+            [
+                f"/repos/cbusillo/sellyouroutboard/check-runs/{check_run_id}/annotations?per_page=50"
+                for check_run_id in (11, 12)
+            ],
         )
         self.assertFalse(failures.infrastructure_only)
         self.assertEqual(failures.check_names, ("test_shard (0)", "audit_policy"))

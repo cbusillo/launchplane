@@ -328,7 +328,6 @@ class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
                     name="test_shard (0)",
                     conclusion="failure",
                     url="https://github.com/cbusillo/sellyouroutboard/actions/runs/1/job/2",
-                    infrastructure=False,
                     failed_tests=("tests.test_widget.WidgetTests.test_renders",),
                 ),
             )

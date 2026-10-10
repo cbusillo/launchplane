@@ -2661,6 +2661,7 @@ def _reflow_stale_candidate_record(
             snapshot=snapshot,
             held_out=candidate_record.candidate.held_out,
             batch_landing=lease.record.ordinary_job_binding is None,
+            isolating_entries=candidate_record.candidate.entries,
         ),
     )
     stack_collapse_root = candidate_record.candidate.stack_collapse_root
@@ -4026,6 +4027,7 @@ def try_reflow_failed_merge_train_candidate(
         snapshot=snapshot,
         held_out=active_candidate_record.candidate.held_out,
         batch_landing=active_candidate_record.ordinary_job_binding is None,
+        isolating_entries=active_candidate_record.candidate.entries,
     )
     snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
     dry_run_result = build_merge_train_dry_run_result(
@@ -4331,7 +4333,8 @@ def _recover_failed_merge_train_candidate(
 ) -> dict[str, object] | None:
     """Move an unchanged candidate that failed its checks toward landing the rest.
 
-    An infrastructure failure is rebuilt once with the same members. Any other
+    An infrastructure failure is rebuilt once with the same members; a second
+    one stays stopped without blaming anyone. Any other
     failure of several members retests the first half on the same base while
     the rest wait; when one member fails alone, only that pull request is
     blocked. ``None`` keeps the failure stopped.
@@ -4354,12 +4357,24 @@ def _recover_failed_merge_train_candidate(
         ],
         "failed_tests": list(failures.failed_tests),
     }
-    if failures.infrastructure_only and not _infrastructure_retry_used(
-        candidate_store=candidate_store,
-        failed=failed,
-        dry_run_result=dry_run_result,
-        base_sha=snapshot.base_sha,
-    ):
+    if failures.infrastructure_only:
+        if _infrastructure_retry_used(
+            candidate_store=candidate_store,
+            failed=failed,
+            dry_run_result=dry_run_result,
+            base_sha=snapshot.base_sha,
+        ):
+            # Runners failed twice; that blames no pull request. Stay stopped.
+            return {
+                "repository": repository,
+                "base_branch": base_branch,
+                "mode": "dry-run",
+                "controller_action": "candidate_failed",
+                "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+                "candidate": failed.model_dump(mode="json"),
+                "reason_code": "infrastructure_retry_used",
+                "details": details,
+            }
         return _plan_failed_candidate_replacement(
             reason_code="infrastructure_retry",
             candidate_store=candidate_store,
@@ -4987,12 +5002,25 @@ def _surviving_held_out_entries(
     snapshot: MergeTrainDryRunSnapshot,
     held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
     batch_landing: bool = False,
+    isolating_entries: tuple[MergeTrainBatchEntry, ...] = (),
 ) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
+    """Return the holds that still apply to the current queue.
+
+    A conflict hold lasts while its base, head and accepted preceding heads are
+    unchanged. A failure-isolation hold also needs its base and head, and lasts
+    only while every member of the candidate retesting without it
+    (``isolating_entries``) is still queued at the same head; planning without
+    that candidate releases it.
+    """
     if not held_out:
         return ()
     queue = build_merge_train_dry_run_result(
         policy=policy, snapshot=snapshot, batch_landing=batch_landing
     ).queue
+    eligible_heads = {(entry.number, entry.head_sha) for entry in queue if entry.eligible}
+    isolation_active = bool(isolating_entries) and all(
+        (entry.pull_request_number, entry.head_sha) in eligible_heads for entry in isolating_entries
+    )
     holds = {entry.pull_request_number: entry for entry in held_out}
     preceding: list[tuple[int, str]] = []
     surviving: list[MergeTrainBatchHeldOutEntry] = []
@@ -5005,10 +5033,9 @@ def _surviving_held_out_entries(
             and hold.head_sha == entry.head_sha
             and hold.probe_base_sha == snapshot.base_sha
             and (
-                # An isolation hold lasts while its base is unchanged; landing
-                # the retested members ends it.
-                hold.reason == "failure_isolation"
-                or tuple(zip(hold.conflicts_with, hold.conflicts_with_head_shas))
+                isolation_active
+                if hold.reason == "failure_isolation"
+                else tuple(zip(hold.conflicts_with, hold.conflicts_with_head_shas))
                 == tuple(preceding)
             )
         ):

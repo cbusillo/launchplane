@@ -36,7 +36,8 @@ class CandidateCheckFailure:
     name: str
     conclusion: str
     url: str
-    infrastructure: bool
+    # GitHub annotated the run as lost, shut down, or never given a runner.
+    runner_lost: bool = False
     failed_tests: tuple[str, ...] = ()
     source: Literal["check_run", "commit_status"] = "check_run"
 
@@ -50,12 +51,18 @@ class CandidateCheckFailures:
         """Retry only when the runners failed and no check named a real failure.
 
         Jobs that depend on a lost job also fail, with a generic exit-code
-        annotation, so one runner-loss signature is enough while no check
-        names a failed test and no commit status reports a failure.
+        annotation, so a runner-loss annotation is enough. A bare cancellation
+        is not: fail-fast also cancels the siblings of a real failure, so it
+        counts only when no run failed outright. A named failed test or a
+        failing commit status always rules infrastructure out.
         """
-        return any(check.infrastructure for check in self.checks) and not any(
-            check.failed_tests or check.source == "commit_status" for check in self.checks
-        )
+        if any(check.failed_tests or check.source == "commit_status" for check in self.checks):
+            return False
+        if any(check.runner_lost for check in self.checks):
+            return True
+        return any(
+            check.conclusion in INFRASTRUCTURE_CONCLUSIONS for check in self.checks
+        ) and not any(check.conclusion in FAILURE_CONCLUSIONS for check in self.checks)
 
     @property
     def check_names(self) -> tuple[str, ...]:
@@ -75,7 +82,7 @@ def classify_candidate_check_failures(
     """Name each failing check and decide whether runner infrastructure caused it.
 
     ``read_annotations`` is called for at most ``MAX_ANNOTATED_CHECK_RUNS``
-    failing check runs; cancelled runs need no read.
+    failed or cancelled check runs.
     """
     failures: list[CandidateCheckFailure] = []
     annotated = 0
@@ -88,12 +95,11 @@ def classify_candidate_check_failures(
         conclusion = str(check_run.get("conclusion") or "").strip().lower()
         if conclusion not in INFRASTRUCTURE_CONCLUSIONS | FAILURE_CONCLUSIONS:
             continue
-        infrastructure = conclusion in INFRASTRUCTURE_CONCLUSIONS
+        runner_lost = False
         failed_tests: list[str] = []
         check_run_id = check_run.get("id")
         if (
-            not infrastructure
-            and annotated < MAX_ANNOTATED_CHECK_RUNS
+            annotated < MAX_ANNOTATED_CHECK_RUNS
             and isinstance(check_run_id, int)
             and not isinstance(check_run_id, bool)
         ):
@@ -101,7 +107,7 @@ def classify_candidate_check_failures(
             for annotation in read_annotations(check_run_id):
                 message = str(annotation.get("message") or "").strip()
                 if any(signature in message.lower() for signature in RUNNER_LOSS_MESSAGES):
-                    infrastructure = True
+                    runner_lost = True
                 title = str(annotation.get("title") or "").strip().casefold()
                 if title == FAILED_TEST_ANNOTATION_TITLE and _SAFE_TEST_ID.fullmatch(message):
                     failed_tests.append(message)
@@ -110,7 +116,7 @@ def classify_candidate_check_failures(
                 name=_safe_check_name(name),
                 conclusion=conclusion,
                 url=_safe_url(check_run.get("html_url")),
-                infrastructure=infrastructure and not failed_tests,
+                runner_lost=runner_lost,
                 failed_tests=tuple(failed_tests),
             )
         )
@@ -127,7 +133,6 @@ def classify_candidate_check_failures(
                     name=_safe_check_name(context),
                     conclusion=state,
                     url="",
-                    infrastructure=False,
                     source="commit_status",
                 )
             )
