@@ -97,28 +97,40 @@ def _opaque_inputs(manifest: ArtifactIdentityManifest) -> dict[str, object]:
 def _kind_conflicts(file: ReleaseInputFile) -> bool:
     path = PurePosixPath(file.path)
     if file.kind == "static":
-        return "static" not in path.parts or path.suffix.lower() not in {
-            ".scss",
-            ".css",
-            ".js",
-            ".xml",
-            ".svg",
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".webp",
-            ".woff",
-            ".woff2",
-        }
+        return "static" not in path.parts
     if file.kind == "code":
         return (
             path.suffix != ".py"
-            or bool({"models", "migrations", "data", "views"} & set(path.parts))
+            or bool(
+                {
+                    "models",
+                    "wizard",
+                    "wizards",
+                    "report",
+                    "reports",
+                    "security",
+                    "migrations",
+                    "data",
+                    "views",
+                }
+                & set(path.parts)
+            )
             or path.name in {"__manifest__.py", "__init__.py"}
         )
     if file.kind == "docs_ci":
-        return not (path.suffix == ".md" or path.parts[0] in {"docs", ".github", "tests"})
+        return not (
+            path.suffix in {".md", ".rst", ".adoc"}
+            or {"docs", "doc", ".github", "tests"} & set(path.parts)
+            or path.name in {".gitignore", "Makefile", ".pre-commit-config.yaml"}
+        )
     return False
+
+
+def release_opaque_inputs_sha256(manifest: ArtifactIdentityManifest) -> str:
+    """Producer/consumer fingerprint for the opaque-input examination contract."""
+    return hashlib.sha256(
+        json.dumps(_opaque_inputs(manifest), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _dependency_closure(roots: set[str], graph: dict[str, set[str]]) -> set[str]:
@@ -185,12 +197,25 @@ def classify_release_database_compatibility(
                 reasons.add("read_write_compatibility_not_declared")
             if _opaque_inputs(production) != _opaque_inputs(candidate):
                 reasons.add("changed_base_dependency_or_build_inputs")
-                complete = False
+                if (
+                    old.opaque_inputs_sha256 != release_opaque_inputs_sha256(production)
+                    or new.opaque_inputs_sha256 != release_opaque_inputs_sha256(candidate)
+                    or new.database_update_modules is None
+                ):
+                    complete = False
+                    reasons.add("unexamined_opaque_input_plan")
+                else:
+                    update_roots.update(new.database_update_modules)
+                    changed_modules.update(new.database_update_modules)
             graph = {module.name: set(module.depends) for module in new.modules}
             old_graph = {module.name: set(module.depends) for module in old.modules}
             if old_graph != graph:
                 reasons.add("changed_module_dependencies")
-                update_roots.update(name for name in graph if old_graph.get(name) != graph[name])
+                changed_dependencies = {
+                    name for name in graph if old_graph.get(name) != graph[name]
+                }
+                update_roots.update(changed_dependencies)
+                changed_modules.update(changed_dependencies)
             installs = set(candidate.odoo_install_modules) - set(production.odoo_install_modules)
             if not set(candidate.odoo_install_modules) <= graph.keys():
                 reasons.add("unexamined_install_requirements")

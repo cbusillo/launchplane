@@ -17,7 +17,10 @@ from control_plane.contracts.artifact_release_compatibility import (
     ReleaseSourceInventory,
 )
 from control_plane.contracts.release_review import ReleaseChecklist, ReleaseReviewDecisionRecord
-from control_plane.release_compatibility import classify_release_database_compatibility
+from control_plane.release_compatibility import (
+    classify_release_database_compatibility,
+    release_opaque_inputs_sha256,
+)
 from control_plane.release_review import build_release_review, checklist_digest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -144,6 +147,17 @@ class ReleaseCompatibilityTests(unittest.TestCase):
             ("addons/site/controllers/main.py", "code", "site"),
             ("docs/deployment.md", "docs_ci", ""),
             (".github/workflows/build.yml", "docs_ci", ""),
+            (".gitignore", "docs_ci", ""),
+            ("Makefile", "docs_ci", ""),
+            (".pre-commit-config.yaml", "docs_ci", ""),
+            ("README.rst", "docs_ci", ""),
+            ("addons/site/tests/mock_response.json", "docs_ci", ""),
+            ("addons/site/static/favicon.ico", "static", "site"),
+            ("addons/site/static/font.ttf", "static", "site"),
+            ("addons/site/static/font.otf", "static", "site"),
+            ("addons/site/static/font.eot", "static", "site"),
+            ("addons/site/static/demo.gif", "static", "site"),
+            ("addons/site/static/demo.mp4", "static", "site"),
         ):
             with self.subTest(path=path):
                 before = artifact("old", files=(file(path, kind, module=module),))
@@ -236,6 +250,38 @@ class ReleaseCompatibilityTests(unittest.TestCase):
                 self.assertFalse(result.module_plan_complete)
                 self.assertIn("changed_base_dependency_or_build_inputs", result.reasons)
 
+    def test_examined_opaque_changes_have_a_hash_bound_targeted_path(self) -> None:
+        graph = (
+            ReleaseModuleDeclaration(name="base"),
+            ReleaseModuleDeclaration(name="site", depends=("base",)),
+            ReleaseModuleDeclaration(name="unrelated"),
+        )
+        before, after = artifact("old", modules=graph), artifact("new", modules=graph)
+        after.enterprise_base_digest = "sha256:" + "e" * 64
+        assert before.release_compatibility is not None and after.release_compatibility is not None
+        before.release_compatibility = before.release_compatibility.model_copy(
+            update={
+                "opaque_inputs_sha256": release_opaque_inputs_sha256(before),
+            }
+        )
+        after.release_compatibility = after.release_compatibility.model_copy(
+            update={
+                "opaque_inputs_sha256": release_opaque_inputs_sha256(after),
+                "database_update_modules": ("base",),
+            }
+        )
+        result = classify(before, after)
+        self.assertEqual(result.classification, "database_changing")
+        self.assertTrue(result.module_plan_complete)
+        self.assertEqual(result.update_modules, ("base", "site"))
+        self.assertEqual(result.changed_modules, ("base",))
+        self.assertEqual(result.install_modules, ())
+        # The supported route cannot reuse a plan for different opaque inputs.
+        after.enterprise_base_digest = "sha256:" + "f" * 64
+        result = classify(before, after)
+        self.assertFalse(result.module_plan_complete)
+        self.assertIn("unexamined_opaque_input_plan", result.reasons)
+
     def test_missing_history_declarations_or_full_inputs_cannot_be_compatible(self) -> None:
         after = artifact("new")
         self.assertEqual(classify(None, after).classification, "database_changing")
@@ -264,6 +310,9 @@ class ReleaseCompatibilityTests(unittest.TestCase):
     def test_conflicting_or_unknown_declarations_do_not_hide_database_changes(self) -> None:
         for path, kind in (
             ("addons/site/models/order.py", "code"),
+            ("addons/site/wizard/order.py", "code"),
+            ("addons/site/report/order.py", "code"),
+            ("addons/site/security/rules.py", "code"),
             ("addons/site/views/home.xml", "static"),
             ("addons/site/hook.py", "unknown"),
         ):

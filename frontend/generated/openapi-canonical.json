@@ -901,12 +901,32 @@
             "title": "Complete",
             "type": "boolean"
           },
+          "database_update_modules": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Database Update Modules"
+          },
           "modules": {
             "items": {
               "$ref": "#/components/schemas/ReleaseModuleDeclaration"
             },
             "title": "Modules",
             "type": "array"
+          },
+          "opaque_inputs_sha256": {
+            "default": "",
+            "pattern": "^(|[0-9a-f]{64})$",
+            "title": "Opaque Inputs Sha256",
+            "type": "string"
           },
           "read_write_compatible": {
             "title": "Read Write Compatible",
@@ -56129,12 +56149,32 @@
                         "title": "Complete",
                         "type": "boolean"
                       },
+                      "database_update_modules": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Database Update Modules"
+                      },
                       "modules": {
                         "items": {
                           "$ref": "#/$defs/ReleaseModuleDeclaration"
                         },
                         "title": "Modules",
                         "type": "array"
+                      },
+                      "opaque_inputs_sha256": {
+                        "default": "",
+                        "pattern": "^(|[0-9a-f]{64})$",
+                        "title": "Opaque Inputs Sha256",
+                        "type": "string"
                       },
                       "read_write_compatible": {
                         "title": "Read Write Compatible",
@@ -57582,12 +57622,32 @@
                         "title": "Complete",
                         "type": "boolean"
                       },
+                      "database_update_modules": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Database Update Modules"
+                      },
                       "modules": {
                         "items": {
                           "$ref": "#/$defs/ReleaseModuleDeclaration"
                         },
                         "title": "Modules",
                         "type": "array"
+                      },
+                      "opaque_inputs_sha256": {
+                        "default": "",
+                        "pattern": "^(|[0-9a-f]{64})$",
+                        "title": "Opaque Inputs Sha256",
+                        "type": "string"
                       },
                       "read_write_compatible": {
                         "title": "Read Write Compatible",
@@ -58755,12 +58815,32 @@
                         "title": "Complete",
                         "type": "boolean"
                       },
+                      "database_update_modules": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Database Update Modules"
+                      },
                       "modules": {
                         "items": {
                           "$ref": "#/$defs/ReleaseModuleDeclaration"
                         },
                         "title": "Modules",
                         "type": "array"
+                      },
+                      "opaque_inputs_sha256": {
+                        "default": "",
+                        "pattern": "^(|[0-9a-f]{64})$",
+                        "title": "Opaque Inputs Sha256",
+                        "type": "string"
                       },
                       "read_write_compatible": {
                         "title": "Read Write Compatible",

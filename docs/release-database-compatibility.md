@@ -23,7 +23,9 @@ The cutover/readiness implementation must enforce them before overlap.
 
 Missing production history, missing verification or complete declarations,
 conflicting identities, unknown files, and changed opaque framework/base-image,
-build or dependency inputs yield `database_changing`. Unknown evidence also
+build or dependency inputs yield `database_changing`. An examined, hash-bound
+opaque-input module plan permits targeted work on that conservative path.
+Unknown evidence also
 marks `module_plan_complete=false`: consumers must refuse to execute an
 incomplete plan, rather than guessing modules or upgrading everything.
 Classification does not waive any backup, Client-acceptance, credential or
@@ -69,6 +71,18 @@ enterprise base digest, build flags, selector, platform, lock hash, package
 inventory and external dependency changes remain conservative even if the
 source file declarations suggest compatibility.
 
+To examine an opaque change, both declarations supply `opaque_inputs_sha256`,
+matching the fingerprint defined by `release_opaque_inputs_sha256` in
+`control_plane/release_compatibility.py`. That function is the canonical
+semantic projection and hashing specification. The producer supplies
+`database_update_modules` naming the resolved update roots for its examined
+inputs. `null` means unexamined; an explicit empty list asserts no module DB
+work is required. Names must exist in the full module graph. Hash mismatch,
+missing baseline hash or missing candidate plan keeps execution incomplete.
+A matching plan stays `database_changing` and expands dependents, providing a
+supported path for framework/base-image and Python dependency updates without
+silently declaring overlap safe or copying the artifact install list.
+
 Each file names a normalized relative `path`, content `sha256`, `kind`, optional
 `module`, and (for an assets-only manifest) `manifest_database_sha256`:
 
@@ -101,7 +115,7 @@ installation set, not the update set. The consumer expands required installation
 dependencies and records new requirements separately in `install_modules`.
 Database changes seed `update_modules`, expanded through reverse dependencies
 in the candidate graph, excluding new installs. `changed_modules` records direct
-file owners separately, including static/code-only owners that need no update.
+file modules separately, including static/code-only modules that need no update.
 Unrelated modules do not enter the update list; docs/CI-only changes induce none.
 
 The maintenance consumer must reconcile this image graph/requirement plan with
