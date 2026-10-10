@@ -26,7 +26,10 @@ from control_plane.contracts.merge_readiness import (
     MergeReadinessTechnicalChecksFacet,
     merge_readiness_worst_state,
 )
-from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidateRecord,
+    MergeTrainHeadCheckReuse,
+)
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
 from control_plane.tenant_admission_controller import (
     TenantAdmissionRequiredTechnicalCheck,
@@ -67,8 +70,11 @@ def evaluate_merge_readiness(
     candidate_evidence: MergeReadinessCandidateEvidence,
     fence_evidence: MergeReadinessFenceEvidence,
     evaluated_at: str,
+    head_check_reuse: MergeTrainHeadCheckReuse | None = None,
 ) -> MergeReadinessResult:
-    technical_facet = _technical_checks_facet(target=target, evidence=technical_checks)
+    technical_facet = _technical_checks_facet(
+        target=target, evidence=technical_checks, head_check_reuse=head_check_reuse
+    )
     engineering_facet = _engineering_review_facet(
         target=target,
         decision=engineering_decision,
@@ -162,6 +168,14 @@ def evaluate_merge_readiness_from_live_evidence(
             observed_effect_sha=observed_effect_sha,
         ),
         evaluated_at=evaluated_at,
+        head_check_reuse=(
+            candidate_record.candidate.head_check_reuse
+            if candidate_record is not None
+            and structural_candidate_status == "exact"
+            and candidate_record.candidate.candidate_sha == target.expected_effect_sha
+            and candidate_record.candidate.candidate_tree_sha == target.pull_request_tree_sha
+            else None
+        ),
     )
 
 
@@ -169,6 +183,7 @@ def _technical_checks_facet(
     *,
     target: MergeReadinessTarget,
     evidence: MergeReadinessTechnicalCheckEvidence,
+    head_check_reuse: MergeTrainHeadCheckReuse | None = None,
 ) -> MergeReadinessTechnicalChecksFacet:
     reasons: list[MergeReadinessReasonCode] = []
     states: list[MergeReadinessState] = []
@@ -184,7 +199,25 @@ def _technical_checks_facet(
     else:
         reasons.append("checks_unknown")
         states.append("unknown")
-    if evidence.head_sha != target.expected_effect_sha:
+    reuse_matches = (
+        head_check_reuse is not None
+        and (
+            head_check_reuse.pull_request_number,
+            head_check_reuse.head_sha,
+            head_check_reuse.tree_sha,
+            head_check_reuse.base_sha,
+            head_check_reuse.candidate_sha,
+        )
+        == (
+            target.pull_request_number,
+            evidence.head_sha,
+            target.pull_request_tree_sha,
+            target.base_sha,
+            target.expected_effect_sha,
+        )
+        and evidence.head_sha == target.pull_request_head_sha
+    )
+    if evidence.head_sha != target.expected_effect_sha and not reuse_matches:
         reasons.append("checks_head_mismatch")
         states.append("blocked_checks")
     return MergeReadinessTechnicalChecksFacet(
