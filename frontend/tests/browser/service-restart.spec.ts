@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
 
-for (const outcome of ["success", "uncertain", "stale"]) {
-  const uncertain = outcome === "uncertain";
+for (const outcome of ["success", "uncertain", "stale", "busy", "wrong-actor", "missing-receipt"]) {
+  const invalidHandle = outcome === "wrong-actor" || outcome === "missing-receipt";
+  const uncertain = outcome === "uncertain" || invalidHandle;
   test(`service restart reviews identity and handles ${outcome}`, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -40,6 +41,8 @@ for (const outcome of ["success", "uncertain", "stale"]) {
       if (body.mode !== "dry-run") {
         applies.push({ key: route.request().headers()["idempotency-key"], body });
         if (uncertain && applies.length === 1) { await route.abort(); return; }
+        if (invalidHandle && applies.length === 2) { await route.fulfill({ status: outcome === "wrong-actor" ? 409 : 404, json: { error: { code: outcome === "wrong-actor" ? "idempotency_key_reused" : "restart_receipt_unavailable", message: "This is not a recoverable request for this account." } } }); return; }
+        if (outcome === "busy" && applies.length === 1) { await route.fulfill({ status: 409, json: { error: { code: "restart_target_busy", message: "Another restart holds this lane." } } }); return; }
         if (uncertain && applies.length === 2) { await route.fulfill({ status: 401, json: { error: { code: "session_expired", message: "Sign in again." } } }); return; }
         if (uncertain && applies.length === 3) { await route.fulfill({ status: 409, json: { error: { code: "restart_refused", message: "Lane temporarily held." } } }); return; }
         if (outcome === "stale" && applies.length === 1) {
@@ -76,6 +79,15 @@ for (const outcome of ["success", "uncertain", "stale"]) {
       await expect(panel.getByLabel("Reason", { exact: true })).toBeDisabled();
       await panel.getByRole("button", { name: "Resume existing restart request" }).click();
       await expect.poll(() => applies.length).toBe(2);
+      if (invalidHandle) {
+        await expect(panel.getByRole("button", { name: "Resume existing restart request" })).toHaveCount(0);
+        await expect(panel.getByLabel("Reason", { exact: true })).toBeEnabled();
+        await expect(panel.getByRole("status")).toContainText("does not identify a recoverable restart");
+        expect(applies[1]).toEqual({ key: applies[0].key, body: { ...(applies[0].body as object), mode: "reconcile" } });
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        await panel.screenshot({ path: testInfo.outputPath("restart-unavailable-handle.png") });
+        return;
+      }
       await expect(panel.getByRole("status")).toContainText("Sign in again");
       await page.reload();
       panel = page.getByRole("region", { name: "Restart on the same version" });
@@ -84,7 +96,7 @@ for (const outcome of ["success", "uncertain", "stale"]) {
       await panel.getByRole("button", { name: "Resume existing restart request" }).click();
       await expect.poll(() => applies.length).toBe(4);
       for (const resumed of applies.slice(1)) expect(resumed).toEqual({ key: applies[0].key, body: { ...(applies[0].body as object), mode: "reconcile" } });
-    } else if (outcome === "stale") {
+    } else if (outcome === "stale" || outcome === "busy") {
       await expect(panel.getByRole("status")).toContainText("refused before a service change");
       await expect(panel.getByLabel("Reason", { exact: true })).toBeEnabled();
       await expect(panel.getByRole("button", { name: "Resume existing restart request" })).toHaveCount(0);

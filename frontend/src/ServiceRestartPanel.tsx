@@ -67,15 +67,19 @@ export function ServiceRestartPanel({ detail, fixtureMode, onRefresh }: {
       try { sessionStorage.removeItem(storageKey); } catch { /* Optional browser storage. */ }
       onRefresh();
     } catch (error) {
-      const refused = !pending && error instanceof LaunchplaneApiError && (
+      const unavailableHandle = !!pending && error instanceof LaunchplaneApiError
+        && ["restart_receipt_unavailable", "idempotency_key_reused"].includes(error.code);
+      const refused = unavailableHandle || !pending && error instanceof LaunchplaneApiError && (
         [400, 401, 403, 404, 422].includes(error.statusCode)
-        || ["restart_refused", "restart_identity_changed", "idempotency_key_reused"].includes(error.code)
+        || ["restart_refused", "restart_identity_changed", "restart_target_busy", "idempotency_key_reused"].includes(error.code)
       );
       if (refused) {
         setPending(null); setReview(null); setConfirmed(false);
         try { sessionStorage.removeItem(storageKey); } catch { /* Optional browser storage. */ }
       }
-      setMessage(`${error instanceof Error ? error.message : "Restart outcome is unknown."} ${refused
+      setMessage(`${error instanceof Error ? error.message : "Restart outcome is unknown."} ${unavailableHandle
+        ? "This handle does not identify a recoverable restart for your account. Inspect activity and use the account that started it."
+        : refused
         ? "The request was refused before a service change. Inspect again."
         : "Resume this request to read its result; do not start another restart."}`);
     } finally { setBusy(false); }
@@ -97,7 +101,7 @@ export function ServiceRestartPanel({ detail, fixtureMode, onRefresh }: {
     </div> : null}
     {pending ? <button className="secondary-button" type="button" disabled={fixtureMode || busy} onClick={() => void restart()}>Resume existing restart request</button> : null}
     {!pending ? recoveries.map(event => <div key={event.event_id}>
-      <p>{event.title}. Resume with the identity that started this request.</p>
+      <p>{event.title}. Resume with the account that started this request.</p>
       <button className="secondary-button" type="button" disabled={fixtureMode || busy} onClick={() => {
         const recovery = event.restart_recovery!;
         const attempt = { payload: recovery.request, key: recovery.idempotency_key };

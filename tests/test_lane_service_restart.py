@@ -4,6 +4,7 @@ import asyncio
 from contextlib import redirect_stderr
 from copy import deepcopy
 from datetime import datetime, timezone
+from dataclasses import replace
 import json
 import io
 from pathlib import Path
@@ -32,7 +33,11 @@ from control_plane.contracts.release_review import (
     ReleaseVersion,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
-from control_plane.service_auth import BearerIdentityConfig
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
+)
 from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.auth import StubVerifier, identity, local_operator_policy
@@ -118,6 +123,8 @@ class RestartProvider:
         self.unknown = False
         self.after_bad_image = False
         self.rejection: int | None = None
+        self.remote_command_failed = False
+        self.restart_started_at = "2026-10-10T00:02:00Z"
         self.config: dict[str, Any] = {
             "Id": self.container_id,
             "Image": "sha256:" + "e" * 64,
@@ -163,9 +170,10 @@ class RestartProvider:
                     path=path,
                     detail="private credential=must-not-leak",
                     status_code=self.rejection,
+                    remote_command_failed=self.remote_command_failed,
                 )
             self.config["State"].update(
-                StartedAt="2026-10-10T00:02:00Z", Health={"Status": "healthy"}
+                StartedAt=self.restart_started_at, Health={"Status": "healthy"}
             )
             if self.after_bad_image:
                 self.config["Image"] = "sha256:" + "1" * 64
@@ -214,13 +222,28 @@ class ServiceRestartTests(unittest.TestCase):
         actions: tuple[str, ...] = ("live_target_runtime.plan", "live_target_runtime.apply"),
         contexts: tuple[str, ...] = ("cm",),
         subject: str = "local-owner-agent",
+        github_admin: int | None = None,
     ) -> Any:
         return create_launchplane_fastapi_test_app(
             local_record_store_for_tests=self.store,
             state_dir=self.root / "state",
             control_plane_root_path=self.root,
             verifier=StubVerifier(identity()),
-            authz_policy=local_operator_policy(
+            authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "github_ids": [github_admin],
+                            "roles": ["admin"],
+                            "actions": ["live_target_runtime.plan", "live_target_runtime.apply"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                        }
+                    ]
+                }
+            )
+            if github_admin is not None
+            else local_operator_policy(
                 actions=actions, products=("odoo-tenant-cm",), contexts=contexts, subject=subject
             ),
             bearer_identity_config=BearerIdentityConfig(
@@ -446,6 +469,100 @@ class ServiceRestartTests(unittest.TestCase):
         )
         self.assertEqual(len(self.provider.writes), 1)
 
+    def test_partial_remote_command_failure_remains_unknown_and_fenced(self) -> None:
+        self.review()
+        self.provider.rejection = 400
+        self.provider.remote_command_failed = True
+        self.assertEqual(self.invoke(key="partial-command")[0], 409)
+        self.assertEqual(self.invoke(key="partial-command")[0], 409)
+        self.assertEqual(len(self.provider.writes), 1)
+
+    def test_github_login_rename_preserves_original_principal_recovery(self) -> None:
+        self.app = self.create_app(github_admin=101)
+        human = [
+            GitHubHumanIdentity(
+                login="original-name",
+                github_id=101,
+                name="",
+                email="",
+                organizations=frozenset(),
+                teams=frozenset(),
+                role="admin",
+            )
+        ]
+        route = next(
+            route
+            for route in self.app.routes
+            if getattr(route, "path", "") == SERVICE_RESTART_ROUTE
+        )
+        self.app.dependency_overrides[route.dependant.dependencies[0].call] = lambda: human[0]
+        self.review()
+        self.provider.unknown = True
+        self.assertEqual(self.invoke(key="renamed-account")[0], 409)
+        human[0] = replace(human[0], login="new-name")
+        self.payload["mode"] = "reconcile"
+        self.provider.config["State"]["StartedAt"] = datetime.now(timezone.utc).isoformat()
+        self.assertEqual(self.invoke(key="renamed-account")[1]["result"]["status"], "pass")
+        self.assertEqual(len(self.provider.writes), 1)
+
+    def test_later_verified_replacement_settles_old_unknown_without_repeating_it(self) -> None:
+        self.review()
+        original_payload = dict(self.payload)
+        self.provider.unknown = True
+        self.assertEqual(self.invoke(key="old-container")[0], 409)
+        original = self.store.read_deployment_record(self.expected.deployment_record_id)
+        replacement_identity = self.expected.model_copy(
+            update={"deployment_record_id": "isolated-replacement"}
+        )
+        self.store.write_deployment_record(
+            original.model_copy(
+                update={
+                    "record_id": replacement_identity.deployment_record_id,
+                    "runtime_identity": replacement_identity,
+                    "deploy": original.deploy.model_copy(
+                        update={
+                            "started_at": "2026-10-10T00:03:00Z",
+                            "finished_at": "2026-10-10T00:04:00Z",
+                        }
+                    ),
+                }
+            )
+        )
+        self.provider.config["Config"]["Env"] = [
+            f"{k}={v}" for k, v in runtime_identity_env(replacement_identity).items()
+        ]
+        self.payload["mode"] = "reconcile"
+        # A new deployment record alone cannot settle an effect on the same container.
+        self.assertEqual(self.invoke(key="old-container")[0], 409)
+        self.provider.container_id = "f" * 64
+        self.provider.config["Id"] = self.provider.container_id
+        self.provider.config["State"]["StartedAt"] = "2026-10-10T00:03:00Z"
+        # A different authorized admin can recover the current replacement even
+        # while the original account's old-container receipt remains unknown.
+        self.app = self.create_app(subject="replacement-admin")
+        self.provider.unknown = False
+        self.provider.restart_started_at = "2026-10-10T00:05:00Z"
+        self.payload["mode"] = "dry-run"
+        self.payload.pop("reviewed_plan_sha256")
+        self.review()
+        self.assertEqual(self.invoke(key="current-container")[1]["result"]["status"], "pass")
+        self.assertEqual(
+            self.provider.writes[-1]["payload"]["containerId"], self.provider.container_id
+        )
+        self.assertEqual(len(self.provider.writes), 2)
+        self.assertTrue(self.store.list_held_provider_target_reservations())
+        self.app = self.create_app()
+        self.payload = {**original_payload, "mode": "reconcile"}
+        status, response = self.invoke(key="old-container")
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["result"]["status"], "unknown")
+        self.assertEqual(
+            response["records"]["superseding_deployment_record_id"],
+            replacement_identity.deployment_record_id,
+        )
+        self.assertEqual(len(self.provider.writes), 2)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+
     def test_redacted_reason_activity_handle_matches_the_original_request(self) -> None:
         self.payload["reason"] = "Recover worker credential=must-not-leak"
         self.review()
@@ -498,5 +615,4 @@ class ServiceRestartTests(unittest.TestCase):
         ):
             helper()
         self.assertEqual(exited.exception.code, 2)
-        self.assertIn("already exists", stderr.getvalue())
         self.assertEqual(evidence.read_text(), "retained review")

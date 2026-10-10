@@ -76,14 +76,17 @@ an existing request retain its handle, including an expired session or a lane
 temporarily held by a release. After closing a tab, **Recover restart from
 activity** restores the original request. Resume with the original actor;
 the handle grants no authority to a reader or another admin.
+An absent or other-account receipt releases only the browser draft; a fresh
+request refused by an existing restart does not create a recovery handle.
 
 Activity's `restart_recovery` contains the original redacted request and key.
 The bounded helper also accepts `resume --evidence-file <private-recovery.json>`
 with that object and the original coordinates/reason. This sends `reconcile`,
 which refuses a missing original receipt and can never dispatch a restart.
 
-An unknown provider outcome holds the target against another restart under any
-key. Resuming the original request performs read-only reconciliation: unchanged
+An unknown provider outcome holds that exact container against another restart
+under any key. A replacement container has a distinct fence; an old POST names
+the immutable original ID and cannot affect it. Resuming the original request performs read-only reconciliation: unchanged
 identity, a healthy later start after its effect checkpoint, and HTTP runtime
 identity for web can settle the receipt without another POST. A definite,
 nonretryable provider 4xx settles as a failed receipt and releases the fence;
@@ -91,6 +94,13 @@ timeouts, retryable replies and genuinely uncertain effects stay held. A request
 stopped before any effect checkpoint can settle as undispatched. Changed or
 unverifiable evidence remains unknown; inspect its activity and provider evidence
 rather than deleting its reservation or inventing a new key.
+
+If a later verified deployment replaced the original container, reconciliation
+can settle the old receipt as **unknown** and release its fence. It requires
+the same target/app/server, a different current deployment record and a different
+sole inspected service container. A changed deployment record alone is
+insufficient. The original outcome remains unknown in activity; this observes an
+existing deployment and dispatches no restart, deployment or new code.
 
 ## Isolated proof
 

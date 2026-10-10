@@ -5782,6 +5782,10 @@ export type RestartLaneServiceData = {
 };
 
 export type RestartLaneServiceErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
     409: LaunchplaneErrorResponse;
     503: LaunchplaneErrorResponse;
 };

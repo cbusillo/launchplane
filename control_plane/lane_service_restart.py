@@ -190,11 +190,19 @@ class ServiceRestartAdapter:
         self.trace_id = trace_id
 
     def target_key(self) -> str:
-        # Fence the entire lane, including a restart of a different named service.
+        # Fence the immutable recipient of the POST. An old uncertain request
+        # cannot block a replacement container or affect that new recipient.
         return (
             "lane-service-restart-target:"
             + hashlib.sha256(
-                json.dumps([self.plan.context, self.plan.instance, self.plan.target_id]).encode()
+                json.dumps(
+                    [
+                        self.plan.context,
+                        self.plan.instance,
+                        self.plan.target_id,
+                        self.plan.before.container_id,
+                    ]
+                ).encode()
             ).hexdigest()
         )
 
@@ -224,6 +232,32 @@ class ServiceRestartAdapter:
                 store=self.store, root=self.root, request=self.request, actor=self.plan.actor
             )
             after = fresh.before
+            # A full Docker container ID is immutable. A verified later deploy
+            # with a different sole service container proves the old POST cannot
+            # affect the current container, without guessing the old outcome.
+            if (
+                all(
+                    getattr(fresh, field) == getattr(self.plan, field)
+                    for field in ("target_id", "app_name", "server_id")
+                )
+                and fresh.deployment_record_id != self.plan.deployment_record_id
+                and after.container_id != self.plan.before.container_id
+            ):
+                result = LaneServiceRestartResult(
+                    status="unknown",
+                    plan=self.plan,
+                    plan_sha256=self.plan.digest(),
+                    error_message=f"Original restart remains unknown. Verified deployment {fresh.deployment_record_id} replaced its container; no additional restart was dispatched.",
+                )
+                return ProviderObservation(
+                    outcome="present",
+                    response_status_code=200,
+                    response_payload=provider_operation_response_payload(
+                        trace_id=self.trace_id,
+                        records={"superseding_deployment_record_id": fresh.deployment_record_id},
+                        result=result.model_dump(mode="json"),
+                    ),
+                )
             # Observation never changes the service. If a later deploy, config
             # change or release intervened, retain the original unknown outcome.
             if any(
@@ -329,6 +363,7 @@ class ServiceRestartAdapter:
                     error.status_code is not None
                     and 400 <= error.status_code < 500
                     and not error.retryable
+                    and not error.remote_command_failed
                 ):
                     result = LaneServiceRestartResult(
                         status="fail",

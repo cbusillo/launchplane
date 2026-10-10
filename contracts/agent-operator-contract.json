@@ -60,6 +60,10 @@
         "purpose": "Inspect or restart one existing lane service on its current accepted artifact, or reconcile its original receipt without another restart.",
         "response_statuses": [
           "200",
+          "400",
+          "401",
+          "403",
+          "404",
           "409",
           "503"
         ],
@@ -68,7 +72,7 @@
           "current_artifact_identity",
           "release_lane_exclusion"
         ],
-        "schema_fingerprint_sha256": "453c60609347a5292b904587cd76174202f7399e371d35b2346e99204c87b5c7",
+        "schema_fingerprint_sha256": "d21c23fe8c2561b4c30efa827a0f68125838085eb653c92adb12666151f2b0d7",
         "supported_surfaces": [
           "bounded_admin_helper",
           "operator_ui",
@@ -624,8 +628,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "ea545371d435a0038c15b6a301b8783f221cfdc1"
+    "source_commit_sha": "2e21e65140e102660d4fc1498fd8b3a3e346951b"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "a84b55f3b54416fbd230db1f70f96d34783ee97789fc70c24f39f0bf29fe24c9"
+  "semantic_digest_sha256": "f81b8099676d9c3869302deb5748711821ec646312e4ccddec2283b5e586316f"
 }

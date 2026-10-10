@@ -28117,6 +28117,7 @@ def create_launchplane_fastapi_app(
             authorization_allows=resolved_authz_policy_runtime.policy.allows,
             http_error=_launchplane_http_error,
             control_plane_root=resolved_control_plane_root,
+            error_response_model=LaunchplaneErrorResponse,
         ),
     )
     register_managed_secret_read_routes(app, dependencies=read_route_dependencies)

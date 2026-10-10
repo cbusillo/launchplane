@@ -9,6 +9,7 @@ from typing import Annotated
 
 import click
 from fastapi import Depends, Header
+from pydantic import BaseModel
 
 from control_plane.contracts.lane_service_restart import (
     SERVICE_RESTART_ROUTE,
@@ -49,6 +50,7 @@ class ServiceRestartDependencies:
     authorization_allows: AuthorizationAllows
     http_error: HttpErrorFactory
     control_plane_root: Path
+    error_response_model: type[BaseModel]
 
 
 def register_service_restart_route(
@@ -97,7 +99,7 @@ def register_service_restart_route(
             refuse("database_required", "Service restart requires shared database storage.", 503)
         assert isinstance(record_store, PostgresRecordStore)
         actor = (
-            f"github:{identity.github_id}:{identity.login}"
+            f"github:{identity.github_id}"
             if isinstance(identity, GitHubHumanIdentity)
             else f"{type(identity).__name__}:{identity.subject}"
             if isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity)
@@ -262,6 +264,11 @@ def register_service_restart_route(
                 )
             if result.status == "conflict":
                 refuse("idempotency_key_reused", "The key belongs to a different restart request.")
+            if result.status == "target_busy" and not recovering:
+                refuse(
+                    "restart_target_busy",
+                    "Another restart holds this lane. This request was not dispatched; recover the existing request from activity.",
+                )
             refuse(
                 "mutation_reconciliation_required",
                 "Restart has not settled. Inspect its activity; do not submit another restart.",
@@ -291,4 +298,8 @@ def register_service_restart_route(
         response_model_exclude_none=True,
         operation_id="restart_lane_service",
         summary="Restart one lane service on its current artifact",
+        responses={
+            status: {"model": dependencies.error_response_model}
+            for status in (400, 401, 403, 404, 409, 422, 503)
+        },
     )
