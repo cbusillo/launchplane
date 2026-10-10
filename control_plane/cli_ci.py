@@ -547,6 +547,7 @@ def _run_and_write_unittest_shard(
         import_root=import_root,
         stream=sys.stderr,
         verbosity=verbosity,
+        annotation_stream=sys.stdout if os.environ.get("GITHUB_ACTIONS") == "true" else None,
     )
     write_shard_run_summary(summary, timings_output)
     return summary

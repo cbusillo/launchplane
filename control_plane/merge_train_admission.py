@@ -9,6 +9,7 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRe
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
+from control_plane.contracts.merge_train_batch import MergeTrainHeldOutReason
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
 from control_plane.contracts.merge_train_admission import MergeTrainAdmissionDecision
 from control_plane.contracts.merge_admission_record import MergeAdmissionRecord
@@ -80,7 +81,7 @@ class MergeTrainHeldOutSummary(BaseModel):
 
     pull_request_number: int
     head_sha: str
-    reason: Literal["entry_conflict"]
+    reason: MergeTrainHeldOutReason
     conflicts_with: tuple[int, ...] = ()
 
 

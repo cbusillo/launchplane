@@ -1,0 +1,160 @@
+"""Classify why a merge-train candidate's checks failed.
+
+A candidate fails either because a queued change broke the combined tree or
+because the runner infrastructure did not finish the work. The controller
+retries the second kind and isolates the change behind the first.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Callable, Literal
+
+from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
+
+# Conclusions GitHub gives a check run that never ran its work to the end.
+INFRASTRUCTURE_CONCLUSIONS = frozenset({"cancelled", "stale", "startup_failure"})
+# Conclusions that can carry a real failure; their annotations are read.
+FAILURE_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required"})
+# GitHub's own annotations when a runner is lost, shut down, or never assigned.
+RUNNER_LOSS_MESSAGES = (
+    "lost communication with the server",
+    "received a shutdown signal",
+    "was not acquired by runner",
+)
+# A CI job names each failed test with an annotation titled this way.
+FAILED_TEST_ANNOTATION_TITLE = "failed test"
+MAX_ANNOTATED_CHECK_RUNS = 20
+MAX_NAMED_FAILURES = 5
+_SAFE_CHECK_NAME = re.compile(r"[\w .:/(),-]{1,100}")
+_SAFE_TEST_ID = re.compile(r"[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+")
+
+
+@dataclass(frozen=True)
+class CandidateCheckFailure:
+    name: str
+    conclusion: str
+    url: str
+    infrastructure: bool
+    failed_tests: tuple[str, ...] = ()
+    source: Literal["check_run", "commit_status"] = "check_run"
+
+
+@dataclass(frozen=True)
+class CandidateCheckFailures:
+    checks: tuple[CandidateCheckFailure, ...]
+
+    @property
+    def infrastructure_only(self) -> bool:
+        """Retry only when the runners failed and no check named a real failure.
+
+        Jobs that depend on a lost job also fail, with a generic exit-code
+        annotation, so one runner-loss signature is enough while no check
+        names a failed test and no commit status reports a failure.
+        """
+        return any(check.infrastructure for check in self.checks) and not any(
+            check.failed_tests or check.source == "commit_status" for check in self.checks
+        )
+
+    @property
+    def check_names(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(check.name for check in self.checks if check.name))
+
+    @property
+    def failed_tests(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(test for check in self.checks for test in check.failed_tests))
+
+
+def classify_candidate_check_failures(
+    *,
+    check_runs: list[dict[str, object]],
+    commit_statuses: list[dict[str, object]],
+    read_annotations: Callable[[int], list[dict[str, object]]],
+) -> CandidateCheckFailures:
+    """Name each failing check and decide whether runner infrastructure caused it.
+
+    ``read_annotations`` is called for at most ``MAX_ANNOTATED_CHECK_RUNS``
+    failing check runs; cancelled runs need no read.
+    """
+    failures: list[CandidateCheckFailure] = []
+    annotated = 0
+    for check_run in check_runs:
+        name = str(check_run.get("name") or "")
+        if is_launchplane_projected_check(name):
+            continue
+        if str(check_run.get("status") or "").strip().lower() != "completed":
+            continue
+        conclusion = str(check_run.get("conclusion") or "").strip().lower()
+        if conclusion not in INFRASTRUCTURE_CONCLUSIONS | FAILURE_CONCLUSIONS:
+            continue
+        infrastructure = conclusion in INFRASTRUCTURE_CONCLUSIONS
+        failed_tests: list[str] = []
+        check_run_id = check_run.get("id")
+        if (
+            not infrastructure
+            and annotated < MAX_ANNOTATED_CHECK_RUNS
+            and isinstance(check_run_id, int)
+            and not isinstance(check_run_id, bool)
+        ):
+            annotated += 1
+            for annotation in read_annotations(check_run_id):
+                message = str(annotation.get("message") or "").strip()
+                if any(signature in message.lower() for signature in RUNNER_LOSS_MESSAGES):
+                    infrastructure = True
+                title = str(annotation.get("title") or "").strip().casefold()
+                if title == FAILED_TEST_ANNOTATION_TITLE and _SAFE_TEST_ID.fullmatch(message):
+                    failed_tests.append(message)
+        failures.append(
+            CandidateCheckFailure(
+                name=_safe_check_name(name),
+                conclusion=conclusion,
+                url=_safe_url(check_run.get("html_url")),
+                infrastructure=infrastructure and not failed_tests,
+                failed_tests=tuple(failed_tests),
+            )
+        )
+    seen_contexts: set[str] = set()
+    for status in commit_statuses:
+        context = str(status.get("context") or "")
+        if is_launchplane_projected_check(context) or context.casefold() in seen_contexts:
+            continue
+        seen_contexts.add(context.casefold())
+        state = str(status.get("state") or "").strip().lower()
+        if state in {"failure", "error"}:
+            failures.append(
+                CandidateCheckFailure(
+                    name=_safe_check_name(context),
+                    conclusion=state,
+                    url="",
+                    infrastructure=False,
+                    source="commit_status",
+                )
+            )
+    return CandidateCheckFailures(checks=tuple(failures))
+
+
+def candidate_failure_summary(failures: CandidateCheckFailures) -> str:
+    """Return a short, link-free sentence naming the failing checks and tests."""
+    names = failures.check_names
+    tests = failures.failed_tests
+    parts: list[str] = []
+    if names:
+        parts.append("failing checks: " + ", ".join(names[:MAX_NAMED_FAILURES]) + _more(len(names)))
+    if tests:
+        parts.append("failing tests: " + ", ".join(tests[:MAX_NAMED_FAILURES]) + _more(len(tests)))
+    return "; ".join(parts)
+
+
+def _more(count: int) -> str:
+    return f" and {count - MAX_NAMED_FAILURES} more" if count > MAX_NAMED_FAILURES else ""
+
+
+def _safe_check_name(name: str) -> str:
+    compact = " ".join(name.split())
+    return compact if _SAFE_CHECK_NAME.fullmatch(compact) else "unnamed check"
+
+
+def _safe_url(value: object) -> str:
+    url = str(value or "").strip()
+    return url if url.startswith("https://") and " " not in url else ""
