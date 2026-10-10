@@ -18,7 +18,11 @@ from control_plane.contracts.lane_service_restart import (
 from control_plane.contracts.deployment_record import deployment_record_passed
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import api, source
-from control_plane.dokploy.service_restart import inspect_service, restart_container
+from control_plane.dokploy.service_restart import (
+    ServiceInspectionUnavailable,
+    inspect_service,
+    restart_container,
+)
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
@@ -393,14 +397,23 @@ class ServiceRestartAdapter:
             try:
                 while time.monotonic() < deadline:
                     lease.assert_current()
-                    after = inspect_service(
-                        host=self.host,
-                        token=self.token,
-                        app_name=self.plan.app_name,
-                        server_id=self.plan.server_id,
-                        service=self.plan.service,
-                        expected=self.expected,
-                    )
+                    try:
+                        after = inspect_service(
+                            host=self.host,
+                            token=self.token,
+                            app_name=self.plan.app_name,
+                            server_id=self.plan.server_id,
+                            service=self.plan.service,
+                            expected=self.expected,
+                        )
+                    except ServiceInspectionUnavailable:
+                        time.sleep(1)
+                        continue
+                    except api.DokployRequestFailed as error:
+                        if not api.is_transient_dokploy_error(error):
+                            raise
+                        time.sleep(1)
+                        continue
                     for field in (
                         "container_id",
                         "image_id",

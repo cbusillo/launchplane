@@ -21,6 +21,10 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
+class ServiceInspectionUnavailable(ValueError):
+    """No usable provider evidence; never infer a container from this result."""
+
+
 def inspect_service(
     *,
     host: str,
@@ -37,7 +41,7 @@ def inspect_service(
         host=host, token=token, path="/api/docker.getContainersByAppNameMatch", query=query
     )
     if not isinstance(raw, list):
-        raise ValueError("Container inventory is unavailable.")
+        raise ServiceInspectionUnavailable("Container inventory is unavailable.")
     selected: list[RestartContainerIdentity] = []
     seen: set[str] = set()
     for item in raw:
@@ -58,7 +62,7 @@ def inspect_service(
         if isinstance(config_raw, list) and len(config_raw) == 1:
             config_raw = config_raw[0]
         if not isinstance(config_raw, dict):
-            raise ValueError("Container inspection is unavailable.")
+            raise ServiceInspectionUnavailable("Container inspection is unavailable.")
         config = config_raw.get("Config")
         if not isinstance(config, dict) or not isinstance(config.get("Labels"), dict):
             raise ValueError("Container membership is ambiguous.")
@@ -115,6 +119,8 @@ def inspect_service(
                 ),
             )
         )
+    if not selected:
+        raise ServiceInspectionUnavailable("No service container is observable.")
     if len(selected) != 1:
         raise ValueError("Restart requires exactly one inspected service container.")
     return selected[0]

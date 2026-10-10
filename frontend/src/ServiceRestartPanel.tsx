@@ -68,13 +68,15 @@ export function ServiceRestartPanel({ detail, fixtureMode, onRefresh }: {
       onRefresh();
     } catch (error) {
       const unavailableHandle = !!pending && error instanceof LaunchplaneApiError
-        && ["restart_receipt_unavailable", "idempotency_key_reused"].includes(error.code);
+        && (["restart_receipt_unavailable", "idempotency_key_reused"].includes(error.code)
+          || error.statusCode === 403 && error.code === "authorization_denied");
       const refused = unavailableHandle || !pending && error instanceof LaunchplaneApiError && (
         [400, 401, 403, 404, 422].includes(error.statusCode)
         || ["restart_refused", "restart_identity_changed", "restart_target_busy", "idempotency_key_reused"].includes(error.code)
       );
       if (refused) {
         setPending(null); setReview(null); setConfirmed(false);
+        if (unavailableHandle) setRecoveries(events => events.filter(event => event.restart_recovery?.idempotency_key !== attempt.key));
         try { sessionStorage.removeItem(storageKey); } catch { /* Optional browser storage. */ }
       }
       setMessage(`${error instanceof Error ? error.message : "Restart outcome is unknown."} ${unavailableHandle

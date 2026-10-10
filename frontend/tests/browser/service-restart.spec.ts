@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
-for (const outcome of ["success", "uncertain", "stale", "busy", "wrong-actor", "missing-receipt"]) {
-  const invalidHandle = outcome === "wrong-actor" || outcome === "missing-receipt";
+for (const outcome of ["success", "uncertain", "stale", "busy", "wrong-actor", "missing-receipt", "revoked"]) {
+  const invalidHandle = outcome === "wrong-actor" || outcome === "missing-receipt" || outcome === "revoked";
   const uncertain = outcome === "uncertain" || invalidHandle;
   test(`service restart reviews identity and handles ${outcome}`, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
@@ -41,7 +41,7 @@ for (const outcome of ["success", "uncertain", "stale", "busy", "wrong-actor", "
       if (body.mode !== "dry-run") {
         applies.push({ key: route.request().headers()["idempotency-key"], body });
         if (uncertain && applies.length === 1) { await route.abort(); return; }
-        if (invalidHandle && applies.length === 2) { await route.fulfill({ status: outcome === "wrong-actor" ? 409 : 404, json: { error: { code: outcome === "wrong-actor" ? "idempotency_key_reused" : "restart_receipt_unavailable", message: "This is not a recoverable request for this account." } } }); return; }
+        if (invalidHandle && applies.length === 2) { await route.fulfill({ status: outcome === "wrong-actor" ? 409 : outcome === "revoked" ? 403 : 404, json: { error: { code: outcome === "wrong-actor" ? "idempotency_key_reused" : outcome === "revoked" ? "authorization_denied" : "restart_receipt_unavailable", message: "This is not a recoverable request for this account." } } }); return; }
         if (outcome === "busy" && applies.length === 1) { await route.fulfill({ status: 409, json: { error: { code: "restart_target_busy", message: "Another restart holds this lane." } } }); return; }
         if (uncertain && applies.length === 2) { await route.fulfill({ status: 401, json: { error: { code: "session_expired", message: "Sign in again." } } }); return; }
         if (uncertain && applies.length === 3) { await route.fulfill({ status: 409, json: { error: { code: "restart_refused", message: "Lane temporarily held." } } }); return; }

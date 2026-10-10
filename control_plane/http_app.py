@@ -28114,7 +28114,7 @@ def create_launchplane_fastapi_app(
             read_identity=read_operator_mutation_identity,
             get_record_store=get_record_store,
             next_trace_id=next_trace_id,
-            authorization_allows=resolved_authz_policy_runtime.policy.allows,
+            authorization_allows=resolved_authz_policy_runtime.allows,
             http_error=_launchplane_http_error,
             control_plane_root=resolved_control_plane_root,
             error_response_model=LaunchplaneErrorResponse,

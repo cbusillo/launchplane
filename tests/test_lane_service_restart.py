@@ -44,6 +44,7 @@ from tests.support.auth import StubVerifier, identity, local_operator_policy
 from tests.support.http import request as http_request
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.test_service import create_launchplane_fastapi_test_app
+from control_plane.http_app import LaunchplaneAuthzPolicyRuntime
 from tests.test_odoo_prod_promotion_operation import _operation
 
 
@@ -125,6 +126,7 @@ class RestartProvider:
         self.rejection: int | None = None
         self.remote_command_failed = False
         self.restart_started_at = "2026-10-10T00:02:00Z"
+        self.transient_after_reads = 0
         self.config: dict[str, Any] = {
             "Id": self.container_id,
             "Image": "sha256:" + "e" * 64,
@@ -155,6 +157,14 @@ class RestartProvider:
                 "serverId": "isolated-server",
             }
         if path == "/api/docker.getContainersByAppNameMatch":
+            if self.writes and self.transient_after_reads:
+                self.transient_after_reads -= 1
+                raise DokployRequestFailed(
+                    method="GET",
+                    path=path,
+                    detail="transient inventory unavailable",
+                    status_code=502,
+                )
             return [{"containerId": self.container_id}] + (
                 [{"containerId": "f" * 64}] if self.duplicate else []
             )
@@ -223,9 +233,11 @@ class ServiceRestartTests(unittest.TestCase):
         contexts: tuple[str, ...] = ("cm",),
         subject: str = "local-owner-agent",
         github_admin: int | None = None,
+        policy_runtime: LaunchplaneAuthzPolicyRuntime | None = None,
     ) -> Any:
         return create_launchplane_fastapi_test_app(
             local_record_store_for_tests=self.store,
+            authz_policy_runtime=policy_runtime,
             state_dir=self.root / "state",
             control_plane_root_path=self.root,
             verifier=StubVerifier(identity()),
@@ -305,6 +317,32 @@ class ServiceRestartTests(unittest.TestCase):
         ):
             self.assertEqual(self.invoke()[0], 403)
             self.assertEqual(self.invoke(token="valid-token")[0], 403)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_live_apply_grant_revocation_is_seen_without_restarting_the_service(self) -> None:
+        runtime = LaunchplaneAuthzPolicyRuntime(
+            local_operator_policy(
+                actions=("live_target_runtime.plan", "live_target_runtime.apply"),
+                products=(self.expected.product,),
+                contexts=(self.expected.context,),
+            )
+        )
+        self.app = self.create_app(policy_runtime=runtime)
+        self.review()
+        runtime.update(
+            local_operator_policy(
+                actions=("live_target_runtime.plan",),
+                products=(self.expected.product,),
+                contexts=(self.expected.context,),
+            ),
+            policy_sha256="1" * 64,
+            source="test:revoked",
+        )
+        with patch(
+            "control_plane.http_routes.lane_service_restart.plan_service_restart",
+            side_effect=AssertionError("revoked provider read"),
+        ):
+            self.assertEqual(self.invoke(key="revoked")[0], 403)
         self.assertEqual(self.provider.writes, [])
 
     def test_stale_container_configuration_and_duplicate_service_refuse_without_writes(
@@ -475,6 +513,15 @@ class ServiceRestartTests(unittest.TestCase):
         self.provider.remote_command_failed = True
         self.assertEqual(self.invoke(key="partial-command")[0], 409)
         self.assertEqual(self.invoke(key="partial-command")[0], 409)
+        self.assertEqual(len(self.provider.writes), 1)
+
+    def test_transient_verification_read_retries_without_another_restart(self) -> None:
+        self.review()
+        self.provider.transient_after_reads = 1
+        status, response = self.invoke(key="transient-read")
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["result"]["status"], "pass")
+        self.assertEqual(self.provider.transient_after_reads, 0)
         self.assertEqual(len(self.provider.writes), 1)
 
     def test_github_login_rename_preserves_original_principal_recovery(self) -> None:

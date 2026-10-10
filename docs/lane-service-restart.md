@@ -36,6 +36,9 @@ Launchplane acquires the release lane reservation, rechecks the reviewed identit
 and release ownership, durably checkpoints the exact container restart, and sends
 one POST. It verifies a later start time, unchanged container/image/configuration/
 runtime identity, and health. A failed verification remains a failed receipt.
+Verification retries unavailable inventory and transient provider reads within
+its bounded window; identity changes fail verification and never cause another
+restart. Authorization uses the current policy, including live revocations.
 
 ## Product Ops
 
