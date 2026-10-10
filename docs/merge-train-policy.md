@@ -74,14 +74,14 @@ revision; a moved base reads its own ownership file. Author permissions are shar
 by login only within the snapshot. Every mutable observation revalidates with GitHub; a terminal check can
 still be rerun or superseded. A 304 supplies the previously observed body and quota
 headers without charging primary quota. A restart or managed-key rotation starts
-cold. Grant validation runs when minting; a conclusive authentication or permission
+cold. Grant validation runs when minting; a conclusive 401 authentication
 failure discards the issued token so the next pass mints and validates again. A
 denied or failed read never supplies a cached answer.
 
 A dry-run controller invocation reuses its snapshot within that invocation and
 releases it on success or failure. Mutating controllers retain their existing fresh
 reads at effect and reconciliation boundaries. Every controller tally logs request
-attempts, not-modified responses and a conservative charged-request upper bound
+attempts, not-modified responses and non-304 attempts
 for instrumented clients, including short idle passes. Separate admission evidence
 clients are not included in that tally; provider counters remain the authority for
 total quota use. GraphQL attempts count as requests, not measured GraphQL point costs.

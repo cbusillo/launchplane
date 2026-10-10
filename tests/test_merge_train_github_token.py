@@ -213,7 +213,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                             method="GET", path="/value"
                         )
                 self.assertEqual(raised.exception.rate_limited, quota_limited)
-                self.assertEqual(self.resolve() == first, quota_limited)
+                self.assertEqual(self.resolve() == first, status != 401)
 
     def test_native_token_refreshes_before_expiry_and_repository_scope_does_not_share(self) -> None:
         with (

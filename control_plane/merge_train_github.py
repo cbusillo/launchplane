@@ -307,7 +307,7 @@ class UrllibMergeTrainGitHubTransport:
             provider_error = _github_http_error(
                 method=method, path=path, status_code=error.code, error=error
             )
-            if error.code == 401 or (error.code == 403 and not provider_error.rate_limited):
+            if error.code == 401:
                 from control_plane.merge_train_github_token import (
                     invalidate_cached_merge_train_github_token,
                 )
@@ -2625,9 +2625,7 @@ class GitHubMergeTrainSnapshotReader:
             repository_path=repository_path,
             base_branch=normalized_base_branch,
             pull_requests=tuple(
-                self._pull_request_snapshot(
-                    repository=repository, repository_path=repository_path, pull_request=pr
-                )
+                self._pull_request_snapshot(repository_path=repository_path, pull_request=pr)
                 for pr in enriched
             ),
         )
@@ -2641,7 +2639,6 @@ class GitHubMergeTrainSnapshotReader:
         pull_requests = tuple(
             by_number.get(_required_int(pr["number"], "GitHub pull request entry requires number."))
             or self._pull_request_snapshot(
-                repository=repository,
                 repository_path=repository_path,
                 pull_request=pr,
                 enrich=False,
@@ -2697,7 +2694,6 @@ class GitHubMergeTrainSnapshotReader:
         self._dependency_classes.clear()
         repository_path = _repository_path(repository)
         snapshot = self._pull_request_snapshot(
-            repository=repository,
             repository_path=repository_path,
             pull_request={"number": pull_request_number},
         )
@@ -2785,7 +2781,6 @@ class GitHubMergeTrainSnapshotReader:
     def _pull_request_snapshot(
         self,
         *,
-        repository: str,
         repository_path: str,
         pull_request: dict[str, object],
         enrich: bool = True,

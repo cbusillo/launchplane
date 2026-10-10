@@ -179,7 +179,6 @@ class MergeTrainReadCostTests(unittest.TestCase):
                     transport=cast(Any, None), repository_policy=target
                 )
                 child = reader._pull_request_snapshot(
-                    repository=target.repository,
                     repository_path=target.repository,
                     pull_request=raw_child,
                     enrich=reader._needs_enrichment(raw_child),
@@ -213,6 +212,8 @@ class MergeTrainReadCostTests(unittest.TestCase):
     def test_real_idle_controller_with_fifteen_prs_is_two_charged_then_zero(self) -> None:
         provider = _Provider()
         policy = build_test_merge_train_policy()
+        admission = Mock(spec=MergeAdmissionEvaluator)
+        admission.evaluate.side_effect = AssertionError("Idle controller attempted admission")
         with (
             TemporaryDirectory() as directory,
             patch("control_plane.merge_train_github.urlopen", provider),
@@ -241,11 +242,12 @@ class MergeTrainReadCostTests(unittest.TestCase):
                             stack_collapse_store=store,
                             controller_state_store=store,
                             admission_store=store,
-                            admission_evaluator=cast(MergeAdmissionEvaluator, None),
+                            admission_evaluator=admission,
                         )
                     )
                 deltas.append(provider.used - before)
             self.assertEqual(deltas, [2, 0])
+            admission.evaluate.assert_not_called()
             self.assertTrue(all(r.accepted_result["controller_action"] == "idle" for r in results))
             self.assertTrue(all(request.method == "GET" for request in provider.requests))
             self.assertTrue(any("not_modified=2" in line for line in logs.output))
