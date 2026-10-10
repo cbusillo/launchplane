@@ -131,6 +131,8 @@ class BuildProvenanceTests(unittest.TestCase):
                     else:
                         transport.get_json("/repos/example/site")
                 self.assertIsInstance(caught.exception.__cause__, IncompleteRead)
+                self.assertEqual(caught.exception.code, "github_read_failed")
+                self.assertIsNone(caught.exception.run_id)
 
     def test_accepts_main_push_build_under_launchplane_key(self) -> None:
         manifest = _verify(FakeGitHub(runs=[_run()])).manifest
@@ -147,14 +149,18 @@ class BuildProvenanceTests(unittest.TestCase):
             first_parents={TIP: MERGED_BRANCH_COMMIT, MERGED_BRANCH_COMMIT: ""},
         )
 
-        with self.assertRaisesRegex(BuildProvenanceError, "first-parent"):
+        with self.assertRaisesRegex(BuildProvenanceError, "first-parent") as caught:
             _verify(github)
+        self.assertEqual(caught.exception.code, "not_on_first_parent_history")
+        self.assertEqual(caught.exception.run_id, 7)
 
     def test_refuses_pull_request_run_as_release(self) -> None:
         github = FakeGitHub(runs=[_run(event="pull_request", head_branch="feature")])
 
-        with self.assertRaisesRegex(BuildProvenanceError, "No successful push run"):
+        with self.assertRaisesRegex(BuildProvenanceError, "No successful push run") as caught:
             _verify(github)
+        self.assertEqual(caught.exception.code, "build_run_missing")
+        self.assertIsNone(caught.exception.run_id)
 
     def test_refuses_other_workflow_fork_and_failed_runs(self) -> None:
         for run in (
@@ -180,6 +186,31 @@ class BuildProvenanceTests(unittest.TestCase):
         ):
             with self.subTest(manifest=manifest["image"]), self.assertRaises(BuildProvenanceError):
                 _verify(FakeGitHub(runs=[_run()], manifest=manifest))
+
+    def test_manifest_mismatch_reasons_retain_the_selected_run(self) -> None:
+        base = artifact_manifest_v2(
+            image_repository=IMAGE_REPOSITORY, tenant_source_repository=REPOSITORY
+        ).model_dump(mode="json")
+        wrong_tenant = artifact_manifest_v2(
+            image_repository=IMAGE_REPOSITORY, tenant_source_repository="example/other"
+        ).model_dump(mode="json")
+        wrong_commit = json.loads(json.dumps(base))
+        wrong_commit["source_commit"] = TIP
+        for lock in wrong_commit["dependency_provenance"]["uv_locks"]:
+            if lock["scope"] == "tenant":
+                lock["source_ref"] = TIP
+        for manifest, code in (
+            (wrong_commit, "manifest_commit_mismatch"),
+            (
+                {**base, "image": {**base["image"], "repository": "ghcr.io/example/other"}},
+                "image_repository_mismatch",
+            ),
+            (wrong_tenant, "tenant_lock_mismatch"),
+        ):
+            with self.subTest(code=code), self.assertRaises(BuildProvenanceError) as caught:
+                _verify(FakeGitHub(runs=[_run(run_id=19), _run(run_id=23)], manifest=manifest))
+            self.assertEqual(caught.exception.code, code)
+            self.assertEqual(caught.exception.run_id, 23)
 
     def test_accepts_preview_only_for_the_pull_request_head(self) -> None:
         run = _run(event="pull_request", head_branch="feature")
@@ -211,15 +242,21 @@ class BuildProvenanceTests(unittest.TestCase):
         github = FakeGitHub(runs=[_run()])
         github.manifest = {"artifact_id": "not-a-manifest"}
 
-        with self.assertRaisesRegex(BuildProvenanceError, "not a valid artifact manifest"):
+        with self.assertRaisesRegex(
+            BuildProvenanceError, "not a valid artifact manifest"
+        ) as caught:
             _verify(github)
+        self.assertEqual(caught.exception.code, "manifest_invalid")
+        self.assertEqual(caught.exception.run_id, 7)
 
     def test_refuses_an_oversized_or_compression_bomb_manifest(self) -> None:
         github = FakeGitHub(runs=[_run()])
         github.manifest = {"padding": "0" * (MAX_MANIFEST_BYTES + 1)}
 
-        with self.assertRaisesRegex(BuildProvenanceError, "larger than allowed"):
+        with self.assertRaisesRegex(BuildProvenanceError, "larger than allowed") as caught:
             _verify(github)
+        self.assertEqual(caught.exception.code, "download_too_large")
+        self.assertEqual(caught.exception.run_id, 7)
 
     def test_record_refuses_a_preview_artifact(self) -> None:
         run = _run(event="pull_request", head_branch="feature")

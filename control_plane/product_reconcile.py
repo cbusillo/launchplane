@@ -2316,7 +2316,7 @@ def _desired_release(
     current_run_id: int = 0,
     current_image_digest: str = "",
     selection: dict[str, object] | None = None,
-) -> tuple[VerifiedBuildArtifact | VerifiedGenericWebBuild | None, list[dict[str, str]], str]:
+) -> tuple[VerifiedBuildArtifact | VerifiedGenericWebBuild | None, list[dict[str, object]], str]:
     default_branch = profile.default_branch
     workflow_file = BUILD_WORKFLOW_PATH.rsplit("/", 1)[-1]
     query = urlencode(
@@ -2432,7 +2432,7 @@ def _desired_release(
     )
     if built_commits and not current_seen:
         return None, [], "incomplete_commit_history"
-    rejected: list[dict[str, str]] = []
+    rejected: list[dict[str, object]] = []
     for commit in ordered[:TESTING_VERIFY_LIMIT]:
         try:
             verified: VerifiedBuildArtifact | VerifiedGenericWebBuild = (
@@ -2457,7 +2457,9 @@ def _desired_release(
             )
             return verified, rejected, ""
         except BuildProvenanceError as error:
-            rejected.append({"commit": commit, "error": str(error)})
+            rejected.append(
+                {"commit": commit, "run_id": error.run_id, "code": error.code, "error": str(error)}
+            )
     return None, rejected, "no_verified_build"
 
 
