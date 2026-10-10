@@ -110,6 +110,22 @@ class MergeTrainControllerFeedbackTests(TestCase):
                 self.assertIn("review", message)
                 self.assertNotIn(dry_run_result.blocked_label, message)
 
+    def test_controller_refresh_without_a_receipt_does_not_claim_an_update(self) -> None:
+        payloads = feedback.build_feedback_payloads(
+            response={
+                "result": {
+                    "repository": "example/repo",
+                    "base_branch": "main",
+                    "controller_action": "update_branch",
+                    "dry_run_result": {"selected_pr": {"number": 7}},
+                },
+                "records": {},
+            }
+        )
+        self.assertEqual([7], [payload["pull_request_number"] for payload in payloads])
+        self.assertIn("refresh", cast(str, payloads[0]["message"]))
+        self.assertNotIn("updated", cast(str, payloads[0]["message"]))
+
     def test_build_feedback_payloads_marks_pending_checks_waiting(self) -> None:
         response: dict[str, Any] = {
             "result": {
@@ -129,7 +145,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
 
         self.assertEqual(1, len(payloads))
         self.assertEqual("waiting", payloads[0]["event"])
-        self.assertIn("waiting", str(payloads[0]["message"]))
+        self.assertIn("waiting", cast(str, payloads[0]["message"]))
 
     def test_build_feedback_payloads_marks_merged_landing_plan_completed(self) -> None:
         response: dict[str, Any] = {
@@ -173,7 +189,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
 
         self.assertEqual([7, 8], [payload["pull_request_number"] for payload in payloads])
         self.assertEqual({"stale_policy"}, {payload["event"] for payload in payloads})
-        self.assertIn("stale", str(payloads[0]["message"]))
+        self.assertIn("stale", cast(str, payloads[0]["message"]))
 
     def test_completed_batch_feedback_links_every_original_to_the_shared_pr(self) -> None:
         payloads = feedback.build_feedback_payloads(
@@ -196,7 +212,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
         self.assertEqual([payload["pull_request_number"] for payload in payloads], [7, 8])
         self.assertTrue(all(payload["event"] == "completed" for payload in payloads))
         self.assertTrue(
-            all("protected batch PR #99" in str(payload["message"]) for payload in payloads)
+            all("protected batch PR #99" in cast(str, payload["message"]) for payload in payloads)
         )
 
     def test_build_feedback_payloads_reports_admission_block_detail(self) -> None:
@@ -220,7 +236,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
 
         self.assertEqual(1, len(payloads))
         self.assertEqual("blocked", payloads[0]["event"])
-        self.assertIn("Fresh merge readiness evidence", str(payloads[0]["message"]))
+        self.assertIn("Fresh merge readiness evidence", cast(str, payloads[0]["message"]))
 
     def test_build_feedback_payloads_skips_actions_without_pr_numbers(self) -> None:
         response: dict[str, Any] = {
