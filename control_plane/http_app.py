@@ -896,7 +896,10 @@ from control_plane.preview_pr_feedback_remediation import (
     observe_managed_preview_pr_feedback,
     resolve_remediation_token,
 )
-from control_plane.workflows.launchplane_self_deploy import execute_launchplane_self_deploy
+from control_plane.workflows.launchplane_self_deploy import (
+    LaunchplaneSelfDeployResult,
+    execute_launchplane_self_deploy,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.launchplane import (
     github_api_request,
@@ -1748,6 +1751,7 @@ class LaunchplaneRuntimeStatus(BaseModel):
     schema_migration_target_revision: str
     service_audience: str
     storage_backend: str
+    release_drain: dict[str, Any] = Field(default_factory=dict)
 
 
 class LaunchplaneRuntimeResponse(BaseModel):
@@ -4151,6 +4155,13 @@ def create_launchplane_fastapi_app(
         try:
             if health_monitor_scheduler is not None:
                 await run_in_threadpool(health_monitor_scheduler.start)
+            startup_record_store = (
+                record_store_factory() if record_store_factory is not None else shared_record_store
+            )
+            if isinstance(startup_record_store, PostgresRecordStore):
+                from control_plane.service_deploy_drain import confirm_startup
+
+                await run_in_threadpool(confirm_startup, startup_record_store)
             yield
         finally:
             if health_monitor_scheduler is not None:
@@ -5246,6 +5257,13 @@ def create_launchplane_fastapi_app(
                 authz_policy_source=resolved_authz_policy_runtime.source,
             )
         )
+        if isinstance(record_store, PostgresRecordStore):
+            from control_plane.service_deploy_drain import confirm_startup, read_status
+
+            # Reconfirm this API's own image/marker when a refused repair restored
+            # a request whose initial startup raced the repair fence.
+            confirm_startup(record_store)
+            runtime.release_drain = read_status(record_store)
         return LaunchplaneRuntimeResponse(trace_id=trace_id, runtime=runtime)
 
     def read_odoo_stable_operation_worker_status(
@@ -10487,7 +10505,9 @@ def create_launchplane_fastapi_app(
             ) from error
 
         normalized_idempotency_key = idempotency_key.strip()
-        payload_fingerprint = build_request_fingerprint(raw_payload)
+        payload_fingerprint = idempotency_request_fingerprint(
+            route_path=_LAUNCHPLANE_SELF_DEPLOY_ROUTE, payload=raw_payload
+        )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="launchplane_service_deploy.execute",
@@ -10519,23 +10539,64 @@ def create_launchplane_fastapi_app(
                 return replay_response
 
         try:
-            driver_result = execute_launchplane_self_deploy(
+            driver_result = await run_in_threadpool(
+                execute_launchplane_self_deploy,
                 control_plane_root_path=resolved_control_plane_root,
                 request=self_deploy_request.deploy,
+                record_store=record_store,
+                request_fingerprint=payload_fingerprint,
             )
         except (ValueError, click.ClickException) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            ) from error
+            from control_plane.service_deploy_drain import (
+                ServiceDeployDispatchBusy,
+                ServiceDeployFenceConflict,
+                ServiceDeployOutcomeUnknown,
+                ServiceDeployPreEffectRefused,
+            )
+
+            if isinstance(error, ServiceDeployDispatchBusy):
+                driver_result = LaunchplaneSelfDeployResult(
+                    target_type=self_deploy_request.deploy.target_type,
+                    target_id=self_deploy_request.deploy.target_id,
+                    image_reference=self_deploy_request.deploy.image_reference,
+                    image_reference_changed=False,
+                    authz_policy_changed=False,
+                    deploy_state="dispatch_in_progress",
+                )
+            elif isinstance(error, ServiceDeployOutcomeUnknown):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code=(
+                        "self_deploy_fence_conflict"
+                        if isinstance(error, ServiceDeployFenceConflict)
+                        else "self_deploy_reconciliation_required"
+                    ),
+                    message=str(error),
+                ) from error
+            elif isinstance(error, ServiceDeployPreEffectRefused):
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="self_deploy_refused",
+                    message=str(error),
+                ) from error
+            else:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_request",
+                    message="Request could not be completed.",
+                ) from error
 
         response = accepted_evidence_response(
             trace_id=trace_id,
             records=launchplane_self_deploy_records(driver_result),
             result=driver_result.model_dump(mode="json"),
         )
+        if driver_result.deploy_state in {"draining", "dispatch_in_progress"}:
+            # The next POST must re-read live progress, rather than replay this poll.
+            return response
         store_apply_idempotency(
             record_store=record_store,
             identity=identity,

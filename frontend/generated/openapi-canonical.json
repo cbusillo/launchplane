@@ -13373,6 +13373,11 @@
             "title": "Docker Image Reference",
             "type": "string"
           },
+          "release_drain": {
+            "additionalProperties": true,
+            "title": "Release Drain",
+            "type": "object"
+          },
           "schema_migration_target_revision": {
             "title": "Schema Migration Target Revision",
             "type": "string"
@@ -55323,6 +55328,11 @@
                       "policy_b64": {
                         "default": "",
                         "title": "Policy B64",
+                        "type": "string"
+                      },
+                      "supersedes_deployment_marker": {
+                        "default": "",
+                        "title": "Supersedes Deployment Marker",
                         "type": "string"
                       },
                       "target_id": {

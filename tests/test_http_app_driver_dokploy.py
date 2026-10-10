@@ -7,6 +7,7 @@ from datetime import (
 )
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 from unittest.mock import patch
 
 from click import ClickException
@@ -1036,6 +1037,285 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             target_id="compose-123",
             no_cache=False,
         )
+
+    async def test_shared_self_deploy_polls_drain_without_replaying_or_duplicating_dispatch(
+        self,
+    ) -> None:
+        from tests.test_client_release import ClientReleaseTests
+
+        fixture = ClientReleaseTests(methodName="runTest")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.switch("promote")
+        fixture.accept()
+        (backup_id,) = fixture.advance()
+        from datetime import UTC, datetime, timedelta
+
+        fixture.store.claim_next_verireel_prod_backup_gate_operation_record(
+            lease_owner="admitted-backup",
+            claimed_at=datetime.now(UTC).isoformat(),
+            lease_expires_at=(datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(self._identity()),
+            authz_policy=self._policy(),
+            record_store_factory=lambda: fixture.store,
+            control_plane_root_path=fixture.root,
+        )
+        with (
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.example", "synthetic"),
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
+                return_value=self._compose_target(self._BOOTSTRAP_ENV),
+            ),
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
+            ) as update,
+            patch(
+                "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
+            ) as deploy,
+        ):
+            payload = self._payload(
+                oauth_env={"LAUNCHPLANE_DEPLOYMENT_MARKER": "isolated-replacement"}
+            )
+            for key in ("", "isolated-drain"):
+                response = await _post_launchplane_self_deploy(app, payload, idempotency_key=key)
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(response.json()["result"]["deploy_state"], "draining")
+                self.assertEqual(response.json()["result"]["running_operation_ids"], [backup_id])
+                deploy.assert_not_called()
+                update.assert_not_called()
+            fixture.finish(backup_id)
+            from control_plane.service_deploy_drain import ServiceDeployDispatchBusy
+
+            with patch(
+                "control_plane.service_deploy_drain.dispatch_lock",
+                side_effect=ServiceDeployDispatchBusy("active request"),
+            ):
+                response = await _post_launchplane_self_deploy(
+                    app, payload, idempotency_key="isolated-drain"
+                )
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(response.json()["result"]["deploy_state"], "dispatch_in_progress")
+            deploy.assert_not_called()
+            update.assert_not_called()
+            for key in ("isolated-drain", ""):
+                response = await _post_launchplane_self_deploy(app, payload, idempotency_key=key)
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(response.json()["result"]["deploy_state"], "requested")
+                self.assertTrue(response.json()["result"]["release_drain_complete"])
+            deploy.assert_called_once()
+            update.assert_called_once()
+
+    async def test_uncertain_self_deploy_requires_bound_repair_and_dispatches_repair_once(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                    return_value=("https://provider.example", "synthetic"),
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
+                    return_value=self._compose_target(self._BOOTSTRAP_ENV),
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment",
+                    side_effect=[ClickException("synthetic lost response"), None],
+                ) as dispatch,
+            ):
+                payload = self._payload(
+                    oauth_env={"LAUNCHPLANE_DEPLOYMENT_MARKER": "failed-marker"}
+                )
+                for _ in range(2):
+                    response = await _post_launchplane_self_deploy(
+                        app, payload, idempotency_key="failed-dispatch"
+                    )
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertEqual(
+                        response.json()["error"]["code"], "self_deploy_reconciliation_required"
+                    )
+                dispatch.assert_called_once()
+                repair = self._payload(oauth_env={"LAUNCHPLANE_DEPLOYMENT_MARKER": "repair-marker"})
+                repair_deploy = repair["deploy"]
+                assert isinstance(repair_deploy, dict)
+                repair_deploy["supersedes_deployment_marker"] = "failed-marker"
+                for _ in range(2):
+                    response = await _post_launchplane_self_deploy(
+                        app, repair, idempotency_key="explicit-repair"
+                    )
+                    self.assertEqual(response.status_code, 202, response.text)
+                    self.assertEqual(response.json()["result"]["deploy_state"], "requested")
+                self.assertEqual(dispatch.call_count, 2)
+
+    async def test_only_definite_first_write_refusal_releases_admission_without_dispatch(
+        self,
+    ) -> None:
+        from control_plane.dokploy.api import DokployRequestFailed
+        from control_plane.service_deploy_drain import ServiceDeployDraining, read_status
+
+        for status, remote_failed in (
+            (401, False),
+            (403, False),
+            (502, False),
+            (429, False),
+            (400, True),
+        ):
+            with (
+                self.subTest(status=status, remote_failed=remote_failed),
+                TemporaryDirectory() as directory,
+            ):
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+                )
+                try:
+                    store.ensure_schema()
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(self._identity()),
+                        authz_policy=self._policy(),
+                        record_store_factory=lambda: store,
+                    )
+                    with (
+                        patch(
+                            "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                            return_value=("https://provider.example", "synthetic"),
+                        ),
+                        patch(
+                            "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
+                            return_value=self._compose_target(self._BOOTSTRAP_ENV),
+                        ),
+                        patch(
+                            "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env",
+                            side_effect=DokployRequestFailed(
+                                method="POST",
+                                path="/api/compose.update",
+                                status_code=status,
+                                detail="synthetic refusal",
+                                remote_command_failed=remote_failed,
+                            ),
+                        ) as update,
+                        patch(
+                            "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
+                        ) as dispatch,
+                    ):
+                        payload = self._payload(
+                            oauth_env={"LAUNCHPLANE_DEPLOYMENT_MARKER": "refused-marker"}
+                        )
+                        definite = status in {401, 403}
+                        for _ in range(2):
+                            response = await _post_launchplane_self_deploy(
+                                app, payload, idempotency_key="first-write-refusal"
+                            )
+                            self.assertEqual(
+                                response.status_code, 400 if definite else 409, response.text
+                            )
+                            self.assertEqual(
+                                response.json()["error"]["code"],
+                                "self_deploy_refused"
+                                if definite
+                                else "self_deploy_reconciliation_required",
+                            )
+                        update.assert_called_once()
+                        dispatch.assert_not_called()
+                        self.assertEqual(read_status(store)["admission_paused"], not definite)
+                        reservation: dict[str, Any] = dict(
+                            scope="client-release",
+                            route_path="/isolated",
+                            idempotency_key="unrelated-release",
+                            request_fingerprint="release",
+                            lease_owner="worker",
+                        )
+                        if definite:
+                            self.assertEqual(
+                                store.reserve_mutation(**reservation).status, "acquired"
+                            )
+                        else:
+                            with self.assertRaises(ServiceDeployDraining):
+                                store.reserve_mutation(**reservation)
+                finally:
+                    store.close()
+
+    async def test_matching_runtime_read_confirms_a_startup_that_raced_a_refused_repair(
+        self,
+    ) -> None:
+        import os
+        from control_plane.service_deploy_drain import (
+            prepare,
+            confirm_startup,
+            record_dispatch,
+            record_pre_effect_refusal,
+            read_status,
+        )
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+            )
+            try:
+                store.ensure_schema()
+                policy = self._policy()
+                policy.github_actions[0].actions += ("launchplane_service.read",)
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(self._identity()),
+                    authz_policy=policy,
+                    record_store_factory=lambda: store,
+                )
+                first = dict(
+                    request_fingerprint="forward",
+                    target_type="compose",
+                    target_id="isolated",
+                    image_reference="example.invalid/image@sha256:" + "a" * 64,
+                    deployment_marker="forward-marker",
+                )
+                prepare(store, **first)
+                record_dispatch(store, "forward")
+                prepare(
+                    store,
+                    **{
+                        **first,
+                        "request_fingerprint": "repair",
+                        "deployment_marker": "repair-marker",
+                        "supersedes_deployment_marker": "forward-marker",
+                    },
+                )
+                with patch.dict(
+                    os.environ,
+                    {
+                        "DOCKER_IMAGE_REFERENCE": first["image_reference"],
+                        "LAUNCHPLANE_DEPLOYMENT_MARKER": "forward-marker",
+                    },
+                ):
+                    confirm_startup(store)
+                    self.assertEqual(read_status(store)["request_fingerprint"], "repair")
+                    record_pre_effect_refusal(store, "repair")
+                    self.assertEqual(read_status(store)["state"], "requested")
+                    response = await _asgi_get(
+                        app, "/v1/service/runtime", headers={"Authorization": "Bearer valid-token"}
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(
+                        response.json()["runtime"]["release_drain"]["state"], "confirmed"
+                    )
+                    self.assertFalse(read_status(store)["admission_paused"])
+            finally:
+                store.close()
 
     async def test_self_deploy_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -17,13 +17,27 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
         self.workflow = load_workflow(".github/workflows/deploy-launchplane.yml")
 
     def _run_step(
-        self, job: str, name: str, env: dict[str, str], directory: Path
+        self,
+        job: str,
+        name: str,
+        env: dict[str, str],
+        directory: Path,
+        expression_values: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         step = self.workflow.step_named(job, name)
         assert step is not None
         runtime = directory / "runtime.json"
         if not runtime.exists():
             runtime.write_text("{}\n", encoding="utf-8")
+        declared_env: dict[str, str] = {}
+        raw_env = step.data.get("env")
+        if isinstance(raw_env, dict):
+            for key, value in raw_env.items():
+                if isinstance(value, str):
+                    resolved = (expression_values or {}).get(value, value)
+                    resolved = resolved.replace("${{ runner.temp }}", str(directory))
+                    if "${{" not in resolved:
+                        declared_env[key] = resolved
         return subprocess.run(
             ["bash", "-c", step.run],
             cwd=Path.cwd(),
@@ -33,6 +47,7 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 "LANG": "C.UTF-8",
                 "GITHUB_OUTPUT": str(directory / "output"),
                 "RUNNER_TEMP": str(directory),
+                **declared_env,
                 "PREVIOUS_RUNTIME_RESPONSE_FILE": str(runtime),
                 "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
                 "LAUNCHPLANE_DOKPLOY_TARGET_ID": "compose-test",
@@ -105,12 +120,95 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                     else:
                         self.assertEqual(actual, 1)
 
+    def test_finished_drain_starts_short_observation_deadline_then_later_wait_consumes_it(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            response = directory / "launchplane-self-deploy-response.json"
+            response.write_text(json.dumps({"result": {"release_drain_complete": True}}))
+            result = self._run_step(
+                "deploy",
+                "Resolve deploy_runtime_wait remaining wait",
+                {},
+                directory,
+                expression_values={
+                    "${{ steps.deploy_wait_timeout.outputs.deadline_epoch }}": str(
+                        int(time.time()) - 10
+                    ),
+                    "${{ steps.deploy_wait_timeout.outputs.drained_timeout_seconds }}": "17",
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(
+                line.split("=", 1) for line in (directory / "output").read_text().splitlines()
+            )
+            self.assertGreater(int(values["timeout_ms"]), 0)
+            self.assertLessEqual(int(values["timeout_ms"]), 17000)
+            deadline = values["deadline_epoch"]
+            (directory / "output").unlink()
+            result = self._run_step(
+                "deploy",
+                "Resolve deploy_marker_wait remaining wait",
+                {"WAIT_DEADLINE_EPOCH": deadline},
+                directory,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            later = dict(
+                line.split("=", 1) for line in (directory / "output").read_text().splitlines()
+            )
+            self.assertLessEqual(int(later["timeout_ms"]), int(values["timeout_ms"]))
+
+    def test_timed_out_drain_does_not_request_service_rollback(self) -> None:
+        for payload in (
+            {"result": {"deploy_state": "draining"}},
+            {"error": {"code": "invalid_request"}},
+            {"error": {"code": "authorization_denied"}},
+            {"error": {"code": "self_deploy_fence_conflict"}},
+        ):
+            with self.subTest(payload=payload), TemporaryDirectory() as directory_name:
+                directory = Path(directory_name)
+                response = directory / "launchplane-self-deploy-response.json"
+                response.write_text(json.dumps(payload))
+                result = self._run_step(
+                    "deploy",
+                    "Render Launchplane rollback request",
+                    {"PREVIOUS_IMAGE_REFERENCE": "example.invalid/launchplane@sha256:" + "a" * 64},
+                    directory,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((directory / "output").exists())
+                self.assertFalse(
+                    (directory / "launchplane-self-deploy-rollback-payload.json").exists()
+                )
+
+    def test_rollback_requires_matching_marker_even_when_preserving_bootstrap(self) -> None:
+        for marker_outcome in ("success", "failure"):
+            with self.subTest(marker_outcome=marker_outcome), TemporaryDirectory() as name:
+                directory = Path(name)
+                result = self._run_step(
+                    "deploy",
+                    "Check Launchplane rollback runtime image",
+                    {
+                        "BOOTSTRAP_SECRET_OPERATION": "preserve",
+                        "PREVIOUS_IMAGE_REFERENCE": "registry.invalid/service@sha256:abc",
+                        "ROLLBACK_MARKER_OUTCOME": marker_outcome,
+                        "ROLLBACK_RUNTIME_OUTCOME": "success",
+                        "GITHUB_STEP_SUMMARY": str(directory / "summary"),
+                    },
+                    directory,
+                )
+                self.assertEqual(result.returncode, 0 if marker_outcome == "success" else 1)
+                if marker_outcome != "success":
+                    self.assertNotIn("Rolled Launchplane back", result.stdout)
+
     def test_rendered_worker_changes_and_same_image_rollback_are_exact(self) -> None:
         base = {
             "BOOTSTRAP_SECRET_OPERATION": "preserve",
             "DEPLOYMENT_MARKER": "deploy-marker",
             "DEPLOY_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:abc",
             "IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
+            "SUPERSEDES_DEPLOYMENT_MARKER": "stuck-deploy-marker",
         }
         cases = (
             ("preserve", "absent", None),
@@ -130,6 +228,13 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 )
                 deploy = cast(dict[str, object], payload["deploy"])
                 self.assertEqual(deploy.get("ordinary_agent_worker_replicas"), wanted)
+                self.assertEqual(
+                    deploy["supersedes_deployment_marker"], base["SUPERSEDES_DEPLOYMENT_MARKER"]
+                )
+                self.assertEqual(
+                    cast(dict[str, str], deploy["oauth_env"])["LAUNCHPLANE_DEPLOYMENT_MARKER"],
+                    base["DEPLOYMENT_MARKER"],
+                )
         rollback = self._render(
             "Render Launchplane rollback request",
             {
@@ -143,8 +248,13 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 "SELF_DEPLOY_IDEMPOTENCY_KEY": "self-deploy-key",
             },
         )
+        deploy = cast(dict[str, object], rollback["deploy"])
+        self.assertEqual(deploy["supersedes_deployment_marker"], "forward")
         self.assertEqual(
-            cast(dict[str, object], rollback["deploy"])["ordinary_agent_worker_replicas"],
+            cast(dict[str, str], deploy["oauth_env"])["LAUNCHPLANE_DEPLOYMENT_MARKER"], "rollback"
+        )
+        self.assertEqual(
+            deploy["ordinary_agent_worker_replicas"],
             {"expected": "1", "desired": "absent"},
         )
 
@@ -246,38 +356,50 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
     def test_automatic_input_resolution_preserves_worker_replicas(self) -> None:
         step = self.workflow.step_named("deploy", "Resolve deploy inputs")
         assert step is not None
-        with TemporaryDirectory() as directory_name:
-            output = Path(directory_name) / "output"
-            result = subprocess.run(
-                ["bash", "-c", step.run],
-                env={
-                    "PATH": os.environ["PATH"],
-                    "HOME": directory_name,
-                    "LANG": "C.UTF-8",
-                    "GITHUB_OUTPUT": str(output),
-                    "EVENT_NAME": "workflow_run",
-                    "WORKFLOW_RUN_HEAD_SHA": "a" * 40,
-                    "WORKFLOW_SHA": "b" * 40,
-                    "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                    "LAUNCHPLANE_IMAGE_REPOSITORY": "",
-                    "GITHUB_RUN_ID": "123",
-                    "GITHUB_RUN_ATTEMPT": "1",
-                    "DISPATCH_BOOTSTRAP_SECRET_OPERATION": "",
-                    "DISPATCH_ORDINARY_AGENT_WORKERS": "",
-                    "DISPATCH_ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "",
-                    "DISPATCH_IMAGE_REFERENCE": "",
-                    "DISPATCH_SELF_DEPLOY_IDEMPOTENCY_KEY": "",
-                    "OMIT_EVERY_CODE_ENV": "false",
-                    "OMIT_TERMINAL_AGENT_ENV": "false",
-                    "OMIT_OWNER_AGENT_ENV": "false",
-                    "OMIT_NPMPLUS_ENV": "false",
-                },
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("ordinary_agent_workers=preserve", output.read_text(encoding="utf-8"))
+        for event, repair, accepted in (
+            ("workflow_run", "", True),
+            ("workflow_dispatch", "stuck-marker", True),
+            ("workflow_run", "stuck-marker", False),
+        ):
+            with self.subTest(event=event, repair=repair), TemporaryDirectory() as directory_name:
+                output = Path(directory_name) / "output"
+                result = subprocess.run(
+                    ["bash", "-c", step.run],
+                    env={
+                        "PATH": os.environ["PATH"],
+                        "HOME": directory_name,
+                        "LANG": "C.UTF-8",
+                        "GITHUB_OUTPUT": str(output),
+                        "EVENT_NAME": event,
+                        "WORKFLOW_RUN_HEAD_SHA": "a" * 40,
+                        "WORKFLOW_SHA": "b" * 40,
+                        "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                        "LAUNCHPLANE_IMAGE_REPOSITORY": "",
+                        "GITHUB_RUN_ID": "123",
+                        "GITHUB_RUN_ATTEMPT": "1",
+                        "DISPATCH_BOOTSTRAP_SECRET_OPERATION": "",
+                        "DISPATCH_ORDINARY_AGENT_WORKERS": "",
+                        "DISPATCH_ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "",
+                        "DISPATCH_IMAGE_REFERENCE": "",
+                        "DISPATCH_SELF_DEPLOY_IDEMPOTENCY_KEY": "",
+                        "DISPATCH_SUPERSEDES_DEPLOYMENT_MARKER": repair,
+                        "OMIT_EVERY_CODE_ENV": "false",
+                        "OMIT_TERMINAL_AGENT_ENV": "false",
+                        "OMIT_OWNER_AGENT_ENV": "false",
+                        "OMIT_NPMPLUS_ENV": "false",
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if accepted:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                    self.assertEqual(values["ordinary_agent_workers"], "preserve")
+                    self.assertEqual(values["supersedes_deployment_marker"], repair)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":

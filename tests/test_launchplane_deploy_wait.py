@@ -9,6 +9,43 @@ import yaml
 
 
 class LaunchplaneDeployWaitTests(unittest.TestCase):
+    def test_completed_release_drain_excludes_only_release_workers_from_observation(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "scripts/deploy/resolve-wait-timeout.py"
+        with TemporaryDirectory() as directory:
+            compose = Path(directory) / "compose.yml"
+            compose.write_text(
+                yaml.safe_dump(
+                    {
+                        "services": {
+                            "release": {
+                                "stop_grace_period": "2h",
+                                "labels": {"launchplane.release-worker": "true"},
+                            },
+                            "other": {"stop_grace_period": "5m"},
+                        }
+                    }
+                )
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--compose-file",
+                    str(compose),
+                    "--release-drain-complete",
+                ],
+                env={
+                    **os.environ,
+                    "LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS": "7",
+                    "LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS": "11",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(int(result.stdout), 5 * 60 + 7 + 11)
+
     def test_wait_includes_longest_parallel_drain_and_deploy_health_budgets(self) -> None:
         script = Path(__file__).resolve().parents[1] / "scripts/deploy/resolve-wait-timeout.py"
         with TemporaryDirectory() as directory:
