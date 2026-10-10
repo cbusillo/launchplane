@@ -1867,7 +1867,7 @@ def _reconcile_completed_landing_after_policy_change(
                 dispositions.append(child)
                 continue  # A completed disposition cannot close a later reopened head.
             try:
-                observed_head = github_client.pull_request_head_sha(
+                observed_head, observed_state = github_client.read_pull_request_head(
                     repository=request.repository,
                     pull_request_number=child.pull_request_number,
                 )
@@ -1897,7 +1897,8 @@ def _reconcile_completed_landing_after_policy_change(
                         **child.model_dump(),
                         "status": "preserved",
                         "preserved_head_sha": observed_head,
-                        "detail": "Recorded child head landed; changed PR preserved without further provider effects",
+                        "preserved_state": observed_state,
+                        "detail": f"Recorded child head landed; changed PR preserved {observed_state} without further provider effects",
                     }
                 )
             dispositions.append(child)

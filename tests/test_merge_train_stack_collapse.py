@@ -320,6 +320,13 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "different observed head"):
                     MergeTrainStackCollapsePlan.model_validate(payload)
 
+    def test_preserved_history_requires_observed_pr_state(self) -> None:
+        payload = _collapse_plan().model_dump(mode="json")
+        child = payload["child_dispositions"][0]
+        child.update(status="preserved", preserved_head_sha="newer-head")
+        with self.assertRaisesRegex(ValueError, "observed PR state"):
+            MergeTrainStackCollapsePlan.model_validate(payload)
+
     def test_execute_plan_preserves_progress_before_failed_mutation(self) -> None:
         plan = _collapse_plan()
         branch_client = _RecordingStackCollapseBranchClient(

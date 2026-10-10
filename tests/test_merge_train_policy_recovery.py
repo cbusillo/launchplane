@@ -506,6 +506,7 @@ class MergeTrainPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dispositions[1]["status"], "preserved")
         self.assertEqual(dispositions[1]["expected_head_sha"], "3" * 40)
         self.assertEqual(dispositions[1]["preserved_head_sha"], "9" * 40)
+        self.assertEqual(dispositions[1]["preserved_state"], "open")
         self.assertEqual(transport.children[3]["state"], "open")
         self.assertEqual(transport.children[3]["labels"], [])
         self.assertEqual(transport.comments[3], [])
@@ -594,6 +595,29 @@ class MergeTrainPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.children[3]["labels"], [])
         self.assertEqual(transport.comments[3], [])
         self.assertEqual(self.store.list_merge_train_controller_state_records()[0].status, "idle")
+
+    def test_moved_closed_child_records_closed_state_without_reopening_or_new_effects(self) -> None:
+        transport = self._record_unfinished_stack()
+        transport.children[3].update(state="closed", head={"sha": "9" * 40})
+        result = self._run().accepted_result
+        stack_plan = result["stack_collapse_plan"]
+        assert isinstance(stack_plan, dict)
+        self.assertEqual(stack_plan["child_dispositions"][1]["preserved_state"], "closed")
+        self.assertEqual(transport.children[3]["state"], "closed")
+        self.assertEqual(transport.comments[3], [])
+        self.assertEqual(transport.children[3]["labels"], [])
+        self.assertTrue(all("/2/" in path for _, path in transport.effects))
+        self.assertEqual(self.store.list_merge_train_controller_state_records()[0].status, "idle")
+
+    def test_missing_moved_child_state_keeps_fence_without_effects(self) -> None:
+        transport = self._record_unfinished_stack()
+        transport.children[3].update(state="", head={"sha": "9" * 40})
+        with self.assertRaises(MergeTrainGitHubError):
+            self._run()
+        self.assertEqual(transport.effects, [])
+        self.assertEqual(
+            self.store.list_merge_train_controller_state_records()[0].status, "reconcile_required"
+        )
 
     def test_old_policy_stack_requires_current_disposition_policy(self) -> None:
         transport = self._record_unfinished_stack()

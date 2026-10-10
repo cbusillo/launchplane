@@ -100,6 +100,9 @@ class MergeTrainStackChildDisposition(BaseModel):
     expected_head_sha: str
     status: MergeTrainStackChildDispositionStatus = "planned"
     preserved_head_sha: str = Field(default="", exclude_if=lambda value: not value)
+    preserved_state: Literal["", "open", "closed"] = Field(
+        default="", exclude_if=lambda value: not value
+    )
     comment_url: str = ""
     detail: str = ""
 
@@ -115,8 +118,10 @@ class MergeTrainStackChildDisposition(BaseModel):
         if self.status == "preserved":
             if not self.preserved_head_sha or self.preserved_head_sha == self.expected_head_sha:
                 raise ValueError("preserved child disposition requires a different observed head")
-        elif self.preserved_head_sha:
-            raise ValueError("only preserved child disposition may record preserved_head_sha")
+            if not self.preserved_state:
+                raise ValueError("preserved child disposition requires the observed PR state")
+        elif self.preserved_head_sha or self.preserved_state:
+            raise ValueError("only preserved child disposition may record preservation evidence")
         return self
 
     @property

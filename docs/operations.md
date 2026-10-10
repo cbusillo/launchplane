@@ -37,8 +37,11 @@ of repeating them. Completed non-stack history requires no provider writes.
 Persisted completed child dispositions are skipped, preserving any later work
 on a reopened child. If an unfinished child's head has moved, verified containment
 of its recorded head resolves only that historical disposition as `preserved`,
-with `preserved_head_sha` recording the observed newer head. The controller
-checkpoints this preservation before any remaining child effects. It never
+with `preserved_head_sha` and `preserved_state` recording the observed newer head
+and open/closed state. Preservation retains that observed state; a closed moved
+PR is not reopened and its new head is not claimed to be available in the queue.
+The controller checkpoints this preservation before that record's remaining
+child effects. It never
 comments on, labels, closes, retargets or merges the changed PR. Earlier landing
 annotations may remain as history; this recovery does not remove them. New work
 remains subject to ordinary queue discovery and readiness, including its current
@@ -47,7 +50,7 @@ the original collapse progress remain unchanged. Transient provider failures ret
 retry classification and rate-limit reset evidence.
 
 Preservation records require a reader that understands `preserved` and
-`preserved_head_sha`. Older images reject that evidence; an unchanged stack
+its preservation evidence. Older images reject that evidence; an unchanged stack
 disposition keeps its earlier wire shape. For a source rollback after preservation
 has run, retain the disposition reader and terminal-state handling while reverting
 the recovery writer, or repair by rolling forward. The Supervisor qualifies the
