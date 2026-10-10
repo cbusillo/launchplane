@@ -24,6 +24,7 @@ from control_plane.contracts.product_health_monitoring_migration import (
 )
 from control_plane.contracts.product_environment_read_model import (
     ACTION_AUTHZ_BY_ROUTE,
+    PRODUCT_PREVIEW_REFERENCE_LIMIT,
     ProductEnvironmentReadModelCapabilityError,
     build_product_activity_read_model,
     build_product_environment_config_status,
@@ -807,6 +808,46 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertIn(("shared-preview", "example-site"), store.preview_record_calls)
         self.assertEqual(overview.preview.active_count, 1)
         self.assertEqual(overview.preview.latest_preview_id, "example-site-active")
+        self.assertEqual(overview.preview.records_status, "authorization_denied")
+        self.assertEqual(overview.preview.records, ())
+
+        allowed = build_product_site_overview(
+            record_store=store,
+            product=profile.product,
+            action_allowed=lambda action, product, context, instances: (
+                action == "preview.read"
+                and product == "launchplane"
+                and context == profile.preview.context
+                and instances == ()
+            ),
+        )
+        self.assertEqual(allowed.preview.records_status, "available")
+        self.assertEqual(
+            [record.preview_id for record in allowed.preview.records], ["example-site-active"]
+        )
+        self.assertEqual(allowed.preview.records[0].recorded_state, "active")
+        self.assertEqual(allowed.preview.trust_state, overview.preview.trust_state)
+
+    def test_preview_references_keep_full_count_when_display_is_bounded(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
+        previews = tuple(
+            _preview_record(
+                preview_id=f"preview-{index}",
+                context=profile.preview.context,
+                anchor_repo="example-site",
+                state="pending",
+                updated_at=profile.updated_at,
+            )
+            for index in range(PRODUCT_PREVIEW_REFERENCE_LIMIT + 2)
+        )
+        overview = build_product_site_overview(
+            record_store=_PreviewRecordStore(profile, previews),
+            product=profile.product,
+            action_allowed=lambda *_: True,
+        )
+        self.assertEqual(overview.preview.active_count, len(previews))
+        self.assertLess(len(overview.preview.records), len(previews))
+        self.assertTrue(overview.preview.records_truncated)
 
     def test_product_site_overview_uses_canonical_prod_context_for_prod_actions(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(

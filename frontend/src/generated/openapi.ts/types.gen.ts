@@ -842,6 +842,8 @@ export type IntegrationKeyReadbackFinding = {
     code: string;
 };
 
+export type JsonValue = unknown;
+
 export type LaunchplaneAuthzPolicyOutput = {
     [key: string]: unknown;
 };
@@ -2308,6 +2310,13 @@ export type PreviewGenerationRecord = {
     verify_status: 'pending' | 'pass' | 'fail' | 'skipped';
 };
 
+export type PreviewHistoryResponse = {
+    generations: Array<PreviewGenerationRecord>;
+    preview: PreviewRecord;
+    status: 'ok';
+    trace_id: string;
+};
+
 export type PreviewPullRequestSummary = {
     head_sha: string;
     pr_number: number;
@@ -3374,12 +3383,23 @@ export type ProductPreviewProfile = {
     template_instance: string;
 };
 
+export type ProductPreviewReference = {
+    change_number: number;
+    change_url: string;
+    preview_id: string;
+    recorded_state: 'pending' | 'active' | 'failed' | 'paused' | 'teardown_pending' | 'destroyed';
+    updated_at: string;
+};
+
 export type ProductPreviewSummary = {
     active_count: number;
     context: string;
     enabled: boolean;
     latest_preview_id: string;
     provenance: DataProvenance;
+    records: Array<ProductPreviewReference>;
+    records_status: 'available' | 'authorization_denied' | 'unsupported';
+    records_truncated: boolean;
     slug_template: string;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
@@ -3622,6 +3642,29 @@ export type ProductPublicIngressSummary = {
     status: string;
     summary: string;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+};
+
+export type ProductReconcileRequestView = {
+    attempt: number;
+    last_delivery_id: string;
+    last_error: string;
+    last_plan: {
+        [key: string]: JsonValue;
+    };
+    pull_request_number: number | null;
+    request_count: number;
+    requested_at: string;
+    state: 'pending' | 'running' | 'done' | 'failed';
+    target_key: string;
+    target_kind: 'testing' | 'preview';
+    updated_at: string;
+};
+
+export type ProductReconcileRequestsResponse = {
+    product: string;
+    requests: Array<ProductReconcileRequestView>;
+    status: 'ok';
+    trace_id: string;
 };
 
 export type ProductReviewCarry = {
@@ -4813,6 +4856,36 @@ export type ReadPreviewReadinessResponses = {
 
 export type ReadPreviewReadinessResponse = ReadPreviewReadinessResponses[keyof ReadPreviewReadinessResponses];
 
+export type ReadPreviewHistoryData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        preview_id: string;
+    };
+    query?: never;
+    url: '/v1/previews/{preview_id}/history';
+};
+
+export type ReadPreviewHistoryErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadPreviewHistoryError = ReadPreviewHistoryErrors[keyof ReadPreviewHistoryErrors];
+
+export type ReadPreviewHistoryResponses = {
+    200: PreviewHistoryResponse;
+};
+
+export type ReadPreviewHistoryResponse = ReadPreviewHistoryResponses[keyof ReadPreviewHistoryResponses];
+
 export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsData = {
     body?: never;
     headers?: {
@@ -5060,6 +5133,35 @@ export type ReadProductProfileMutationReceiptResponses = {
 };
 
 export type ReadProductProfileMutationReceiptResponse = ReadProductProfileMutationReceiptResponses[keyof ReadProductProfileMutationReceiptResponses];
+
+export type ReadProductReconcileRequestsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/product-profiles/{product}/reconcile-requests';
+};
+
+export type ReadProductReconcileRequestsErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadProductReconcileRequestsError = ReadProductReconcileRequestsErrors[keyof ReadProductReconcileRequestsErrors];
+
+export type ReadProductReconcileRequestsResponses = {
+    200: ProductReconcileRequestsResponse;
+};
+
+export type ReadProductReconcileRequestsResponse = ReadProductReconcileRequestsResponses[keyof ReadProductReconcileRequestsResponses];
 
 export type ReadProductReviewData = {
     body?: never;

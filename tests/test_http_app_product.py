@@ -1008,6 +1008,80 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
 
 
 class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preview_references_preserve_existing_history_read_authority(self) -> None:
+        from control_plane.contracts.preview_record import PreviewRecord
+
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            _seed_product_environment_read_records(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                profile = store.read_product_profile_record("example-site")
+                preview = PreviewRecord(
+                    preview_id="preview-example-pr-28",
+                    context=profile.preview.context,
+                    anchor_repo=profile.repository.rsplit("/", 1)[-1],
+                    anchor_pr_number=28,
+                    anchor_pr_url="https://github.com/example/site/pull/28",
+                    preview_label="pr-28",
+                    canonical_url="https://pr-28.example.invalid",
+                    state="pending",
+                    created_at=profile.updated_at,
+                    updated_at=profile.updated_at,
+                    eligible_at=profile.updated_at,
+                )
+                store.write_preview_record(preview)
+                base = _product_environment_read_policy(products=("launchplane", profile.product))
+                for product, context, allowed in (
+                    (profile.product, preview.context, False),
+                    ("launchplane", "other-preview", False),
+                    ("launchplane", preview.context, True),
+                ):
+                    with self.subTest(product=product, context=context):
+                        read_policy = _product_environment_read_policy(
+                            products=(product,),
+                            context=context,
+                            actions=("preview.read",),
+                        )
+                        policy = base.model_copy(
+                            update={
+                                "github_actions": base.github_actions + read_policy.github_actions,
+                            }
+                        )
+                        app = create_launchplane_fastapi_app(
+                            verifier=_StubVerifier(_identity()),
+                            authz_policy=policy,
+                            record_store_factory=lambda: store,
+                        )
+                        collection = await _get_products(app)
+                        detail = await _get_product(app)
+                        history = await _asgi_get(
+                            app,
+                            f"/v1/previews/{preview.preview_id}/history",
+                            headers={"Authorization": "Bearer valid-token"},
+                        )
+                        self.assertEqual(collection.status_code, 200, collection.text)
+                        self.assertEqual(detail.status_code, 200, detail.text)
+                        self.assertEqual(history.status_code, 200 if allowed else 403)
+                        summaries = (
+                            collection.json()["products"][0]["preview"],
+                            detail.json()["product"]["preview"],
+                        )
+                        for summary in summaries:
+                            self.assertEqual(summary["active_count"], 1)
+                            self.assertEqual(
+                                summary["records_status"],
+                                "available" if allowed else "authorization_denied",
+                            )
+                            self.assertEqual(
+                                [record["preview_id"] for record in summary["records"]],
+                                [preview.preview_id] if allowed else [],
+                            )
+            finally:
+                store.close()
+
     async def test_administrator_evidence_candidate_reads_product_resource_context(self) -> None:
         human = _github_human_identity()
         _, request = compile_administrator_product_evidence_read_candidate(
