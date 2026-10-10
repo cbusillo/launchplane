@@ -49,7 +49,7 @@ merge through the protected branch and record why in the pull request.
 Launchplane records each product's Client and runs every production release
 through the same gated path: verified backup, release record, post-deploy
 checks, automatic rollback. Who accepts a release is set in
-`cbusillo/direction`, and that acceptance is what starts the release, so
+`cbusillo/direction`, and that acceptance or a Director-started temporary hotfix is what starts the release, so
 accepting is a production action: the review says so in plain words, the
 decision stays bound to the exact candidate it reviewed, an admin can hold
 releases without editing a record, and an admin override is still a hand
@@ -60,7 +60,7 @@ acceptance. Admin is a permission, not a role; the Director normally holds it.
 
 An agent asks the Director before:
 
-- changing a real live site outside the Client's accepted release; a deploy or promotion there comes only from that accepted release, and rolling back to an earlier Client-accepted release is part of that gated path
+- changing a real live site outside the Client's accepted release; a deploy or promotion there comes only from that accepted release or a Director-started temporary hotfix, and rolling back to an earlier Client-accepted release is part of that gated path
 - restoring or deleting a live site's data, or weakening a backup gate that protects a live site
 - creating credentials that can reach a live site, granting access, or changing who can merge
 - spending money or creating paid resources
