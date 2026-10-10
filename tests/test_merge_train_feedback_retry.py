@@ -17,7 +17,7 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackEvent,
     MergeTrainPrFeedbackRecord,
 )
-from control_plane import merge_train_scheduler
+import control_plane.merge_train_scheduler as merge_train_scheduler
 from control_plane.merge_train_scheduler import MergeTrainScheduledTargetResult
 from control_plane.merge_train_controller_run_once import MergeTrainControllerRunOnceResult
 from control_plane.merge_train_pr_feedback import (
@@ -25,6 +25,7 @@ from control_plane.merge_train_pr_feedback import (
     build_merge_train_pr_feedback_record,
     feedback_retry_is_due,
     deliver_merge_train_pr_feedback_record,
+    require_merge_train_pr_feedback_record_store,
     write_merge_train_pr_feedback_record,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -79,7 +80,8 @@ class MergeTrainFeedbackRetryTests(TestCase):
                 old_store.write_merge_train_pr_feedback_record(_record())
 
             def deliver(**kwargs: object) -> dict[str, object]:
-                body = str(kwargs["body"])
+                body = kwargs["body"]
+                assert isinstance(body, str)
                 if "Saved terminal landing evidence." in body:
                     retry_entered.set()
                     if not release_retry.wait(5):
@@ -113,7 +115,7 @@ class MergeTrainFeedbackRetryTests(TestCase):
             def newer() -> MergeTrainPrFeedbackRecord:
                 new_started.set()
                 return write_merge_train_pr_feedback_record(
-                    store=new_store,
+                    store=require_merge_train_pr_feedback_record_store(new_store),
                     request=MergeTrainPrFeedbackEnvelope(
                         repository="cbusillo/alpha",
                         pull_request_number=7,
