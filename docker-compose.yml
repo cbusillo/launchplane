@@ -42,6 +42,8 @@ services:
     image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
     pull_policy: always
     restart: unless-stopped
+    labels:
+      launchplane.release-worker: "true"
     depends_on:
       launchplane:
         condition: service_healthy
@@ -64,6 +66,8 @@ services:
     restart: unless-stopped
     # Shared production captures may run for two hours; SIGTERM drains the admitted capture.
     stop_grace_period: 125m
+    labels:
+      launchplane.release-worker: "true"
     depends_on:
       launchplane:
         condition: service_healthy

@@ -509,9 +509,9 @@ class ProductOnboardingTests(unittest.TestCase):
                 "LAUNCHPLANE_SECRET_KEYS_JSON",
                 preserve_payload["deploy"].get("oauth_env_removals", []),
             )
-            self.assertNotIn(
-                "LAUNCHPLANE_DEPLOYMENT_MARKER",
-                preserve_payload["deploy"].get("oauth_env", {}),
+            self.assertEqual(
+                preserve_payload["deploy"]["oauth_env"]["LAUNCHPLANE_DEPLOYMENT_MARKER"],
+                install_payload["deploy"]["oauth_env"]["LAUNCHPLANE_DEPLOYMENT_MARKER"],
             )
             self.assertNotIn("oauth_env_expected_absent", preserve_payload["deploy"])
             self.assertNotIn("oauth_env_expected_values", preserve_payload["deploy"])
@@ -682,7 +682,15 @@ class ProductOnboardingTests(unittest.TestCase):
 
             preserve = render_rollback("preserve")
             self.assertEqual(preserve.returncode, 0, preserve.stderr)
-            self.assertFalse(rollback_payload_path.exists())
+            preserve_payload = json.loads(rollback_payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                preserve_payload["deploy"]["image_reference"],
+                remove_payload["deploy"]["image_reference"],
+            )
+            self.assertEqual(
+                preserve_payload["deploy"]["supersedes_deployment_marker"],
+                "github-actions:12345:2:deploy",
+            )
 
     def test_runtime_key_safety_accepts_configured_rules(
         self,
