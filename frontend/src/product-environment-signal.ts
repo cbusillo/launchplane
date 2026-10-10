@@ -95,6 +95,7 @@ export function environmentOperationalTone(environment: ProductEnvironmentSummar
     "expired", "hostname_mismatch", "untrusted", "self_signed", "unreachable",
   ]);
   if (
+    environment.health_monitoring.open_incidents.length > 0 ||
     checks.some(check => check.status === "fail" || check.incident_status === "open") ||
     ["mismatch", "malformed"].includes(
       environment.topology.observed.placement?.runtime_identity_status ?? "unchecked",
