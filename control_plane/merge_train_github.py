@@ -1320,7 +1320,9 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         head = _json_object(pull_request.get("head"), "GitHub pull request head")
         return (
             _required_text(head.get("sha"), "GitHub pull request head requires sha."),
-            _pull_request_state(str(pull_request.get("state") or "")),
+            _pull_request_state(
+                _required_text(pull_request.get("state"), "GitHub pull request requires state.")
+            ),
         )
 
     def pull_request_is_closed(

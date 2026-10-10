@@ -316,8 +316,11 @@ def latest_merge_train_stack_collapse_progress_record(
             collapse_id,
         ),
     )
+    latest_progress_records = tuple(
+        record for record in records if record.plan.collapse_id == latest_collapse_id
+    )
     return max(
-        (record for record in records if record.plan.collapse_id == latest_collapse_id),
+        latest_progress_records,
         key=lambda record: (
             status_rank[record.plan.status],
             sum(mutation.status == "mutated" for mutation in record.plan.mutations),
