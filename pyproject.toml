@@ -19,6 +19,7 @@ dependencies = [
     "sqlalchemy>=2.1.0",
     "uvicorn>=0.52.3",
     "alembic>=1.19.1",
+    "tinycss2>=1.5.1",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +30,7 @@ dev = [
     "pyyaml>=6.0.3",
     "ruff>=0.16.3",
     "types-pyyaml>=6.0.12.20260906",
+    "types-tinycss2>=1.5.1.20260414",
 ]
 
 [project.scripts]

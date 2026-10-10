@@ -24,7 +24,9 @@ MergeTrainStackCollapseStatus = Literal[
     "planned", "collapsing", "waiting_for_root_checks", "ready_for_train", "blocked", "stale"
 ]
 MergeTrainStackCollapseRunStatus = Literal["planned", "mutated", "blocked", "stale"]
-MergeTrainStackChildDispositionStatus = Literal["planned", "closed", "blocked", "stale"]
+MergeTrainStackChildDispositionStatus = Literal[
+    "planned", "closed", "preserved", "blocked", "stale"
+]
 MergeTrainStackCollapseRecordStatus = Literal["active", "superseded"]
 MergeTrainStackCollapseIntentSource = Literal["root_ready_to_merge"]
 
@@ -97,6 +99,10 @@ class MergeTrainStackChildDisposition(BaseModel):
     pull_request_number: int = Field(gt=0)
     expected_head_sha: str
     status: MergeTrainStackChildDispositionStatus = "planned"
+    preserved_head_sha: str = Field(default="", exclude_if=lambda value: not value)
+    preserved_state: Literal["", "open", "closed"] = Field(
+        default="", exclude_if=lambda value: not value
+    )
     comment_url: str = ""
     detail: str = ""
 
@@ -108,7 +114,19 @@ class MergeTrainStackChildDisposition(BaseModel):
         )
         self.comment_url = self.comment_url.strip()
         self.detail = self.detail.strip()
+        self.preserved_head_sha = self.preserved_head_sha.strip()
+        if self.status == "preserved":
+            if not self.preserved_head_sha or self.preserved_head_sha == self.expected_head_sha:
+                raise ValueError("preserved child disposition requires a different observed head")
+            if not self.preserved_state:
+                raise ValueError("preserved child disposition requires the observed PR state")
+        elif self.preserved_head_sha or self.preserved_state:
+            raise ValueError("only preserved child disposition may record preservation evidence")
         return self
+
+    @property
+    def completed(self) -> bool:
+        return self.status in {"closed", "preserved"}
 
 
 class MergeTrainStackCollapsePlan(BaseModel):
@@ -375,8 +393,12 @@ def reconcile_merge_train_stack_children_after_root_landing(
     )
     updated_dispositions: list[MergeTrainStackChildDisposition] = []
     current_status: MergeTrainStackCollapseStatus = "waiting_for_root_checks"
+    if checkpoint is not None and any(
+        child.status == "preserved" for child in plan.child_dispositions
+    ):
+        checkpoint(plan)  # Persist preservation before any remaining provider effects.
     for disposition_index, disposition in enumerate(plan.child_dispositions):
-        if disposition.status == "closed":
+        if disposition.completed:
             updated_dispositions.append(disposition)
             continue
         pull_request_closed = disposition_client.pull_request_is_closed(

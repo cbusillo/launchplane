@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from email.message import Message
+from urllib.error import HTTPError
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -20,6 +22,9 @@ from control_plane.github_app_identity import (
     mint_pull_request_feedback_installation_token,
 )
 from control_plane.merge_train_github_token import resolve_merge_train_github_token
+from control_plane.github_read_cache import GitHubReadCache
+from control_plane.merge_train_github import MergeTrainGitHubError, UrllibMergeTrainGitHubTransport
+from tests.test_merge_train_read_cost import _Provider
 
 
 class MergeTrainGitHubTokenTests(unittest.TestCase):
@@ -35,6 +40,9 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
         ).decode()
 
     def setUp(self) -> None:
+        cache_patch = patch.dict("control_plane.merge_train_github_token._TOKEN_CACHE", clear=True)
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
         self.source = MergeTrainGitHubTokenSource(
             github_app=MergeTrainGitHubAppSource(
                 app_id=42, repository_id=123, private_key_context="example_context"
@@ -42,6 +50,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
         )
         self.calls: list[dict[str, object]] = []
         self.minted = 0
+        self.token_lifetime = timedelta(hours=1)
         self.returned_repository = "example/repo"
         self.token_permissions = {
             "checks": "read",
@@ -82,7 +91,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
         self.minted += 1
         return {
             "token": f"example-installation-token-{self.minted}",
-            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            "expires_at": (datetime.now(timezone.utc) + self.token_lifetime).isoformat(),
             "permissions": self.token_permissions,
             "repositories": [{"id": 123, "full_name": self.returned_repository}],
         }
@@ -105,7 +114,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                 "",
             )
 
-    def test_app_source_renews_exact_repository_tokens_from_managed_key(self) -> None:
+    def test_app_source_reuses_unexpired_exact_repository_tokens_from_managed_key(self) -> None:
         with (
             patch(
                 "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
@@ -117,8 +126,8 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
         ):
             first, second = self.resolve(), self.resolve()
 
-        self.assertNotEqual(first, second)
-        self.assertEqual(self.minted, 2)
+        self.assertEqual(first, second)
+        self.assertEqual(self.minted, 1)
         managed_key.assert_called_with(
             integration="merge_train_github_app",
             context_name="example_context",
@@ -138,6 +147,94 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                 },
             },
         )
+
+    def test_cached_native_tokens_reuse_validators_until_key_rotation(
+        self,
+    ) -> None:
+        cache = GitHubReadCache()
+        http = _Provider()
+        with (
+            patch(
+                "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                return_value=self.private_key,
+            ),
+            patch(
+                "control_plane.github_app_identity._github_api_request", side_effect=self.provider
+            ),
+            patch("control_plane.merge_train_github.urlopen", http),
+        ):
+            tokens = [self.resolve(), self.resolve()]
+            for token in tokens:
+                UrllibMergeTrainGitHubTransport(token=token, read_cache=cache).request(
+                    method="GET", path="/value"
+                )
+            self.assertEqual(tokens[0], tokens[1])
+            self.assertEqual(self.minted, 1)
+            self.assertEqual(http.used, 1)
+            other_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            other_pem = other_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            ).decode()
+            with patch(
+                "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                return_value=other_pem,
+            ):
+                rotated = self.resolve()
+            UrllibMergeTrainGitHubTransport(token=rotated, read_cache=cache).request(
+                method="GET", path="/value"
+            )
+            self.assertEqual(http.used, 2)
+
+    def test_auth_failures_refresh_issued_token_but_quota_failures_preserve_it(self) -> None:
+        for status, quota_limited in ((401, False), (403, False), (403, True)):
+            with (
+                self.subTest(status=status, quota_limited=quota_limited),
+                patch.dict("control_plane.merge_train_github_token._TOKEN_CACHE", {}, clear=True),
+                patch(
+                    "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                    return_value=self.private_key,
+                ),
+                patch(
+                    "control_plane.github_app_identity._github_api_request",
+                    side_effect=self.provider,
+                ),
+            ):
+                first = self.resolve()
+                headers = Message()
+                if quota_limited:
+                    headers["X-RateLimit-Remaining"] = "0"
+                    headers["X-RateLimit-Reset"] = "1800000000"
+                failure = HTTPError("https://api.github.com/value", status, "denied", headers, None)
+                with patch("control_plane.merge_train_github.urlopen", side_effect=failure):
+                    with self.assertRaises(MergeTrainGitHubError) as raised:
+                        UrllibMergeTrainGitHubTransport(token=first).request(
+                            method="GET", path="/value"
+                        )
+                self.assertEqual(raised.exception.rate_limited, quota_limited)
+                self.assertEqual(self.resolve() == first, status != 401)
+
+    def test_native_token_refreshes_before_expiry_and_repository_scope_does_not_share(self) -> None:
+        with (
+            patch(
+                "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                return_value=self.private_key,
+            ),
+            patch(
+                "control_plane.github_app_identity._github_api_request", side_effect=self.provider
+            ),
+        ):
+            self.token_lifetime = timedelta(minutes=4)
+            first = self.resolve()
+            self.token_lifetime = timedelta(hours=1)
+            renewed = self.resolve()
+            self.assertNotEqual(first, renewed)
+            self.assertEqual(self.minted, 2)
+            # A different repository identity cannot borrow the cached token.
+            assert self.source.github_app is not None
+            self.source.github_app.repository_id = 124
+            self.assertEqual(self.resolve(), "")
 
     def test_shared_installation_write_grants_are_downscoped_for_observation(self) -> None:
         self.installation_permissions.update(checks="write", statuses="write")

@@ -10,6 +10,7 @@ from typing import Literal, TypeVar
 import click
 
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
+from control_plane.contracts.odoo_online_backup import OdooProdBackupCaptureEvidence
 from control_plane.contracts.odoo_prod_retained_volume_backup_import import (
     ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_FAILURE_STAGE_BY_CODE,
     OdooProdRetainedVolumeBackupImportInspectionEvidence,
@@ -18,6 +19,7 @@ from control_plane.contracts.odoo_runtime_environment import (
     merge_required_odoo_addons_path,
 )
 from control_plane.dokploy import api
+from control_plane.dokploy.online_backup import ONLINE_ODOO_BACKUP_PROGRAM
 from control_plane.dokploy.source import (
     DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS,
     DokployTargetDefinition,
@@ -160,18 +162,7 @@ ODOO_WEBSITE_BOOTSTRAP_REQUIRED_READBACK_MARKERS = (
     "website_bootstrap_web_base_url_matches",
 )
 ODOO_BACKUP_GATE_RESULT_MARKER = "LAUNCHPLANE_ODOO_BACKUP_GATE_RESULT_B64"
-ODOO_BACKUP_GATE_RESULT_FIELDS = frozenset(
-    {
-        "schema_version",
-        "backup_nonce",
-        "backup_record_id",
-        "database_name",
-        "database_dump_sha256",
-        "filestore_archive_sha256",
-        "database_dump_size",
-        "filestore_archive_size",
-    }
-)
+ODOO_BACKUP_GATE_RESULT_FIELDS = frozenset(OdooProdBackupCaptureEvidence.model_fields)
 ODOO_BACKUP_VERIFICATION_RESULT_MARKER = "LAUNCHPLANE_ODOO_BACKUP_VERIFICATION_RESULT_B64"
 ODOO_BACKUP_VERIFICATION_RESULT_FIELDS = frozenset(
     {
@@ -1072,6 +1063,7 @@ def run_compose_odoo_backup_verification(
     database_dump_path: str,
     filestore_archive_path: str,
     manifest_path: str,
+    capture_evidence: Mapping[str, str] | None = None,
     timeout_seconds: int | None = None,
 ) -> api.JsonObject:
     normalized_verification_nonce = verification_nonce.strip()
@@ -1124,6 +1116,7 @@ def run_compose_odoo_backup_verification(
             database_dump_path=database_dump_path,
             filestore_archive_path=filestore_archive_path,
             manifest_path=manifest_path,
+            capture_evidence=capture_evidence,
         ),
         "serverId": schedule_server_id,
         "userId": schedule_lookup_id if schedule_type == "dokploy-server" else None,
@@ -2734,217 +2727,68 @@ def _build_dokploy_odoo_backup_gate_script(
     backup_root: str,
     backup_record_id: str,
 ) -> str:
-    normalized_filestore_path = filestore_path.strip() or "/volumes/data/filestore"
-    normalized_backup_root = backup_root.strip() or DEFAULT_ODOO_BACKUP_ROOT
-    quoted_compose_app_name = shlex.quote(compose_app_name)
-    quoted_backup_nonce = shlex.quote(backup_nonce)
-    quoted_database_name = shlex.quote(database_name)
-    quoted_filestore_path = shlex.quote(normalized_filestore_path)
-    quoted_backup_root = shlex.quote(normalized_backup_root)
-    quoted_backup_record_id = shlex.quote(backup_record_id)
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
-compose_project={quoted_compose_app_name}
-database_name={quoted_database_name}
-filestore_root={quoted_filestore_path}
-backup_root={quoted_backup_root}
-backup_record_id={quoted_backup_record_id}
-backup_nonce={quoted_backup_nonce}
-web_was_running=0
+compose_project={shlex.quote(compose_app_name)}
+database_name={shlex.quote(database_name)}
+filestore_root={shlex.quote(filestore_path.strip() or "/volumes/data/filestore")}
+backup_root={shlex.quote(backup_root.strip() or DEFAULT_ODOO_BACKUP_ROOT)}
+backup_record_id={shlex.quote(backup_record_id)}
+backup_nonce={shlex.quote(backup_nonce)}
 
-resolve_container_id() {{
+resolve_running_container() {{
     local service_name="$1"
-    local container_id
-    container_id=$(docker ps -aq \
-        --filter "label=com.docker.compose.project=${{compose_project}}" \
-        --filter "label=com.docker.compose.service=${{service_name}}" | head -n 1)
-    if [ -z "${{container_id}}" ]; then
-        echo "Missing container for service '${{service_name}}' in project '${{compose_project}}'." >&2
+    local container_ids
+    container_ids=$(docker ps -q \\
+        --filter "label=com.docker.compose.project=${{compose_project}}" \\
+        --filter "label=com.docker.compose.service=${{service_name}}")
+    if [ -z "${{container_ids}}" ] || [[ "${{container_ids}}" == *$'\\n'* ]]; then
+        echo "Online backup requires exactly one running ${{service_name}} container." >&2
         exit 1
     fi
-    printf '%s' "${{container_id}}"
+    printf '%s' "${{container_ids}}"
 }}
 
-ensure_running() {{
-    local container_id="$1"
-    local service_name="$2"
-    local current_status
-    current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{container_id}}")
-    if [ "${{current_status}}" != "running" ]; then
-        echo "Starting ${{service_name}} container ${{container_id}}"
-        docker start "${{container_id}}" >/dev/null
-    fi
-}}
-
-start_web_container() {{
-    if [ "${{web_was_running}}" != "1" ]; then
-        return
-    fi
-    local current_status
-    # Still attempt recovery if this first read fails; the final read must pass.
-    current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}" 2>/dev/null) || current_status=""
-    if [ "${{current_status}}" != "running" ]; then
-        echo "Starting web container ${{web_container_id}}"
-        docker start "${{web_container_id}}" >/dev/null || return 1
-    fi
-    current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}") || return 1
-    if [ "${{current_status}}" != "running" ]; then
-        echo "Web container did not return to running after the backup." >&2
-        return 1
-    fi
-}}
-
-exit_trap() {{
-    local exit_status="$?"
-    if ! start_web_container; then
-        if [ "${{exit_status}}" -eq 0 ]; then
-            exit_status=1
-        fi
-    fi
-    exit "${{exit_status}}"
-}}
-
-database_container_id=$(resolve_container_id "database")
-script_runner_container_id=$(resolve_container_id "script-runner")
-web_container_id=$(resolve_container_id "web")
-ensure_running "${{database_container_id}}" "database"
-ensure_running "${{script_runner_container_id}}" "script-runner"
-
-trap exit_trap EXIT
-
-if [ "$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")" = "running" ]; then
-    web_was_running=1
-    echo "Stopping web container ${{web_container_id}} for backup consistency"
-    docker stop "${{web_container_id}}" >/dev/null
+script_runner_container_id=$(resolve_running_container "script-runner")
+web_container_id=$(resolve_running_container "web")
+image_id=$(docker inspect -f '{{{{.Image}}}}' "${{web_container_id}}")
+if [ "${{image_id}}" != "$(docker inspect -f '{{{{.Image}}}}' "${{script_runner_container_id}}")" ]; then
+    echo "Backup web and script-runner image identities must agree." >&2
+    exit 1
 fi
-
 backup_dir="${{backup_root}}/${{database_name}}/${{backup_record_id}}"
-database_dump_path="${{backup_dir}}/${{database_name}}.dump"
-filestore_archive_path="${{backup_dir}}/${{database_name}}-filestore.tar.gz"
-manifest_path="${{backup_dir}}/manifest.json"
-
-echo "Creating Odoo backup gate directory ${{backup_dir}}"
 script_runner_uid=$(docker exec "${{script_runner_container_id}}" id -u)
 script_runner_gid=$(docker exec "${{script_runner_container_id}}" id -g)
-docker exec -u root \
-    -e BACKUP_ROOT="${{backup_root}}" \
-    -e DATABASE_NAME="${{database_name}}" \
-    -e BACKUP_DIR="${{backup_dir}}" \
-    -e SCRIPT_RUNNER_UID="${{script_runner_uid}}" \
-    -e SCRIPT_RUNNER_GID="${{script_runner_gid}}" \
-    "${{script_runner_container_id}}" \
-    /bin/bash -lc '
+docker exec -u root \\
+    -e BACKUP_ROOT="${{backup_root}}" \\
+    -e DATABASE_NAME="${{database_name}}" \\
+    -e BACKUP_DIR="${{backup_dir}}" \\
+    -e SCRIPT_RUNNER_UID="${{script_runner_uid}}" \\
+    -e SCRIPT_RUNNER_GID="${{script_runner_gid}}" \\
+    "${{script_runner_container_id}}" /bin/bash -lc '
         set -euo pipefail
-        install -d -m 700 -o "$SCRIPT_RUNNER_UID" -g "$SCRIPT_RUNNER_GID" "$BACKUP_ROOT"
-        install -d -m 700 -o "$SCRIPT_RUNNER_UID" -g "$SCRIPT_RUNNER_GID" "$BACKUP_ROOT/$DATABASE_NAME"
-        install -d -m 700 -o "$SCRIPT_RUNNER_UID" -g "$SCRIPT_RUNNER_GID" "$BACKUP_DIR"
+        install -d -m 700 -o "$SCRIPT_RUNNER_UID" -g "$SCRIPT_RUNNER_GID" \
+            "$BACKUP_ROOT" "$BACKUP_ROOT/$DATABASE_NAME" "$BACKUP_DIR"
     '
 
-echo "Capturing database dump for ${{database_name}}"
-docker exec \
-    -e ODOO_DATABASE_NAME="${{database_name}}" \
-    -e DATABASE_DUMP_PATH="${{database_dump_path}}" \
-    "${{script_runner_container_id}}" \
-    /bin/bash -lc '
-        set -euo pipefail
-        export PGPASSWORD="${{ODOO_DB_PASSWORD:-}}"
-        pg_dump \
-            --host "${{ODOO_DB_HOST:-database}}" \
-            --port "${{ODOO_DB_PORT:-5432}}" \
-            --username "${{ODOO_DB_USER:-odoo}}" \
-            --format custom \
-            --file "$DATABASE_DUMP_PATH" \
-            "$ODOO_DATABASE_NAME"
-        test -s "$DATABASE_DUMP_PATH"
-    '
-
-echo "Capturing filestore archive for ${{database_name}}"
-docker exec \
-    -e ODOO_DATABASE_NAME="${{database_name}}" \
-    -e ODOO_FILESTORE_ROOT="${{filestore_root}}" \
-    -e FILESTORE_ARCHIVE_PATH="${{filestore_archive_path}}" \
-    "${{script_runner_container_id}}" \
-    /bin/bash -lc '
-        set -euo pipefail
-        filestore_database_path="$ODOO_FILESTORE_ROOT"
-        if [ "$(basename "$filestore_database_path")" != "$ODOO_DATABASE_NAME" ]; then
-            filestore_database_path="$filestore_database_path/$ODOO_DATABASE_NAME"
-        fi
-        if [ ! -d "$filestore_database_path" ]; then
-            echo "Missing filestore path: $filestore_database_path" >&2
-            exit 1
-        fi
-        tar -C "$(dirname "$filestore_database_path")" -czf "$FILESTORE_ARCHIVE_PATH" "$(basename "$filestore_database_path")"
-        test -s "$FILESTORE_ARCHIVE_PATH"
-    '
-
-database_dump_size=$(docker exec "${{script_runner_container_id}}" stat -c %s "${{database_dump_path}}")
-filestore_archive_size=$(docker exec "${{script_runner_container_id}}" stat -c %s "${{filestore_archive_path}}")
-
-docker exec -i \
-    -e MANIFEST_PATH="${{manifest_path}}" \
-    -e BACKUP_RECORD_ID="${{backup_record_id}}" \
-    -e DATABASE_NAME="${{database_name}}" \
-    -e BACKUP_DIR="${{backup_dir}}" \
-    -e DATABASE_DUMP_PATH="${{database_dump_path}}" \
-    -e FILESTORE_ARCHIVE_PATH="${{filestore_archive_path}}" \
-    -e DATABASE_DUMP_SIZE="${{database_dump_size}}" \
-    -e FILESTORE_ARCHIVE_SIZE="${{filestore_archive_size}}" \
-    -e BACKUP_NONCE="${{backup_nonce}}" \
-    -e RESULT_MARKER={shlex.quote(ODOO_BACKUP_GATE_RESULT_MARKER)} \
-    "${{script_runner_container_id}}" \
-    python3 - <<'PY'
-import base64
-import json
-import hashlib
-import os
-from datetime import datetime, timezone
-
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-payload = {{
-    "schema_version": 1,
-    "backup_record_id": os.environ["BACKUP_RECORD_ID"],
-    "database_name": os.environ["DATABASE_NAME"],
-    "backup_dir": os.environ["BACKUP_DIR"],
-    "database_dump_path": os.environ["DATABASE_DUMP_PATH"],
-    "filestore_archive_path": os.environ["FILESTORE_ARCHIVE_PATH"],
-    "manifest_path": os.environ["MANIFEST_PATH"],
-    "database_dump_size": int(os.environ["DATABASE_DUMP_SIZE"]),
-    "filestore_archive_size": int(os.environ["FILESTORE_ARCHIVE_SIZE"]),
-    "database_dump_sha256": sha256_file(os.environ["DATABASE_DUMP_PATH"]),
-    "filestore_archive_sha256": sha256_file(os.environ["FILESTORE_ARCHIVE_PATH"]),
-    "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-}}
-with open(os.environ["MANIFEST_PATH"], "w", encoding="utf-8") as handle:
-    json.dump(payload, handle, indent=2, sort_keys=True)
-    handle.write("\\n")
-
-result_payload = {{
-    "schema_version": payload["schema_version"],
-    "backup_nonce": os.environ["BACKUP_NONCE"],
-    "backup_record_id": payload["backup_record_id"],
-    "database_name": payload["database_name"],
-    "database_dump_sha256": payload["database_dump_sha256"],
-    "filestore_archive_sha256": payload["filestore_archive_sha256"],
-    "database_dump_size": payload["database_dump_size"],
-    "filestore_archive_size": payload["filestore_archive_size"],
-}}
-encoded_result = base64.b64encode(
-    json.dumps(result_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-).decode("ascii")
-print(f"{{os.environ['RESULT_MARKER']}}={{encoded_result}}", flush=True)
+docker exec -i \\
+    -e DATABASE_NAME="${{database_name}}" \\
+    -e FILESTORE_ROOT="${{filestore_root}}" \\
+    -e BACKUP_DIR="${{backup_dir}}" \\
+    -e BACKUP_RECORD_ID="${{backup_record_id}}" \\
+    -e BACKUP_NONCE="${{backup_nonce}}" \\
+    -e IMAGE_ID="${{image_id}}" \\
+    -e RESULT_MARKER={shlex.quote(ODOO_BACKUP_GATE_RESULT_MARKER)} \\
+    "${{script_runner_container_id}}" python3 - <<'PY'
+{ONLINE_ODOO_BACKUP_PROGRAM}
 PY
 
-echo "Odoo backup gate complete: ${{backup_dir}}"
-start_web_container
-trap - EXIT
+if [ "$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")" != "running" ] || \\
+    [ "$(docker inspect -f '{{{{.Image}}}}' "${{web_container_id}}")" != "${{image_id}}" ]; then
+    echo "Serving image changed or web stopped during backup." >&2
+    exit 1
+fi
 """
 
 
@@ -2959,6 +2803,7 @@ def _build_dokploy_odoo_backup_verification_script(
     database_dump_path: str,
     filestore_archive_path: str,
     manifest_path: str,
+    capture_evidence: Mapping[str, str] | None = None,
 ) -> str:
     return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -2981,6 +2826,7 @@ docker exec -i \
     -e DATABASE_DUMP_PATH={shlex.quote(database_dump_path)} \
     -e FILESTORE_ARCHIVE_PATH={shlex.quote(filestore_archive_path)} \
     -e MANIFEST_PATH={shlex.quote(manifest_path)} \
+    -e CAPTURE_EVIDENCE={shlex.quote(json.dumps(dict(capture_evidence or {})))} \
     -e RESULT_MARKER={shlex.quote(ODOO_BACKUP_VERIFICATION_RESULT_MARKER)} \
     "${{script_runner_container_id}}" \
     python3 - <<'PY'
@@ -2988,6 +2834,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -3095,8 +2942,27 @@ try:
     if not isinstance(manifest, dict):
         fail("manifest_identity_mismatch", "manifest_status")
     manifest_schema_version = manifest.get("schema_version")
-    if manifest_schema_version not in (None, 1):
+    if manifest_schema_version not in (None, 1, 2):
         fail("manifest_identity_mismatch", "manifest_status")
+    expected_capture = json.loads(os.environ.get("CAPTURE_EVIDENCE", "{{}}"))
+    if any(str(manifest.get(key)) != value for key, value in expected_capture.items()):
+        fail("manifest_identity_mismatch", "manifest_status")
+    references = None
+    if manifest_schema_version == 2:
+        if (
+            manifest.get("consistency_protocol") != "postgres-exported-snapshot-odoo-hardlinks-v1"
+            or not re.fullmatch(r"sha256:[0-9a-f]{{64}}", str(manifest.get("image_id")))
+            or not manifest.get("postgres_snapshot_id")
+            or not manifest.get("recovery_point_at")
+        ):
+            fail("manifest_identity_mismatch", "manifest_status")
+        inventory_path = backup_dir / "attachments.json"
+        require_regular_file(inventory_path, "artifact_missing", "manifest_status")
+        if file_sha256(inventory_path) != manifest.get("attachment_inventory_sha256"):
+            fail("artifact_hash_mismatch", "sha256_status")
+        references = json.loads(inventory_path.read_text(encoding="utf-8"))
+        if not isinstance(references, dict) or len(references) != manifest.get("attachment_file_count"):
+            fail("manifest_identity_mismatch", "manifest_status")
     expected_identity = {{
         "backup_record_id": backup_record_id,
         "database_name": database_name,
@@ -3113,7 +2979,7 @@ try:
     manifest_path_value = manifest.get("manifest_path")
     if manifest_path_value is not None and manifest_path_value != str(manifest_path):
         fail("manifest_path_mismatch", "manifest_status")
-    if manifest_schema_version == 1 and manifest_path_value != str(manifest_path):
+    if manifest_schema_version in (1, 2) and manifest_path_value != str(manifest_path):
         fail("manifest_path_mismatch", "manifest_status")
 
     unexpected_failure_code = "artifact_path_verification_error"
@@ -3145,7 +3011,7 @@ try:
         manifest_database_dump_sha256 is not None
         or manifest_filestore_archive_sha256 is not None
     )
-    if manifest_schema_version == 1 or manifest_hashes_present:
+    if manifest_schema_version in (1, 2) or manifest_hashes_present:
         if (
             manifest_database_dump_sha256 != result["database_dump_sha256"]
             or manifest_filestore_archive_sha256
@@ -3189,6 +3055,7 @@ try:
 
     active_check = "tar_status"
     seen_members = set()
+    seen_attachment_files = set()
     top_level_directory_seen = False
     try:
         with tarfile.open(filestore_archive_path, mode="r:gz") as archive:
@@ -3209,6 +3076,21 @@ try:
                 result["filestore_member_count"] += 1
                 if member.isfile():
                     result["filestore_unpacked_size"] += member.size
+                    if references is not None:
+                        fname = "/".join(member_path.parts[1:])
+                        reference = references.get(fname)
+                        if not isinstance(reference, dict) or member.size != reference.get("file_size"):
+                            fail("filestore_archive_invalid", "tar_status")
+                        checksum = reference.get("checksum")
+                        if not isinstance(checksum, str) or fname != checksum[:2] + "/" + checksum:
+                            fail("filestore_archive_invalid", "tar_status")
+                        digest = hashlib.sha1()
+                        with archive.extractfile(member) as handle:
+                            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                                digest.update(chunk)
+                        if digest.hexdigest() != checksum:
+                            fail("filestore_archive_invalid", "tar_status")
+                        seen_attachment_files.add(fname)
                 if member.isdir() and normalized_member.rstrip("/") == database_name:
                     top_level_directory_seen = True
     except (OSError, tarfile.TarError):
@@ -3217,6 +3099,8 @@ try:
         fail("filestore_archive_invalid", "tar_status")
     if not top_level_directory_seen:
         fail("filestore_top_level_mismatch", "tar_status")
+    if references is not None and seen_attachment_files != references.keys():
+        fail("filestore_archive_invalid", "tar_status")
     result["tar_status"] = "pass"
 
     active_check = "staging_space_status"

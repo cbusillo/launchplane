@@ -208,7 +208,7 @@ jobs:
       - name: Request Launchplane VeriReel prod rollback
         id: lp_verireel
         if: ${{ steps.request.outputs.driver == 'verireel' }}
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
@@ -247,7 +247,7 @@ jobs:
       - name: Request Launchplane Odoo prod rollback
         id: lp_odoo
         if: ${{ steps.request.outputs.driver == 'odoo' }}
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@052db9d452f05381a3b43a82dfddfeefb34a8b72 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}

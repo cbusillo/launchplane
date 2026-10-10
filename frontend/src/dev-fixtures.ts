@@ -315,9 +315,9 @@ export function incidentsForFixture(
       (incident): incident is ProductIncidentSummary => incident !== null,
     ),
     trust_state:
-      incidentMode === "stale" ? "stale" : detail.health_monitoring.trust_state,
+      incidentMode === "stale" ? "stale" : "recorded",
     provenance: provenance(
-      incidentMode === "stale" ? "stale" : detail.health_monitoring.trust_state,
+      incidentMode === "stale" ? "stale" : "recorded",
       activeIncident
         ? "Launchplane incident history is available for this environment."
         : incidentMode === "stale"
@@ -2442,7 +2442,6 @@ function environmentFixture({
           provenance: provenance("verified", ingressSummary),
         },
       ],
-      trust_state: "recorded",
       provenance: provenance("recorded", "Public monitoring intent is recorded."),
     },
     public_ingress: {
@@ -2709,7 +2708,6 @@ function missingEnvironmentFixture(
           provenance: missing,
         },
       ],
-      trust_state: "recorded",
       provenance: provenance("recorded", "Prelaunch monitoring intent is recorded."),
     },
     public_ingress: {

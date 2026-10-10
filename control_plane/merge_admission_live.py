@@ -225,6 +225,11 @@ class LiveMergeAdmissionEvaluator:
         evaluated_at: str,
     ) -> MergeAdmissionEvaluation:
         landing_plan = landing_plan_record.landing_plan
+        expected_queue = tuple(
+            (plan_entry.pull_request_number, plan_entry.expected_head_sha)
+            for plan_entry in landing_plan.entries
+            if plan_entry.status not in {"merged", "skipped"}
+        )
         snapshot_reader = self.snapshot_reader
         if snapshot_reader is None:
             assert isinstance(
@@ -264,6 +269,9 @@ class LiveMergeAdmissionEvaluator:
                 policy=policy_record.policy,
                 snapshot=snapshot,
                 batch_landing=candidate_record.ordinary_job_binding is None,
+                # Already verified heads can briefly report unknown mergeability
+                # after the base moves. Unplanned heads retain their queue hold.
+                planned_dependency_heads=frozenset(expected_queue),
             )
             policy_record.policy.find_repository_policy(
                 repository=landing_plan.repository,
@@ -274,11 +282,6 @@ class LiveMergeAdmissionEvaluator:
                 "Active merge-train policy no longer admits the landing-plan lineage.",
                 reason_code="landing_policy_not_admitted",
             ) from error
-        expected_queue = tuple(
-            (plan_entry.pull_request_number, plan_entry.expected_head_sha)
-            for plan_entry in landing_plan.entries
-            if plan_entry.status not in {"merged", "skipped"}
-        )
         planned_numbers = {pull_request_number for pull_request_number, _ in expected_queue}
         for pull_request in snapshot.pull_requests:
             if (

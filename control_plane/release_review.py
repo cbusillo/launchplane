@@ -32,6 +32,7 @@ from control_plane.release_review_github import (
     read_release_changes,
 )
 from control_plane.release_review_shared import read_shared_source_changes, repository_key
+from control_plane.release_compatibility import classify_release_database_compatibility
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
@@ -121,6 +122,9 @@ def _identity_missing(instance: str) -> ReleaseEvidenceUnavailable:
 
 def checklist_digest(checklist: ReleaseChecklist) -> str:
     payload = checklist.model_dump(mode="json")
+    # Derived engineering evidence is bound to the immutable artifact pair,
+    # not an additional Client decision. Preserve existing exact-tuple acceptance.
+    payload.pop("database_compatibility", None)
     # Prior preview decisions are helpful annotations, never release approval.
     for item in payload["items"]:
         item.pop("already_reviewed")
@@ -272,6 +276,14 @@ def build_release_review(
         untracked_commits=untracked,
         shared_sources=shared_sources,
         additional_changes=additional_changes,
+        database_compatibility=(
+            classify_release_database_compatibility(
+                production=store.read_artifact_manifest(production.artifact_id),
+                candidate=store.read_artifact_manifest(candidate.artifact_id),
+            )
+            if profile.driver_id == "odoo"
+            else None
+        ),
     )
     digest = checklist_digest(checklist)
     matching = [
