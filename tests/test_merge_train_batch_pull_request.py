@@ -1,7 +1,8 @@
 import unittest
 import hashlib
 from unittest.mock import patch
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, cast
@@ -185,6 +186,11 @@ class _BatchGuard:
         for number in self.admissions:
             if self.outcomes.get(number) != "landed":
                 self.outcomes[number] = "rejected"
+
+    @staticmethod
+    @contextmanager
+    def reuse_batch_evidence() -> Iterator[Callable[[], None]]:
+        yield lambda: None
 
     @staticmethod
     def build_proposal(**_kwargs: Any) -> None:
