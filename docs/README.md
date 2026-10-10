@@ -30,11 +30,14 @@ not describe runtime authority until it is implemented, deployed, and activated.
   approval gate and new website repo checklist.
 - [artifact-provenance.md](artifact-provenance.md) — how Launchplane verifies
   which repository and commit a product's own build came from.
+- [release-database-compatibility.md](release-database-compatibility.md) — verified full-input release classification and targeted module-plan producer contract.
 - [event-driven-deploys.md](event-driven-deploys.md) — GitHub App webhook
   receiver and reconciler that deploy verified builds to testing and previews
   without the product repository calling Launchplane.
 - [preview-workflow-contract.md](preview-workflow-contract.md) — reusable thin
   preview workflow event, idempotency, feedback, and lifecycle contract.
+- [legacy-preview-reconciliation.md](legacy-preview-reconciliation.md) — reviewed
+  reconciliation of provider-absent generic-web preview history.
 - [driver-descriptors.md](driver-descriptors.md) — provider-neutral driver
   descriptor, action safety, registry, and read-model endpoint contract.
 - [driver-development.md](driver-development.md) — when and how to add a new
@@ -93,6 +96,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [operations.md](operations.md) — admin workflows and runtime boundary rules.
 - [production-backup-provider.md](production-backup-provider.md) — typed
   Proxmox/PBS capture, host boundary, evidence and rollout prerequisites.
+- [odoo-online-backups.md](odoo-online-backups.md) — coherent online logical
+  snapshots, attachment retention and isolated restore proof.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — standing public-source posture,
   image and secret boundary, and ongoing public hygiene.

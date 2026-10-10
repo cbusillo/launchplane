@@ -414,6 +414,39 @@
         ]
       },
       {
+        "idempotency": "plan_and_apply",
+        "identity_dependencies": [
+          "read_write_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "inspect",
+          "plan",
+          "apply"
+        ],
+        "operation_id": "reconcile_legacy_generic_web_preview",
+        "path": "/v1/previews/legacy-generic-web/reconciliation",
+        "purpose": "Inspect, plan or reconcile one provider-absent legacy generic-web preview.",
+        "response_statuses": [
+          "202",
+          "400",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan",
+          "expected_plan_digest",
+          "plan_idempotency_key"
+        ],
+        "schema_fingerprint_sha256": "1a5b6056a5f67987eb4fc7ac9b4f242b3b95a1d306599cb72a74a58bff7371b0",
+        "supported_surfaces": [
+          "agent_helper",
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "always",
         "identity_dependencies": [
           "read_write_identity"
@@ -593,8 +626,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "2ce93edda4058ec34a4addfda28c08193f984373"
+    "source_commit_sha": "ede632460946a5b980227f079923703fff64003c"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "9ce47a566999df1816834c269532b8c7517155a52f691b6de6a52ece6c2ef1ce"
+  "semantic_digest_sha256": "2926ccf90b6afeb66331da6af80017ae74cc15d746cb8656c22725c8f59bbd0b"
 }

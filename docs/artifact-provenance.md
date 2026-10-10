@@ -115,3 +115,9 @@ use them.
 
 Event handling (which GitHub events start a verification, and the catch-up
 sweep) is in [event-driven deploys](event-driven-deploys.md).
+
+## Release database compatibility
+
+Verified Odoo artifacts may carry the additive complete input/module inventory
+for [release database compatibility](release-database-compatibility.md). That
+page owns its producer contract and conservative missing-evidence behavior.
