@@ -106,12 +106,8 @@ def classify_candidate_check_failures(
             continue
         runner_lost = False
         failed_tests: list[str] = []
-        check_run_id = check_run.get("id")
-        if (
-            isinstance(check_run_id, int)
-            and not isinstance(check_run_id, bool)
-            and annotated < MAX_ANNOTATED_CHECK_RUNS
-        ):
+        check_run_id = _check_run_id(check_run.get("id"))
+        if check_run_id is not None and annotated < MAX_ANNOTATED_CHECK_RUNS:
             annotated += 1
             for annotation in read_annotations(check_run_id):
                 message = _text(annotation.get("message")).strip()
@@ -167,6 +163,10 @@ def _more(count: int) -> str:
 def _safe_check_name(name: str) -> str:
     compact = " ".join(name.split())
     return compact if _SAFE_CHECK_NAME.fullmatch(compact) else "unnamed check"
+
+
+def _check_run_id(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _text(value: object) -> str:
