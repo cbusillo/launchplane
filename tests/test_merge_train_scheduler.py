@@ -506,12 +506,14 @@ class MergeTrainSchedulerPassTests(TestCase):
 
                 # The same candidate-less result must never deliver in a dry run.
                 self.mocks["write_merge_train_pr_feedback_record"].reset_mock()
+                self.record_store.list_merge_train_pr_feedback_records.reset_mock()
                 self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
                     ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
                 )
                 (dry_run,) = self._run()
                 self.assertEqual(dry_run.feedback_delivered, 0)
                 self.mocks["write_merge_train_pr_feedback_record"].assert_not_called()
+                self.record_store.list_merge_train_pr_feedback_records.assert_not_called()
 
     def test_level1_target_runs_the_level1_step(self) -> None:
         self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
