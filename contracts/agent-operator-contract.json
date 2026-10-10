@@ -45,6 +45,41 @@
     },
     "operations": [
       {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_operator_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "reconcile"
+        ],
+        "operation_id": "restart_lane_service",
+        "path": "/v1/drivers/odoo/service-restart",
+        "purpose": "Inspect or restart one existing lane service on its current accepted artifact, or reconcile its original receipt without another restart.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_digest",
+          "current_artifact_identity",
+          "release_lane_exclusion"
+        ],
+        "schema_fingerprint_sha256": "d21c23fe8c2561b4c30efa827a0f68125838085eb653c92adb12666151f2b0d7",
+        "supported_surfaces": [
+          "bounded_admin_helper",
+          "operator_ui",
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "body",
         "identity_dependencies": [
           "read_ordinary_agent_proof"
@@ -626,8 +661,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "ede632460946a5b980227f079923703fff64003c"
+    "source_commit_sha": "f586bff3113c18a6b02f2fac74f22c46be26c1b1"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "2926ccf90b6afeb66331da6af80017ae74cc15d746cb8656c22725c8f59bbd0b"
+  "semantic_digest_sha256": "9f9f12ce0922dc1cea418c0f17eefef6803297671066d6954335f4e44b2b9c20"
 }
