@@ -107,7 +107,18 @@ def _build_generic_web_cleanup_record(
             error_message="Cleanup requires enabled previews and a plan matching its product/preview context; generate a fresh plan within the caller's existing authority.",
         )
     parsed_previews: list[tuple[str, int]] = []
-    anchor_repo = generic_web_preview_anchor_repo(profile.repository) if profile else plan.product
+    try:
+        anchor_repo = (
+            generic_web_preview_anchor_repo(profile.repository) if profile else plan.product
+        )
+    except click.ClickException as exc:
+        return _blocked_record(
+            plan=plan,
+            requested_at=requested_at,
+            source=source,
+            apply=True,
+            error_message=str(exc),
+        )
     for preview_slug in plan.orphaned_slugs:
         anchor_pr_number = preview_pr_number_from_slug(
             preview_slug=preview_slug,

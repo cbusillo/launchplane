@@ -6,7 +6,7 @@ import json
 from ipaddress import ip_address
 import time
 from pathlib import Path
-from typing import ContextManager, Iterator, Literal, Protocol, cast, runtime_checkable
+from typing import ContextManager, Literal, Protocol, cast, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -450,40 +450,6 @@ def preview_pr_number_from_slug(*, preview_slug: str, slug_template: str) -> int
     return number if number > 0 else None
 
 
-def _iter_dokploy_applications(raw_projects: object) -> Iterator[JsonObject]:
-    if not isinstance(raw_projects, list):
-        raise click.ClickException(
-            "Dokploy project inventory returned an invalid response payload."
-        )
-    for raw_project in raw_projects:
-        project = dokploy_api.as_json_object(raw_project)
-        if project is None:
-            raise click.ClickException("Dokploy project inventory contains an invalid project.")
-        raw_environments = project.get("environments")
-        if not isinstance(raw_environments, list):
-            raise click.ClickException("Dokploy project inventory has incomplete environments.")
-        for raw_environment in raw_environments:
-            environment = dokploy_api.as_json_object(raw_environment)
-            if environment is None:
-                raise click.ClickException(
-                    "Dokploy project inventory contains an invalid environment."
-                )
-            raw_applications = environment.get("applications")
-            if not isinstance(raw_applications, list):
-                raise click.ClickException("Dokploy project inventory has incomplete applications.")
-            for raw_application in raw_applications:
-                application = dokploy_api.as_json_object(raw_application)
-                if application is None:
-                    raise click.ClickException(
-                        "Dokploy project inventory contains an invalid application."
-                    )
-                if not str(application.get("name") or "").strip():
-                    raise click.ClickException(
-                        "Dokploy project inventory contains an unnamed application."
-                    )
-                yield application
-
-
 def _find_application_by_name(*, host: str, token: str, application_name: str) -> JsonObject | None:
     raw_projects = dokploy_api.dokploy_request(
         host=host,
@@ -491,7 +457,7 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
         path="/api/project.all",
     )
     # Validate the complete inventory before accepting a match or proving absence.
-    for application in tuple(_iter_dokploy_applications(raw_projects)):
+    for application in tuple(dokploy_api.iter_dokploy_applications(raw_projects)):
         if str(application.get("name") or "").strip() == application_name:
             return application
     return None
@@ -1671,7 +1637,7 @@ def execute_generic_web_preview_inventory(
         path="/api/project.all",
     )
     preview_items: list[GenericWebPreviewInventoryItem] = []
-    for application in _iter_dokploy_applications(raw_projects):
+    for application in dokploy_api.iter_dokploy_applications(raw_projects):
         application_name = str(application.get("name") or "").strip()
         preview_slug = preview_slug_from_application_name(
             app_name_prefix=app_name_prefix,
