@@ -395,7 +395,6 @@ class ProductHealthMonitoringSummary(BaseModel):
     public_incident_eligible: bool
     checks: tuple[ProductHealthMonitoringCheckSummary, ...] = ()
     open_incidents: tuple[ProductIncidentSummary, ...] = ()
-    trust_state: FreshnessStatus = "recorded"
     provenance: DataProvenance
 
 

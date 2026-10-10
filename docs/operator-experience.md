@@ -274,6 +274,13 @@ model may show provider-safe external links and bounded delivery failures, but
 must not expose destination or policy identities, raw outbox payloads, provider
 operation internals, raw target URLs, secret references, or provider error text.
 
+Monitoring completeness comes from each effective, incident-eligible check's
+observation and deadline. An absent, stale or unsupported observation is
+disclosed even when the active incident set is empty. Disabled and inapplicable
+probes do not imply missing evidence. `health_monitoring.provenance` describes
+the recorded monitoring intent; the retired aggregate `trust_state` is omitted
+so consumers use the checks instead of treating configuration as probe proof.
+
 The first product/site read endpoints are:
 
 - `GET /v1/products`

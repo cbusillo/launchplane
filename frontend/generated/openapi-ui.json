@@ -24943,18 +24943,6 @@
           "public_incident_eligible": {
             "title": "Public Incident Eligible",
             "type": "boolean"
-          },
-          "trust_state": {
-            "default": "recorded",
-            "enum": [
-              "verified",
-              "recorded",
-              "stale",
-              "missing",
-              "unsupported"
-            ],
-            "title": "Trust State",
-            "type": "string"
           }
         },
         "required": [
@@ -24962,8 +24950,7 @@
           "monitoring_intent",
           "open_incidents",
           "provenance",
-          "public_incident_eligible",
-          "trust_state"
+          "public_incident_eligible"
         ],
         "title": "ProductHealthMonitoringSummary",
         "type": "object"

@@ -40,6 +40,7 @@ import {
   type TrustState,
 } from "./ProductOps";
 import { expireEnvironmentEvidence } from "./product-environment-signal";
+import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import {
   EnvironmentViewNav,
   ProductWorkspaceNav,
@@ -562,10 +563,10 @@ function EnvironmentOverview({
                 ? "warning"
                 : conditionTone(
                     statusTone(detail.public_ingress.status),
-                    detail.health_monitoring.trust_state,
+                    monitoringEvidenceTrust(detail.health_monitoring.checks),
                   )
           }
-          trustState={detail.health_monitoring.trust_state}
+          trustState={monitoringEvidenceTrust(detail.health_monitoring.checks)}
           value={
             openIncidentSeverity
               ? `Active incident · ${humanize(openIncidentSeverity)}`
@@ -623,7 +624,7 @@ function EnvironmentOverview({
         currentIncidentId={currentIncidentId}
         environment={detail.environment}
         fixtureMode={fixtureMode}
-        monitoringTrustState={detail.health_monitoring.trust_state}
+        monitoringTrustState={monitoringEvidenceTrust(detail.health_monitoring.checks.filter(check => check.incident_eligible))}
         product={detail.product}
       />
 
@@ -704,7 +705,7 @@ function IngressEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
           </h2>
         </div>
         <EvidenceBadge
-          state={detail.health_monitoring.trust_state}
+          state={monitoringEvidenceTrust(detail.health_monitoring.checks)}
           timestamp={evidenceTimestamp(detail.health_monitoring.provenance)}
         />
       </div>
