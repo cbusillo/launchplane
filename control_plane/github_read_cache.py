@@ -8,8 +8,6 @@ payloads so their edits cannot change a later provider observation.
 from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from hashlib import sha256
 import json
 from threading import Lock
 
@@ -27,30 +25,7 @@ class GitHubReadCache:
         self.max_bytes = max_bytes
         self._bytes = 0
         self._entries: OrderedDict[tuple[str, str], GitHubCachedRead] = OrderedDict()
-        self._token_scopes: OrderedDict[str, tuple[str, datetime]] = OrderedDict()
         self._lock = Lock()
-
-    def register_token_scope(self, token: str, *, scope: str, expires_at: datetime) -> None:
-        """Bind an already validated native App token without retaining the secret."""
-        digest = sha256(token.encode()).hexdigest()
-        with self._lock:
-            self._token_scopes[digest] = (scope, expires_at)
-            self._token_scopes.move_to_end(digest)
-            while len(self._token_scopes) > self.capacity:
-                self._token_scopes.popitem(last=False)
-
-    def namespace(self, *, token: str, api_origin: str) -> str:
-        digest = sha256(token.encode()).hexdigest()
-        scope = "credential:" + digest
-        with self._lock:
-            registered = self._token_scopes.get(digest)
-            if registered is not None:
-                fingerprint, expires_at = registered
-                if expires_at > datetime.now(timezone.utc):
-                    scope = "validated-native-installation:" + fingerprint
-                else:
-                    del self._token_scopes[digest]
-        return sha256(f"{api_origin}\0{scope}".encode()).hexdigest()
 
     def get(self, namespace: str, path: str) -> GitHubCachedRead | None:
         with self._lock:

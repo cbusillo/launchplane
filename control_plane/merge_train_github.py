@@ -247,9 +247,7 @@ class UrllibMergeTrainGitHubTransport:
         ).rstrip("/")
         self.response_headers_observer = response_headers_observer
         self._read_cache = read_cache if read_cache is not None else MERGE_TRAIN_READ_CACHE
-        self._cache_namespace = self._read_cache.namespace(
-            token=self.token, api_origin=self.api_base_url
-        )
+        self._cache_namespace = sha256(f"{self.api_base_url}\0{self.token}".encode()).hexdigest()
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         request_body = None
@@ -2599,6 +2597,9 @@ class GitHubMergeTrainSnapshotReader:
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
     ) -> MergeTrainDryRunSnapshot:
+        self._actor_roles.clear()
+        self._author_roles.clear()
+        self._dependency_classes.clear()
         repository_path = _repository_path(repository)
         normalized_base_branch = _required_value(
             base_branch, "GitHub pull request base branch is required."
@@ -2684,6 +2685,9 @@ class GitHubMergeTrainSnapshotReader:
     def read_pull_request_snapshot(
         self, *, repository: str, pull_request_number: int
     ) -> MergeTrainPullRequestSnapshot:
+        self._actor_roles.clear()
+        self._author_roles.clear()
+        self._dependency_classes.clear()
         repository_path = _repository_path(repository)
         snapshot = self._pull_request_snapshot(
             repository=repository,
@@ -2809,7 +2813,11 @@ class GitHubMergeTrainSnapshotReader:
                 author_association=str(source.get("author_association") or ""),
             )
             if enrich
-            else "unknown"
+            else (
+                "repo_owner"
+                if str(source.get("author_association") or "").upper() == "OWNER"
+                else "unknown"
+            )
         )
         labels = _labels(source.get("labels"))
         label_actors = (
@@ -2861,7 +2869,6 @@ class GitHubMergeTrainSnapshotReader:
             base_sha=str(base.get("sha") or "").strip(),
             base_ref=_required_text(base.get("ref"), "GitHub pull request base requires ref."),
             base_repository=base_repository,
-            requires_individual_landing=not enrich,
             mergeable=_mergeable_state(source) if enrich else "unknown",
             required_checks_status=self._required_checks_status(
                 repository_path=repository_path,
@@ -2897,7 +2904,9 @@ class GitHubMergeTrainSnapshotReader:
                 base_branch=base_branch,
                 base_sha=base_sha,
             )
-        except MergeTrainGitHubError:
+        except MergeTrainGitHubError as error:
+            if error.rate_limited:
+                raise
             result = "needs_review"
         self._dependency_classes[key] = result
         return result

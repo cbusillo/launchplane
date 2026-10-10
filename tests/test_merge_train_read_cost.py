@@ -1,10 +1,11 @@
 import json
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Any, cast
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request
@@ -12,9 +13,11 @@ from urllib.request import Request
 from control_plane.github_read_cache import GitHubReadCache
 from control_plane.github_request_timing import github_request_tally
 from control_plane.merge_admission import MergeAdmissionEvaluator
+from control_plane.merge_train import build_merge_train_dry_run_result
 from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceEnvelope,
     execute_merge_train_controller_run_once,
+    _advance_planned_stack_collapse_record,
 )
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
@@ -24,7 +27,11 @@ from control_plane.merge_train_github import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
-from tests.test_merge_train_github import _github_branch, _github_pull_request
+from tests.test_merge_train_github import _github_branch, _github_commit, _github_pull_request
+from tests.support.merge_train import (
+    _FakeStackedMergeTrainSnapshotReader,
+    _seed_merge_train_stack_collapse_plan_record,
+)
 
 
 class _Response:
@@ -74,6 +81,135 @@ class _Provider:
 
 
 class MergeTrainReadCostTests(unittest.TestCase):
+    def test_rejected_dependency_updates_keep_idle_snapshot_under_twenty_charged_reads(
+        self,
+    ) -> None:
+        provider = _Provider()
+        policy = build_test_merge_train_policy()
+        target = policy.policies[0]
+        target.enqueue.trusted_automation_github_user_ids = (1001,)
+        target.enqueue.dependency_update_github_user_ids = (1001,)
+        provider.pulls = [
+            dict(
+                _github_pull_request(n),
+                labels=[],
+                user={"id": 1001, "type": "Bot", "login": "updates"},
+            )
+            for n in range(1, 16)
+        ]
+        for number in range(1, 16):
+            provider.payloads[f"/repos/{target.repository}/pulls/{number}/commits"] = [
+                _github_commit(1001, "Bump example-lib from 1.0.0 to 2.0.0", sha=f"head-{number}")
+            ]
+        reader = GitHubMergeTrainSnapshotReader(
+            transport=UrllibMergeTrainGitHubTransport(
+                token="fixture", read_cache=GitHubReadCache()
+            ),
+            repository_policy=target,
+        )
+        with patch("control_plane.merge_train_github.urlopen", provider):
+            for _ in range(2):
+                snapshot = reader.read_merge_train_snapshot(
+                    repository=target.repository, base_branch="main"
+                )
+                self.assertEqual(
+                    build_merge_train_dry_run_result(
+                        policy=policy, snapshot=snapshot
+                    ).intended_next_action,
+                    "idle",
+                )
+        self.assertLessEqual(provider.used, 20)
+
+    def test_dependency_classification_preserves_quota_deadline_failures(self) -> None:
+        provider = _Provider()
+        policy = build_test_merge_train_policy().policies[0]
+        policy.enqueue.dependency_update_github_user_ids = (1001,)
+        provider.pulls = [
+            dict(
+                _github_pull_request(1),
+                labels=[],
+                user={"id": 1001, "type": "Bot", "login": "updates"},
+            )
+        ]
+        reset = int((datetime.now(timezone.utc) + timedelta(minutes=1)).timestamp())
+        headers = Message()
+        headers["x-ratelimit-remaining"] = "0"
+        headers["x-ratelimit-reset"] = str(reset)
+
+        def request(value: Request, *, timeout: int) -> _Response:
+            if "/commits?" in value.full_url:
+                raise HTTPError(value.full_url, 403, "quota exhausted", headers, None)
+            return provider(value, timeout=timeout)
+
+        reader = GitHubMergeTrainSnapshotReader(
+            transport=UrllibMergeTrainGitHubTransport(
+                token="fixture", read_cache=GitHubReadCache()
+            ),
+            repository_policy=policy,
+        )
+        with patch("control_plane.merge_train_github.urlopen", request):
+            with self.assertRaises(MergeTrainGitHubError) as failure:
+                reader.read_merge_train_snapshot(repository=policy.repository, base_branch="main")
+        self.assertTrue(failure.exception.rate_limited)
+        self.assertEqual(failure.exception.rate_limit_reset, reset)
+
+    def test_unenriched_stack_child_pauses_instead_of_retiring_the_saved_plan(self) -> None:
+        policy = build_test_merge_train_policy()
+        target = policy.policies[0]
+        for draft in (False, True):
+            with self.subTest(draft=draft), TemporaryDirectory() as directory:
+                state_dir = Path(directory)
+                _seed_merge_train_stack_collapse_plan_record(state_dir, policy=policy)
+                store = FilesystemRecordStore(state_dir)
+                (record,) = store.list_merge_train_stack_collapse_plan_records(
+                    repository=target.repository, base_branch="main", status="active"
+                )
+                snapshot = _FakeStackedMergeTrainSnapshotReader(
+                    transport=None
+                ).read_merge_train_snapshot(repository=target.repository, base_branch="main")
+                root, _ = snapshot.pull_requests
+                raw_child = dict(
+                    _github_pull_request(
+                        2, head_sha="head-child", head_ref="feature/child", base_ref="feature/root"
+                    ),
+                    draft=draft,
+                    labels=[{"name": target.enqueue_label}] if draft else [],
+                )
+                reader = GitHubMergeTrainSnapshotReader(
+                    transport=cast(Any, None), repository_policy=target
+                )
+                child = reader._pull_request_snapshot(
+                    repository=target.repository,
+                    repository_path=target.repository,
+                    pull_request=raw_child,
+                    enrich=reader._needs_enrichment(raw_child),
+                )
+                client = Mock(spec=GitHubMergeTrainClient)
+                client.read_merge_train_snapshot.return_value = snapshot.model_copy(
+                    update={"pull_requests": (root, child)}
+                )
+                result = _advance_planned_stack_collapse_record(
+                    request=MergeTrainControllerRunOnceEnvelope(
+                        repository=target.repository, mutate=True
+                    ),
+                    policy_sha256=policy.policy_sha256,
+                    repository_policy=target,
+                    transport=cast(Any, None),
+                    github_client=client,
+                    stack_collapse_store=store,
+                    planned_collapse_record=record,
+                    trace_id="pause-test",
+                    recorded_at=record.updated_at,
+                    lease=cast(Any, Mock()),
+                )
+                self.assertIsNone(result)
+                self.assertEqual(
+                    store.list_merge_train_stack_collapse_plan_records(
+                        repository=target.repository, base_branch="main", status="active"
+                    ),
+                    (record,),
+                )
+
     def test_real_idle_controller_with_fifteen_prs_is_two_charged_then_zero(self) -> None:
         provider = _Provider()
         policy = build_test_merge_train_policy()

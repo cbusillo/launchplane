@@ -697,6 +697,12 @@ def _build_queue_entry(
     if (
         not is_trusted_automation
         and actor_role not in repository_policy.enqueue.allowed_actor_roles
+        and not (
+            actor_role == "unknown"
+            and repository_policy.enqueue.label_required
+            and repository_policy.enqueue_label not in pull_request.labels
+            and pull_request.dependency_update_class != "patch_or_minor"
+        )
     ):
         ineligible_reasons.append("actor role is not allowed to enqueue")
     if pull_request.review_conversations is not None:

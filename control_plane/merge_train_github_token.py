@@ -1,9 +1,8 @@
 """Resolve only the credential source declared by a merge-train policy."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-import json
 from pathlib import Path
 
 import click
@@ -16,10 +15,18 @@ from control_plane.github_app_identity import (
     GitHubAppPermissionError,
     mint_merge_train_installation_token,
 )
-from control_plane.github_read_cache import MERGE_TRAIN_READ_CACHE
+from collections import OrderedDict
+from threading import Lock
+from control_plane.github_app_identity import GitHubAppInstallationToken
 
 MERGE_TRAIN_GITHUB_APP_SECRET_INTEGRATION = "merge_train_github_app"
 _LOGGER = logging.getLogger(__name__)
+# Existing issued credentials stay private and process-local. Scope and key
+# changes start cold; refresh before expiry rather than extending a token.
+_TOKEN_CACHE: OrderedDict[tuple[int, int, str, str], GitHubAppInstallationToken] = OrderedDict()
+_TOKEN_CACHE_LOCK = Lock()
+_TOKEN_CACHE_CAPACITY = 256
+_TOKEN_REFRESH_MARGIN = timedelta(minutes=5)
 
 
 def resolve_merge_train_github_token(
@@ -38,30 +45,31 @@ def resolve_merge_train_github_token(
                     "Merge train App credentials unavailable: exact_key_binding_missing"
                 )
                 return ""
+            cache_key = (
+                app.app_id,
+                app.repository_id,
+                repository.casefold(),
+                sha256(private_key.encode()).hexdigest(),
+            )
+            now = datetime.now(timezone.utc)
+            with _TOKEN_CACHE_LOCK:
+                cached = _TOKEN_CACHE.get(cache_key)
+                if cached is not None:
+                    expires_at = datetime.fromisoformat(cached.expires_at.replace("Z", "+00:00"))
+                    if expires_at > now + _TOKEN_REFRESH_MARGIN:
+                        _TOKEN_CACHE.move_to_end(cache_key)
+                        return cached.token
+                    del _TOKEN_CACHE[cache_key]
             issued = mint_merge_train_installation_token(
                 identity=GitHubAppIdentity(app_id=app.app_id, private_key=private_key),
                 repository=repository,
                 repository_id=str(app.repository_id),
             )
-            # Mint and validate exactly as before. Only validators are shared
-            # across fresh tokens for the same observed installation/grants.
-            scope = sha256(
-                json.dumps(
-                    {
-                        "app_id": issued.app_id,
-                        "installation_id": issued.installation_id,
-                        "repository_id": issued.repository_id,
-                        "permissions": sorted(issued.permissions),
-                        "key_sha256": sha256(private_key.encode()).hexdigest(),
-                    },
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest()
-            MERGE_TRAIN_READ_CACHE.register_token_scope(
-                issued.token,
-                scope=scope,
-                expires_at=datetime.fromisoformat(issued.expires_at.replace("Z", "+00:00")),
-            )
+            with _TOKEN_CACHE_LOCK:
+                _TOKEN_CACHE[cache_key] = issued
+                _TOKEN_CACHE.move_to_end(cache_key)
+                while len(_TOKEN_CACHE) > _TOKEN_CACHE_CAPACITY:
+                    _TOKEN_CACHE.popitem(last=False)
             return issued.token
         except GitHubAppPermissionError as error:
             # Only schema-owned permission names/levels; never provider errors or secret values.

@@ -3477,7 +3477,7 @@ def _advance_planned_stack_collapse_record(
         pr.number in collapse_members and pr.requires_individual_landing
         for pr in snapshot.pull_requests
     ):
-        retire("stack_members_require_original_pull_requests")
+        retire("code_owned_changes_require_original_pull_requests")
         return None
     root_pull_request = next(
         (

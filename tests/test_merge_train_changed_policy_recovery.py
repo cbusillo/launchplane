@@ -1,4 +1,6 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from control_plane.github_app_identity import GitHubAppInstallationToken
 from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import unquote
@@ -269,7 +271,14 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "control_plane.merge_train_github_token.mint_merge_train_installation_token",
-                return_value=Mock(token="token"),
+                return_value=GitHubAppInstallationToken(
+                    token="token",
+                    app_id=42,
+                    installation_id=77,
+                    repository_id=123,
+                    repository="cbusillo/sellyouroutboard",
+                    expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                ),
             ),
         ):
             state_dir = Path(directory) / "state"

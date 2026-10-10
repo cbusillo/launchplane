@@ -60,10 +60,14 @@ every non-draft PR. Unqueued and draft entries carry unknown readiness and canno
 justify a landing. A newly applied label is observed on the next list read.
 
 Authenticated REST GETs retain response bodies and ETags in a bounded process-local
-cache separated by credential scope and API origin. Native App tokens share
-validators only after mint-time validation binds the same App, installation,
-repository, permissions and managed-key fingerprint; token minting and grant
-validation remain fresh on every pass. Other credentials stay isolated by token. Paths include revision identifiers
+cache separated by credential and API origin. Native controller token resolution
+reuses an already issued exact-repository App token until five minutes before its
+provider expiry. The cache is process-local and bounded; the managed key is still
+resolved each pass, and an App, repository or key change starts cold. Minting keeps
+its existing exact-repository and permission validation. This avoids changing the
+Authorization representation on every pass, which can change GitHub's ETag even
+when the resource has not changed. Other credentials stay isolated by token.
+Paths include revision identifiers
 where the provider exposes them, including CODEOWNERS' base SHA and check results'
 head SHA. Successfully read commit-pinned contents are reused by that immutable
 revision; a moved base reads its own ownership file. Author permissions are shared
