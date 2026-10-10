@@ -527,7 +527,7 @@ The generic product-config API uses the same credential-value validator as the
 form: password-bearing URLs/DSNs and recognized credentials cannot become plain
 runtime settings, even under a neutral or declared key. Managed secrets remain
 the supported encrypted path. Both entrypoints enforce the existing rule that a
-local operator cannot add undeclared settings to a live product; declared settings
+the Director's agent cannot add undeclared settings to a live product; declared settings
 and non-live site settings remain supported within the caller's existing scope.
 
 Every form request stays bound to the profile used to construct it through
