@@ -1356,6 +1356,9 @@ reusable workflow accepts only mode, reason, and an idempotency key, preserves a
 requires attention. Production enrollment is a separate change and cannot be
 selected through this endpoint.
 
+The [record contract](records.md) documents the separate remaining-stable
+controller for bindings outside this testing-only slice.
+
 `Odoo Testing Route Binding Refresh` is the clock-only wrapper. It accepts no
 target selectors and calls the reusable worker pinned to an immutable commit.
 Manual dispatch defaults to `dry-run`; reviewed proof may select `apply`. The
