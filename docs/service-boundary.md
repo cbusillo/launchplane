@@ -4199,6 +4199,12 @@ Launchplane's fixed description, the kind of fix (`code`, `grant`,
 `owner_approval`, `client_acceptance`, `by_hand` or `wait`) and the record ids
 it read. `testing` checks the lane, the staff-testing hold and the last
 reconcile attempt, naming the `deploy_blocked.*` or other code that stopped it.
+A completed `already_deployed` no-op is clear when the recorded current and
+desired artifact ids, commit SHAs and immutable image digests all match and the
+plan is not held. It cites the artifact id without inventing a deploy operation.
+Missing or inconsistent provenance, or a request that is not done, stays unknown.
+This cites saved reconciliation evidence, not a fresh provider observation;
+a later manual deployment requires reconciliation before this evidence is current.
 `promote` checks the caller's own promotion grant, Client acceptance, the prod
 lane's backup authority and the last promotion's failure. A step whose evidence
 cannot be read is `unknown`, never `clear`, and the response never carries

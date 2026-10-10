@@ -258,7 +258,13 @@ Admins should not normally need to choose a raw context or understand provider
 lookup rows before taking safe action.
 
 Incidents remain children of product environments rather than a separate raw
-record browser. Product summaries surface active incident count and severity;
+record browser. Product summaries surface active incident count and severity
+from the canonical lane-wide `health_monitoring.open_incidents` collection,
+including generated TLS, cadence and deploy-fence occurrences. This collection
+reuses the incident-history summary and notification state; configured checks
+do not define the incident inventory. Resolved occurrences remain in history
+and disappear from the active overview. Open occurrences also block a green
+operational signal, even when ordinary health checks pass;
 the environment view owns lifecycle state, material evidence, observation
 history, and delivery evidence for one occurrence. GitHub, email, and Discord
 notifications are sinks, not authority. Incident surfaces are `inspect` actions
