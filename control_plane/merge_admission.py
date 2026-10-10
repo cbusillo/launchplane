@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol, cast
@@ -167,6 +168,20 @@ class GuardedMergeAdmission:
         self.landing_plan_record = self.landing_plan_record.model_copy(
             update={"landing_plan": landing_plan}
         )
+
+    @contextmanager
+    def reuse_batch_evidence(self) -> Iterator[Callable[[], None]]:
+        """Let one batch's evaluations share provider reads when the evaluator supports it.
+
+        Yields a callable that drops the shared reads, so the next evaluation
+        reads everything fresh. Evaluators without reuse always read fresh.
+        """
+        reuse = getattr(self.evaluator, "reuse_batch_evidence", None)
+        if reuse is None:
+            yield lambda: None
+            return
+        with reuse() as refresh:
+            yield refresh
 
     def admit(
         self,
