@@ -2047,8 +2047,10 @@ run` is the foreground loop intended for an external process supervisor, and
   storage-owned recovery in `reconcile`, `run-once`, and the worker loop.
   The deployed service exposes the same redacted read model at
   `GET /v1/service/odoo-workers/status` for callers authorized to
-  `launchplane_service.read` on product/context `launchplane`, so admins can
+  `launchplane_service.read` on product/context `launchplane`, so authorized readers can
   prove worker queue state without shelling into provider containers. The
+  [service boundary](service-boundary.md) owns the complete set of service
+  reads covered by that standing permission. The
   deployed service also exposes `POST /v1/service/odoo-workers/reconcile` for
   callers authorized to `launchplane_service.reconcile_odoo_workers` on the same
   service context, so expired-lease reconciliation can be proven through

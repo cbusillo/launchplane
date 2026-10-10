@@ -494,6 +494,9 @@ export type DriverActionDescriptor = {
     };
     label: string;
     method: 'GET' | 'POST';
+    mode_effects: {
+        [key: string]: 'observation' | 'inert_evidence' | 'operation' | 'access' | 'credential' | 'destructive' | 'live_site';
+    };
     operator_visible: boolean;
     output_schema: {
         [key: string]: unknown;
