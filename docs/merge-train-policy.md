@@ -1378,7 +1378,7 @@ has fallen outside the recent-record display window. The workbench uses
 that qualification and active controller references for current attention.
 An idle, reconciled train does not
 become blocked solely because old-policy history remains visible; those rows are
-labeled historical. A stale active/selected record, policy-digest mismatch or
+labeled historical. A stale active record, policy-digest mismatch or
 unresolved reconciliation still requires attention. It is
 also store-only, so it can power dashboards and status summaries without
 consuming GitHub API capacity or advancing the train.

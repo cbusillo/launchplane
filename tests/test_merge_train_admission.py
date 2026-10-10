@@ -639,6 +639,48 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertEqual(len(result.controller_records), 3)
         self.assertTrue(all(summary.historical for summary in result.controller_records))
 
+    def test_completed_ordinary_job_history_does_not_block_idle_policy_revision(self) -> None:
+        from tests.test_merge_train_controller_ordinary_landing import (
+            OrdinaryLandingControllerTests,
+        )
+
+        fixture = OrdinaryLandingControllerTests()
+        fixture.setUp()
+        candidate = fixture.candidate_record
+        landed = fixture._terminal_record()
+        result = build_merge_train_controller_status_read_model(
+            store=_RunHistoryStore(
+                None, candidate_records=(candidate,), landing_plan_records=(landed,)
+            ),
+            repository=candidate.candidate.repository,
+            base_branch=candidate.candidate.base_branch,
+            generated_at=landed.updated_at,
+            current_policy_key=candidate.candidate.policy_key,
+            current_policy_sha256="replacement-policy",
+        )
+        self.assertEqual(result.admission.controller_action, "idle")
+        self.assertTrue(all(summary.historical for summary in result.controller_records))
+
+    def test_terminal_blocked_landing_is_history_but_unfinished_landing_is_not(self) -> None:
+        candidate = _candidate_record(status="passed")
+        for status, expected in (
+            ("blocked", True),
+            ("stale", True),
+            ("planned", False),
+            ("merging", False),
+        ):
+            with self.subTest(status=status):
+                landing = _landing_plan_record(candidate, entry_status=status)
+                result = build_merge_train_controller_status_read_model(
+                    store=_RunHistoryStore(None, landing_plan_records=(landing,)),
+                    repository=candidate.candidate.repository,
+                    base_branch=candidate.candidate.base_branch,
+                    generated_at=landing.updated_at,
+                    current_policy_key=candidate.candidate.policy_key,
+                    current_policy_sha256="replacement-policy",
+                )
+                self.assertEqual(result.controller_records[0].historical, expected)
+
     def test_completed_candidate_qualifies_when_landing_is_outside_recent_window(self) -> None:
         candidate = _candidate_record(status="passed")
         landed = _landing_plan_record(candidate, entry_status="merged")

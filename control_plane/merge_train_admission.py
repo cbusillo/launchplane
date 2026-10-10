@@ -382,6 +382,7 @@ def build_merge_train_controller_status_read_model(
         ),
         controller_records=_summarize_controller_records(
             store=store,
+            controller_state=controller_state,
             controller_records=controller_records,
             current_policy_key=current_policy_key,
             current_policy_sha256=current_policy_sha256,
@@ -842,6 +843,7 @@ def _string_tuple_field(payload: dict[str, object], key: str) -> tuple[str, ...]
 def _summarize_controller_records(
     *,
     store: MergeTrainRunHistoryStore,
+    controller_state: MergeTrainControllerStateRecord | None,
     controller_records: MergeTrainControllerRecords,
     current_policy_key: str = "",
     current_policy_sha256: str = "",
@@ -872,7 +874,9 @@ def _summarize_controller_records(
             for record in controller_records.stack_collapse_plan_records
         ),
     ]
-    historical_ids = _historical_controller_record_ids(controller_records, store=store)
+    historical_ids = _historical_controller_record_ids(
+        controller_records, store=store, controller_state=controller_state
+    )
     return tuple(
         summary.model_copy(update={"historical": summary.record_id in historical_ids})
         for summary in sorted(
@@ -882,13 +886,21 @@ def _summarize_controller_records(
 
 
 def _historical_controller_record_ids(
-    records: MergeTrainControllerRecords, *, store: MergeTrainRunHistoryStore
+    records: MergeTrainControllerRecords,
+    *,
+    store: MergeTrainRunHistoryStore,
+    controller_state: MergeTrainControllerStateRecord | None,
 ) -> set[str]:
     """Qualify history with the same stored-progress selector the controller uses.
 
     Evaluate each lineage before current-policy filtering: an obsolete unfinished
     lineage still needs retirement even when admission correctly selects no action.
     """
+    active_binding = (
+        controller_state.ordinary_job_binding
+        if controller_state is not None and controller_state.status == "running"
+        else None
+    )
     historical: set[str] = set()
     for batch_id in {record.candidate.batch_id for record in records.candidate_records}:
         candidates = tuple(
@@ -907,7 +919,15 @@ def _historical_controller_record_ids(
             landing_plan_records=landings,
             stack_collapse_plan_records=(),
         )
-        if decision.action in {"idle", "candidate_stopped"}:
+        completed = latest_completed_merge_train_batch_landing_plan_record(
+            landing_plan_records=landings, batch_id=batch_id, candidate_sha=candidate.candidate_sha
+        )
+        ordinary_complete = (
+            completed is not None
+            and completed.ordinary_job_binding is not None
+            and completed.ordinary_job_binding != active_binding
+        )
+        if decision.action in {"idle", "candidate_stopped"} or ordinary_complete:
             historical.update(record.record_id for record in candidates)
     for plan_id in {record.landing_plan.plan_id for record in records.landing_plan_records}:
         landings = tuple(
@@ -919,15 +939,17 @@ def _historical_controller_record_ids(
             candidate_records=(), landing_plan_records=landings, stack_collapse_plan_records=()
         )
         plan = landings[0].landing_plan
-        if (
-            decision.action == "idle"
-            and latest_completed_merge_train_batch_landing_plan_record(
-                landing_plan_records=landings,
-                batch_id=plan.batch_id,
-                candidate_sha=plan.candidate_sha,
-            )
-            is not None
-        ):
+        completed = latest_completed_merge_train_batch_landing_plan_record(
+            landing_plan_records=landings, batch_id=plan.batch_id, candidate_sha=plan.candidate_sha
+        )
+        ordinary_complete = (
+            completed is not None
+            and completed.ordinary_job_binding is not None
+            and completed.ordinary_job_binding != active_binding
+        )
+        # The selector is idle for terminal blocked/stale outcomes as well as
+        # successful ones. Reconciliation diagnostics independently retain attention.
+        if decision.action == "idle" or ordinary_complete:
             historical.update(record.record_id for record in landings)
     for collapse_id in {record.plan.collapse_id for record in records.stack_collapse_plan_records}:
         collapses = tuple(
