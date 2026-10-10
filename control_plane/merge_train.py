@@ -658,6 +658,23 @@ def _build_queue_entry(
         and pull_request.actor_id in repository_policy.enqueue.dependency_update_github_user_ids
     )
     label_refusal = _enqueue_label_refusal(repository_policy, pull_request)
+    if (
+        skip_blocked
+        and is_dependency_update
+        and pull_request.dependency_update_class == "patch_or_minor"
+        and label_refusal
+        and (
+            pull_request.required_checks_status == "fail" or pull_request.mergeable == "conflicting"
+        )
+    ):
+        # A failed automatically admitted head is a current-check hold, not a
+        # persistent label. The next snapshot requalifies it without clearing
+        # any manual hold or guessing who applied an existing block label.
+        ineligible_reasons.append(
+            "dependency update current-head merge conflicts"
+            if pull_request.mergeable == "conflicting"
+            else "dependency update current-head checks failed"
+        )
     if repository_policy.enqueue.label_required and label_refusal:
         if not is_dependency_update:
             ineligible_reasons.append(label_refusal)

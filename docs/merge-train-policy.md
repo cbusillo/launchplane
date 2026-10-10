@@ -399,6 +399,19 @@ queue selection,
 including label-free dependency updates, so the next controller pass can select
 other eligible work. Remove the block label after resolving the failure to admit
 that PR again. Applied-block PR feedback explains the failure and how to rejoin.
+
+Automatically admitted within-major dependency updates use current-head check and
+mergeability evidence for failure holds, rather than acquiring a persistent block
+label. The service queue records the observed head and its refusal reason, excludes
+that failed or conflicting head, and can plan other eligible PRs immediately.
+Every fresh snapshot requalifies the update under the existing dependency admission
+and required-check gates; a new head with pending or unknown checks still cannot
+land. A passing rerun on the same head can also requalify it. An explicit enqueue
+label uses the normal block path above. Every existing block label remains a hold,
+including labels applied by earlier controller versions: no actor or historical
+record is used to guess that a generic hold may be cleared. Those PRs retain the
+supported remove-label path. The single-transition worker is unchanged.
+
 The GitHub adapter creates a missing policy label when label
 application is refused because it does not exist; other provider errors remain
 fail-closed.

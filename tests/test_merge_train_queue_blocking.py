@@ -40,12 +40,19 @@ from tests.support.merge_train import (
 
 
 class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_failing_dependabot_is_blocked_then_green_pr_can_proceed(self) -> None:
+    async def test_explicitly_enqueued_failure_is_blocked_then_green_pr_can_proceed(self) -> None:
         for failure_policy in ("pause_train", "continue_after_blocking_pr"):
             with self.subTest(failure_policy=failure_policy):
                 await self._assert_queue_progress(failure_policy)
 
-    async def _assert_queue_progress(self, failure_policy: str) -> None:
+    async def test_failing_auto_admitted_update_does_not_gain_a_persistent_block(self) -> None:
+        for failure_policy in ("pause_train", "continue_after_blocking_pr"):
+            with self.subTest(failure_policy=failure_policy):
+                await self._assert_queue_progress(failure_policy, automatically_admitted=True)
+
+    async def _assert_queue_progress(
+        self, failure_policy: str, *, automatically_admitted: bool = False
+    ) -> None:
         labels: list[tuple[int, str]] = []
 
         class Reader(_FakeExpandedMergeTrainSnapshotReader):
@@ -61,10 +68,11 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
                         "pull_requests": (
                             failing.model_copy(
                                 update={
-                                    "labels": tuple(
-                                        label for number, label in labels if number == 1
+                                    "labels": (() if automatically_admitted else failing.labels)
+                                    + tuple(label for number, label in labels if number == 1),
+                                    "label_actors": (
+                                        () if automatically_admitted else failing.label_actors
                                     ),
-                                    "label_actors": (),
                                     "actor_id": 42,
                                     "actor_role": "trusted_automation",
                                     "dependency_update_class": "patch_or_minor",
@@ -118,21 +126,30 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
             request = {"repository": repository_policy.repository, "base_branch": "main"}
             dry = await _post_merge_train_controller_run_once(app, {**request, "mutate": False})
             self.assertEqual(dry.status_code, 202, dry.text)
-            self.assertEqual(dry.json()["result"]["controller_action"], "block")
+            self.assertEqual(
+                dry.json()["result"]["controller_action"],
+                "plan_candidate" if automatically_admitted else "block",
+            )
             self.assertEqual(labels, [])
             self.assertEqual(store.list_merge_train_batch_candidate_records(), ())
-            blocked = await _post_merge_train_controller_run_once(app, {**request, "mutate": True})
-            self.assertEqual(blocked.status_code, 202, blocked.text)
-            result = blocked.json()["result"]
-            self.assertEqual(result["mode"], "block")
-            self.assertEqual(result["block_result"]["pull_request_number"], 1)
-            self.assertTrue(result["block_result"]["train_should_continue"])
-            feedback = build_feedback_payloads(response=blocked.json())
-            self.assertEqual([entry["pull_request_number"] for entry in feedback], [1])
-            self.assertIn("required checks failed", cast(str, feedback[0]["message"]))
-            self.assertIn("remove", cast(str, feedback[0]["message"]))
-            self.assertEqual(labels, [(1, repository_policy.blocked_label)])
-            self.assertEqual(store.list_merge_train_batch_candidate_records(), ())
+            expected_labels = (
+                [] if automatically_admitted else [(1, repository_policy.blocked_label)]
+            )
+            if not automatically_admitted:
+                blocked = await _post_merge_train_controller_run_once(
+                    app, {**request, "mutate": True}
+                )
+                self.assertEqual(blocked.status_code, 202, blocked.text)
+                result = blocked.json()["result"]
+                self.assertEqual(result["mode"], "block")
+                self.assertEqual(result["block_result"]["pull_request_number"], 1)
+                self.assertTrue(result["block_result"]["train_should_continue"])
+                feedback = build_feedback_payloads(response=blocked.json())
+                self.assertEqual([entry["pull_request_number"] for entry in feedback], [1])
+                self.assertIn("required checks failed", cast(str, feedback[0]["message"]))
+                self.assertIn("remove", cast(str, feedback[0]["message"]))
+                self.assertEqual(labels, expected_labels)
+                self.assertEqual(store.list_merge_train_batch_candidate_records(), ())
             progressed = await _post_merge_train_controller_run_once(
                 app, {**request, "mutate": True}
             )
@@ -145,7 +162,7 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
                 ],
                 [2],
             )
-            self.assertEqual(labels, [(1, repository_policy.blocked_label)])
+            self.assertEqual(labels, expected_labels)
             for action in ("build_candidate", "observe_candidate", "plan_landing", "land_batch"):
                 response = await _post_merge_train_controller_run_once(
                     app, {**request, "mutate": True}
@@ -162,7 +179,7 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
                 [(entry.pull_request_number, entry.status) for entry in landing.entries],
                 [(2, "merged")],
             )
-            self.assertEqual(labels, [(1, repository_policy.blocked_label)])
+            self.assertEqual(labels, expected_labels)
 
     def test_bound_controller_reports_queue_block_without_ambient_provider_write(self) -> None:
         policy = build_test_merge_train_policy_record().policy
