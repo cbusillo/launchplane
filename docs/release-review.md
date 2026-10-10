@@ -269,7 +269,14 @@ and raw generic-web promotion routes. Odoo evaluates it before backup in the
 combined run and again before direct promotion. The existing VeriReel service
 promotion wrapper also checks it. Readiness and direct dry-runs remain available
 while a Client decision is pending. Recording a decision never merges or
-dispatches a workflow, and only a Client's acceptance starts a release.
+dispatches a workflow. The [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
+owns who may start a release; the normal acceptance-started implementation is
+described below.
+
+The Director-started temporary hotfix path for live breakage is direction,
+not implemented behavior. Until it is built and activated, this contract
+provides no way to start one; an admin override or existing grant is not that
+path.
 
 ## Acceptance starts the release
 
