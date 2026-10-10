@@ -1267,7 +1267,7 @@ export type MergeTrainAdmissionDecision = {
     latest_run_recorded_at: string;
     latest_run_status: string;
     next_allowed_at: string;
-    reason_code: 'no_prior_run' | 'dry_run_history_only' | 'reread_required' | 'poll_interval_elapsed' | 'poll_interval_pending' | 'backoff_elapsed' | 'backoff_pending';
+    reason_code: 'no_prior_run' | 'dry_run_history_only' | 'reread_required' | 'poll_interval_elapsed' | 'poll_interval_pending' | 'backoff_elapsed' | 'backoff_pending' | 'github_rate_limit_pending';
     repository: string;
     requested_at: string;
     schema_version: number;
@@ -2988,6 +2988,7 @@ export type ProductHealthMonitoringCheckSummary = {
 export type ProductHealthMonitoringSummary = {
     checks: Array<ProductHealthMonitoringCheckSummary>;
     monitoring_intent: 'public' | 'private' | 'prelaunch';
+    open_incidents: Array<ProductIncidentSummary>;
     provenance: DataProvenance;
     public_incident_eligible: boolean;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';

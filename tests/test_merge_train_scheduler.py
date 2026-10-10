@@ -3,8 +3,14 @@ from threading import Event
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
+from typing import cast
 
 from control_plane import merge_train_scheduler
+from control_plane.merge_train import (
+    MergeTrainBranchClient,
+    apply_merge_train_branch_update_intent,
+    build_merge_train_dry_run_result,
+)
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
 from control_plane.repository_evidence import GitHubRepositoryEvidenceProvider
 from control_plane.contracts.merge_train_controller_state import (
@@ -23,6 +29,7 @@ from control_plane.merge_train_scheduler import (
     run_merge_train_scheduler_pass,
 )
 from tests.merge_train_policy_fixtures import _policy_table
+from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
 
 _ROOT = Path("/tmp/launchplane-test-root")
 
@@ -48,7 +55,6 @@ def _policy_record(
     )
     return MergeTrainPolicyRecord(
         record_id="merge-train-policy-scheduler-test",
-        status="active",
         source="test",
         updated_at="2026-10-01T00:00:00Z",
         policy=policy,
@@ -141,7 +147,7 @@ class MergeTrainSchedulerPassTests(TestCase):
 
         self.mocks["execute_merge_train_controller_run_once"].side_effect = execute
         with (
-            patch.object(merge_train_scheduler, "github_api_request", side_effect=provider),
+            patch("control_plane.merge_train_scheduler.github_api_request", side_effect=provider),
             patch.object(
                 merge_train_scheduler, "_deliver_controller_feedback", return_value=(0, 0)
             ),
@@ -215,7 +221,7 @@ class MergeTrainSchedulerPassTests(TestCase):
         enabled = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True))
         )
-        disabled = _policy_record(("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=False)))
+        disabled = _policy_record(("cbusillo/alpha", MergeTrainSchedulerPolicy()))
         self.mocks["resolve_merge_train_policy_record"].side_effect = [enabled, enabled, disabled]
         self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
             "admitted"
@@ -273,7 +279,7 @@ class MergeTrainSchedulerPassTests(TestCase):
     def test_only_scheduler_enabled_targets_run(self) -> None:
         self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
-            ("cbusillo/beta", MergeTrainSchedulerPolicy(enabled=False)),
+            ("cbusillo/beta", MergeTrainSchedulerPolicy()),
         )
         self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
             "admitted"
@@ -348,7 +354,7 @@ class MergeTrainSchedulerPassTests(TestCase):
         )
         beta_disabled = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
-            ("cbusillo/beta", MergeTrainSchedulerPolicy(enabled=False)),
+            ("cbusillo/beta", MergeTrainSchedulerPolicy()),
         )
         # The operator turns beta off while alpha's pass is running.
         self.mocks["resolve_merge_train_policy_record"].side_effect = [
@@ -394,7 +400,7 @@ class MergeTrainSchedulerPassTests(TestCase):
 
     def test_dry_run_controller_pass_posts_no_feedback(self) -> None:
         self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
-            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=False)),
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
         )
         self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
             "admitted"
@@ -427,6 +433,78 @@ class MergeTrainSchedulerPassTests(TestCase):
         self.assertEqual(feedback_request.source, "launchplane:merge-train-scheduler")
         self.assertEqual(result.feedback_delivered, 1)
         self.record_store.write_merge_train_pr_feedback_record.assert_called_once()
+
+    def test_candidate_less_wait_and_refresh_reach_scheduled_feedback(self) -> None:
+        policy = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
+        )
+        snapshot = _FakeExpandedMergeTrainSnapshotReader(
+            transport=object()
+        ).read_merge_train_snapshot(repository="cbusillo/alpha", base_branch="main")
+        selected = snapshot.pull_requests[1]
+        scenarios = (
+            {"required_checks_status": "pending"},
+            {"mergeable": "unknown"},
+            {"branch_update_required": True},
+        )
+        for changes in scenarios:
+            with self.subTest(changes=changes):
+                self.mocks["build_merge_train_pr_feedback_record"].reset_mock()
+                self.record_store.write_merge_train_pr_feedback_record.reset_mock()
+                self.mocks["resolve_merge_train_policy_record"].return_value = policy
+                self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+                    "admitted"
+                )
+                queue = build_merge_train_dry_run_result(
+                    policy=policy.policy,
+                    snapshot=snapshot.model_copy(
+                        update={"pull_requests": (selected.model_copy(update=changes),)}
+                    ),
+                    batch_landing=True,
+                )
+                response: dict[str, object] = {
+                    "repository": queue.repository,
+                    "base_branch": queue.base_branch,
+                    "controller_action": queue.intended_next_action,
+                    "dry_run_result": queue.model_dump(mode="json"),
+                }
+                if queue.intended_next_action == "update_branch":
+                    branch_client = MagicMock()
+                    response["branch_update_result"] = apply_merge_train_branch_update_intent(
+                        dry_run_result=queue,
+                        branch_client=cast(MergeTrainBranchClient, branch_client),
+                    ).model_dump(mode="json")
+                    branch_client.update_pull_request_branch.assert_called_once()
+                self.mocks[
+                    "execute_merge_train_controller_run_once"
+                ].return_value = MergeTrainControllerRunOnceResult(
+                    accepted_result=response, records={}
+                )
+
+                (result,) = self._run()
+
+                self.assertEqual(result.feedback_delivered, 1)
+                request = self.mocks["build_merge_train_pr_feedback_record"].call_args.kwargs[
+                    "request"
+                ]
+                self.assertEqual(request.pull_request_number, selected.number)
+                self.assertEqual(request.controller_record_id, "")
+                self.assertEqual(request.controller_action, queue.intended_next_action)
+                self.assertNotIn(queue.blocked_label, request.message)
+                self.assertNotIn("candidate", request.message)
+                if queue.intended_next_action == "update_branch":
+                    self.assertIn("updated", request.message.lower())
+                self.assertEqual(request.event, "waiting")
+                self.record_store.write_merge_train_pr_feedback_record.assert_called_once()
+
+                # The same candidate-less result must never deliver in a dry run.
+                self.mocks["build_merge_train_pr_feedback_record"].reset_mock()
+                self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+                    ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
+                )
+                (dry_run,) = self._run()
+                self.assertEqual(dry_run.feedback_delivered, 0)
+                self.mocks["build_merge_train_pr_feedback_record"].assert_not_called()
 
     def test_level1_target_runs_the_level1_step(self) -> None:
         self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(

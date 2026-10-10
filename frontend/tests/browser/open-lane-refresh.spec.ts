@@ -122,7 +122,7 @@ for (const environmentView of [false, true]) {
     await expect(signal).not.toContainText("Stale");
     // Inventory has its own read lifecycle, including the rail's lane evidence.
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
-    await expect(page.locator('.rail-product-link[data-active="true"] [data-lane="testing"]')).toHaveAttribute("data-trust", "verified");
+    await expect(page.locator('.rail-product-link[data-active="true"] [data-lane="testing"]')).toHaveAttribute("data-tone", "verified");
     await page.screenshot({ path: `../tmp/browser-smoke/open-${environmentView ? "environment" : "workspace"}-recovered-${testInfo.project.name}.png`, fullPage: true });
     delayInventory = true;
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
