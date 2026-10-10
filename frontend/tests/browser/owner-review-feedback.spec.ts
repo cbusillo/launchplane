@@ -1,5 +1,19 @@
 import { expect, test } from "@playwright/test";
 
+test("a carried acceptance applies to this preview and a new decision replaces it", async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=carried-decision");
+  const decision = page.getByLabel("Recorded decision");
+  await expect(decision).toContainText("Applies to preview version aaaaaaa");
+  await expect(decision).toContainText("Carried from version bbbbbbb");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("owner-acceptance-carried.png"), fullPage: true });
+  await page.getByRole("textbox").fill("Please change this feature again.");
+  await page.getByRole("button", { name: "Request changes" }).click();
+  await expect(decision).toContainText("Changes requested");
+  await expect(decision).not.toContainText("Carried from version");
+  await expect(decision.locator("blockquote")).toHaveText("Please change this feature again.");
+});
+
 test("a saved decision with pending delivery keeps the reason available to retry", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=delivery-pending");
   const reason = "Please adjust the checkout flow.\nKeep the contact details visible.";

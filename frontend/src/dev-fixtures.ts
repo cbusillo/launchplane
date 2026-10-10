@@ -2889,6 +2889,17 @@ export function productReviewForFixture(
         ? { ...productReviewDecisionForFixture("accepted", ""), feedback_url: "", head_sha: "b".repeat(40) }
         : scenario === "earlier-decision"
         ? { ...productReviewDecisionForFixture("accepted", ""), head_sha: "b".repeat(40) }
+        : scenario === "carried-decision"
+        ? {
+            ...productReviewDecisionForFixture("accepted", ""),
+            carried_from: {
+              record_id: "fixture-original-acceptance",
+              head_sha: "b".repeat(40),
+              reason: "unchanged_patch_base_update",
+              refresh_record_ids: [],
+              comparison_base_sha: "c".repeat(40),
+            },
+          }
         : scenario === "decided"
         ? productReviewDecisionForFixture("changes_requested", "Please adjust the checkout flow.")
         : null),
