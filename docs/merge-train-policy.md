@@ -1244,7 +1244,7 @@ Controller actions have these retry/stop semantics:
   recorded PR head SHAs, and base SHA and is ready for PR-native landing-plan
   creation. Mutate once, then call again.
 - `land_batch`: A landing plan with planned or in-progress merge entries is
-  ready to merge or resume the original PRs in order. Mutate once only after
+  ready to execute or resume [PR-Native Landing](#pr-native-landing). Mutate once only after
   Director intent; call again to verify terminal state.
 - `batch_landed`: The batch already landed. Stop; the train phase is complete
   for that batch.
@@ -1282,8 +1282,7 @@ The batch-landing service endpoint
 `POST /v1/work-graph/merge-train/batch-landing/run-once` owns
 [PR-Native Landing](#pr-native-landing). It accepts `mode: plan` with a passed
 candidate record id and writes a `launchplane_merge_train_batch_landing_plans`
-record, or `mode: land`
-with a landing-plan record id. The linked section owns which PR is merged,
+record, or `mode: land` with a landing-plan record id. The linked section owns which PR is merged,
 the landing-mode exceptions, and the evidence required to finish or reconcile
 each mode. [Batch And Recovery](merge-admission.md#batch-and-recovery) owns
 admission and outcome reconciliation; [structural provenance](merge-train-structural-provenance.md)
