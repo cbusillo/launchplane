@@ -3276,7 +3276,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             responses.extend(
                 [
                     _github_pull_request(number),
-                    {"permission": "admin"},
+                    *([{"permission": "admin"}] if number == 1 else []),
                     _label_events(),
                     _combined_status(),
                     {"check_runs": [_check_run("completed", "success")]},
