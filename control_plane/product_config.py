@@ -682,7 +682,9 @@ def _normalize_product_config_runtime_env(raw_env: object) -> dict[str, ScalarVa
             raise ProductConfigError(
                 f"Product config runtime env value for {key_name!r} must be a scalar."
             )
-        if provider_key_adoption.looks_like_credential(key_name, str(raw_value)):
+        # Preserve the existing key-name rule above; share credential-value detection
+        # without expanding it to harmless names containing e.g. KEYCLOAK or TOKENIZER.
+        if provider_key_adoption.looks_like_credential("", str(raw_value)):
             raise ProductConfigError(
                 f"Runtime environment key {key_name!r} must hold a plain setting; "
                 "write credentials as managed secrets.",

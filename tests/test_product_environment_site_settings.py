@@ -129,6 +129,32 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                     )
                     self.assertEqual(self.store.list_secret_records(), ())
 
+    async def test_ordinary_declared_names_and_urls_remain_supported_on_both_routes(self) -> None:
+        profile = _profile()
+        requirement = profile.expected_config.runtime_environment_keys[0]
+        profile = profile.model_copy(
+            update={
+                "expected_config": profile.expected_config.model_copy(
+                    update={
+                        "runtime_environment_keys": (
+                            requirement,
+                            requirement.model_copy(update={"key": "KEYCLOAK_URL"}),
+                        )
+                    }
+                )
+            }
+        )
+        self.store.write_product_profile_record(profile)
+        settings = {"KEYCLOAK_URL": "https://login.example.invalid"}
+        for route in ("generic", "environment"):
+            review = (
+                await self._submit_generic(mode="dry-run", settings=settings)
+                if route == "generic"
+                else await self._submit({"mode": "dry-run", "runtime_settings": settings})
+            )
+            self.assertEqual(review.status_code, 202, review.text)
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+
     async def test_generic_route_live_guard_and_supported_declared_setting(self) -> None:
         self.store.write_product_profile_record(_profile(production_use="live"))
         for mode in ("dry-run", "apply"):
