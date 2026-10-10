@@ -1,4 +1,11 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+import type { ProductSiteOverview } from "../../src/generated/openapi.ts";
+
+async function installInventoryReads(page: Page, product: ProductSiteOverview, identity: unknown) {
+  await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { error: { code: "authorization_denied" } } }));
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", identity, csrf_token: "fixture" } }));
+  await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", products: [product] } }));
+}
 
 for (const mode of ["missing", "stale", "fresh", "disabled", "inapplicable"] as const) {
   test(`incident empty state distinguishes ${mode} monitoring and recovers`, async ({ page }, testInfo) => {
@@ -23,9 +30,7 @@ for (const mode of ["missing", "stale", "fresh", "disabled", "inapplicable"] as 
     check.provenance.stale_after = new Date(start + (mode === "stale" ? -1000 : 60_000)).toISOString();
     check.probe_effective = mode !== "disabled" && mode !== "inapplicable";
     check.incident_eligible = check.probe_effective;
-    await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { error: { code: "authorization_denied" } } }));
-    await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", identity: fixture.identity, csrf_token: "fixture" } }));
-    await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", products: [fixture.product] } }));
+    await installInventoryReads(page, fixture.product, fixture.identity);
     await page.goto("/ui/products");
     const overview = page.getByRole("region", { name: "Active public ingress incidents" });
     await expect(overview).toContainText("No open incidents recorded");
@@ -60,9 +65,7 @@ for (const incidentEligible of [true, false]) {
     fixture.detail.health_monitoring.checks = [fixture.detail.health_monitoring.checks[0]];
     fixture.detail.health_monitoring.checks[0].trust_state = "unsupported";
     fixture.detail.health_monitoring.checks[0].incident_eligible = incidentEligible;
-    await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { error: { code: "authorization_denied" } } }));
-    await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", identity: fixture.identity, csrf_token: "fixture" } }));
-    await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", products: [fixture.product] } }));
+    await installInventoryReads(page, fixture.product, fixture.identity);
     await page.route(`**/v1/products/${fixture.product.product}`, route => route.fulfill({ json: { status: "ok", product: fixture.product } }));
     await page.route(`**/v1/products/${fixture.product.product}/environments/testing`, route => route.fulfill({ json: { status: "ok", environment: fixture.detail } }));
     await page.route(`**/v1/products/${fixture.product.product}/environments/testing/public-ingress/incidents`, route => route.fulfill({ json: { status: "ok", incident_list: fixture.incidents } }));

@@ -9,7 +9,9 @@ if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
 else Reflect.deleteProperty(globalThis, "window");
 
 function check() {
-  const check = structuredClone(productsForFixture("products")[0].environments[0].health_monitoring.checks[0]);
+  /** @type {import("../src/generated/openapi.ts").ProductSiteOverview[]} */
+  const products = productsForFixture("products");
+  const check = structuredClone(products[0].environments[0].health_monitoring.checks[0]);
   check.trust_state = "verified";
   check.provenance.stale_after = new Date(Date.now() + 60_000).toISOString();
   return check;
