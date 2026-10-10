@@ -334,6 +334,10 @@ def execute_odoo_prod_promotion(
             error_message=replacement_result.error_message,
         )
     except click.ClickException as error:
+        if recovery is not None and recovery.step in {"complete", "rolled_back"}:
+            # A stable release key owns its completed audit record. A refused
+            # replay must not replace that history with a new failure record.
+            raise
         if recovery is not None and recovery.step not in {"complete", "rolled_back"}:
             raise RuntimeError("Cutover remains unfinished; retain its recovery hold.") from error
         from control_plane.lane_movement import LaneMovementRefused

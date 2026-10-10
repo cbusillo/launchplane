@@ -198,6 +198,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
         ):
             from control_plane.workflows.odoo_stable_operation_worker import (
                 _execute_prod_promotion_operation,
+                DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
             )
             from control_plane.durable_operation_authorization import (
                 capture_durable_operation_authorization,
@@ -251,7 +252,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 )
                 if reconcile:
                     return store.claim_odoo_cutover_reconciliation_record(
-                        **arguments, max_attempts=10
+                        **arguments, max_attempts=DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS
                     )
                 return store.claim_next_odoo_prod_promotion_operation_record(**arguments)
 
@@ -316,7 +317,13 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 record_store=store, request=OdooProdRollbackRequest(context=request.context)
             )
             self.assertEqual(target.artifact_id, plan.production.artifact_id)
-            for denial in ("start", ODOO_LOGICAL_BACKUP_EFFECT, ODOO_PROD_DEPLOY_EFFECT):
+            for denial in (
+                "start",
+                ODOO_LOGICAL_BACKUP_EFFECT,
+                ODOO_PROD_DEPLOY_EFFECT,
+                "start",
+                ODOO_PROD_DEPLOY_EFFECT,
+            ):
                 before = list(provider.actions)
                 self.assertTrue(work(claim(reconcile=True), denial))
                 self.assertEqual(
@@ -325,6 +332,10 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 )
                 self.assertEqual(provider.actions, before)
                 self.assertEqual(capture.call_count, 1)
+                self.assertEqual(
+                    store.read_odoo_prod_promotion_operation_record(operation.operation_id).attempt,
+                    held.attempt,
+                )
             resumed = claim(reconcile=True)
             self.assertIsNotNone(resumed)
             with patch(

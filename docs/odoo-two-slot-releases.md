@@ -118,7 +118,11 @@ competing consumption. A failed continuation keeps unfinished work held. New
 releases cannot bypass another unfinished cutover; recover it first. Configured
 two-slot lanes also refuse an in-place rollback after a switch-back event.
 Authorization is checked again at recovery boundaries. Denial performs no
-effects and keeps the unfinished cutover's lane hold. The direct promotion
+effects and keeps the unfinished cutover's lane hold without consuming the
+provider retry budget. A refused finished-release replay preserves its existing
+promotion audit record. Switch-back intent persists its start time so a crash
+before publishing the deployment event cannot replace it with retry times.
+The direct promotion
 route uses the original logical-backup identity for a stable recovery key;
 native queued releases retain their existing operation identity.
 

@@ -8,6 +8,8 @@ from tests.support.promotion_backup import stub_verified_promotion_backup
 from control_plane.workflows.production_promotion_backup import ProductionPromotionBackupGuard
 from pathlib import Path
 from unittest.mock import Mock, patch
+from tempfile import TemporaryDirectory
+from datetime import UTC, datetime
 
 import click
 from pydantic import ValidationError
@@ -127,6 +129,50 @@ def _replacement_result() -> OdooStableTargetReplacementApplyResult:
 class OdooProdPromotionWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         stub_verified_promotion_backup(self, "control_plane.workflows.odoo_prod_promotion")
+
+    def test_refused_finished_cutover_replay_preserves_promotion_audit(self) -> None:
+        from control_plane.contracts.odoo_cutover import OdooCutoverRecord
+        from tests.test_odoo_cutover import IsolatedCutoverProvider
+
+        with TemporaryDirectory() as directory:
+            provider = IsolatedCutoverProvider(Path(directory))
+            self.addCleanup(provider.engine.dispose)
+            plan = provider.cutover
+            store = _promotion_store()
+            for step in ("complete", "rolled_back"):
+                record = OdooCutoverRecord(
+                    record_id="fixture-record",
+                    plan=plan,
+                    began_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                    step=step,
+                )
+                with (
+                    self.subTest(step=step),
+                    patch(
+                        "control_plane.workflows.odoo_prod_promotion.persisted_cutover",
+                        return_value=record,
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_prod_promotion.require_production_promotion_backup",
+                        side_effect=click.ClickException("fixture refused backup replay"),
+                    ),
+                    self.assertRaisesRegex(click.ClickException, "refused backup replay"),
+                ):
+                    execute_odoo_prod_promotion(
+                        control_plane_root=Path(directory),
+                        state_dir=Path(directory),
+                        database_url=None,
+                        record_store=store,
+                        request=OdooProdPromotionRequest(
+                            product="example-product",
+                            context="fixture",
+                            artifact_id=plan.candidate.artifact_id,
+                            backup_record_id=plan.release_id,
+                        ),
+                        cutover_plan=plan,
+                    )
+                store.write_promotion_record.assert_not_called()
 
     def test_promotion_request_accepts_profile_owned_context(self) -> None:
         request = OdooProdPromotionRequest(

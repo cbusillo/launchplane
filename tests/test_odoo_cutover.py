@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
+from unittest.mock import patch
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.odoo_cutover import (
@@ -335,6 +336,27 @@ class OdooCutoverTests(unittest.TestCase):
         deployment = records.read_deployment_record(result.deployment_record_id)
         self.assertEqual(deployment.runtime_identity, self.provider.cutover.new.runtime_identity)
         self.assertEqual(deployment.deploy.status, "pass")
+        write = records.write_deployment_record
+
+        def crash_after_switch(record: DeploymentRecord) -> object:
+            if record.record_id.endswith("-switch-back"):
+                raise RuntimeError("fixture crash after persisted switch-back")
+            return write(record)
+
+        with (
+            patch.object(records, "write_deployment_record", side_effect=crash_after_switch),
+            self.assertRaisesRegex(RuntimeError, "fixture crash"),
+        ):
+            execute_odoo_cutover_rollback_deployment(
+                deployment=deployment,
+                record_store=records,
+                provider=self.provider,
+                artifact_id=self.provider.cutover.production.artifact_id,
+            )
+        deployment = records.read_deployment_record(result.deployment_record_id)
+        assert deployment.odoo_cutover is not None
+        self.assertEqual(deployment.odoo_cutover.step, "rolled_back")
+        switches = self.provider.actions.count("switch")
         rollback = execute_odoo_cutover_rollback_deployment(
             deployment=deployment,
             record_store=records,
@@ -342,6 +364,12 @@ class OdooCutoverTests(unittest.TestCase):
             artifact_id=self.provider.cutover.production.artifact_id,
         )
         old = records.read_deployment_record(rollback.deployment_record_id)
+        assert deployment.odoo_cutover.rollback_started_at is not None
+        self.assertEqual(
+            old.deploy.started_at, deployment.odoo_cutover.rollback_started_at.isoformat()
+        )
+        self.assertEqual(old.deploy.finished_at, deployment.odoo_cutover.updated_at.isoformat())
+        self.assertEqual(self.provider.actions.count("switch"), switches)
         self.assertEqual(old.runtime_identity, self.provider.cutover.old.runtime_identity)
         assert old.artifact_identity is not None
         self.assertEqual(

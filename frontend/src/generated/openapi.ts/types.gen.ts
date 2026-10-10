@@ -1594,6 +1594,7 @@ export type OdooCutoverRecord = {
     public_site: PreparedPublicSite | null;
     readiness: OdooSlotReadiness | null;
     record_id: string;
+    rollback_started_at: string | null;
     route: OdooRouteObservation | null;
     step: 'preparing' | 'prepared' | 'pausing' | 'backing_up' | 'maintaining' | 'ready' | 'switching' | 'resuming' | 'draining' | 'complete' | 'rolling_back' | 'rolled_back';
     updated_at: string;

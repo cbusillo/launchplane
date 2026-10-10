@@ -1579,6 +1579,24 @@ def _run_release_operation(
             }
         )
 
+    def denied_hold(error: DurableOperationAuthorizationDeniedError) -> Any:
+        return read_current().model_copy(
+            update={
+                "status": "reconciliation_required",
+                "updated_at": _utc_now_timestamp(),
+                "finished_at": "",
+                "lease_owner": "",
+                "lease_expires_at": "",
+                "heartbeat_at": "",
+                "result": None,
+                # An authority refusal ran no recovery effects. Preserve the
+                # budget for actual provider attempts after authority returns.
+                "attempt": max(operation.attempt - 1, 0),
+                "error_code": error.code,
+                "error_message": "Unfinished cutover recovery was denied; retain the lane hold without effects.",
+            }
+        )
+
     try:
         authorization_guard.authorize_execution()
         result = run(checkpoint_phase, checkpoint_provider_effect)
@@ -1587,26 +1605,16 @@ def _run_release_operation(
     except DurableOperationAuthorizationDeniedError as error:
         logging.warning("%s operation %s was denied: %s", label, operation.operation_id, error)
         if retain_denied_hold():
-            terminal_operation = read_current().model_copy(
-                update={
-                    "status": "reconciliation_required",
-                    "updated_at": _utc_now_timestamp(),
-                    "finished_at": "",
-                    "lease_owner": "",
-                    "lease_expires_at": "",
-                    "heartbeat_at": "",
-                    "result": None,
-                    "error_code": error.code,
-                    "error_message": "Unfinished cutover recovery was denied; retain the lane hold without effects.",
-                }
-            )
+            terminal_operation = denied_hold(error)
         else:
             terminal_operation = failed(str(error), error.code)
     except Exception as error:
         logging.exception(
             "%s operation %s failed before producing a result.", label, operation.operation_id
         )
-        if (
+        if authorization_guard.denial_error is not None and retain_denied_hold():
+            terminal_operation = denied_hold(authorization_guard.denial_error)
+        elif (
             isinstance(error, LaneMovementRefused)
             and error.code == "source_order_unavailable"
             and not odoo_release_wrote_production(read_current())

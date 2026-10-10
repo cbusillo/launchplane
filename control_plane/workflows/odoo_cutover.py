@@ -286,7 +286,14 @@ def rollback_compatible_cutover(
             route = provider.current_route(plan)
             slot = plan.old if route.slot_id == plan.old.slot_id else plan.new
             _require_route(route, plan, slot)
-            record = record.model_copy(update={"step": "rolling_back", "updated_at": clock()})
+            started_at = clock()
+            record = record.model_copy(
+                update={
+                    "step": "rolling_back",
+                    "updated_at": started_at,
+                    "rollback_started_at": started_at,
+                }
+            )
             store.save(record)
         route = provider.current_route(plan)
         if route.slot_id != plan.old.slot_id:

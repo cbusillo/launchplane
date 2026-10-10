@@ -166,6 +166,7 @@ class OdooCutoverRecord(FrozenRecord):
     began_at: datetime
     updated_at: datetime
     ended_at: datetime | None = None
+    rollback_started_at: datetime | None = None
     public_site: PreparedPublicSite | None = None
     pause: PublicPauseRecord | None = None
     backup: OdooRecoveryTuple | None = None

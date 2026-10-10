@@ -110,10 +110,10 @@ def execute_odoo_cutover_rollback_deployment(
     if record is None or artifact_id != record.plan.production.artifact_id:
         raise ValueError("cutover rollback requires its exact retained production artifact")
     store = DeploymentCutoverStore(record_store, deployment)
-    rollback_started_at = record.updated_at if record.step == "rolling_back" else datetime.now(UTC)
     rolled = rollback_compatible_cutover(store, provider, record.record_id)
+    rollback_started_at = rolled.rollback_started_at or rolled.updated_at
     old = rolled.plan.old
-    finished_at = datetime.now(UTC).isoformat()
+    finished_at = rolled.updated_at.isoformat()
     rollback_id = deployment.record_id + "-switch-back"
     previous = deployment.model_copy(
         update={

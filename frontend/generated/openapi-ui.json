@@ -16897,6 +16897,18 @@
             "title": "Record Id",
             "type": "string"
           },
+          "rollback_started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollback Started At"
+          },
           "route": {
             "anyOf": [
               {
@@ -16945,6 +16957,7 @@
           "public_site",
           "readiness",
           "record_id",
+          "rollback_started_at",
           "route",
           "step",
           "updated_at"
