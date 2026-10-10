@@ -55,8 +55,9 @@ delivery authority back into the forge.
 
 Each product profile names its Client. That person reviews product previews
 and the release checklist in Launchplane. These decisions do not enter machine
-merge readiness. The Client's release acceptance is the one decision that starts
-anything: for a product an admin has not held, it starts the gated production
+merge readiness. The [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
+owns release authority. In the implemented normal release path, for a product
+an admin has not held, the Client's acceptance starts the gated production
 promotion, which still checks release approval and backup evidence. See
 `docs/release-review.md`.
 

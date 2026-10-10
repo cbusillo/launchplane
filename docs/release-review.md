@@ -138,7 +138,8 @@ the checklist. Admins get a separate **Admin Approval Override** section
 and approval-justification field explaining that their decision supplies
 approval under their own identity and replaces an earlier
 request for changes. A saved decision whose release record has not been
-published shows that pending state beside the decision. Only the Client's
+published shows that pending state beside the decision. In the implemented
+normal release path, only the Client's
 acceptance can start a release, and only as described under
 [Acceptance starts the release](#acceptance-starts-the-release); every other
 decision is recorded without deploying.
@@ -269,7 +270,20 @@ and raw generic-web promotion routes. Odoo evaluates it before backup in the
 combined run and again before direct promotion. The existing VeriReel service
 promotion wrapper also checks it. Readiness and direct dry-runs remain available
 while a Client decision is pending. Recording a decision never merges or
-dispatches a workflow, and only a Client's acceptance starts a release.
+dispatches a workflow. The [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
+owns who may start a release; the normal acceptance-started implementation is
+described below.
+
+The Director-started temporary hotfix path for live breakage is direction,
+not implemented behavior. Until it is built and activated, this contract
+provides no way to start one; an admin override or existing grant is not that
+path.
+
+That path uses the same verified backup, release record, post-deploy checks,
+and automatic rollback. Launchplane immediately sends the Client a release
+review for the exact candidate, marked as an urgent temporary fix with the
+reason. Acceptance hands the final check back to the Client; a rejection
+rolls back to their last accepted release.
 
 ## Acceptance starts the release
 
