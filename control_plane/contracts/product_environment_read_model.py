@@ -22,7 +22,7 @@ from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
-from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_record import PreviewRecord, PreviewState
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -431,6 +431,19 @@ class ProductEnvironmentSummary(BaseModel):
     available_actions: tuple[ProductActionAvailability, ...] = ()
 
 
+PRODUCT_PREVIEW_REFERENCE_LIMIT = 50
+
+
+class ProductPreviewReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preview_id: str
+    change_number: int = Field(ge=1)
+    change_url: str
+    recorded_state: PreviewState
+    updated_at: str
+
+
 class ProductPreviewSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -439,6 +452,9 @@ class ProductPreviewSummary(BaseModel):
     slug_template: str = ""
     active_count: int = Field(default=0, ge=0)
     latest_preview_id: str = ""
+    records_status: Literal["available", "authorization_denied", "unsupported"] = "unsupported"
+    records: tuple[ProductPreviewReference, ...] = ()
+    records_truncated: bool = False
     trust_state: FreshnessStatus = "unsupported"
     provenance: DataProvenance = DataProvenance(
         source_kind="unsupported",
@@ -633,7 +649,9 @@ def build_product_site_overview(
         )
         for lane in profile.lanes
     )
-    preview_summary = _build_preview_summary(record_store=record_store, profile=profile)
+    preview_summary = _build_preview_summary(
+        record_store=record_store, profile=profile, action_allowed=action_allowed
+    )
     available_actions = _action_availability(
         descriptor=descriptor,
         profile=profile,
@@ -2052,7 +2070,10 @@ def _missing_lane_provenance(lane: ProductLaneProfile) -> DataProvenance:
 
 
 def _build_preview_summary(
-    *, record_store: object, profile: LaunchplaneProductProfileRecord
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    action_allowed: ActionAllowed,
 ) -> ProductPreviewSummary:
     if not profile.preview.enabled:
         return ProductPreviewSummary(enabled=False)
@@ -2111,12 +2132,42 @@ def _build_preview_summary(
                 detail="Launchplane preview identity record.",
             )
         latest_preview_id = preview.preview_id
+    # Match the existing preview/history read grant exactly; product-read access
+    # alone does not authorize these additional individual identities.
+    records_allowed = action_allowed("preview.read", "launchplane", profile.preview.context, ())
+    records_status: Literal["available", "authorization_denied", "unsupported"] = (
+        "authorization_denied"
+        if not records_allowed
+        else "available"
+        if callable(list_preview_summaries) or callable(list_preview_records)
+        else "unsupported"
+    )
+    records = (
+        tuple(
+            ProductPreviewReference(
+                preview_id=preview.preview_id,
+                change_number=preview.anchor_pr_number,
+                change_url=preview.anchor_pr_url,
+                recorded_state=preview.state,
+                updated_at=preview.updated_at,
+            )
+            for summary in summaries[:PRODUCT_PREVIEW_REFERENCE_LIMIT]
+            for preview in (
+                summary.preview if isinstance(summary, LaunchplanePreviewSummary) else summary,
+            )
+        )
+        if records_allowed
+        else ()
+    )
     return ProductPreviewSummary(
         enabled=True,
         context=profile.preview.context,
         slug_template=profile.preview.slug_template,
         active_count=len(summaries),
         latest_preview_id=latest_preview_id,
+        records_status=records_status,
+        records=records,
+        records_truncated=records_allowed and len(summaries) > len(records),
         trust_state=provenance.freshness_status,
         provenance=provenance,
     )

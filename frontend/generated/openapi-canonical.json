@@ -31992,6 +31992,49 @@
         "title": "ProductPreviewProfile",
         "type": "object"
       },
+      "ProductPreviewReference": {
+        "additionalProperties": false,
+        "properties": {
+          "change_number": {
+            "minimum": 1.0,
+            "title": "Change Number",
+            "type": "integer"
+          },
+          "change_url": {
+            "title": "Change Url",
+            "type": "string"
+          },
+          "preview_id": {
+            "title": "Preview Id",
+            "type": "string"
+          },
+          "recorded_state": {
+            "enum": [
+              "pending",
+              "active",
+              "failed",
+              "paused",
+              "teardown_pending",
+              "destroyed"
+            ],
+            "title": "Recorded State",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "preview_id",
+          "change_number",
+          "change_url",
+          "recorded_state",
+          "updated_at"
+        ],
+        "title": "ProductPreviewReference",
+        "type": "object"
+      },
       "ProductPreviewSummary": {
         "additionalProperties": false,
         "properties": {
@@ -32026,6 +32069,29 @@
               "source_record_id": "",
               "stale_after": ""
             }
+          },
+          "records": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductPreviewReference"
+            },
+            "title": "Records",
+            "type": "array"
+          },
+          "records_status": {
+            "default": "unsupported",
+            "enum": [
+              "available",
+              "authorization_denied",
+              "unsupported"
+            ],
+            "title": "Records Status",
+            "type": "string"
+          },
+          "records_truncated": {
+            "default": false,
+            "title": "Records Truncated",
+            "type": "boolean"
           },
           "slug_template": {
             "default": "",
@@ -90357,6 +90423,7 @@
     "/v1/ordinary-agent-operations/{principal_id}/{operation_id}": "read_human_ordinary_agent_operation",
     "/v1/owner-secret-inputs": "read_owner_secret_inputs",
     "/v1/previews/readiness": "read_preview_readiness",
+    "/v1/previews/{preview_id}/history": "read_preview_history",
     "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs": "read_ordinary_agent_delivery_authorization_candidate_inputs",
     "/v1/privileged-operations/merge-train-targets/inputs": "read_ordinary_agent_merge_train_target_inputs",
     "/v1/privileged-operations/ordinary-agent-delivery-activation/options": "read_ordinary_agent_delivery_activation_options",
@@ -90366,6 +90433,7 @@
     "/v1/product-profiles": "list_product_profiles",
     "/v1/product-profiles/{product}": "read_product_profile",
     "/v1/product-profiles/{product}/mutation-receipts/{field}": "read_product_profile_mutation_receipt",
+    "/v1/product-profiles/{product}/reconcile-requests": "read_product_reconcile_requests",
     "/v1/product-review": "read_product_review",
     "/v1/production-backup-gates/operations/{operation_id}": "read_production_backup_gate_operation",
     "/v1/products": "list_products",
