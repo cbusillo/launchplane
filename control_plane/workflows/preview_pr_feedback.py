@@ -794,8 +794,8 @@ def _render_preview_pr_feedback_markdown(
         lines.extend(
             [
                 (
-                    f"Launchplane preview is ready for PR #{anchor_pr_number} — "
-                    "Client review requested."
+                    f"**Change review (preview)** for PR #{anchor_pr_number} — "
+                    "is this one change exactly right?"
                     if owner_review_requested and not owner_review_accepted
                     else f"Launchplane preview is ready for PR #{anchor_pr_number}."
                 ),
@@ -892,6 +892,7 @@ def _render_preview_pr_feedback_markdown(
                     "the test notes in the pull request description.",
                     f"2. Record **Accept** or **Request changes** in Launchplane: {owner_review_url}",
                     "",
+                    "Accept approves this one change; nothing goes live yet. "
                     "Your decision does not merge or deploy anything. A GitHub approval or comment "
                     "does not record it.",
                 ]

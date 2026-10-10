@@ -18,6 +18,7 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
+import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
@@ -35,7 +36,7 @@ import { useEvidenceRefresh } from "./use-evidence-refresh";
 import type {
   DataProvenance,
   ProductEnvironmentSummary,
-  ProductHealthMonitoringCheckSummary,
+  ProductIncidentSummary,
   ProductSiteOverview,
   ProductTopologyWarning,
 } from "./generated/openapi.ts";
@@ -553,7 +554,7 @@ function ProductWorkspace({
 }
 
 interface ActiveProductIncident {
-  check: ProductHealthMonitoringCheckSummary;
+  occurrence: ProductIncidentSummary;
   displayName: string;
   environment: ProductEnvironmentSummary;
   product: string;
@@ -568,21 +569,19 @@ function ProductIncidentOverview({
 }) {
   const incidents = products.flatMap((product) =>
     product.environments.flatMap((environment) =>
-      environment.health_monitoring.checks
-        .filter((check) => check.incident_eligible && check.incident_status === "open")
-        .map((check) => ({
-          check,
+      environment.health_monitoring.open_incidents
+        .map((occurrence) => ({
+          occurrence,
           displayName: product.display_name,
           environment,
           product: product.product,
         })),
     ),
   );
-  const evidenceIncomplete = products.some((product) =>
-    product.environments.some((environment) =>
-      ["missing", "stale"].includes(environment.health_monitoring.trust_state),
-    ),
-  );
+  const expectedChecks = products.flatMap(product => product.environments.flatMap(environment =>
+    environment.health_monitoring.checks.filter(check => check.probe_effective && check.incident_eligible),
+  ));
+  const evidenceIncomplete = ["missing", "stale", "unsupported"].includes(monitoringEvidenceTrust(expectedChecks));
 
   return (
     <section
@@ -604,10 +603,12 @@ function ProductIncidentOverview({
           </h2>
           <p>
             {incidents.length
-              ? "Launchplane material incident records require admin attention."
+              ? `Launchplane material incident records require admin attention.${evidenceIncomplete ? " Monitoring evidence is incomplete." : ""}`
               : evidenceIncomplete
                 ? "No open incident records were returned, but monitoring evidence is incomplete."
-                : "All incident-eligible health checks returned without an open incident record."}
+                : expectedChecks.length
+                  ? "All incident-eligible health checks returned without an open incident record."
+                  : "No incident-eligible health checks are effective for these lanes."}
           </p>
         </div>
       </div>
@@ -616,7 +617,7 @@ function ProductIncidentOverview({
           {incidents.map((incident) => (
             <ProductIncidentRow
               incident={incident}
-              key={`${incident.product}:${incident.environment.environment}:${incident.check.incident_id}`}
+              key={incident.occurrence.incident_id}
             />
           ))}
         </ul>
@@ -627,26 +628,26 @@ function ProductIncidentOverview({
 
 function ProductIncidentRow({ incident }: { incident: ActiveProductIncident }) {
   return (
-    <li data-severity={incident.check.incident_severity || "critical"}>
+    <li data-severity={incident.occurrence.severity}>
       <span>
         <strong>{incident.displayName}</strong>
         <small>
-          {environmentLabel(incident.environment.environment)} · {humanize(incident.check.name)}
+          {environmentLabel(incident.environment.environment)} · {humanize(incident.occurrence.check_name)}
         </small>
       </span>
       <span>
-        <strong>{humanize(incident.check.incident_severity || "critical")}</strong>
-        <small>{humanize(incident.check.incident_notification_state || "active")}</small>
+        <strong>{humanize(incident.occurrence.severity)}</strong>
+        <small>{humanize(incident.occurrence.notification_state)}</small>
       </span>
       <span>
-        <strong>{incident.check.summary}</strong>
-        <small>{humanize(incident.check.failure_code || "material failure")}</small>
+        <strong>{incident.occurrence.summary}</strong>
+        <small>{humanize(incident.occurrence.failure_code)}</small>
       </span>
       <AppLink
         to={productEnvironmentPath(
           incident.product,
           incident.environment.environment,
-        )}
+        ) + "#incident-history"}
       >
         Inspect incident
         <ArrowRight size={14} aria-hidden="true" />

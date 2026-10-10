@@ -1498,6 +1498,16 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
                 self.assertTrue(plan["held"])
                 self.assertEqual(self.deploys.runtime_identities, [])
 
+    def test_legacy_baseline_with_no_successful_builds_reports_no_verified_build(self) -> None:
+        self.record_legacy_baseline()
+        self.request()
+
+        plan = self.reconcile()
+
+        self.assertEqual((plan["action"], plan["reason"]), ("none", "no_verified_build"))
+        self.assertFalse(plan["held"])
+        self.assertEqual(self.deploys.runtime_identities, [])
+
     def test_legacy_baseline_still_requires_first_parent_history_to_reach_it(self) -> None:
         self.record_legacy_baseline()
         self.github.add_run(20, DEPLOYABLE)
@@ -3495,7 +3505,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
 
                 (comment,) = self.comments.on(number)
                 body = cast(str, comment["body"])
-                self.assertIn(f"preview is ready for PR #{number}", body)
+                self.assertEqual(feedback["status"], "ready")
                 self.assertEqual(feedback.get("owner_review"), owner_review)
                 if owner_review == "mentioned":
                     self.assertIn("@site-owner this change is ready for you to look at.", body)

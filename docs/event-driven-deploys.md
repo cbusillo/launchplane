@@ -336,7 +336,10 @@ that supported configuration path.
 
 Testing searches up to 20 pages of successful build runs and first-parent
 history to find its running build. An omitted running run or commit still
-holds selection with the observed counts. If the running build is beyond
+holds selection with the observed counts. For a recorded generic-web baseline
+predating contract Build adoption, a complete empty successful Build inventory
+reports `no_verified_build`: there is no candidate to verify or deploy, and no
+commit-history search was attempted. If the running build is beyond
 those bounds, or its history was rewritten, the supported service
 deploy/target-replacement operation can request an exact verified newer build;
 it still checks source and artifact order before

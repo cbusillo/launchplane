@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import runtime_platform_credentials
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.odoo_online_backup import OdooProdBackupCaptureEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.workflows.ship import utc_now_timestamp
@@ -118,19 +119,6 @@ class OdooProdBackupGateResult(BaseModel):
     filestore_archive_path: str = ""
     manifest_path: str = ""
     error_message: str = ""
-
-
-class OdooProdBackupCaptureEvidence(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    schema_version: int = Field(default=1, ge=1)
-    backup_nonce: str = Field(pattern=r"^[0-9a-f]{64}$")
-    backup_record_id: str = Field(min_length=1)
-    database_name: str = Field(min_length=1)
-    database_dump_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    filestore_archive_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    database_dump_size: int = Field(gt=0)
-    filestore_archive_size: int = Field(gt=0)
 
 
 class OdooProdBackupVerificationRequest(BaseModel):
@@ -621,6 +609,11 @@ def execute_odoo_prod_backup_verification(
             database_dump_path=expected_paths["database_dump_path"],
             filestore_archive_path=expected_paths["filestore_archive_path"],
             manifest_path=expected_paths["manifest_path"],
+            capture_evidence={
+                key: value
+                for key, value in backup_record.evidence.items()
+                if key in OdooProdBackupCaptureEvidence.model_fields and key != "backup_nonce"
+            },
             timeout_seconds=request.timeout_seconds,
         )
         if (

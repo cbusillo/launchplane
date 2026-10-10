@@ -700,7 +700,7 @@ function IncidentDetailLoadingState() {
 }
 
 function IncidentEmptyState({ monitoringTrustState }: { monitoringTrustState: TrustState }) {
-  const incomplete = monitoringTrustState === "missing" || monitoringTrustState === "stale";
+  const incomplete = ["missing", "stale", "unsupported"].includes(monitoringTrustState);
   return (
     <div className="incident-empty-state" data-incomplete={incomplete}>
       {incomplete ? (
@@ -712,7 +712,7 @@ function IncidentEmptyState({ monitoringTrustState }: { monitoringTrustState: Tr
         <strong>{incomplete ? "Incident evidence is incomplete" : "No incidents recorded"}</strong>
         <p>
           {incomplete
-            ? "Launchplane returned no incident records, but monitoring evidence is missing or stale."
+            ? "Launchplane returned no incident records, but monitoring evidence is missing, stale or unsupported."
             : "Launchplane returned no public ingress incident occurrences for this environment."}
         </p>
       </div>

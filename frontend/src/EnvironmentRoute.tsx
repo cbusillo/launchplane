@@ -40,6 +40,7 @@ import {
   type TrustState,
 } from "./ProductOps";
 import { expireEnvironmentEvidence } from "./product-environment-signal";
+import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import {
   EnvironmentViewNav,
   ProductWorkspaceNav,
@@ -524,13 +525,12 @@ function EnvironmentOverview({
   const effectiveChecks = detail.health_monitoring.checks.filter(
     (check) => check.probe_effective,
   );
-  const openIncidentCheck = effectiveChecks.find(
-    (check) => check.incident_eligible && check.incident_status === "open",
-  );
+  const openIncidents = detail.health_monitoring.open_incidents;
+  const openIncident = openIncidents[0];
   const openIncidentSeverity =
-    openIncidentCheck?.incident_severity || detail.public_ingress.incident_severity;
+    openIncident?.severity;
   const currentIncidentId =
-    openIncidentCheck?.incident_id || detail.public_ingress.incident_id;
+    openIncident?.incident_id || "";
   const actionableMonitoringFailure = effectiveChecks.some(
     (check) => check.incident_eligible && check.status === "fail",
   );
@@ -563,10 +563,10 @@ function EnvironmentOverview({
                 ? "warning"
                 : conditionTone(
                     statusTone(detail.public_ingress.status),
-                    detail.health_monitoring.trust_state,
+                    monitoringEvidenceTrust(detail.health_monitoring.checks),
                   )
           }
-          trustState={detail.health_monitoring.trust_state}
+          trustState={monitoringEvidenceTrust(detail.health_monitoring.checks)}
           value={
             openIncidentSeverity
               ? `Active incident · ${humanize(openIncidentSeverity)}`
@@ -624,7 +624,7 @@ function EnvironmentOverview({
         currentIncidentId={currentIncidentId}
         environment={detail.environment}
         fixtureMode={fixtureMode}
-        monitoringTrustState={detail.health_monitoring.trust_state}
+        monitoringTrustState={monitoringEvidenceTrust(detail.health_monitoring.checks.filter(check => check.incident_eligible))}
         product={detail.product}
       />
 
@@ -705,7 +705,7 @@ function IngressEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
           </h2>
         </div>
         <EvidenceBadge
-          state={detail.health_monitoring.trust_state}
+          state={monitoringEvidenceTrust(detail.health_monitoring.checks)}
           timestamp={evidenceTimestamp(detail.health_monitoring.provenance)}
         />
       </div>
@@ -978,17 +978,15 @@ function diagnosisFor(
   warnings: WarningItem[],
 ): Diagnosis | null {
   const errorWarning = warnings.find((warning) => warning.severity === "error");
-  const openIncident = detail.health_monitoring.checks.find(
-    (check) => check.incident_eligible && check.incident_status === "open",
-  );
+  const openIncident = detail.health_monitoring.open_incidents[0];
   if (openIncident) {
     return {
-      title: openIncident.summary || `${humanize(openIncident.name)} incident open`,
+      title: openIncident.summary,
       detail: openIncident.failure_code
         ? `Failure code: ${humanize(openIncident.failure_code)}.`
         : "Launchplane recorded an open material incident for this health check.",
       targetId: "incident-history",
-      severity: openIncident.incident_severity === "warning" ? "warning" : "error",
+      severity: openIncident.severity === "warning" ? "warning" : "error",
     };
   }
   if (primaryTls && tlsTone(primaryTls) === "danger") {

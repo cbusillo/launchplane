@@ -151,7 +151,17 @@ export function productsForFixture(
   if (fixture === "missing") {
     return [missingEvidenceProduct];
   }
-  return [atlasProduct, missingEvidenceProduct];
+  return [atlasProduct, missingEvidenceProduct].map((site) => ({
+    ...site,
+    environments: site.environments.map((environment) => {
+      const incident = incidentSummaryForFixture({
+        ...environment, product: site.product, display_name: site.display_name,
+      });
+      return { ...environment, health_monitoring: {
+        ...environment.health_monitoring, open_incidents: incident ? [incident] : [],
+      } };
+    }),
+  }));
 }
 
 export function environmentForFixture(
@@ -305,9 +315,9 @@ export function incidentsForFixture(
       (incident): incident is ProductIncidentSummary => incident !== null,
     ),
     trust_state:
-      incidentMode === "stale" ? "stale" : detail.health_monitoring.trust_state,
+      incidentMode === "stale" ? "stale" : "recorded",
     provenance: provenance(
-      incidentMode === "stale" ? "stale" : detail.health_monitoring.trust_state,
+      incidentMode === "stale" ? "stale" : "recorded",
       activeIncident
         ? "Launchplane incident history is available for this environment."
         : incidentMode === "stale"
@@ -2306,7 +2316,7 @@ function incidentFixtureState(open: boolean) {
 }
 
 function incidentSummaryForFixture(
-  detail: ProductEnvironmentDetail,
+  detail: ProductEnvironmentSummary & Pick<ProductSiteOverview, "product" | "display_name">,
 ): ProductIncidentSummary | null {
   const ingress = detail.public_ingress;
   const check = detail.health_monitoring.checks.find(
@@ -2409,6 +2419,7 @@ function environmentFixture({
     available_actions: actionsForEnvironment(environment),
     driver_extensions: { odoo: null },
     health_monitoring: {
+      open_incidents: [],
       monitoring_intent: "public",
       public_incident_eligible: true,
       checks: [
@@ -2431,7 +2442,6 @@ function environmentFixture({
           provenance: provenance("verified", ingressSummary),
         },
       ],
-      trust_state: "recorded",
       provenance: provenance("recorded", "Public monitoring intent is recorded."),
     },
     public_ingress: {
@@ -2675,6 +2685,7 @@ function missingEnvironmentFixture(
     available_actions: [],
     driver_extensions: { odoo: null },
     health_monitoring: {
+      open_incidents: [],
       monitoring_intent: "prelaunch",
       public_incident_eligible: false,
       checks: [
@@ -2697,7 +2708,6 @@ function missingEnvironmentFixture(
           provenance: missing,
         },
       ],
-      trust_state: "recorded",
       provenance: provenance("recorded", "Prelaunch monitoring intent is recorded."),
     },
     public_ingress: {

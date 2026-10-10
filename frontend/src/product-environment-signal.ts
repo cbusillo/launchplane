@@ -19,8 +19,6 @@ export function expireEnvironmentEvidence<T extends ProductEnvironmentSummary | 
     health_monitoring: {
       ...environment.health_monitoring,
       checks,
-      trust_state: checks.some(check => check.probe_effective && check.trust_state === "stale")
-        ? "stale" : environment.health_monitoring.trust_state,
     },
     topology: {
       ...environment.topology,
@@ -50,6 +48,7 @@ export function environmentOperationalTone(environment: ProductEnvironmentSummar
     "expired", "hostname_mismatch", "untrusted", "self_signed", "unreachable",
   ]);
   if (
+    environment.health_monitoring.open_incidents.length > 0 ||
     checks.some(check => check.status === "fail" || check.incident_status === "open") ||
     ["mismatch", "malformed"].includes(
       environment.topology.observed.placement?.runtime_identity_status ?? "unchecked",
