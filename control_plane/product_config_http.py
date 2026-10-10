@@ -458,7 +458,7 @@ def product_config_has_undeclared_runtime_settings(
             lane
             for lane in profile.lanes
             if lane.context.strip() == payload["context"]
-            and lane.instance.strip() == payload["instance"]
+            and (not payload["instance"] or lane.instance.strip() == payload["instance"])
         ),
         None,
     )
@@ -466,6 +466,7 @@ def product_config_has_undeclared_runtime_settings(
         requirement.key
         for requirement in profile.expected_config.runtime_environment_keys
         if lane is not None
+        and (payload["instance"] or not requirement.instance)
         and product_config_requirement_applies_to_lane(
             requirement_context=requirement.context,
             requirement_instance=requirement.instance,

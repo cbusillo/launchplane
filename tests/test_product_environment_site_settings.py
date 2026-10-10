@@ -155,6 +155,50 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
             self.assertEqual(review.status_code, 202, review.text)
         self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
 
+    async def test_both_routes_preserve_platform_host_refusal(self) -> None:
+        for key in ("DOKPLOY_HOST", "LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST"):
+            settings = {key: "https://dokploy.example.invalid"}
+            for route in ("generic", "environment"):
+                response = (
+                    await self._submit_generic(mode="dry-run", settings=settings)
+                    if route == "generic"
+                    else await self._submit({"mode": "dry-run", "runtime_settings": settings})
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()["error"]["code"], "runtime_setting_refused")
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+
+    async def test_live_context_wide_declared_settings_keep_their_supported_scope(self) -> None:
+        profile = _profile(production_use="live")
+        requirement = profile.expected_config.runtime_environment_keys[0]
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "expected_config": profile.expected_config.model_copy(
+                        update={
+                            "runtime_environment_keys": (
+                                requirement.model_copy(update={"instance": ""}),
+                            )
+                        }
+                    )
+                }
+            )
+        )
+        for key, status in (("APP_MODE", 202), ("SITE_MODE", 403)):
+            response = await _post_product_config_apply(
+                self.app,
+                {
+                    "product": "example-site",
+                    "context": "example-site",
+                    "mode": "dry-run",
+                    "runtime_env": {"env": {key: "public"}},
+                    "reason": "Check context scope.",
+                },
+                authorization=_TOKEN,
+            )
+            self.assertEqual(response.status_code, status, response.text)
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+
     async def test_generic_route_live_guard_and_supported_declared_setting(self) -> None:
         self.store.write_product_profile_record(_profile(production_use="live"))
         for mode in ("dry-run", "apply"):

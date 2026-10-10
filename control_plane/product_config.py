@@ -8,7 +8,7 @@ from typing import Literal, NotRequired, Protocol, TypedDict, cast, get_args
 
 import click
 
-from control_plane import provider_key_adoption
+from control_plane import provider_key_adoption, runtime_platform_credentials
 from control_plane import product_secret_copy
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -684,7 +684,11 @@ def _normalize_product_config_runtime_env(raw_env: object) -> dict[str, ScalarVa
             )
         # Preserve the existing key-name rule above; share credential-value detection
         # without expanding it to harmless names containing e.g. KEYCLOAK or TOKENIZER.
-        if provider_key_adoption.looks_like_credential("", str(raw_value)):
+        if (
+            provider_key_adoption.looks_like_credential("", str(raw_value))
+            or runtime_platform_credentials.platform_credential_reason(key_name, str(raw_value))
+            is not None
+        ):
             raise ProductConfigError(
                 f"Runtime environment key {key_name!r} must hold a plain setting; "
                 "write credentials as managed secrets.",
