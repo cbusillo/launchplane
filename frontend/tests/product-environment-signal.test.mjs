@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { environmentOperationalTone, expireProductEvidence } from "../src/product-environment-signal.ts";
+import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence } from "../src/product-environment-signal.ts";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 Object.defineProperty(globalThis, "window", { configurable: true, value: { location: { search: "" } } });
@@ -13,6 +13,12 @@ function environment() {
   lane.trust_state = "recorded";
   lane.provenance.freshness_status = "verified";
   lane.provenance.stale_after = new Date(Date.now() + 60_000).toISOString();
+  const freshen = value => {
+    if (!value || typeof value !== "object") return;
+    if ("stale_after" in value) value.stale_after = lane.provenance.stale_after;
+    Object.values(value).forEach(freshen);
+  };
+  freshen(lane.topology);
   lane.warnings = [];
   lane.topology.warnings = [];
   lane.topology.observed.tls_domains = [];
@@ -93,4 +99,59 @@ test("product and lane badges expire together with the signal", () => {
   assert.equal(expired.trust_state, "stale");
   assert.equal(expired.environments[0].trust_state, "stale");
   assert.equal(environmentOperationalTone(expired.environments[0]), "warning");
+});
+
+
+test("route proof expires before still-fresh health and identity", () => {
+  const lane = environment();
+  const deadline = Date.now();
+  const sourceTrust = lane.topology.provider_recorded.trust_state;
+  lane.topology.provider_recorded.provenance.stale_after = new Date(deadline).toISOString();
+  assert.equal(environmentOperationalTone(lane, deadline), "verified");
+  const expired = expireEnvironmentEvidence(lane, deadline + 1);
+  assert.equal(expired.topology.provider_recorded.trust_state, "stale");
+  assert.equal(expired.health_monitoring.checks[0].trust_state, "verified");
+  assert.equal(environmentOperationalTone(lane, deadline + 1), "warning");
+  assert.equal(lane.topology.provider_recorded.trust_state, sourceTrust);
+});
+
+test("TLS proof expires independently and an old response cannot restore it", () => {
+  const lane = environment();
+  const source = productsForFixture("products")[0].environments[0].topology.observed.tls_domains[0];
+  const domain = structuredClone(source);
+  domain.status = "valid";
+  domain.trust_state = "verified";
+  domain.provenance.freshness_status = "verified";
+  const deadline = Date.now();
+  domain.stale_after = new Date(deadline).toISOString();
+  domain.provenance.stale_after = domain.stale_after;
+  lane.topology.observed.tls_domains = [domain];
+  assert.equal(environmentOperationalTone(lane, deadline), "verified");
+  const expired = expireEnvironmentEvidence(lane, deadline + 1);
+  assert.equal(expired.topology.observed.tls_domains[0].trust_state, "stale");
+  assert.equal(environmentOperationalTone(expired, deadline + 1), "warning");
+  assert.equal(environmentOperationalTone(structuredClone(lane), deadline + 1), "warning");
+  domain.stale_after = lane.provenance.stale_after;
+  domain.provenance.stale_after = domain.stale_after;
+  assert.equal(environmentOperationalTone(lane, deadline + 1), "verified");
+});
+
+
+test("explicit no-website applicability does not turn historical route expiry into a health gate", () => {
+  const lane = environment();
+  lane.topology.desired = { ...lane.topology.desired, public_website: "none" };
+  lane.health_monitoring.monitoring_intent = "private";
+  lane.health_monitoring.checks[0].kind = "private_http";
+  lane.public_ingress.status = "not_expected";
+  lane.topology.provider_recorded.provenance.stale_after = new Date(Date.now() - 1).toISOString();
+  assert.equal(environmentOperationalTone(lane), "verified");
+});
+
+test("expired negative TLS observations remain failures", () => {
+  const lane = environment();
+  const domain = structuredClone(productsForFixture("products")[0].environments[0].topology.observed.tls_domains[0]);
+  domain.status = "hostname_mismatch";
+  domain.provenance.stale_after = new Date(Date.now() - 1).toISOString();
+  lane.topology.observed.tls_domains = [domain];
+  assert.equal(environmentOperationalTone(lane), "danger");
 });

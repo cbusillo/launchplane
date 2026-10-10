@@ -5,14 +5,66 @@ function expireProvenance(provenance: DataProvenance, now: number): DataProvenan
     ? { ...provenance, freshness_status: "stale" } : provenance;
 }
 
+type Topology = ProductEnvironmentSummary["topology"];
+type Evidence = { trust_state: DataProvenance["freshness_status"]; provenance: DataProvenance };
+type EnvironmentEvidence = Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring" | "topology">;
+
+function expireEvidence<T extends Evidence>(evidence: T, now: number): T {
+  const provenance = expireProvenance(evidence.provenance, now);
+  return provenance === evidence.provenance ? evidence : { ...evidence, provenance, trust_state: "stale" };
+}
+
+function publicTopologyEvidence(topology: Topology): Evidence[] {
+  const recorded = topology.provider_recorded;
+  return [recorded, recorded.ingress, recorded.tls,
+    topology.observed.ingress, ...topology.observed.tls_domains];
+}
+
+function publicTopologyApplicable(topology: Topology): boolean {
+  // Consume the server's explicit applicability when supplied; do not infer it
+  // from private health monitoring or replace the product's declared intent.
+  return !("public_website" in topology.desired && topology.desired.public_website === "none");
+}
+
+export function environmentEvidenceDeadlines(environment: EnvironmentEvidence): string[] {
+  return [environment.provenance, ...environment.health_monitoring.checks.map(check => check.provenance),
+    environment.topology.provider_recorded.placement.provenance,
+    environment.topology.observed.placement.provenance,
+    ...publicTopologyEvidence(environment.topology).map(evidence => evidence.provenance),
+  ].map(provenance => provenance.stale_after);
+}
+
+function expiredAggregate(state: DataProvenance["freshness_status"], expired: boolean): DataProvenance["freshness_status"] {
+  return expired && ["verified", "recorded"].includes(state) ? "stale" : state;
+}
+
 export function expireEnvironmentEvidence<T extends ProductEnvironmentSummary | ProductEnvironmentDetail>(environment: T, now = Date.now()): T {
   const provenance = expireProvenance(environment.provenance, now);
-  const placement = environment.topology.observed.placement;
-  const placementProvenance = expireProvenance(placement.provenance, now);
-  const checks = environment.health_monitoring.checks.map(check => {
-    const provenance = expireProvenance(check.provenance, now);
-    return { ...check, provenance, trust_state: provenance.freshness_status === "stale" ? "stale" as const : check.trust_state };
-  });
+  const sourceTopology = environment.topology;
+  const recorded = sourceTopology.provider_recorded;
+  const placement = expireEvidence(sourceTopology.observed.placement, now);
+  const checks = environment.health_monitoring.checks.map(check => expireEvidence(check, now));
+  const topology: Topology = {
+    ...sourceTopology,
+    provider_recorded: {
+      ...expireEvidence(recorded, now),
+      placement: expireEvidence(recorded.placement, now),
+      ingress: expireEvidence(recorded.ingress, now),
+      tls: expireEvidence(recorded.tls, now),
+    },
+    observed: {
+      ...sourceTopology.observed,
+      placement,
+      ingress: expireEvidence(sourceTopology.observed.ingress, now),
+      tls_domains: sourceTopology.observed.tls_domains.map(domain => expireEvidence(domain, now)),
+    },
+  };
+  const publicExpired = publicTopologyApplicable(topology) && publicTopologyEvidence(topology).some(evidence => evidence.trust_state === "stale");
+  const placementExpired = placement.trust_state === "stale";
+  topology.trust_state = expiredAggregate(topology.trust_state, publicExpired || placementExpired);
+  topology.observed.trust_state = expiredAggregate(topology.observed.trust_state,
+    placementExpired || publicTopologyApplicable(topology) &&
+    [topology.observed.ingress, ...topology.observed.tls_domains].some(evidence => evidence.trust_state === "stale"));
   return {
     ...environment, provenance,
     trust_state: provenance.freshness_status === "stale" ? "stale" : environment.trust_state,
@@ -22,15 +74,7 @@ export function expireEnvironmentEvidence<T extends ProductEnvironmentSummary | 
       trust_state: checks.some(check => check.probe_effective && check.trust_state === "stale")
         ? "stale" : environment.health_monitoring.trust_state,
     },
-    topology: {
-      ...environment.topology,
-      trust_state: placementProvenance.freshness_status === "stale" ? "stale" : environment.topology.trust_state,
-      observed: {
-        ...environment.topology.observed,
-        trust_state: placementProvenance.freshness_status === "stale" ? "stale" : environment.topology.observed.trust_state,
-        placement: { ...placement, provenance: placementProvenance, trust_state: placementProvenance.freshness_status === "stale" ? "stale" : placement.trust_state },
-      },
-    },
+    topology,
   };
 }
 
@@ -45,6 +89,7 @@ export type SignalTone = ProductEnvironmentSummary["trust_state"] | "warning" | 
 
 export function environmentOperationalTone(environment: ProductEnvironmentSummary | null, now = Date.now()): SignalTone {
   if (!environment) return "missing";
+  environment = expireEnvironmentEvidence(environment, now);
   const checks = environment.health_monitoring.checks.filter(check => check.probe_effective);
   const negativeTlsStates = new Set([
     "expired", "hostname_mismatch", "untrusted", "self_signed", "unreachable",
@@ -59,6 +104,8 @@ export function environmentOperationalTone(environment: ProductEnvironmentSummar
   ) return "danger";
   if (
     environment.warnings.length || environment.topology.warnings.length ||
+    environment.topology.observed.placement.trust_state === "stale" ||
+    publicTopologyApplicable(environment.topology) && publicTopologyEvidence(environment.topology).some(evidence => evidence.trust_state === "stale") ||
     checks.some(check => check.status !== "pass" || check.trust_state !== "verified") ||
     checks.length > 0 && environment.provenance.freshness_status !== "verified" ||
     Date.parse(environment.provenance.stale_after) < now ||

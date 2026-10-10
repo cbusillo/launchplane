@@ -662,8 +662,11 @@ their read resources once a minute after a completed read. Hidden tabs pause
 automatic reads and catch up on focus or visibility return when due. Pending
 reads do not overlap; access-denied and missing resources require a manual retry.
 Evidence still expires at its recorded deadline while a read is delayed or
-failed. Only a new service response with fresh passing health and current runtime
-identity can restore green. Automatic reads do not reset action, settings, or
+failed, including recorded route authority, nested ingress/TLS ownership and
+observed TLS proof. A fresh health/identity observation cannot prolong expired
+applicable topology proof. Focus or visibility return re-evaluates the cached
+deadlines immediately. Only a new service response with fresh applicable proof,
+passing health and current runtime identity can restore green. Automatic reads do not reset action, settings, or
 promotion resources; the manual Refresh remains available.
 
 Each Delivery Governance or transitional engineering child route owns an

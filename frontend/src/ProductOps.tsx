@@ -18,7 +18,7 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
-import { environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { environmentEvidenceDeadlines, environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -273,20 +273,19 @@ export function ProductWorkspaceRoute({
   );
 }
 
-export function useEvidenceExpiry(environments: Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring">[]) {
+export function useEvidenceExpiry(environments: Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring" | "topology">[]) {
   const [tick, setTick] = useState(0);
-  const nextExpiry = Math.min(...environments.flatMap(environment => [
-    environment.provenance.stale_after,
-    ...environment.health_monitoring.checks.map(check => check.provenance.stale_after),
-  ]).map(value => Date.parse(value)).filter(value => Number.isFinite(value) && value >= Date.now()));
+  const nextExpiry = Math.min(...environments.flatMap(environmentEvidenceDeadlines).map(value => Date.parse(value)).filter(value => Number.isFinite(value) && value >= Date.now()));
   useEffect(() => {
     const update = () => setTick(value => value + 1);
     const timer = Number.isFinite(nextExpiry)
       ? window.setTimeout(update, Math.min(nextExpiry - Date.now() + 1, 2_147_483_647)) : undefined;
     window.addEventListener("focus", update);
+    document.addEventListener("visibilitychange", update);
     return () => {
       window.clearTimeout(timer);
       window.removeEventListener("focus", update);
+      document.removeEventListener("visibilitychange", update);
     };
   }, [nextExpiry, tick]);
 }
@@ -1212,8 +1211,7 @@ function ingressHeadline(environment: ProductEnvironmentSummary): string {
     : `${trustLabel(environment.trust_state)} evidence`;
 }
 
-function signalHeadline(environment: ProductEnvironmentSummary | null): string {
-  const tone = environmentOperationalTone(environment);
+export function signalHeadline(environment: ProductEnvironmentSummary | null, tone = environmentOperationalTone(environment)): string {
   if (tone === "danger") {
     return "Needs attention";
   }

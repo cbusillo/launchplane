@@ -36,10 +36,11 @@ import {
   evidenceTimestamp,
   humanize,
   trustLabel,
+  signalHeadline,
   useEvidenceExpiry,
   type TrustState,
 } from "./ProductOps";
-import { expireEnvironmentEvidence } from "./product-environment-signal";
+import { environmentOperationalTone, expireEnvironmentEvidence } from "./product-environment-signal";
 import {
   EnvironmentViewNav,
   ProductWorkspaceNav,
@@ -402,6 +403,7 @@ function EnvironmentPage({
 }) {
   const externalUrl = safeExternalUrl(detail.base_url);
   const laneLabel = environmentLabel(detail.environment);
+  const operationalTone = environmentOperationalTone(detail);
   const heading = view === "overview" ? laneLabel : environmentViewLabel(view);
   useEffect(() => {
     document.querySelector<HTMLElement>("[data-route-heading]")?.focus({
@@ -431,10 +433,10 @@ function EnvironmentPage({
                 {heading}
               </h1>
             </div>
-            <EvidenceBadge
-              state={detail.trust_state}
-              timestamp={evidenceTimestamp(detail.provenance)}
-            />
+            <span className="evidence-badge environment-operational-status" data-tone={operationalTone} aria-label="Lane status">
+              <span aria-hidden="true" />
+              <strong>{signalHeadline(detail, operationalTone)}</strong>
+            </span>
           </div>
           <p>
             {view === "actions"
@@ -723,6 +725,7 @@ function IngressEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
         <EvidenceFact label="Summary" value={detail.public_ingress.summary || "No public ingress summary was returned."} />
         <EvidenceFact label="Desired endpoint" value={detail.topology.desired.base_url || "Not recorded"} />
         <EvidenceFact label="Recorded path" value={humanize(ingress.path)} />
+        <EvidenceFact label="Route authority" value={trustLabel(detail.topology.provider_recorded.trust_state)} />
         <EvidenceFact label="Termination" value={humanize(ingress.termination_kind)} />
         <EvidenceFact label="Incident" value={detail.public_ingress.incident_status ? humanize(detail.public_ingress.incident_status) : "No incident recorded"} />
       </dl>
@@ -764,7 +767,7 @@ function TlsEvidence({
       {tlsDomains.length ? (
         <ul className="tls-domain-list">
           {tlsDomains.map((domain) => (
-            <li data-tone={tlsTone(domain)} key={`${domain.role}:${domain.domain_name}`}>
+            <li data-tone={conditionTone(tlsTone(domain), domain.trust_state)} key={`${domain.role}:${domain.domain_name}`}>
               <div>
                 <strong>{domain.domain_name}</strong>
                 <span>{domain.role}</span>
