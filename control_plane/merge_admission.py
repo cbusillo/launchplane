@@ -152,6 +152,7 @@ class GuardedMergeAdmission:
     admission_algorithm_version: str = MERGE_ADMISSION_ALGORITHM_VERSION
     controller_state_provider: Callable[[], MergeTrainControllerStateRecord] | None = None
     admission_time_provider: Callable[[], str] = _utc_now_timestamp
+    observation_time_provider: Callable[[], str] = _utc_now_timestamp
     stack_collapse_record: MergeTrainStackCollapsePlanRecord | None = None
     expected_lease_owner: str = field(init=False)
 

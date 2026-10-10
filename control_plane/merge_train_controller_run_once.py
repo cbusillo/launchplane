@@ -1454,7 +1454,7 @@ def _retire_changed_policy_landing(
             observed_head_sha=entry.expected_head_sha,
             observed_head_tree_sha=entry.expected_head_tree_sha,
             observed_pull_request_state="open",
-            observed_at=recorded_at,
+            observed_at=guard.observation_time_provider(),
         )
     lease.checkpoint(
         active_action="land_batch",

@@ -1010,7 +1010,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     observed_base_sha=current_base_sha,
                     observed_base_tree_sha=current_base_tree_sha,
                     provider_effect_attempted=True,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 expected_base_sha = recovered_entry.merge_commit_sha
                 expected_base_tree_sha = recovered_entry.merge_commit_tree_sha
@@ -1052,7 +1052,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     observed_base_tree_sha=current_base_tree_sha,
                     base_contains_merge_commit=True,
                     provider_effect_attempted=False,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 landed_entries.append(skipped_entry)
                 progress_plan = _validated_model_update(
@@ -1088,7 +1088,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     observed_base_sha=current_base_sha,
                     observed_base_tree_sha=current_base_tree_sha,
                     provider_effect_attempted=True,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 expected_base_sha = already_merged_entry.merge_commit_sha
                 expected_base_tree_sha = already_merged_entry.merge_commit_tree_sha
@@ -1126,7 +1126,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 observed_head_sha=landed_head_sha,
                 observed_head_tree_sha=landed_head_tree_sha,
                 observed_pull_request_state="open",
-                observed_at=recorded_at,
+                observed_at=admission_guard.observation_time_provider(),
             )
             if head_behind_base:
                 raise MergeAdmissionDeniedError(
@@ -1177,7 +1177,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 admission_guard.record_provider_failure(
                     admission=admission,
                     error=error,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 raise
             try:
@@ -1199,7 +1199,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     admission=admission,
                     reason="landing_evidence_incomplete",
                     message=str(error).strip(),
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 raise
             base_contains_merge_commit = observed_base_sha == merge_commit_sha or (
@@ -1215,7 +1215,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     admission=admission,
                     reason="landing_evidence_contradicted",
                     message=message,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 raise MergeTrainGitHubStaleHeadError(message, status_code=409)
             merged_entry = _validated_model_update(
@@ -1236,7 +1236,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 observed_base_tree_sha=observed_base_tree_sha,
                 base_contains_merge_commit=base_contains_merge_commit,
                 provider_effect_attempted=True,
-                observed_at=recorded_at,
+                observed_at=admission_guard.observation_time_provider(),
             )
             expected_base_sha = merge_commit_sha
             expected_base_tree_sha = merge_commit_tree_sha
