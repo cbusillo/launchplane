@@ -50,6 +50,40 @@ If no active record exists, service routes fail closed with
 new DB-backed policy record, not by relying on checked-in config files,
 service-host env, or generic service-code conditionals.
 
+## GitHub Read Cost
+
+Controller snapshots retain the base-rooted open-PR graph, but read details,
+checks, label actors, conversations and CODEOWNERS routing only for potential
+queue members. The active policy's enqueue label and label-free dependency-update
+identities decide that enrichment; policies without a required label still read
+every non-draft PR. Unqueued and draft entries carry unknown readiness and cannot
+justify a landing. A newly applied label is observed on the next list read.
+
+Authenticated REST GETs retain response bodies and ETags in a bounded process-local
+cache separated by credential and API origin. Paths include revision identifiers
+where the provider exposes them, including CODEOWNERS' base SHA and check results'
+head SHA. Commit-pinned contents and missing files are reused by that immutable
+revision; a moved base reads its own ownership file. Author permissions are shared
+by login only within the snapshot. Every mutable observation revalidates with GitHub; a terminal check can
+still be rerun or superseded. A 304 supplies the previously observed body and quota
+headers without charging primary quota. A restart or credential rotation starts
+cold; a denied or failed read never supplies a cached answer.
+
+A dry-run controller invocation reuses its snapshot within that invocation and
+releases it on success or failure. Mutating controllers retain their existing fresh
+reads at effect and reconciliation boundaries. Every controller tally logs request
+attempts, not-modified responses and a conservative charged-request upper bound,
+including short idle passes. GraphQL attempts count as requests, not measured
+GraphQL point costs.
+
+Measure cold and immediately repeated idle dry runs with an isolated record store
+and the same authenticated provider transport. Compare response-header quota-used
+counters as well as per-pass attempts/304s; other users of a shared installation
+can increase its counter during the measurement. The HTTP fixture in
+`tests/test_merge_train_read_cost.py` exercises the controller with fifteen unqueued
+PRs. An isolated read proof does not establish a whole night's installation-wide
+budget; correlate deployed pass tallies with hourly counter peaks after landing.
+
 ## Preparing An Ordinary-Agent Target
 
 > Ordinary-agent delegated delivery is retired under

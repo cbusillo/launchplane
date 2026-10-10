@@ -24,6 +24,7 @@ SLOW_GITHUB_OPERATION_SECONDS = 60.0
 @dataclass
 class _GitHubRequestTally:
     count: int = 0
+    not_modified: int = 0
     seconds: float = 0.0
     slowest_seconds: float = 0.0
     slowest_request: str = ""
@@ -36,6 +37,12 @@ _ACTIVE_TALLY: ContextVar[_GitHubRequestTally | None] = ContextVar(
 
 def _request_label(*, method: str, path: str) -> str:
     return f"{method.upper()} {path.split('?', 1)[0]}"
+
+
+def record_github_response(status: int) -> None:
+    tally = _ACTIVE_TALLY.get()
+    if tally is not None and status == 304:
+        tally.not_modified += 1
 
 
 @contextmanager
@@ -77,6 +84,14 @@ def github_request_tally(
     finally:
         _ACTIVE_TALLY.reset(token)
         elapsed = clock() - started
+        _LOGGER.info(
+            "GitHub request tally: %s; requests=%d not_modified=%d charged_upper_bound=%d seconds=%.1f",
+            operation,
+            tally.count,
+            tally.not_modified,
+            tally.count - tally.not_modified,
+            tally.seconds,
+        )
         if elapsed >= SLOW_GITHUB_OPERATION_SECONDS:
             _LOGGER.warning(
                 "Slow operation: %s took %.1fs; %d GitHub requests took %.1fs, slowest %s at %.1fs",
