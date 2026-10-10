@@ -101,6 +101,10 @@ from control_plane import (
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
 from control_plane import live_target_runtime as control_plane_live_target_runtime
+from control_plane.http_routes.lane_service_restart import (
+    ServiceRestartDependencies,
+    register_service_restart_route,
+)
 from control_plane.repository_evidence import (
     GitHubRepositoryEvidenceProvider,
 )
@@ -28170,6 +28174,18 @@ def create_launchplane_fastapi_app(
         },
     )
 
+    register_service_restart_route(
+        app,
+        dependencies=ServiceRestartDependencies(
+            read_identity=read_operator_mutation_identity,
+            get_record_store=get_record_store,
+            next_trace_id=next_trace_id,
+            authorization_allows=resolved_authz_policy_runtime.allows,
+            http_error=_launchplane_http_error,
+            control_plane_root=resolved_control_plane_root,
+            error_response_model=LaunchplaneErrorResponse,
+        ),
+    )
     register_managed_secret_read_routes(app, dependencies=read_route_dependencies)
 
     app.add_api_route(

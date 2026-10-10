@@ -19,6 +19,7 @@ from control_plane.contracts.deployment_record import (
 )
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.lane_service_restart import LaneServiceRestartRecovery
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
@@ -600,6 +601,9 @@ class ProductActivityEvent(BaseModel):
     summary: str = ""
     records: tuple[ProductActivityRecordLink, ...] = ()
     trust_state: FreshnessStatus = "recorded"
+    restart_recovery: LaneServiceRestartRecovery | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
 
 
 class ProductActivityReadModel(BaseModel):
@@ -1031,6 +1035,7 @@ def build_product_activity_read_model(
     profile = record_store.read_product_profile_record(product)
     source_limit = max(limit, 0)
     events: list[ProductActivityEvent] = []
+    events.extend(_service_restart_activity_events(record_store, profile, source_limit))
     events.extend(_client_release_failure_activity_events(record_store, profile, source_limit))
     for lane in _product_activity_lanes(profile):
         events.extend(
@@ -1089,6 +1094,74 @@ def build_product_activity_read_model(
         driver_id=profile.driver_id,
         events=tuple(events[:limit]),
     )
+
+
+def _service_restart_activity_events(
+    record_store: object, profile: LaunchplaneProductProfileRecord, source_limit: int
+) -> tuple[ProductActivityEvent, ...]:
+    from control_plane.contracts.lane_service_restart import (
+        LaneServiceRestartPlan,
+        LaneServiceRestartRecoveryRequest,
+        LaneServiceRestartResult,
+    )
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if not isinstance(record_store, PostgresRecordStore):
+        return ()
+    events = []
+    for record in record_store.list_lane_service_restart_reservations(
+        product=profile.product, limit=source_limit
+    ):
+        plan = LaneServiceRestartPlan.model_validate_json(record.reconciliation_key)
+        result = (
+            LaneServiceRestartResult.model_validate(record.response_payload["result"])
+            if record.state == "completed"
+            else None
+        )
+        status = (
+            result.status
+            if result
+            else "unknown"
+            if record.state == "reconcile_required"
+            else "running"
+        )
+        after = result.after if result else None
+        events.append(
+            ProductActivityEvent(
+                event_id=record.record_id,
+                event_type="service_restart",
+                product=profile.product,
+                context=plan.context,
+                environment=plan.instance,
+                driver_id=profile.driver_id,
+                action_id="service_restart",
+                status=status,
+                occurred_at=record.updated_at or record.created_at,
+                title=f"Restart {plan.service} (same version): {status}",
+                summary=(
+                    f"Actor: {plan.actor}. Reason: {plan.reason}. Artifact: {plan.artifact_id}. "
+                    f"Before: {plan.before.container_id} at {plan.before.started_at}. "
+                    f"After: {after.container_id + ' at ' + after.started_at if after else 'unverified'}. "
+                    f"Result: {status}. {result.error_message if result else 'Do not repeat an unsettled restart.'}"
+                ),
+                records=(_record_link("service_restart", record.record_id),),
+                restart_recovery=LaneServiceRestartRecovery(
+                    request=LaneServiceRestartRecoveryRequest(
+                        product=plan.product,
+                        context=plan.context,
+                        instance=plan.instance,
+                        service=plan.service,
+                        reason=plan.reason,
+                        mode="apply",
+                        reviewed_plan_sha256=plan.digest(),
+                    ),
+                    idempotency_key=record.idempotency_key,
+                )
+                if record.state != "completed"
+                else None,
+            )
+        )
+    return tuple(events)
 
 
 def _client_release_failure_activity_events(

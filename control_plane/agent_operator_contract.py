@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+
 import hashlib
 import json
 import os
@@ -81,6 +83,15 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        SERVICE_RESTART_ROUTE,
+        "Inspect or restart one existing lane service on its current accepted artifact, or reconcile its original receipt without another restart.",
+        ("bounded_admin_helper", "operator_ui", "service_api"),
+        ("dry-run", "apply", "reconcile"),
+        "apply",
+        ("reviewed_plan_digest", "current_artifact_identity", "release_lane_exclusion"),
+    ),
     OperationSpec(
         "POST",
         "/v1/agent/ordinary-agent-jobs",
