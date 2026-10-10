@@ -553,6 +553,7 @@ class RuntimeKeySafetyTests(unittest.TestCase):
             "FISHBOWL_PASSWORD",
             "RESEND_API_KEY",
             "MAPBOX_API_KEY",
+            "ODOO_OVERRIDE_SECRET__CONFIG_PARAM__WEB_MAP__TOKEN_MAP_BOX",
             "UNSPLASH_ACCESS_TOKEN",
             "TENOR_API_KEY",
             "WEB_PUSH_VAPID_PRIVATE_KEY",

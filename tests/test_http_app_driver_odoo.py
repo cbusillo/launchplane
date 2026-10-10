@@ -2366,6 +2366,10 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 {},
                 (
                     ("context_instance", "MAPBOX_API_KEY"),
+                    (
+                        "context_instance",
+                        "ODOO_OVERRIDE_SECRET__CONFIG_PARAM__WEB_MAP__TOKEN_MAP_BOX",
+                    ),
                     ("context_instance", "UNSPLASH_ACCESS_TOKEN"),
                     ("context_instance", "TENOR_API_KEY"),
                     ("context_instance", "WEB_PUSH_VAPID_PRIVATE_KEY"),
@@ -2377,6 +2381,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 (unrelated_rule,),
                 [
                     "MAPBOX_API_KEY",
+                    "ODOO_OVERRIDE_SECRET__CONFIG_PARAM__WEB_MAP__TOKEN_MAP_BOX",
                     "UNSPLASH_ACCESS_TOKEN",
                     "TENOR_API_KEY",
                     "WEB_PUSH_VAPID_PRIVATE_KEY",

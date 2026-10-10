@@ -51,6 +51,7 @@ DEFAULT_INTEGRATION_KEY_MARKERS = (
     "FISHBOWL",
     "CM_DATA",
     "MAPBOX",
+    "MAP_BOX",
     "UNSPLASH",
     "TENOR",
     "VAPID",
