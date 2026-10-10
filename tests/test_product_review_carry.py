@@ -342,6 +342,20 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         )
         self.assert_waits_for_the_client(self._publish())
 
+    def test_diff_content_line_separators_do_not_change_hunk_line_counts(self) -> None:
+        content = "Unicode\u2028separator\r\f\x1c\x85end"
+        self.github.base_sha = _NEWER_BASE_COMMIT
+        self.github.merge_bases[_REFRESHED_HEAD] = _NEWER_BASE_COMMIT
+        feature_patch = "@@ -5 +5 @@\n-Old " + content + "\n+New " + content + "\n"
+        self.github.changes[(_NEWER_BASE_COMMIT, _ACCEPTED_HEAD)] = _change(patch=feature_patch)
+        self.github.changes[(_NEWER_BASE_COMMIT, _REFRESHED_HEAD)] = _change(
+            patch=feature_patch.replace("@@ -5 +5 @@", "@@ -6 +6 @@")
+        )
+        self.github.base_changes[(_BASE_COMMIT, _NEWER_BASE_COMMIT)] = _change(
+            patch="@@ -0,0 +1 @@\n+" + content + "\n"
+        )
+        self.assertEqual(self._publish()["state"], "success")
+
     def test_missing_or_partial_position_evidence_needs_acceptance(self) -> None:
         self.github.merge_bases[_REFRESHED_HEAD] = ""
         self.assert_waits_for_the_client(self._publish())

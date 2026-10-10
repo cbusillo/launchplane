@@ -157,7 +157,7 @@ def _patch_hunks(entry: dict[str, object]) -> tuple[tuple[int, int, int, int], .
         return None
     hunks: list[tuple[int, int, int, int]] = []
     old_lines = new_lines = 0
-    for line in patch.splitlines():
+    for line in patch.rstrip("\n").split("\n"):
         header = _HUNK_HEADER.fullmatch(line)
         if header:
             if hunks and (old_lines, new_lines) != (hunks[-1][1], hunks[-1][3]):
@@ -181,7 +181,7 @@ def _patch_edits(entry: dict[str, object]) -> tuple[tuple[int, int, int], ...] |
     edits: list[list[int]] = []
     cursor = 0
     current: list[int] | None = None
-    for line in str(entry["patch"]).splitlines():
+    for line in str(entry["patch"]).rstrip("\n").split("\n"):
         header = _HUNK_HEADER.fullmatch(line)
         if header:
             cursor = int(header[1]) + (int(header[2] or 1) == 0)
