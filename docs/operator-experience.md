@@ -613,6 +613,12 @@ types remain only for UI state and view models.
 
 ### Browser Route Contract
 
+The light/dark switch saves only an explicit choice in browser local storage,
+scoped to the browser profile and Launchplane origin. The saved choice applies
+before the first render on every UI route, survives return visits, and updates
+other open tabs. Without a valid saved choice, the existing dark default applies.
+If the browser refuses storage, the switch still works for the current page.
+
 The clean-slate shell uses URL-owned product selection under the service-owned
 `/ui` prefix:
 
