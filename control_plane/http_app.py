@@ -6286,6 +6286,7 @@ def create_launchplane_fastapi_app(
                     github_token_scope=lambda **_: nullcontext(token),
                     github_api=github_api_request,
                     token_context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    reuse_commit_trees=True,
                 ),
                 technical_check_client=GitHubMergeTrainClient(
                     transport=UrllibMergeTrainGitHubTransport(
