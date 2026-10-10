@@ -313,7 +313,7 @@ test.describe("operator journeys", () => {
     ).toBeVisible();
     await expect(page.locator(".product-trust-dots").first()).toHaveAttribute(
       "aria-label",
-      "Testing data trust: verified; Production data trust: verified",
+      "Testing operational status: verified; Production operational status: danger",
     );
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "product-workspace");

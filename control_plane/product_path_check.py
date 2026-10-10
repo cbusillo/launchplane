@@ -12,6 +12,7 @@ returned.
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import re
 from typing import Literal, Protocol, cast
 
 import click
@@ -236,6 +237,14 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
             _testing_failure_fix(code),
             (failed,),
         )
+    if _completed_testing_noop(plan):
+        return _step(
+            step_id,
+            "clear",
+            "already_deployed",
+            "The completed reconcile records matching current and desired testing build provenance.",
+            record_ids=(_testing_artifact_id(plan["current_artifact_id"]),),
+        )
     return _step(
         step_id,
         "unknown",
@@ -243,6 +252,41 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
         "The last reconcile plan recorded no deploy outcome.",
         "wait",
     )
+
+
+def _completed_testing_noop(plan: dict[str, object]) -> bool:
+    if (
+        plan.get("reconcile_state") != "done"
+        or plan.get("action") != "none"
+        or plan.get("reason") != "already_deployed"
+        or plan.get("held") is not False
+    ):
+        return False
+    artifact = plan.get("current_artifact_id")
+    commit = plan.get("current_commit")
+    digest = plan.get("current_image_digest")
+    return (
+        isinstance(artifact, str)
+        and bool(artifact.strip())
+        and _testing_artifact_id(artifact) == artifact
+        and artifact == plan.get("desired_artifact_id")
+        and isinstance(commit, str)
+        and re.fullmatch(r"[0-9a-f]{40}", commit) is not None
+        and commit == plan.get("desired_commit")
+        and isinstance(digest, str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is not None
+        and digest == plan.get("desired_image_digest")
+    )
+
+
+def _testing_artifact_id(value: object) -> str:
+    if isinstance(value, str) and re.fullmatch(
+        r"artifact-[A-Za-z0-9][A-Za-z0-9_.-]*-run-[0-9]+-[0-9]+"
+        r"|[a-z0-9][a-z0-9./:_-]*@sha256:[0-9a-f]{64}",
+        value,
+    ):
+        return value
+    return ""
 
 
 def _testing_steps(inputs: PathCheckInputs) -> list[PathCheckStep]:
@@ -530,7 +574,14 @@ def _testing_reconcile_plan(
     testing = next((record for record in requests if record.target_kind == "testing"), None)
     if testing is None:
         return None
-    return dict(product_reconcile_request_view(testing).last_plan)
+    return {
+        **product_reconcile_request_view(testing).last_plan,
+        "reconcile_state": testing.state,
+        # The general reconcile view redacts long artifact ids as possible secrets.
+        # Only these validated provenance shapes may be compared or cited here.
+        "current_artifact_id": _testing_artifact_id(testing.last_plan.get("current_artifact_id")),
+        "desired_artifact_id": _testing_artifact_id(testing.last_plan.get("desired_artifact_id")),
+    }
 
 
 def _latest_promotion(
