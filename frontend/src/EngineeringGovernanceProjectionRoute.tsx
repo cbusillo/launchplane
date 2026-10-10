@@ -318,6 +318,11 @@ function GovernanceAdmissionFacet({ projection }: { projection: GovernanceProjec
 function GovernanceLandingFacet({ projection }: { projection: GovernanceProjection }) {
   const landing = projection.landing_outcome;
   const alreadyContained = landing.record?.reason === "already_contained_no_provider_effect";
+  const admission = projection.merge_admission.record;
+  const historicalObservationTime = Boolean(
+    landing.record && admission && landing.record.admission_id === admission.admission_id &&
+    Date.parse(landing.record.observed_at) < Date.parse(admission.created_at),
+  );
   return (
     <section className="governance-facet" aria-label="Separate landing outcome">
       <GovernanceFacetHeader
@@ -330,11 +335,12 @@ function GovernanceLandingFacet({ projection }: { projection: GovernanceProjecti
         Landed, rejected, and reconcile required are independent observations. Missing
         outcome evidence is never interpreted as landed.
         {alreadyContained ? " The change was already contained in the base; Launchplane performed no merge for this step." : null}
+        {historicalObservationTime ? " This older record predates its admission; the actual observation time is unqualified." : null}
       </p>
       {landing.record ? (
         <dl className="governance-meta-grid">
           <div><dt>Reason</dt><dd><code>{landing.record.reason}</code></dd></div>
-          <div><dt>Observed</dt><dd>{formatTime(landing.record.observed_at)}</dd></div>
+          <div><dt>{historicalObservationTime ? "Recorded time (unqualified)" : "Observed"}</dt><dd>{formatTime(landing.record.observed_at)}</dd></div>
           <div><dt>{alreadyContained ? "Unchanged base" : "Merge commit"}</dt><dd><code>{shortSha(landing.record.merge_commit_sha)}</code></dd></div>
         </dl>
       ) : null}
