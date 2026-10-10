@@ -29,7 +29,9 @@ markup/content type or resource budget failure aborts preparation before a write
 pause can begin. A homepage 200 never establishes coverage.
 
 The supported document grammar is explicit balanced HTML with local styles,
-fonts, raster/passive SVG images and audio/video. CSS resource discovery uses the
+fonts, raster/external passive SVG images and audio/video. Inline SVG and other
+unsupported markup fail before pausing; the supported site's browser proof must
+pass before admission. CSS resource discovery uses the
 [tinycss2 parser](https://doc.courtbouillon.org/tinycss2/stable/api_reference.html)
 for comments, escapes, imports, nested rules and image sets. Imported CSS and
 SVG dependencies join the same local closure; executable SVG and invalid or
@@ -41,7 +43,8 @@ an unsupported site fails rather than claiming browsing continuity.
 Safe UTF-8 charset and viewport metadata and embedded image data remain visible.
 Refresh and other metadata are removed with session/CSRF-bearing attributes.
 All executable site scripts, inline handlers, session/CSRF-bearing data
-attributes, hidden inputs and forms are removed. The page contains a visible
+attributes, hidden inputs and form wrappers are removed; passive display content
+inside forms is retained, while editable controls are removed. The page contains a visible
 notice and disabled submission control. Script execution, connections, frames,
 objects and form actions are denied by the serving CSP. JS forms and live metrics
 therefore cannot produce requests. Only safe response headers are retained;

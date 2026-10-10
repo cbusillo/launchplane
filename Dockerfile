@@ -16,14 +16,14 @@ FROM mirror.gcr.io/library/golang:1.26.9-bookworm AS github-cli-build
 
 ARG GITHUB_CLI_VERSION=v2.98.0
 ARG GITHUB_CLI_GRPC_VERSION=v1.83.2
-ARG GITHUB_CLI_X_CRYPTO_VERSION=v0.55.0
-ARG GITHUB_CLI_X_TEXT_VERSION=v0.41.0
+ARG GITHUB_CLI_X_CRYPTO_VERSION=v0.57.0
+ARG GITHUB_CLI_X_TEXT_VERSION=v0.42.0
 ARG GITHUB_CLI_X_NET_VERSION=v0.60.0
 
 ENV CGO_ENABLED=0 \
     GOTOOLCHAIN=local
 
-RUN github_cli_x_mod_version=v0.40.0 \
+RUN github_cli_x_mod_version=v0.41.0 \
     && mkdir -p /tmp/github-cli-build \
     && cd /tmp/github-cli-build \
     && go mod init launchplane.local/github-cli-build \

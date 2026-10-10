@@ -339,3 +339,62 @@ class PreparedPublicSiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private-meta-token", response.text)
         self.assertNotIn("http-equiv", response.text)
         self.assertNotIn("<embed", response.text)
+
+    async def test_form_display_fragments_and_icon_declarations_survive_pause(self) -> None:
+        original = self.fixture.capture
+
+        def capture(path: str) -> CapturedPublicResponse:
+            response = original(path)
+            if path in self.fixture.plan.public_routes and response.status == 200:
+                body = response.body.replace(
+                    b"</head>",
+                    b'<link rel="Shortcut ICON" href="/assets/bg.png">'
+                    b'<link rel="apple-touch-icon" href="/assets/bg.png"></head>',
+                ).replace(
+                    b'<input name="message">',
+                    b"<section><h2>Repair enquiry details</h2>"
+                    b'<a href="/prices/repair#details">Read details</a>'
+                    b"<label>Message</label><textarea>private-field-value</textarea>"
+                    b"<select><option>private-selection</option></select></section>",
+                )
+                return response.model_copy(update={"body": body})
+            return response
+
+        self.fixture.capture = capture  # type: ignore[method-assign]
+        site = prepare_public_site(self.fixture.plan, self.fixture)
+        PreparedPublicPause(site, self.store, self.fixture).begin()
+        self.fixture.update_database()
+        response = await request(prepared_public_app(site), "GET", "/contact")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('href="/prices/repair#details"', response.text)
+        self.assertIn("Repair enquiry details", response.text)
+        self.assertIn('rel="Shortcut ICON"', response.text)
+        self.assertIn('rel="apple-touch-icon"', response.text)
+        self.assertNotIn("private-field-value", response.text)
+        self.assertNotIn("private-selection", response.text)
+        self.assertNotIn("<form", response.text)
+        self.assertNotIn("<input", response.text)
+        self.assertIn("disabled", response.text)
+        submission = await request(prepared_public_app(site), "POST", "/contact")
+        self.assertEqual(submission.status_code, 423)
+
+    def test_unsupported_inline_svg_fails_before_writer_fencing(self) -> None:
+        original = self.fixture.capture
+
+        def capture(path: str) -> CapturedPublicResponse:
+            response = original(path)
+            if path == "/":
+                return response.model_copy(
+                    update={
+                        "body": response.body.replace(
+                            b"</main>", b'<svg><path d="M0 0"/></svg></main>'
+                        )
+                    }
+                )
+            return response
+
+        self.fixture.capture = capture  # type: ignore[method-assign]
+        with self.assertRaises(ValueError):
+            prepare_public_site(self.fixture.plan, self.fixture)
+        self.assertEqual(self.fixture.fenced, set())
+        self.assertEqual(self.fixture.published, "")

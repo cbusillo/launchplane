@@ -26,10 +26,12 @@ DISPLAY_TAGS = frozenset(
     "html head title body main header footer nav section article aside div span p a "
     "h1 h2 h3 h4 h5 h6 ul ol li dl dt dd table thead tbody tfoot tr th td caption "
     "strong em b i u s small sub sup blockquote pre code br hr img picture source "
-    "video audio track figure figcaption link style details summary address time".split()
+    "video audio track figure figcaption link style details summary address time label".split()
 )
 VOID_TAGS = frozenset({"br", "hr", "img", "source", "track", "link"})
-DROP_TAGS = frozenset({"script", "iframe", "object", "embed", "template", "form", "textarea"})
+DROP_TAGS = frozenset(
+    {"script", "iframe", "object", "embed", "template", "textarea", "select", "button"}
+)
 SAFE_ATTRIBUTES = frozenset(
     "id class title lang dir role alt width height colspan rowspan scope datetime "
     "controls loop muted preload loading decoding media type rel sizes label kind".split()
@@ -118,14 +120,15 @@ class PassivePublicHTML(HTMLParser):
                 self.dropped.append(tag)
             return
         values = dict(attrs)
+        if tag == "form":
+            self.parts.append('<p role="status">Forms temporarily paused.</p>')
+            self.parts.append('<button type="button" disabled>Submissions paused</button>')
+            return
         if tag in DROP_TAGS:
             if tag == "script" and values.get("src"):
                 ref = local_reference(self.plan, self.path, str(values["src"]))
                 if ref:
                     self.assets.add(ref)
-            if tag == "form":
-                self.parts.append('<p role="status">Forms temporarily paused.</p>')
-                self.parts.append('<button type="button" disabled>Submissions paused</button>')
             if tag not in {"embed"}:
                 self.dropped.append(tag)
             return
@@ -175,6 +178,8 @@ class PassivePublicHTML(HTMLParser):
                         continue
                     if ref:
                         self.links.add(ref)
+                    if ref and joined.fragment:
+                        ref += "#" + joined.fragment
                 else:
                     if tag in {"img", "source"} and value.lower().startswith("data:image/"):
                         safe.append((name, value))
@@ -185,7 +190,12 @@ class PassivePublicHTML(HTMLParser):
                 safe.append((name, ref or value))
             elif name in SAFE_ATTRIBUTES or name.startswith("aria-"):
                 safe.append((name, value))
-        if tag == "link" and values.get("rel") not in {"stylesheet", "icon"}:
+        if tag == "link" and not set(str(values.get("rel", "")).lower().split()) & {
+            "stylesheet",
+            "icon",
+            "apple-touch-icon",
+            "apple-touch-icon-precomposed",
+        }:
             return
         self.parts.append("<" + tag + "".join(f' {n}="{escape(v)}"' for n, v in safe) + ">")
         if tag not in VOID_TAGS:
@@ -205,7 +215,7 @@ class PassivePublicHTML(HTMLParser):
             if tag == self.dropped[-1]:
                 self.dropped.pop()
             return
-        if tag in {"input", "button", "meta", "embed"}:
+        if tag in {"input", "button", "meta", "embed", "form"}:
             return
         if tag in VOID_TAGS:
             return
