@@ -400,25 +400,27 @@ including label-free dependency updates, so the next controller pass can select
 other eligible work. Remove the block label after resolving the failure to admit
 that PR again. Applied-block PR feedback explains the failure and how to rejoin.
 
-Within-major dependency updates admitted through the required-label exception use current-head check and
-mergeability evidence for failure holds, rather than acquiring a persistent block
+Within-major dependency updates admitted through the required-label exception use
+current-head check and mergeability evidence for holds, rather than acquiring a
+persistent block
 label. Controller and dry-run queue entries report the observed head and its
 refusal reason; GitHub's current checks also remain visible. The service excludes
-the update while that failure or conflict persists and can plan other eligible PRs
-immediately.
+the update while checks fail or mergeability is conflicting/unknown and can plan
+other eligible PRs immediately.
 Every fresh snapshot requalifies the update under the existing dependency admission
 and required-check gates; a new head with pending or unknown checks still cannot
 land. A passing rerun on the same head or a base change resolving conflicts can
-also requalify it. An explicit enqueue
-label uses the normal block path above. Every existing block label remains a hold,
+also requalify it. An explicit enqueue label uses the normal block path above.
+Every existing block label remains a hold,
 including labels applied by earlier controller versions: no actor or historical
 record is used to guess that a generic hold may be cleared. Those PRs retain the
 supported remove-label path. The single-transition worker is unchanged.
 
 Landing admission rereads the same queue rule. If an included dependency head
 starts failing or conflicting after candidate planning, its changed eligibility
-invalidates that landing lineage; the controller must retire/replan the candidate
-before independent work can proceed. Passing candidate checks do not override a
+invalidates that landing lineage. A wholly unlanded plan can be retired/replanned;
+a partially landed plan retains its merged progress and blocks for requalification
+or the existing reconciliation path. Passing candidate checks do not override a
 constituent's current failure.
 
 The GitHub adapter creates a missing policy label when label

@@ -665,9 +665,7 @@ def _build_queue_entry(
         and is_dependency_update
         and pull_request.dependency_update_class == "patch_or_minor"
         and label_refusal
-        and (
-            pull_request.required_checks_status == "fail" or pull_request.mergeable == "conflicting"
-        )
+        and (pull_request.required_checks_status == "fail" or pull_request.mergeable != "mergeable")
     ):
         # A failed automatically admitted head is a current-check hold, not a
         # persistent label. The next snapshot requalifies it without clearing
@@ -675,6 +673,8 @@ def _build_queue_entry(
         ineligible_reasons.append(
             "dependency update current-head merge conflicts"
             if pull_request.mergeable == "conflicting"
+            else "dependency update current-head mergeability unknown"
+            if pull_request.mergeable == "unknown"
             else "dependency update current-head checks failed"
         )
     if repository_policy.enqueue.label_required and label_refusal:

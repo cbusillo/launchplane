@@ -287,6 +287,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
         for failed_head in (
             update.model_copy(update={"required_checks_status": "fail"}),
             update.model_copy(update={"mergeable": "conflicting"}),
+            update.model_copy(update={"mergeable": "unknown"}),
         ):
             with self.subTest(failed_head=failed_head.model_dump()):
                 failed = build_merge_train_dry_run_result(
