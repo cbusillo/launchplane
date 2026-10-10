@@ -2430,7 +2430,7 @@ def _desired_release(
         built_commits_seen=len(built_commits),
         ordered_built_commits=len(ordered),
     )
-    if not current_seen:
+    if built_commits and not current_seen:
         return None, [], "incomplete_commit_history"
     rejected: list[dict[str, str]] = []
     for commit in ordered[:TESTING_VERIFY_LIMIT]:

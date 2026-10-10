@@ -215,6 +215,7 @@ def register_merge_train_read_routes(
             requested_at=utc_now_timestamp(),
             current_policy_key=repository_policy.policy_key,
             current_policy_sha256=policy_record.policy_sha256,
+            policy_record=policy_record,
         )
         return MergeTrainAdmissionResponse(
             trace_id=trace_id,
@@ -272,6 +273,7 @@ def register_merge_train_read_routes(
             generated_at=utc_now_timestamp(),
             current_policy_key=repository_policy.policy_key,
             current_policy_sha256=policy_record.policy_sha256,
+            policy_record=policy_record,
         )
         return MergeTrainControllerStatusResponse(
             trace_id=trace_id,
