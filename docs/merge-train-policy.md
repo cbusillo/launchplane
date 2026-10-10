@@ -435,7 +435,21 @@ after every entry's rolling commit and tree are verified does the native
 GitHub adapter publish `launchplane/train/**` at the completed candidate SHA.
 Base and intermediate construction pushes therefore do not start required
 workflows. The canonical candidate ref, persisted candidate identity, and
-rolling provenance remain the inputs to checks and landing.
+rolling provenance remain the inputs to checks and landing. The single-entry
+reuse below keeps its completed candidate on the construction ref instead.
+
+For one PR, Launchplane can avoid that publication only when the constructed
+candidate tree equals the recorded PR head tree, the protected base is unchanged
+and contained in that head, and fresh reads prove every current required check
+passed on the exact head with the required App bindings. PR identity/head/base
+and the base branch are confirmed after those reads. Missing, pending, failed,
+stale or unreadable evidence selects the normal publication and candidate CI;
+multiple queued PRs always take that path, even if a tree happens to match.
+`head_check_reuse` in the candidate record binds the source PR/head/tree, base,
+constructed candidate commit, observation time, required check names/App ids and
+passing evidence sources. Rolling merge-commit provenance remains intact.
+The reused candidate stays reachable on its construction ref, which becomes
+the recorded candidate ref and is removed by ordinary post-landing cleanup.
 
 Publication has a bounded exact-SHA readback, including temporary 404s while a
 new branch becomes visible. A failed or interrupted publication never returns
@@ -465,6 +479,14 @@ being considered for the batch. Checks on each PR's own head are useful
 screening evidence, but they do not prove the combined tree is safe to land.
 Launchplane must fail closed when candidate check evidence is missing, pending,
 failed, stale, or attached to a different commit SHA.
+
+The single-entry tree-identity proof above is the only exception. Observation
+re-reads its head checks and live required-check policy rather than treating the
+recorded pass as current authority. If reuse stops being provable, it publishes
+the same completed candidate to the canonical train ref, clears the active reuse
+proof and waits for full candidate CI. Landing still reads fresh technical and
+structural admission evidence and uses the protected expected-head merge; no
+checks are copied to a new SHA and no provider requirement is changed.
 
 Repositories using batch candidates must run their required workflows for
 pushes to `launchplane/train/**` and exclude `launchplane/construct/**` from

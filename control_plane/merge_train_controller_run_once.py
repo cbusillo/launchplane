@@ -2394,8 +2394,10 @@ def _advance_active_candidate_record(
     candidate_build_error: MergeTrainGitHubStaleHeadError | None = None
     construction_evidence = (
         {
-            "construction_ref": merge_train_construction_ref(
+            "construction_ref": (
                 active_candidate_record.candidate.candidate_ref
+                if active_candidate_record.candidate.head_check_reuse is not None
+                else merge_train_construction_ref(active_candidate_record.candidate.candidate_ref)
             )
         }
         if active_candidate_record.ordinary_job_binding is None
