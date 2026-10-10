@@ -299,6 +299,7 @@ def build_merge_train_dry_run_result(
     policy: MergeTrainPolicy,
     snapshot: MergeTrainDryRunSnapshot,
     batch_landing: bool = False,
+    planned_dependency_heads: frozenset[tuple[int, str]] = frozenset(),
 ) -> MergeTrainDryRunResult:
     repository_policy = policy.find_repository_policy(
         repository=snapshot.repository, base_branch=snapshot.base_branch
@@ -309,7 +310,13 @@ def build_merge_train_dry_run_result(
         if _targets_merge_train_base(pull_request=pull_request, base_branch=snapshot.base_branch)
     )
     queue = tuple(
-        _build_queue_entry(repository_policy, pull_request, skip_blocked=batch_landing)
+        _build_queue_entry(
+            repository_policy,
+            pull_request,
+            skip_blocked=batch_landing,
+            allow_unknown_mergeability=(pull_request.number, pull_request.head_sha)
+            in planned_dependency_heads,
+        )
         for pull_request in sorted(
             base_pull_requests, key=lambda item: (item.created_at, item.number)
         )
@@ -637,6 +644,7 @@ def _build_queue_entry(
     pull_request: MergeTrainPullRequestSnapshot,
     *,
     skip_blocked: bool = False,
+    allow_unknown_mergeability: bool = False,
 ) -> MergeTrainQueueEntry:
     ineligible_reasons: list[str] = []
     is_trusted_automation = (
@@ -658,6 +666,29 @@ def _build_queue_entry(
         and pull_request.actor_id in repository_policy.enqueue.dependency_update_github_user_ids
     )
     label_refusal = _enqueue_label_refusal(repository_policy, pull_request)
+    if (
+        skip_blocked
+        and pull_request.state == "open"
+        and repository_policy.enqueue.label_required
+        and is_dependency_update
+        and pull_request.dependency_update_class == "patch_or_minor"
+        and label_refusal
+        and (
+            pull_request.required_checks_status == "fail"
+            or pull_request.mergeable == "conflicting"
+            or (pull_request.mergeable == "unknown" and not allow_unknown_mergeability)
+        )
+    ):
+        # A failed automatically admitted head is a current-check hold, not a
+        # persistent label. The next snapshot requalifies it without clearing
+        # any manual hold or guessing who applied an existing block label.
+        ineligible_reasons.append(
+            "dependency update current-head merge conflicts"
+            if pull_request.mergeable == "conflicting"
+            else "dependency update current-head mergeability unknown"
+            if pull_request.mergeable == "unknown"
+            else "dependency update current-head checks failed"
+        )
     if repository_policy.enqueue.label_required and label_refusal:
         if not is_dependency_update:
             ineligible_reasons.append(label_refusal)
