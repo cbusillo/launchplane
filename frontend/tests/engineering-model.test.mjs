@@ -124,7 +124,8 @@ test("controller reconciliation and stale policy evidence fail closed", () => {
   assert.equal(
     mergeTrainControllerTone({
       ...base,
-      controller_records: [{ policy_status: "stale" }],
+      controller_state: { status: "running", active_record_id: "active" },
+      controller_records: [{ record_id: "active", policy_status: "stale" }],
     }),
     "blocked",
   );
@@ -143,6 +144,31 @@ test("controller reconciliation and stale policy evidence fail closed", () => {
     ),
     "blocked",
   );
+});
+
+test("completed policy history does not block an idle, reconciled controller", () => {
+  const records = [
+    { record_id: "old-landing", policy_status: "stale", status: "merged", historical: true },
+    { record_id: "old-candidate", policy_status: "stale", status: "passed", historical: true },
+  ];
+  const status = {
+    controller_records: records,
+    controller_state: { status: "idle", active_record_id: "" },
+    controller_diagnostics: { reconciliation_status: "clean", active_record_id: "" },
+    admission: { controller_action: "idle" },
+  };
+  const before = structuredClone(records);
+  assert.equal(mergeTrainControllerTone(status), "pass");
+  assert.deepEqual(status.controller_records, before);
+  assert.equal(mergeTrainControllerTone({
+    ...status, controller_records: [{ ...records[1], historical: false }],
+  }), "blocked");
+  assert.equal(mergeTrainControllerTone({
+    ...status, controller_records: [{ record_id: "unqualified", policy_status: "stale" }],
+  }), "blocked");
+  assert.equal(mergeTrainControllerTone({
+    ...status, controller_state: { status: "idle", reconciliation_status: "adopted" },
+  }), "pending");
 });
 
 test("engineering errors distinguish denied from unavailable", () => {

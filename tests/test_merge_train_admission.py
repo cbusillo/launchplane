@@ -1,3 +1,6 @@
+from datetime import datetime, timedelta
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from types import SimpleNamespace
 
@@ -26,6 +29,8 @@ from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
     build_merge_train_stack_collapse_id,
 )
+from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.merge_train_admission import build_merge_train_controller_status_read_model
 from control_plane.merge_train_admission import MergeTrainReconciliationDiagnostic
 from control_plane.merge_train import MergeTrainDryRunSnapshot
@@ -108,8 +113,13 @@ class _RunHistoryStore:
         base_branch: str = "",
         status: str = "",
         limit: int | None = None,
+        batch_id: str = "",
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
-        return self.landing_plan_records
+        return tuple(
+            record
+            for record in self.landing_plan_records
+            if not batch_id or record.landing_plan.batch_id == batch_id
+        )
 
     def list_merge_train_stack_collapse_plan_records(
         self,
@@ -595,6 +605,184 @@ class MergeTrainAdmissionTests(unittest.TestCase):
             read_model.controller_records[0].stale_reason,
             "policy_digest_mismatch",
         )
+
+    def test_old_policy_unfinished_records_are_not_historical_when_idle(self) -> None:
+        for status in ("planned", "building", "ready_for_checks", "passed"):
+            with self.subTest(status=status):
+                candidate = _candidate_record(status=status)
+                result = build_merge_train_controller_status_read_model(
+                    store=_RunHistoryStore(None, candidate_records=(candidate,)),
+                    repository=candidate.candidate.repository,
+                    base_branch=candidate.candidate.base_branch,
+                    generated_at=candidate.updated_at,
+                    current_policy_key=candidate.candidate.policy_key,
+                    current_policy_sha256="replacement-policy",
+                )
+                self.assertEqual(result.admission.controller_action, "idle")
+                self.assertFalse(result.controller_records[0].historical)
+
+    def test_old_policy_completed_lineage_qualifies_all_progress_as_history(self) -> None:
+        planned = _candidate_record(status="planned")
+        passed = _candidate_record(status="passed")
+        landed = _landing_plan_record(passed, entry_status="merged")
+        result = build_merge_train_controller_status_read_model(
+            store=_RunHistoryStore(
+                None, candidate_records=(planned, passed), landing_plan_records=(landed,)
+            ),
+            repository=passed.candidate.repository,
+            base_branch=passed.candidate.base_branch,
+            generated_at=landed.updated_at,
+            current_policy_key=passed.candidate.policy_key,
+            current_policy_sha256="replacement-policy",
+        )
+        self.assertEqual(result.admission.controller_action, "idle")
+        self.assertEqual(len(result.controller_records), 3)
+        self.assertTrue(all(summary.historical for summary in result.controller_records))
+
+    def test_completed_ordinary_job_history_does_not_block_idle_policy_revision(self) -> None:
+        from tests.test_merge_train_controller_ordinary_landing import (
+            OrdinaryLandingControllerTests,
+        )
+
+        fixture = OrdinaryLandingControllerTests()
+        fixture.setUp()
+        candidate = fixture.candidate_record
+        landed = fixture._terminal_record()
+        result = build_merge_train_controller_status_read_model(
+            store=_RunHistoryStore(
+                None, candidate_records=(candidate,), landing_plan_records=(landed,)
+            ),
+            repository=candidate.candidate.repository,
+            base_branch=candidate.candidate.base_branch,
+            generated_at=landed.updated_at,
+            current_policy_key=candidate.candidate.policy_key,
+            current_policy_sha256="replacement-policy",
+        )
+        self.assertEqual(result.admission.controller_action, "idle")
+        self.assertTrue(all(summary.historical for summary in result.controller_records))
+
+    def test_completed_other_job_cannot_qualify_unfinished_candidate_as_history(self) -> None:
+        from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
+        from control_plane.contracts.merge_train_batch import (
+            build_ordinary_merge_train_candidate_ref,
+        )
+        from tests.test_merge_train_controller_ordinary_landing import (
+            OrdinaryLandingControllerTests,
+        )
+
+        fixture = OrdinaryLandingControllerTests()
+        fixture.setUp()
+        landed = fixture._terminal_record()
+        binding = OrdinaryAgentJobBinding(
+            request_id="next-job", scope_sha256="b" * 64, binding_revision=1
+        )
+        payload = fixture.candidate_record.model_dump(mode="json")
+        payload["ordinary_job_binding"] = binding.model_dump(mode="json")
+        payload["record_id"] = "next-job-candidate"
+        payload["candidate"]["candidate_ref"] = build_ordinary_merge_train_candidate_ref(
+            binding=binding, batch_id=fixture.candidate_record.candidate.batch_id
+        )
+        candidate = MergeTrainBatchCandidateRecord.model_validate(payload)
+        result = build_merge_train_controller_status_read_model(
+            store=_RunHistoryStore(
+                None, candidate_records=(candidate,), landing_plan_records=(landed,)
+            ),
+            repository=candidate.candidate.repository,
+            base_branch=candidate.candidate.base_branch,
+            generated_at=landed.updated_at,
+            current_policy_key=candidate.candidate.policy_key,
+            current_policy_sha256="replacement-policy",
+        )
+        summaries = {summary.record_id: summary for summary in result.controller_records}
+        self.assertTrue(summaries[landed.record_id].historical)
+        self.assertFalse(summaries[candidate.record_id].historical)
+
+    def test_terminal_blocked_landing_is_history_but_unfinished_landing_is_not(self) -> None:
+        candidate = _candidate_record(status="passed")
+        for status, expected in (
+            ("blocked", True),
+            ("stale", True),
+            ("planned", False),
+            ("merging", False),
+        ):
+            with self.subTest(status=status):
+                landing = _landing_plan_record(candidate, entry_status=status)
+                result = build_merge_train_controller_status_read_model(
+                    store=_RunHistoryStore(None, landing_plan_records=(landing,)),
+                    repository=candidate.candidate.repository,
+                    base_branch=candidate.candidate.base_branch,
+                    generated_at=landing.updated_at,
+                    current_policy_key=candidate.candidate.policy_key,
+                    current_policy_sha256="replacement-policy",
+                )
+                self.assertEqual(result.controller_records[0].historical, expected)
+
+    def test_completed_candidate_qualifies_when_landing_is_outside_recent_window(self) -> None:
+        candidate = _candidate_record(status="passed")
+        landed = _landing_plan_record(candidate, entry_status="merged")
+        with TemporaryDirectory() as directory:
+            stores = (
+                FilesystemRecordStore(Path(directory) / "files"),
+                PostgresRecordStore(
+                    database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite'}"
+                ),
+            )
+            stores[1].ensure_schema()
+            self.addCleanup(stores[1].close)
+            for store in stores:
+                with self.subTest(store=type(store).__name__):
+                    store.write_merge_train_batch_candidate_record(candidate)
+                    store.write_merge_train_batch_landing_plan_record(landed)
+                    for number in range(40):
+                        updated_at = (
+                            datetime.fromisoformat(landed.updated_at.replace("Z", "+00:00"))
+                            + timedelta(minutes=number + 1)
+                        ).isoformat()
+                        plan = MergeTrainBatchLandingPlan.model_validate(
+                            {
+                                **landed.landing_plan.model_dump(mode="json"),
+                                "batch_id": f"newer-batch-{number}",
+                                "plan_id": f"newer-plan-{number}",
+                                "landing_plan_sha256": "",
+                                "created_at": updated_at,
+                            }
+                        )
+                        store.write_merge_train_batch_landing_plan_record(
+                            build_merge_train_batch_landing_plan_record(
+                                landing_plan=plan,
+                                source="test:crowded-history",
+                                updated_at=updated_at,
+                            )
+                        )
+                    result = build_merge_train_controller_status_read_model(
+                        store=store,
+                        repository=candidate.candidate.repository,
+                        base_branch=candidate.candidate.base_branch,
+                        generated_at=updated_at,
+                        current_policy_key=candidate.candidate.policy_key,
+                        current_policy_sha256="replacement-policy",
+                    )
+                    summaries = {
+                        summary.record_id: summary for summary in result.controller_records
+                    }
+                    self.assertNotIn(landed.record_id, summaries)
+                    self.assertTrue(summaries[candidate.record_id].historical)
+
+    def test_old_policy_unfinished_landing_and_collapse_require_attention(self) -> None:
+        candidate = _candidate_record(status="passed")
+        landing = _landing_plan_record(candidate)
+        collapse = _stack_collapse_record(status="waiting_for_root_checks")
+        result = build_merge_train_controller_status_read_model(
+            store=_RunHistoryStore(
+                None, landing_plan_records=(landing,), stack_collapse_plan_records=(collapse,)
+            ),
+            repository=candidate.candidate.repository,
+            base_branch=candidate.candidate.base_branch,
+            generated_at=landing.updated_at,
+            current_policy_key=candidate.candidate.policy_key,
+            current_policy_sha256="replacement-policy",
+        )
+        self.assertFalse(any(summary.historical for summary in result.controller_records))
 
     def test_controller_status_keeps_terminal_records_visible_without_action(self) -> None:
         candidate_record = _candidate_record(status="passed")
