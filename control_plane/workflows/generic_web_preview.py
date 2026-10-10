@@ -6,7 +6,7 @@ import json
 from ipaddress import ip_address
 import time
 from pathlib import Path
-from typing import ContextManager, Iterator, Literal, Protocol, cast, runtime_checkable
+from typing import ContextManager, Literal, Protocol, cast, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -320,7 +320,7 @@ class GenericWebPreviewSmokeResult(BaseModel):
     failure_summary: str = ""
 
 
-def _anchor_repo(repository: str) -> str:
+def generic_web_preview_anchor_repo(repository: str) -> str:
     owner, separator, repo = repository.strip().partition("/")
     if not separator or not owner.strip() or not repo.strip() or "/" in repo.strip():
         raise click.ClickException("GitHub repository must use owner/repo format.")
@@ -450,38 +450,14 @@ def preview_pr_number_from_slug(*, preview_slug: str, slug_template: str) -> int
     return number if number > 0 else None
 
 
-def _iter_dokploy_applications(raw_projects: object) -> Iterator[JsonObject]:
-    if not isinstance(raw_projects, list):
-        raise click.ClickException(
-            "Dokploy project inventory returned an invalid response payload."
-        )
-    for raw_project in raw_projects:
-        project = dokploy_api.as_json_object(raw_project)
-        if project is None:
-            continue
-        raw_environments = project.get("environments")
-        if not isinstance(raw_environments, list):
-            continue
-        for raw_environment in raw_environments:
-            environment = dokploy_api.as_json_object(raw_environment)
-            if environment is None:
-                continue
-            raw_applications = environment.get("applications")
-            if not isinstance(raw_applications, list):
-                continue
-            for raw_application in raw_applications:
-                application = dokploy_api.as_json_object(raw_application)
-                if application is not None:
-                    yield application
-
-
 def _find_application_by_name(*, host: str, token: str, application_name: str) -> JsonObject | None:
     raw_projects = dokploy_api.dokploy_request(
         host=host,
         token=token,
         path="/api/project.all",
     )
-    for application in _iter_dokploy_applications(raw_projects):
+    # Validate the complete inventory before accepting a match or proving absence.
+    for application in tuple(dokploy_api.iter_dokploy_applications(raw_projects)):
         if str(application.get("name") or "").strip() == application_name:
             return application
     return None
@@ -1633,7 +1609,7 @@ def discover_generic_web_preview_desired_state(
         source=request.source,
         discovered_at=discovered_at,
         repository=resolved_profile.repository,
-        anchor_repo=_anchor_repo(resolved_profile.repository),
+        anchor_repo=generic_web_preview_anchor_repo(resolved_profile.repository),
         preview_slug_prefix=_preview_slug_prefix(resolved_profile.preview.slug_template),
         preview_slug_template=resolved_profile.preview.slug_template,
         max_pages=request.max_pages,
@@ -1661,7 +1637,7 @@ def execute_generic_web_preview_inventory(
         path="/api/project.all",
     )
     preview_items: list[GenericWebPreviewInventoryItem] = []
-    for application in _iter_dokploy_applications(raw_projects):
+    for application in dokploy_api.iter_dokploy_applications(raw_projects):
         application_name = str(application.get("name") or "").strip()
         preview_slug = preview_slug_from_application_name(
             app_name_prefix=app_name_prefix,
@@ -1673,7 +1649,9 @@ def execute_generic_web_preview_inventory(
             application.get("applicationId") or application.get("id") or ""
         ).strip()
         if not application_id:
-            continue
+            raise click.ClickException(
+                "Dokploy project inventory has incomplete application identity."
+            )
         preview_items.append(
             GenericWebPreviewInventoryItem(
                 applicationId=application_id,
@@ -1736,11 +1714,24 @@ def _execute_generic_web_preview_destroy_unserialized(
         preview_slug=request.preview_slug,
     )
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
-    application = _find_application_by_name(
-        host=host,
-        token=token,
-        application_name=application_name,
-    )
+    try:
+        application = _find_application_by_name(
+            host=host,
+            token=token,
+            application_name=application_name,
+        )
+    except click.ClickException as error:
+        return GenericWebPreviewDestroyResult(
+            destroy_status="fail",
+            destroy_started_at=started_at,
+            destroy_finished_at=utc_now_timestamp(),
+            product=resolved_profile.product,
+            context=resolved_profile.preview.context,
+            preview_slug=request.preview_slug,
+            application_name=application_name,
+            application_id="",
+            error_message=str(error),
+        )
     if application is None:
         finished_at = utc_now_timestamp()
         return GenericWebPreviewDestroyResult(
