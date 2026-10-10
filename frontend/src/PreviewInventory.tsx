@@ -61,15 +61,15 @@ export function PreviewInventory({ product, refreshToken }: { product: ProductSi
           {safeExternalUrl(record.change_url) ? <a href={safeExternalUrl(record.change_url)!.href} target="_blank" rel="noreferrer">Open change #{record.change_number}</a> : null}
           </div>
           {record.preview_id === selectedId ? <PreviewDetails key={record.preview_id} product={product}
-            previewId={record.preview_id} refreshToken={refreshToken} reconcile={reconcile} /> : null}
+            previewId={record.preview_id} changeNumber={record.change_number} refreshToken={refreshToken} reconcile={reconcile} /> : null}
         </li>)}
       </ul>}
     {preview.records_truncated ? <p role="status">Only part of the recorded inventory is displayed; the summary count includes the remaining identities.</p> : null}
   </section>;
 }
 
-function PreviewDetails({ product, previewId, refreshToken, reconcile }: {
-  product: ProductSiteOverview; previewId: string; refreshToken: number;
+function PreviewDetails({ product, previewId, changeNumber, refreshToken, reconcile }: {
+  product: ProductSiteOverview; previewId: string; changeNumber: number; refreshToken: number;
   reconcile: ReturnType<typeof useReadEvidence<Awaited<ReturnType<typeof readProductReconcileRequests>>>>;
 }) {
   const history = useReadEvidence(previewId, true, refreshToken, readPreviewHistory);
@@ -79,7 +79,7 @@ function PreviewDetails({ product, previewId, refreshToken, reconcile }: {
   const latest = matches ? generations.find(generation => generation.generation_id === data.preview.latest_generation_id) : undefined;
   const serving = matches ? generations.find(generation => generation.generation_id === data.preview.serving_generation_id) : undefined;
   const requests = reconcile.resource.data?.product === product.product ? reconcile.resource.data.requests : [];
-  const request = requests.find(value => value.target_kind === "preview" && value.pull_request_number === data?.preview.anchor_pr_number);
+  const request = requests.find(value => value.target_kind === "preview" && value.pull_request_number === changeNumber);
   const previewUrl = matches ? safeExternalUrl(data.preview.canonical_url) : null;
   return <div className="preview-record-evidence" id="selected-preview-evidence">
     <button type="button" className="button button-secondary" disabled={history.resource.status === "loading" || reconcile.resource.status === "loading"}

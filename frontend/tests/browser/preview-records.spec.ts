@@ -101,6 +101,8 @@ test("recorded previews show pending, held cleanup and distinct serving/latest p
   await expect(serving).toContainText("1 · ready");
   await expect(serving).not.toContainText(fixture.latest.anchor_summary.head_sha);
   await expect(inventory).not.toContainText("RAW PROVIDER LOG");
+  await latest.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `../tmp/browser-smoke/preview-records-generations-${testInfo.project.name}.png` });
   fixture.mode("fail");
   await inventory.getByRole("button", { name: "Refresh preview evidence" }).click();
   await expect(inventory).toContainText("Showing the last recorded response");
@@ -132,6 +134,26 @@ test("history denial removes previously cached details without widening authorit
   await page.getByRole("button", { name: "Refresh preview evidence" }).click();
   await expect(page.getByRole("alert").filter({ hasText: "Read denied: preview.read" })).toBeVisible();
   await expect(page.getByRole("region", { name: "Latest recorded generation" })).toHaveCount(0);
+  expect(fixture.mutations).toEqual([]);
+  expect(fixture.pageErrors).toEqual([]);
+});
+
+test("held cleanup remains visible while history is delayed or unavailable", async ({ page }) => {
+  const fixture = await setup(page);
+  fixture.delay();
+  await page.goto(`/ui/products/${fixture.product.product}`);
+  await page.getByRole("button", { name: /^Change #28/ }).click();
+  await expect.poll(fixture.delayed).toBe(true);
+  const evidence = page.locator("#selected-preview-evidence");
+  try {
+    await expect(evidence).toContainText("Retries held");
+  } finally {
+    fixture.mode("fail");
+    fixture.release();
+  }
+  await expect(evidence).toContainText("History read unavailable");
+  await expect(evidence).toContainText("Retries held");
+  await expect(evidence).not.toContainText("No matching reconciliation was returned");
   expect(fixture.mutations).toEqual([]);
   expect(fixture.pageErrors).toEqual([]);
 });
