@@ -327,7 +327,8 @@ fence; an abandoned drain expires without stranding pending Client releases.
 Final admission rechecks the fence and running operations under the same lock.
 
 Provider dispatch is recorded before its first effect and never automatically
-replayed after an uncertain response. Only startup of the exact requested image
+replayed after an uncertain response. Per-request receipts survive later service
+replacements, so an old lost-response request stays settled. Only startup of the exact requested image
 and deployment marker confirms the replacement. The requested fence does not
 expire, and old worker processes remain fenced even after confirmation. Pending
 operations then run on the matching replacement workers. A changed candidate,

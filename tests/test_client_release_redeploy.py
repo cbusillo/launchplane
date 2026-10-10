@@ -432,6 +432,33 @@ class ClientReleaseRedeployTests(unittest.TestCase):
             _, _, dispatch = _prepare(fixture.store)
             self.assertFalse(dispatch)
 
+    def test_a_later_replacement_does_not_erase_an_earlier_dispatch_receipt(self) -> None:
+        fixture = self.fixture("odoo")
+        _prepare(fixture.store)
+        record_dispatch(fixture.store, "rehearsal")
+        self.start_replacement_api(fixture)
+        with patch.dict(os.environ, _replacement_env()):
+            prepare(
+                fixture.store,
+                request_fingerprint="second-replacement",
+                target_type="compose",
+                target_id="isolated-control-plane",
+                image_reference=IMAGE,
+                deployment_marker="second-marker",
+            )
+            record_dispatch(fixture.store, "second-replacement")
+        with patch.dict(
+            os.environ, {**_replacement_env(), "LAUNCHPLANE_DEPLOYMENT_MARKER": "second-marker"}
+        ):
+            confirm_startup(fixture.store)
+            self.restart(fixture)
+            prior, _, dispatch = _prepare(fixture.store)
+            self.assertFalse(dispatch, "replaying the old request cannot replace the service again")
+            self.assertEqual(prior.state, "confirmed")
+            self.assertEqual(
+                read_status(fixture.store)["request_fingerprint"], "second-replacement"
+            )
+
     def test_marker_bound_repair_replaces_uncertain_dispatch_without_replaying_it(self) -> None:
         for original_state in ("dispatching", "requested"):
             with self.subTest(original_state=original_state):

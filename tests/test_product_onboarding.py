@@ -509,9 +509,9 @@ class ProductOnboardingTests(unittest.TestCase):
                 "LAUNCHPLANE_SECRET_KEYS_JSON",
                 preserve_payload["deploy"].get("oauth_env_removals", []),
             )
-            self.assertNotIn(
-                "LAUNCHPLANE_DEPLOYMENT_MARKER",
-                preserve_payload["deploy"].get("oauth_env", {}),
+            self.assertEqual(
+                preserve_payload["deploy"]["oauth_env"]["LAUNCHPLANE_DEPLOYMENT_MARKER"],
+                install_payload["deploy"]["oauth_env"]["LAUNCHPLANE_DEPLOYMENT_MARKER"],
             )
             self.assertNotIn("oauth_env_expected_absent", preserve_payload["deploy"])
             self.assertNotIn("oauth_env_expected_values", preserve_payload["deploy"])

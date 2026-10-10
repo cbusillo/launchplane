@@ -80,6 +80,21 @@ def _read(session: Any) -> tuple[Any, ServiceDeployDrainRecord | None]:
     return row, ServiceDeployDrainRecord.model_validate(row.payload) if row else None
 
 
+def _write(session: Any, record: ServiceDeployDrainRecord) -> None:
+    from control_plane.storage.postgres import LaunchplaneServiceDeployDrainRow
+
+    # Keep dispatch receipts independently of the current service fence. A later
+    # replacement must not make an old lost-response request dispatchable again.
+    for record_id in ("service", f"request:{record.request_fingerprint}"):
+        row = session.get(LaunchplaneServiceDeployDrainRow, record_id)
+        if row is None:
+            session.add(
+                LaunchplaneServiceDeployDrainRow(record_id=record_id, payload=record.model_dump())
+            )
+        else:
+            row.payload = record.model_dump()
+
+
 def admission_allowed(session: Any, now: str) -> bool:
     _, record = _read(session)
     if record is None:
@@ -143,14 +158,16 @@ def prepare(
     with store._session_factory() as session:
         lock(store, session)
         now = store._database_mutation_timestamp(session)
-        row, current = _read(session)
-        if current is not None and current.request_fingerprint == request_fingerprint:
-            if current.state == "dispatching":
+        _, current = _read(session)
+        prior_row = session.get(LaunchplaneServiceDeployDrainRow, f"request:{request_fingerprint}")
+        prior = ServiceDeployDrainRecord.model_validate(prior_row.payload) if prior_row else None
+        if prior is not None:
+            if prior.state == "dispatching":
                 raise ServiceDeployOutcomeUnknown(
                     "Self-deploy dispatch requires provider reconciliation."
                 )
-            if current.state != "draining":
-                return current, (), False
+            if prior.state != "draining":
+                return prior, (), False
         if not deployment_marker or deployment_marker == os.environ.get(
             "LAUNCHPLANE_DEPLOYMENT_MARKER"
         ):
@@ -198,12 +215,7 @@ def prepare(
                 else ""
             ),
         )
-        if row is None:
-            session.add(
-                LaunchplaneServiceDeployDrainRow(record_id="service", payload=record.model_dump())
-            )
-        else:
-            row.payload = record.model_dump()
+        _write(session, record)
         session.commit()
         return record, blockers, not blockers
 
@@ -211,11 +223,11 @@ def prepare(
 def record_dispatch(store: Any, request_fingerprint: str) -> None:
     with store._session_factory() as session:
         lock(store, session)
-        row, record = _read(session)
+        _, record = _read(session)
         if record is None or record.request_fingerprint != request_fingerprint:
             raise ServiceDeployOutcomeUnknown("Self-deploy fence changed during provider dispatch.")
         if record.state == "dispatching":
-            row.payload = record.model_copy(update={"state": "requested"}).model_dump()
+            _write(session, record.model_copy(update={"state": "requested"}))
             session.commit()
 
 
@@ -223,7 +235,7 @@ def confirm_startup(store: Any) -> None:
     """Only the replacement's healthy startup releases admission on that worker image."""
     with store._session_factory() as session:
         lock(store, session)
-        row, record = _read(session)
+        _, record = _read(session)
         if record is None or record.state not in {"dispatching", "requested"}:
             return
         if (
@@ -232,9 +244,15 @@ def confirm_startup(store: Any) -> None:
             != os.environ.get("LAUNCHPLANE_DEPLOYMENT_MARKER", "").strip()
         ):
             return
-        row.payload = record.model_copy(
-            update={"state": "confirmed", "updated_at": store._database_mutation_timestamp(session)}
-        ).model_dump()
+        _write(
+            session,
+            record.model_copy(
+                update={
+                    "state": "confirmed",
+                    "updated_at": store._database_mutation_timestamp(session),
+                }
+            ),
+        )
         session.commit()
 
 
