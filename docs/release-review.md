@@ -446,6 +446,9 @@ startup does not resolve or rebuild Python dependencies. This lets a compatible
 repair image start without package-registry access. CI qualifies the packaged
 API and both release-worker entrypoints on an isolated network with PostgreSQL,
 then recreates them against the same database and checks the replacement marker.
+For the local `qualityGate.build.serviceCompose` command, first set
+`LAUNCHPLANE_CI_POSTGRES_IMAGE` from the top-level environment in the CI workflow;
+that workflow owns the PostgreSQL test image pin.
 
 ### Interrupted provider operations
 

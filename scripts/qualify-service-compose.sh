@@ -72,12 +72,14 @@ jq --arg prefix "$project" '.volumes |= with_entries(.value = {name: ($prefix + 
 mv "$fixture_dir/compose.next.json" "$fixture_dir/compose.json"
 
 check_workers() {
-  local service container_id worker_ip
+  local service container_id worker_ip worker_started_at
   for service in "${services[@]:1}"; do
     container_id="$("${compose[@]}" ps --quiet "$service")"
     test -n "$container_id"
     worker_ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container_id")"
-    "${compose[@]}" exec -T -e QUALIFICATION_WORKER_IP="$worker_ip" launchplane /app/.venv/bin/python - <<'PY'
+    worker_started_at="$(docker inspect --format '{{.State.StartedAt}}' "$container_id")"
+    "${compose[@]}" exec -T -e QUALIFICATION_WORKER_IP="$worker_ip" \
+      -e QUALIFICATION_WORKER_STARTED_AT="$worker_started_at" launchplane /app/.venv/bin/python - <<'PY'
 import os
 import time
 from sqlalchemy import text
@@ -90,8 +92,10 @@ try:
             with store._engine.connect() as connection:
                 ready = connection.scalar(text(
                     "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
-                    "WHERE datname = current_database() AND client_addr = CAST(:address AS inet))"
-                ), {"address": os.environ["QUALIFICATION_WORKER_IP"]})
+                    "WHERE datname = current_database() AND client_addr = CAST(:address AS inet) "
+                    "AND backend_start >= CAST(:started_at AS timestamptz))"
+                ), {"address": os.environ["QUALIFICATION_WORKER_IP"],
+                    "started_at": os.environ["QUALIFICATION_WORKER_STARTED_AT"]})
             if ready:
                 break
             if time.monotonic() >= deadline:
