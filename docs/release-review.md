@@ -441,6 +441,12 @@ The local rehearsal uses synthetic providers and SQLite; its API starts in a
 new process while the test reopens worker storage. Installed worker-process and
 provider qualification remains the Supervisor's next step.
 
+The runtime image uses the environment installed during its locked build;
+startup does not resolve or rebuild Python dependencies. This lets a compatible
+repair image start without package-registry access. CI qualifies the packaged
+API and both release-worker entrypoints on an isolated network with PostgreSQL,
+then recreates them against the same database and checks the replacement marker.
+
 ### Interrupted provider operations
 
 Failures before any provider effect are recorded as terminal failures for this

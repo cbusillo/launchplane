@@ -82,7 +82,8 @@
       "browser": "pnpm --dir frontend test:browser",
       "frontend": "pnpm --dir frontend validate",
       "container": "docker build -t launchplane-ci:test .",
-      "ordinaryWorkerCompose": "bash scripts/qualify-ordinary-agent-compose.sh launchplane-ci:test"
+      "ordinaryWorkerCompose": "bash scripts/qualify-ordinary-agent-compose.sh launchplane-ci:test",
+      "serviceCompose": "bash scripts/qualify-service-compose.sh launchplane-ci:test"
     },
     "openapi": {
       "export": "uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json",

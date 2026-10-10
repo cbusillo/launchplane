@@ -326,6 +326,9 @@ jobs:
           docker run --rm --entrypoint ssh "$LAUNCHPLANE_CI_IMAGE_TAG" -V
           docker run --rm --entrypoint gh "$LAUNCHPLANE_CI_IMAGE_TAG" --version
 
+      - name: Qualify packaged service Compose restart
+        run: bash scripts/qualify-service-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
+
       - name: Qualify ordinary worker Compose lifecycle
         run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
 
@@ -414,6 +417,9 @@ jobs:
         run: |
           docker run --rm --entrypoint ssh "$LAUNCHPLANE_CI_IMAGE_TAG" -V
           docker run --rm --entrypoint gh "$LAUNCHPLANE_CI_IMAGE_TAG" --version
+
+      - name: Qualify packaged service Compose restart
+        run: bash scripts/qualify-service-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
 
       - name: Qualify ordinary worker Compose lifecycle
         run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
