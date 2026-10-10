@@ -398,6 +398,15 @@ review on the head it is about to merge and treats a changed decision as a
 stale head.
 Successful review still requires all other current-head checks.
 
+When an admitted Client feature is ready on its current head, batch planning
+selects it together with the other ready admitted features for that repository
+and base. Pending, failed, unknown or conflicting Client features stay visible
+in the queue but outside that candidate; they do not delay accepted siblings.
+The existing CODEOWNERS individual-landing boundary still applies. Combined
+merge candidates preserve member heads without a branch refresh between them.
+The release invitation expands the recorded landing's members as described in
+[release review](release-review.md).
+
 Only an actor allowed to enqueue may put a pull request in the train: a trusted
 automation identity, or an actor whose role is in `allowed_actor_roles` (by
 default the repository owner and its admins). Pull-request write access

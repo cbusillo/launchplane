@@ -323,6 +323,32 @@ def build_merge_train_dry_run_result(
     )
     eligible_entries = tuple(entry for entry in queue if entry.eligible)
     if batch_landing:
+        # An admitted, accepted feature must not wait behind another feature
+        # whose current head still needs review or engineering repair. Keep
+        # those heads visible in the queue, but out of this landing candidate.
+        if any(
+            entry.owner_review_required
+            and entry.required_checks_status == "pass"
+            and entry.mergeable == "mergeable"
+            for entry in eligible_entries
+        ):
+            queue = tuple(
+                entry.model_copy(
+                    update={
+                        "eligible": False,
+                        "ineligible_reasons": (
+                            *entry.ineligible_reasons,
+                            "Client feature is not ready on its current head",
+                        ),
+                    }
+                )
+                if entry.eligible
+                and entry.owner_review_required
+                and (entry.required_checks_status != "pass" or entry.mergeable != "mergeable")
+                else entry
+                for entry in queue
+            )
+            eligible_entries = tuple(entry for entry in queue if entry.eligible)
         batch_entries: list[MergeTrainQueueEntry] = []
         for entry in eligible_entries:
             if entry.requires_individual_landing:

@@ -87,6 +87,45 @@ class _FakeSnapshotReader:
 
 
 class MergeTrainDryRunTests(unittest.TestCase):
+    def test_batch_selects_only_ready_admitted_client_features(self) -> None:
+        features = tuple(
+            _pull_request(
+                number,
+                created_at=f"2026-05-08T10:{number:02}:00Z",
+                required_checks_status=checks,
+                mergeable=mergeable,
+                labels=labels,
+                branch_update_required=True,
+            ).model_copy(update={"owner_review_required": True})
+            for number, checks, mergeable, labels in (
+                (1, "pending", "mergeable", ("ready-to-merge",)),
+                (2, "fail", "mergeable", ("ready-to-merge",)),
+                (3, "unknown", "mergeable", ("ready-to-merge",)),
+                (4, "pass", "conflicting", ("ready-to-merge",)),
+                (5, "pass", "mergeable", ()),
+                (6, "pass", "mergeable", ("ready-to-merge", "merge-blocked")),
+                (7, "pass", "mergeable", ("ready-to-merge",)),
+                (8, "pass", "mergeable", ("ready-to-merge",)),
+            )
+        )
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main", pull_requests=features
+        )
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(), snapshot=snapshot, batch_landing=True
+        )
+        self.assertEqual(result.queue_order, (7, 8))
+        self.assertEqual(result.intended_next_action, "merge")
+        self.assertEqual(
+            {entry.number for entry in result.queue if not entry.eligible}, {1, 2, 3, 4, 5, 6}
+        )
+        # The single-transition path still refreshes the oldest waiting head;
+        # only the protected combined landing can preserve the accepted heads.
+        single = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(), snapshot=snapshot
+        )
+        self.assertEqual(single.intended_next_action, "update_branch")
+
     def test_cli_merge_train_dry_run_requires_policy_file(self) -> None:
         with TemporaryDirectory() as temp_dir:
             snapshot_file = Path(temp_dir) / "snapshot.json"

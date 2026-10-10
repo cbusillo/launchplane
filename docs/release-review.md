@@ -73,6 +73,10 @@ preview feedback; titles, labels and the existence of a preview are not classifi
 For a batch landing, the stored landing plan binds the batch PR and merge commit
 to its constituent PRs; each constituent uses its own review evidence and its
 section of the batch's Client test notes.
+The invitation names each Client-facing member from its generated notes heading
+and includes that member's instructions, rather than naming the synthetic batch.
+Fenced examples cannot introduce member sections; duplicate member sections
+refuse publication. The release still needs its own Client Accept.
 Durable `release-client-change` receipts record which PRs have been announced in
 this open review. Engineering-only candidates update the current invitation
 silently, with no new comment or mention. Notes edits and already-announced changes
