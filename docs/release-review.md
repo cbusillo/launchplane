@@ -55,19 +55,50 @@ from the candidate's artifact, commit and shared-input identity. The worker
 serializes publication across replicas using the existing release-publication
 lock and checks for that receipt before posting. A retry after a lost response
 adopts the existing comment; edits to checklist notes do not notify again.
-Before the Client accepts or requests changes, newer candidates update the same
-request comment's review link, change list, candidate identity and marker, without
-another mention or comment. The request also carries a `release-request` marker
-bound to the product, repository, Client identity and latest Client decision.
-A new candidate after the Client accepts or requests changes opens a new
-request and mentions the Client.
+The invitation greets the Client, shows the Client test notes for changes they
+reviewed or were asked to review on preview, and asks them to open the release
+page, check the testing site, and press Accept or Request changes. It explains
+what Accept does and displays the update time in Eastern time. Engineering-only
+titles are omitted; the complete checklist remains on the release page.
+Its first visible line names **Release review** and asks whether the site is
+working with these changes so they can go live. This is the site's release
+decision, separate from the one-change preview decision described in
+[Client review](owner-acceptance.md).
+
+Before the Client decides, a candidate containing new Client-facing changes posts
+one new invitation mentioning the Client and naming only the additions. A batch
+of changes gets one invitation. Client-facing evidence is an existing product
+preview decision or a bound per-PR review request in Launchplane's persisted
+preview feedback; titles, labels and the existence of a preview are not classifiers.
+For a batch landing, the stored landing plan binds the batch PR and merge commit
+to its constituent PRs; each constituent uses its own review evidence and its
+section of the batch's Client test notes.
+Durable `release-client-change` receipts record which PRs have been announced in
+this open review. Engineering-only candidates update the current invitation
+silently, with no new comment or mention. Notes edits and already-announced changes
+do not notify again. The `release-request` marker binds the open review to the
+product, repository, Client identity and latest Client decision. A new candidate
+after acceptance or a request for changes opens a new review and mentions the Client.
 The worker adopts the newest legacy candidate-marked request created after that
-decision (or the newest one if there has been no decision); older receipts are
-left in place. Missing timestamps or ambiguous request markers refuse publication.
+decision (or the newest one if there has been no decision). Legacy PR links,
+including batch links bound to their constituents, seed the announcement history.
+An adopted manual receipt for the exact current candidate covers its included
+changes even without individual PR links. Bound request evidence compares
+repository names without case sensitivity, as GitHub does.
+The publisher updates the wording and marks older invitations in the same open
+review replaced once, collapsing the earlier wording and neutralizing its
+mentions while retaining delivery receipts and historical text. Release decision
+records remain the authority for accepted releases. Invitations from already
+decided reviews stay unchanged. After every publication, exactly one invitation
+in the open review is current. Lost post or replacement responses are recovered from those receipts;
+cleanup is completed before delivery is cached. Missing timestamps or identities
+refuse publication. No manual live-thread cleanup is needed.
 
 An undecided request gets at most one reminder, no sooner than three days after
-its original creation. Updating its candidate does not reset that clock or send
-a reminder during the update. A separate `release-reminder` marker binds the
+the current invitation's creation. Silent candidate updates do not reset that
+clock or send a reminder during the update. A fresh Client-facing addition resets
+the reminder deadline; the open review still gets at most one reminder. A reminder
+also replaces the older invitation. A separate `release-reminder` marker binds the
 reminder to the open request, so retries and worker restarts cannot send it twice,
 even when another candidate arrives. A decided or incomplete review gets no
 reminder. Markers are delivery

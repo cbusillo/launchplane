@@ -756,6 +756,90 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
         self.assertEqual(policy_reads, 2)
         self.assertEqual(snapshot_reader.read_count, 2)
 
+    def test_dependency_check_flip_invalidates_planned_landing(self) -> None:
+        policy_record = build_test_merge_train_policy_record(repository=REPOSITORY)
+        policy_payload = policy_record.model_dump(mode="json")
+        enqueue = policy_payload["policy"]["policies"][0]["enqueue"]
+        enqueue["dependency_update_github_user_ids"] = [42]
+        enqueue["trusted_automation_github_user_ids"] = [42]
+        policy_payload["policy_sha256"] = ""
+        policy_record = MergeTrainPolicyRecord.model_validate(policy_payload)
+        candidate, landing, controller, _ = _guard_records(
+            policy_sha256=policy_record.policy_sha256
+        )
+        entry = landing.landing_plan.entries[0]
+        update = _queued_pull_request(
+            number=entry.pull_request_number, head_sha=HEAD_SHA, created_at="2026-08-11T03:00:00Z"
+        ).model_copy(
+            update={
+                "labels": (),
+                "label_actors": (),
+                "actor_id": 42,
+                "dependency_update_class": "patch_or_minor",
+            }
+        )
+        older_unknown_update = update.model_copy(
+            update={
+                "number": entry.pull_request_number - 1,
+                "head_sha": "d" * 40,
+                "created_at": "2026-08-11T02:59:00Z",
+                "mergeable": "unknown",
+            }
+        )
+        for checks, mergeable, head_sha, admitted in (
+            ("pass", "mergeable", HEAD_SHA, True),
+            ("pass", "unknown", HEAD_SHA, True),
+            ("fail", "unknown", HEAD_SHA, False),
+            ("pass", "conflicting", HEAD_SHA, False),
+            ("pass", "unknown", "e" * 40, False),
+        ):
+            with self.subTest(checks=checks, mergeable=mergeable, head_sha=head_sha):
+                evaluator = LiveMergeAdmissionEvaluator(
+                    store=object(),
+                    repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
+                    technical_check_client=_TechnicalCheckClient(),
+                    policy_record_provider=lambda: policy_record,
+                    snapshot_reader=_StaticSnapshotReader(
+                        MergeTrainDryRunSnapshot(
+                            repository=REPOSITORY,
+                            base_branch="main",
+                            base_sha=BASE_SHA,
+                            pull_requests=(
+                                older_unknown_update,
+                                update.model_copy(
+                                    update={
+                                        "required_checks_status": checks,
+                                        "mergeable": mergeable,
+                                        "head_sha": head_sha,
+                                    }
+                                ),
+                            ),
+                        )
+                    ),
+                )
+                with patch.object(
+                    LiveMergeAdmissionEvaluator,
+                    "_entry_evidence",
+                    side_effect=_QueueAccepted("queue accepted"),
+                ):
+                    expected_error = _QueueAccepted if admitted else MergeAdmissionDeniedError
+                    with self.assertRaises(expected_error) as result:
+                        evaluator.evaluate(
+                            candidate_record=candidate,
+                            landing_plan_record=landing,
+                            entry=entry,
+                            observed_base_sha=BASE_SHA,
+                            observed_base_tree_sha="4" * 40,
+                            observed_head_sha=HEAD_SHA,
+                            observed_head_tree_sha="2" * 40,
+                            controller_state=controller,
+                            expected_lease_owner=controller.lease_owner,
+                            stack_collapse_record=None,
+                            evaluated_at="2026-08-11T03:01:00Z",
+                        )
+                    if isinstance(result.exception, MergeAdmissionDeniedError):
+                        self.assertEqual(result.exception.reason_code, "landing_lineage_changed")
+
     def test_a_changed_planned_entry_refuses_even_with_a_newer_pull_request_behind_it(
         self,
     ) -> None:
