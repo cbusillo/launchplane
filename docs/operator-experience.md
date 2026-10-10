@@ -86,6 +86,18 @@ artifact and provider-routing evidence. If that evidence changes or the plan
 expires, the UI must present a stale-plan result and obtain a new plan rather
 than offering a force-apply control.
 
+The workspace's read-only recorded-preview list exposes bounded identity
+references only under the existing `preview.read` grant. Selecting a change
+reads the canonical preview history and redacted product reconciliation route,
+each under its own existing authorization. Latest and serving generation
+references stay separate; missing reference evidence is not replaced by a
+different historical generation. Generation health and runtime identity
+declarations are recorded evidence, not current provider/runtime verification.
+Held or failed cleanup remains visible beside an explicit unknown provider
+state. Activity supplies the next supported inspection; this view enables no
+refresh/destroy/reconciliation mutation. Deployed acceptance still requires
+the actual product records and authenticated consumer, not development fixtures.
+
 ### Promote A Verified Release
 
 The rebuilt UI must show what artifact is in testing and production, why

@@ -2247,6 +2247,9 @@ const atlasProduct: ProductSiteOverview = {
     slug_template: "pr-{number}",
     active_count: 3,
     latest_preview_id: "preview-example-3",
+    records_status: "unsupported",
+    records: [],
+    records_truncated: false,
     trust_state: "recorded",
     provenance: provenance(
       "recorded",
@@ -2279,6 +2282,9 @@ const missingEvidenceProduct: ProductSiteOverview = {
     slug_template: "",
     active_count: 0,
     latest_preview_id: "",
+    records_status: "unsupported",
+    records: [],
+    records_truncated: false,
     trust_state: "unsupported",
     provenance: provenance(
       "unsupported",
