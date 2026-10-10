@@ -46,6 +46,8 @@ class _ReuseTransport:
         self.observed_names: tuple[str, ...] = self.required_names
         self.pull_reads = 0
         self.change_on_confirmation = False
+        self.change_unbound_fields = False
+        self.base_history: list[dict[str, object]] = []
         self.unavailable_path = ""
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
@@ -53,6 +55,25 @@ class _ReuseTransport:
         path = unquote(path)
         if self.unavailable_path and self.unavailable_path in path:
             raise MergeTrainGitHubError("unavailable", status_code=403)
+        if path == "/graphql":
+            history = [
+                event
+                for event in self.base_history
+                if event.get("event")
+                in {"base_ref_changed", "base_ref_force_pushed", "automatic_base_change_succeeded"}
+            ]
+            return {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "timelineItems": {
+                                "nodes": history[:1],
+                                "pageInfo": {"hasNextPage": len(history) > 1},
+                            }
+                        }
+                    }
+                }
+            }
         prefix = "/repos/example/merge-train-repo"
         suffix = path.removeprefix(prefix)
         if method == "POST" and suffix == "/git/refs":
@@ -96,6 +117,7 @@ class _ReuseTransport:
                 "state": "open",
                 "merged": False,
                 "draft": False,
+                "mergeable": None if self.change_unbound_fields and self.pull_reads == 1 else True,
                 "head": {"sha": head},
                 "base": {
                     "sha": self.base_sha,
@@ -181,6 +203,20 @@ class HeadCheckReuseTests(unittest.TestCase):
         self.assertEqual(built.status, "ready_for_checks")
         self.assertIsNone(built.head_check_reuse)
         self.assertIn(built.candidate_ref.removeprefix("refs/heads/"), self.transport.refs)
+
+    def test_retarget_or_force_push_history_selects_full_ci_including_later_pages(self) -> None:
+        for event in ("base_ref_changed", "base_ref_force_pushed"):
+            with self.subTest(event=event):
+                self.setUp()
+                history: list[dict[str, object]] = [{"event": "commented"}] * 100
+                self.transport.base_history = history + [{"event": event}]
+                built = self.build()
+                self.assertEqual(built.status, "ready_for_checks")
+                self.assertIsNone(built.head_check_reuse)
+
+    def test_unrelated_mergeability_changes_do_not_veto_identity_reuse(self) -> None:
+        self.transport.change_unbound_fields = True
+        self.assertEqual(self.build().status, "passed")
 
     def test_unproven_or_changed_evidence_runs_full_candidate_ci(self) -> None:
         scenarios: tuple[dict[str, object], ...] = (

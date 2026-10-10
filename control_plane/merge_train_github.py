@@ -931,6 +931,15 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 != candidate.candidate_tree_sha
             ):
                 return None
+            if (
+                _git_commit_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    commit_sha=candidate.candidate_sha,
+                )[1]
+                != candidate.candidate_tree_sha
+            ):
+                return None
             observed_at = datetime.now(timezone.utc).isoformat()
             checks = self.read_technical_checks(
                 repository=candidate.repository,
@@ -966,9 +975,26 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 ),
                 "GitHub pull request confirmation for head-check reuse",
             )
+            confirmed_head = _json_object(confirmed.get("head"), "GitHub confirmed head")
+            confirmed_base = _json_object(confirmed.get("base"), "GitHub confirmed base")
+            confirmed_repo = _json_object(confirmed_base.get("repo"), "GitHub confirmed repository")
             if (
-                confirmed != pull
-                or _base_branch_sha(
+                confirmed.get("number") != entry.pull_request_number
+                or confirmed.get("state") != "open"
+                or confirmed.get("merged") is not False
+                or confirmed.get("draft") is not False
+                or confirmed_head.get("sha") != entry.head_sha
+                or confirmed_base.get("sha") != candidate.base_sha
+                or confirmed_base.get("ref") != candidate.base_branch
+                or confirmed_repo.get("full_name") != candidate.repository
+            ):
+                return None
+            if not self._head_check_reuse_base_history_is_unchanged(
+                repository_path=repository_path, pull_request_number=entry.pull_request_number
+            ):
+                return None
+            if (
+                _base_branch_sha(
                     transport=self.transport,
                     repository_path=repository_path,
                     base_branch=candidate.base_branch,
@@ -1007,6 +1033,47 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 for required in checks.required_checks
             ),
         )
+
+    def _head_check_reuse_base_history_is_unchanged(
+        self, *, repository_path: str, pull_request_number: int
+    ) -> bool:
+        # Historical PR checks can test a merge-ref tree from a former base.
+        owner, repository = repository_path.split("/", 1)
+        payload = _json_object(
+            self.transport.request(
+                method="POST",
+                path="/graphql",
+                body={
+                    "query": """
+                    query($owner: String!, $name: String!, $number: Int!) {
+                      repository(owner: $owner, name: $name) {
+                        pullRequest(number: $number) {
+                          timelineItems(first: 1, itemTypes: [BASE_REF_CHANGED_EVENT,
+                            BASE_REF_FORCE_PUSHED_EVENT, AUTOMATIC_BASE_CHANGE_SUCCEEDED_EVENT]) {
+                            nodes { __typename }
+                            pageInfo { hasNextPage }
+                          }
+                        }
+                      }
+                    }
+                    """,
+                    "variables": {
+                        "owner": owner,
+                        "name": repository,
+                        "number": pull_request_number,
+                    },
+                },
+            ),
+            "GitHub base-history response",
+        )
+        if payload.get("errors"):
+            return False
+        data = _json_object(payload.get("data"), "GitHub base-history data")
+        repo = _json_object(data.get("repository"), "GitHub base-history repository")
+        pull = _json_object(repo.get("pullRequest"), "GitHub base-history pull request")
+        timeline = _json_object(pull.get("timelineItems"), "GitHub base-history timeline")
+        page = _json_object(timeline.get("pageInfo"), "GitHub base-history page info")
+        return timeline.get("nodes") == [] and page.get("hasNextPage") is False
 
     def read_technical_checks(
         self,

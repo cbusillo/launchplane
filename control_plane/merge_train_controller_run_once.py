@@ -1376,7 +1376,7 @@ def _lineage_change_retires_landing(
     for explicit reconciliation.
     """
     return (
-        reason_code == "landing_lineage_changed"
+        reason_code in {"landing_lineage_changed", "head_check_reuse_unavailable"}
         and landing_record.ordinary_job_binding is None
         and not has_stack_collapse
         and all(entry.status == "planned" for entry in landing_record.landing_plan.entries)
@@ -2790,6 +2790,26 @@ def _advance_passed_candidate_record(
         },
     )
     batch_pull_request_number = None
+    if passed_candidate_record.candidate.head_check_reuse is not None:
+        refreshed = github_client.observe_batch_candidate_checks(
+            candidate=passed_candidate_record.candidate
+        )
+        refreshed_record = build_merge_train_batch_candidate_record(
+            candidate=refreshed,
+            source=f"service:controller:head-check-revalidation:{trace_id}",
+            updated_at=recorded_at,
+        )
+        candidate_store.write_merge_train_batch_candidate_record(refreshed_record)
+        if refreshed.status != "passed":
+            return {
+                "repository": request.repository,
+                "base_branch": request.base_branch,
+                "mode": "observe_candidate",
+                "controller_action": "observe_candidate",
+                "merge_train_batch_candidate_record_id": refreshed_record.record_id,
+                "candidate": refreshed.model_dump(mode="json"),
+            }
+        passed_candidate_record = refreshed_record
     if (
         lease.record.ordinary_job_binding is None
         and len(passed_candidate_record.candidate.entries) > 1

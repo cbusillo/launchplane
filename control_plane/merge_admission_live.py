@@ -378,11 +378,24 @@ class LiveMergeAdmissionEvaluator:
             limit=2,
         )
         active_authority = authorities[0] if len(authorities) == 1 else None
+        check_head_sha = landing_plan.candidate_sha
+        if candidate_record.candidate.head_check_reuse is not None:
+            if not isinstance(self.technical_check_client, GitHubMergeTrainClient) or (
+                self.technical_check_client._read_head_check_reuse(
+                    candidate=candidate_record.candidate
+                )
+                is None
+            ):
+                raise MergeAdmissionDeniedError(
+                    "Exact-head check reuse is no longer provable; rebuild with candidate CI.",
+                    reason_code="head_check_reuse_unavailable",
+                )
+            check_head_sha = candidate_record.candidate.head_check_reuse.head_sha
         technical_checks = self.technical_check_client.read_technical_checks(
             repository=landing_plan.repository,
             base_branch=landing_plan.base_branch,
             base_sha=observed_base_sha,
-            head_sha=landing_plan.candidate_sha,
+            head_sha=check_head_sha,
             evaluated_at=evaluated_at,
         )
         policy_fingerprints = self._policy_fingerprints(

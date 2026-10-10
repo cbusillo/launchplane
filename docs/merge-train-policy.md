@@ -445,6 +445,11 @@ passed on the exact head with the required App bindings. PR identity/head/base
 and the base branch are confirmed after those reads. Missing, pending, failed,
 stale or unreadable evidence selects the normal publication and candidate CI;
 multiple queued PRs always take that path, even if a tree happens to match.
+PRs with recorded retargets or base force pushes also run full candidate CI:
+their historical head checks may have tested another merge-ref tree. Incomplete
+or unreadable timeline history cannot qualify reuse. The filtered
+[GitHub timeline query](https://docs.github.com/en/graphql/reference/pulls#pullrequesttimelineitemsitemtype)
+includes manual and automatic base changes and base force pushes.
 `head_check_reuse` in the candidate record binds the source PR/head/tree, base,
 constructed candidate commit, observation time, required check names/App ids and
 passing evidence sources. Rolling merge-commit provenance remains intact.
@@ -480,12 +485,17 @@ screening evidence, but they do not prove the combined tree is safe to land.
 Launchplane must fail closed when candidate check evidence is missing, pending,
 failed, stale, or attached to a different commit SHA.
 
-The single-entry tree-identity proof above is the only exception. Observation
+The single-entry tree-identity proof above is the only exception. Before planning
+its landing, the controller calls observation, which
 re-reads its head checks and live required-check policy rather than treating the
 recorded pass as current authority. If reuse stops being provable, it publishes
 the same completed candidate to the canonical train ref, clears the active reuse
-proof and waits for full candidate CI. Landing still reads fresh technical and
-structural admission evidence and uses the protected expected-head merge; no
+proof and waits for full candidate CI. Live landing admission repeats the reuse
+proof, reads fresh technical checks on the source head, and keeps that source
+SHA visible in readiness. The exact tree binding connects those checks to the
+constructed effect; loss of reuse retires an unlanded native plan so the next
+pass rebuilds with full CI. Landing uses fresh structural admission evidence
+and the protected expected-head merge; no
 checks are copied to a new SHA and no provider requirement is changed.
 
 Repositories using batch candidates must run their required workflows for
