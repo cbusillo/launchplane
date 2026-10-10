@@ -507,6 +507,41 @@ class ClientReleaseRedeployTests(unittest.TestCase):
                     self.assertFalse(read_status(fixture.store)["admission_paused"])
                 fixture.doCleanups()
 
+    def test_refused_repair_restores_prior_uncertainty_and_worker_generation(self) -> None:
+        from control_plane.service_deploy_drain import (
+            ServiceDeployPreEffectRefused,
+            record_pre_effect_refusal,
+        )
+
+        for settled in (False, True):
+            with self.subTest(settled=settled):
+                fixture = self.fixture("odoo")
+                _prepare(fixture.store)
+                if settled:
+                    record_dispatch(fixture.store, "rehearsal")
+                    self.start_replacement_api(fixture)
+                repair = dict(
+                    request_fingerprint="refused-repair",
+                    target_type="compose",
+                    target_id="isolated-control-plane",
+                    image_reference=IMAGE,
+                    deployment_marker="repair-marker",
+                    supersedes_deployment_marker=MARKER,
+                )
+                prepare(fixture.store, **repair)
+                record_pre_effect_refusal(fixture.store, "refused-repair")
+                self.assertEqual(read_status(fixture.store)["request_fingerprint"], "rehearsal")
+                with self.assertRaises(ServiceDeployPreEffectRefused):
+                    prepare(fixture.store, **repair)
+                with patch.dict(os.environ, _replacement_env()):
+                    self.assertEqual(read_status(fixture.store)["admission_paused"], not settled)
+                with patch.dict(
+                    os.environ,
+                    {**_replacement_env(), "LAUNCHPLANE_DEPLOYMENT_MARKER": "older-worker"},
+                ):
+                    self.assertTrue(read_status(fixture.store)["admission_paused"])
+                fixture.doCleanups()
+
     def test_expired_heartbeat_does_not_prove_an_admitted_effect_has_finished(self) -> None:
         fixture = self.fixture("odoo")
         fixture.accept()

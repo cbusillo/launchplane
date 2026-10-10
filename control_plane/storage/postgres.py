@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 import hashlib
+import logging
 import secrets
 from threading import local
 from typing import (
@@ -10620,6 +10621,9 @@ class PostgresRecordStore(HumanSessionStore):
 
             lock(self, session)
             if not admission_allowed(session, self._database_mutation_timestamp(session)):
+                logging.getLogger(__name__).debug(
+                    "Odoo release claims paused for Launchplane replacement: %s", operation_kind
+                )
                 return None
             for row in cast(list[Any], session.scalars(statement).all()):
                 record = self._read_payload(model_type=model_type, payload=row.payload)
@@ -11914,6 +11918,9 @@ class PostgresRecordStore(HumanSessionStore):
 
             lock(self, session)
             if not admission_allowed(session, self._database_mutation_timestamp(session)):
+                logging.getLogger(__name__).debug(
+                    "Production backup claims paused for Launchplane replacement"
+                )
                 return None
             row = session.scalar(statement)
             if row is None:

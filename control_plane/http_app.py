@@ -10545,6 +10545,7 @@ def create_launchplane_fastapi_app(
                 ServiceDeployDispatchBusy,
                 ServiceDeployFenceConflict,
                 ServiceDeployOutcomeUnknown,
+                ServiceDeployPreEffectRefused,
             )
 
             if isinstance(error, ServiceDeployDispatchBusy):
@@ -10565,6 +10566,13 @@ def create_launchplane_fastapi_app(
                         if isinstance(error, ServiceDeployFenceConflict)
                         else "self_deploy_reconciliation_required"
                     ),
+                    message=str(error),
+                ) from error
+            elif isinstance(error, ServiceDeployPreEffectRefused):
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="self_deploy_refused",
                     message=str(error),
                 ) from error
             else:

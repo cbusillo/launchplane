@@ -325,10 +325,24 @@ and key until it returns `requested`. The Deploy Launchplane workflow does this
 with its existing request action. Each drain poll renews a two-minute pre-effect
 fence; an abandoned drain expires without stranding pending Client releases.
 Final admission rechecks the fence and running operations under the same lock.
+The typed Odoo and shared backup queues also contain workflow-started operations;
+their claims pause at this worker boundary and resume after replacement. Worker
+debug logs report that pause, and the runtime read exposes its cause. Generic-web
+workflow requests outside Client releases retain their existing reservations;
+this change covers Client-started generic-web releases.
 An active provider request returns pollable `dispatch_in_progress`, also without
 caching the intermediate response. An expired release lease stays a drain
 blocker: losing its heartbeat does not prove the provider effect ended. Reconcile
 that operation through its existing recovery route before replacement.
+The request action tolerates network errors while polling the drain. A definite,
+non-retryable 4xx refusal of the first environment write records `refused`, frees
+this attempt's fence, and never dispatches or replays that request. The previous
+fence is restored: a refused repair cannot unlock an earlier uncertain replacement
+or unquarantine old workers. Timeouts, 5xx,
+remote command failures, or failures after that write remain uncertain and fenced.
+Bootstrap key-ring rollback keeps its existing expected-value/absence guards;
+when those refuse uncertain compensation, use the explicit service repair input
+with `bootstrap_secret_operation=preserve` after reviewing provider state.
 
 Provider dispatch is recorded before its first effect and never automatically
 replayed after an uncertain response. Per-request receipts survive later service

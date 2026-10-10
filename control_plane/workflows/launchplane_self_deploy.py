@@ -355,15 +355,34 @@ def _execute_launchplane_self_deploy(
         release_drain_complete = True
     try:
         if updated_env_map != previous_env_map:
-            dokploy_api.update_dokploy_target_env(
-                host=host,
-                token=token,
-                target_type=request.target_type,
-                target_id=request.target_id,
-                target_payload=target_payload,
-                env_text=updated_env_text,
-                launchplane_service_target=True,
-            )
+            try:
+                dokploy_api.update_dokploy_target_env(
+                    host=host,
+                    token=token,
+                    target_type=request.target_type,
+                    target_id=request.target_id,
+                    target_payload=target_payload,
+                    env_text=updated_env_text,
+                    launchplane_service_target=True,
+                )
+            except dokploy_api.DokployRequestFailed as error:
+                if (
+                    isinstance(record_store, PostgresRecordStore)
+                    and error.status_code is not None
+                    and 400 <= error.status_code < 500
+                    and not error.retryable
+                    and not error.remote_command_failed
+                ):
+                    from control_plane.service_deploy_drain import (
+                        ServiceDeployPreEffectRefused,
+                        record_pre_effect_refusal,
+                    )
+
+                    record_pre_effect_refusal(record_store, request_fingerprint)
+                    raise ServiceDeployPreEffectRefused(
+                        f"Dokploy refused {error.method} {error.path} ({error.status_code}) before deployment; no effect was dispatched."
+                    ) from error
+                raise
         dokploy_api.trigger_deployment(
             host=host,
             token=token,
@@ -376,6 +395,10 @@ def _execute_launchplane_self_deploy(
 
             record_dispatch(record_store, request_fingerprint)
     except Exception as error:
+        from control_plane.service_deploy_drain import ServiceDeployPreEffectRefused
+
+        if isinstance(error, ServiceDeployPreEffectRefused):
+            raise
         if isinstance(record_store, PostgresRecordStore):
             from control_plane.service_deploy_drain import ServiceDeployOutcomeUnknown
 

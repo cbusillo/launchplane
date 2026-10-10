@@ -769,6 +769,7 @@ jobs:
           fail-result-paths: ""
           poll-result-path: result.deploy_state
           poll-result-statuses: draining,dispatch_in_progress
+          poll-retry-on-request-error: "true"
           poll-interval-ms: "10000"
           poll-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.timeout_ms }}
           timeout-ms: "30000"
@@ -1117,6 +1118,7 @@ jobs:
           fail-result-paths: ""
           poll-result-path: result.deploy_state
           poll-result-statuses: draining,dispatch_in_progress
+          poll-retry-on-request-error: "true"
           poll-interval-ms: "10000"
           poll-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.timeout_ms }}
           timeout-ms: "30000"

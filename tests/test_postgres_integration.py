@@ -3437,9 +3437,26 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
     def test_self_deploy_fence_and_release_admission_serialize_in_both_orders(self) -> None:
         from control_plane.service_deploy_drain import ServiceDeployDraining, prepare
 
-        for admission_first in (True, False):
-            with self.subTest(admission_first=admission_first), _head_postgres_database() as url:
+        for admission_kind, admission_first in (
+            ("reservation", True),
+            ("reservation", False),
+            ("backup-claim", True),
+            ("backup-claim", False),
+        ):
+            with (
+                self.subTest(kind=admission_kind, admission_first=admission_first),
+                _head_postgres_database() as url,
+            ):
                 store = PostgresRecordStore(database_url=url)
+                if admission_kind == "backup-claim":
+                    from tests.test_verireel_prod_backup_gate import (
+                        VeriReelProdBackupGateWorkflowTests,
+                    )
+
+                    specimen = VeriReelProdBackupGateWorkflowTests(
+                        methodName="runTest"
+                    )._operation_record()
+                    store.write_verireel_prod_backup_gate_operation_record(specimen)
                 held = threading.Event()
                 release = threading.Event()
                 timestamp = store._database_mutation_timestamp
@@ -3452,6 +3469,14 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     return timestamp(session)
 
                 def admit() -> Any:
+                    if admission_kind == "backup-claim":
+                        return store.claim_next_verireel_prod_backup_gate_operation_record(
+                            lease_owner="worker",
+                            lease_expires_at=(
+                                datetime.now(timezone.utc) + timedelta(minutes=1)
+                            ).isoformat(),
+                            claimed_at=datetime.now(timezone.utc).isoformat(),
+                        )
                     return store.reserve_mutation(
                         scope="client-release",
                         route_path="/isolated",
@@ -3508,14 +3533,22 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                             reservation = initial.result(10)
                             record, running, dispatch = contender.result(10)
                             self.assertEqual(record.state, "draining")
-                            self.assertEqual(running, (reservation.record.record_id,))
+                            record_id = (
+                                reservation.operation_id
+                                if admission_kind == "backup-claim"
+                                else reservation.record.record_id
+                            )
+                            self.assertEqual(running, (record_id,))
                             self.assertFalse(dispatch)
                         else:
                             _, running, dispatch = initial.result(10)
                             self.assertTrue(dispatch)
                             self.assertFalse(running)
-                            with self.assertRaises(ServiceDeployDraining):
-                                contender.result(10)
+                            if admission_kind == "backup-claim":
+                                self.assertIsNone(contender.result(10))
+                            else:
+                                with self.assertRaises(ServiceDeployDraining):
+                                    contender.result(10)
                 finally:
                     release.set()
                     store.close()

@@ -7,6 +7,7 @@ from datetime import (
 )
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 from unittest.mock import patch
 
 from click import ClickException
@@ -1167,6 +1168,93 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(response.status_code, 202, response.text)
                     self.assertEqual(response.json()["result"]["deploy_state"], "requested")
                 self.assertEqual(dispatch.call_count, 2)
+
+    async def test_only_definite_first_write_refusal_releases_admission_without_dispatch(
+        self,
+    ) -> None:
+        from control_plane.dokploy.api import DokployRequestFailed
+        from control_plane.service_deploy_drain import ServiceDeployDraining, read_status
+
+        for status, remote_failed in (
+            (401, False),
+            (403, False),
+            (502, False),
+            (429, False),
+            (400, True),
+        ):
+            with (
+                self.subTest(status=status, remote_failed=remote_failed),
+                TemporaryDirectory() as directory,
+            ):
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+                )
+                try:
+                    store.ensure_schema()
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(self._identity()),
+                        authz_policy=self._policy(),
+                        record_store_factory=lambda: store,
+                    )
+                    with (
+                        patch(
+                            "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                            return_value=("https://provider.example", "synthetic"),
+                        ),
+                        patch(
+                            "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
+                            return_value=self._compose_target(self._BOOTSTRAP_ENV),
+                        ),
+                        patch(
+                            "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env",
+                            side_effect=DokployRequestFailed(
+                                method="POST",
+                                path="/api/compose.update",
+                                status_code=status,
+                                detail="synthetic refusal",
+                                remote_command_failed=remote_failed,
+                            ),
+                        ) as update,
+                        patch(
+                            "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
+                        ) as dispatch,
+                    ):
+                        payload = self._payload(
+                            oauth_env={"LAUNCHPLANE_DEPLOYMENT_MARKER": "refused-marker"}
+                        )
+                        definite = status in {401, 403}
+                        for _ in range(2):
+                            response = await _post_launchplane_self_deploy(
+                                app, payload, idempotency_key="first-write-refusal"
+                            )
+                            self.assertEqual(
+                                response.status_code, 400 if definite else 409, response.text
+                            )
+                            self.assertEqual(
+                                response.json()["error"]["code"],
+                                "self_deploy_refused"
+                                if definite
+                                else "self_deploy_reconciliation_required",
+                            )
+                        update.assert_called_once()
+                        dispatch.assert_not_called()
+                        self.assertEqual(read_status(store)["admission_paused"], not definite)
+                        reservation: dict[str, Any] = dict(
+                            scope="client-release",
+                            route_path="/isolated",
+                            idempotency_key="unrelated-release",
+                            request_fingerprint="release",
+                            lease_owner="worker",
+                        )
+                        if definite:
+                            self.assertEqual(
+                                store.reserve_mutation(**reservation).status, "acquired"
+                            )
+                        else:
+                            with self.assertRaises(ServiceDeployDraining):
+                                store.reserve_mutation(**reservation)
+                finally:
+                    store.close()
 
     async def test_self_deploy_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

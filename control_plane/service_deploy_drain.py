@@ -26,7 +26,8 @@ class ServiceDeployDrainRecord(BaseModel):
     target_id: str
     image_reference: str
     deployment_marker: str
-    state: Literal["draining", "dispatching", "requested", "confirmed"]
+    previous_request_fingerprint: str = ""
+    state: Literal["draining", "dispatching", "requested", "confirmed", "refused"]
     updated_at: str
     expires_at: str = ""
 
@@ -45,6 +46,10 @@ class ServiceDeployDispatchBusy(ValueError):
 
 class ServiceDeployFenceConflict(ServiceDeployOutcomeUnknown):
     """This request did not acquire an earlier or mismatched replacement fence."""
+
+
+class ServiceDeployPreEffectRefused(ValueError):
+    """The provider definitely refused the first env write; no replacement started."""
 
 
 @contextmanager
@@ -170,6 +175,10 @@ def prepare(
         prior_row = session.get(LaunchplaneServiceDeployDrainRow, f"request:{request_fingerprint}")
         prior = ServiceDeployDrainRecord.model_validate(prior_row.payload) if prior_row else None
         if prior is not None:
+            if prior.state == "refused":
+                raise ServiceDeployPreEffectRefused(
+                    "This self-deploy was refused before effects; use a new request after resolving the refusal."
+                )
             if prior.state == "dispatching":
                 raise ServiceDeployOutcomeUnknown(
                     "Self-deploy dispatch requires provider reconciliation."
@@ -213,6 +222,13 @@ def prepare(
             target_id=target_id,
             image_reference=image_reference,
             deployment_marker=deployment_marker,
+            previous_request_fingerprint=(
+                current.previous_request_fingerprint
+                if current.request_fingerprint == request_fingerprint
+                else current.request_fingerprint
+            )
+            if current
+            else "",
             state=state,
             updated_at=now,
             expires_at=(
@@ -237,6 +253,47 @@ def record_dispatch(store: Any, request_fingerprint: str) -> None:
         if record.state == "dispatching":
             _write(session, record.model_copy(update={"state": "requested"}))
             session.commit()
+
+
+def record_pre_effect_refusal(store: Any, request_fingerprint: str) -> None:
+    from control_plane.storage.postgres import LaunchplaneServiceDeployDrainRow
+
+    with store._session_factory() as session:
+        lock(store, session)
+        _, record = _read(session)
+        if (
+            record is None
+            or record.request_fingerprint != request_fingerprint
+            or record.state != "dispatching"
+        ):
+            raise ServiceDeployOutcomeUnknown(
+                "The service fence changed before recording provider refusal."
+            )
+        previous_row = (
+            session.get(
+                LaunchplaneServiceDeployDrainRow, f"request:{record.previous_request_fingerprint}"
+            )
+            if record.previous_request_fingerprint
+            else None
+        )
+        if record.previous_request_fingerprint and previous_row is None:
+            raise ServiceDeployOutcomeUnknown("The previous service fence receipt is unavailable.")
+        previous_payload = previous_row.payload if previous_row else None
+        _write(
+            session,
+            record.model_copy(
+                update={
+                    "state": "refused",
+                    "updated_at": store._database_mutation_timestamp(session),
+                }
+            ),
+        )
+        row, _ = _read(session)
+        if previous_payload is not None:
+            row.payload = previous_payload
+        else:
+            session.delete(row)
+        session.commit()
 
 
 def confirm_startup(store: Any) -> None:
@@ -268,7 +325,7 @@ def read_status(store: Any) -> dict[str, object]:
     with store._session_factory() as session:
         _, record = _read(session)
         if record is None:
-            return {"state": "idle", "running_operation_ids": ()}
+            return {"state": "idle", "running_operation_ids": (), "admission_paused": False}
         result = record.model_dump()
         result["running_operation_ids"] = _running_operations(session)
         result["admission_paused"] = not admission_allowed(
