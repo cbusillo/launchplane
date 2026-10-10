@@ -7950,6 +7950,17 @@
           "openupgrade_inputs": {
             "$ref": "#/components/schemas/ArtifactOpenUpgradeInputs"
           },
+          "release_compatibility": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArtifactReleaseCompatibility"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "schema_version": {
             "default": 1,
             "enum": [
@@ -8146,6 +8157,70 @@
           "repository"
         ],
         "title": "ArtifactPythonPackageSource",
+        "type": "object"
+      },
+      "ArtifactReleaseCompatibility": {
+        "additionalProperties": false,
+        "properties": {
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "database_update_modules": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Database Update Modules"
+          },
+          "examined_inputs_sha256": {
+            "default": "",
+            "pattern": "^(|[0-9a-f]{64})$",
+            "title": "Examined Inputs Sha256",
+            "type": "string"
+          },
+          "modules": {
+            "items": {
+              "$ref": "#/components/schemas/ReleaseModuleDeclaration"
+            },
+            "title": "Modules",
+            "type": "array"
+          },
+          "read_write_compatible": {
+            "title": "Read Write Compatible",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/ReleaseSourceInventory"
+            },
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "complete",
+          "database_update_modules",
+          "examined_inputs_sha256",
+          "modules",
+          "read_write_compatible",
+          "schema_version",
+          "sources"
+        ],
+        "title": "ArtifactReleaseCompatibility",
         "type": "object"
       },
       "ArtifactSourceBuild": {
@@ -30774,6 +30849,17 @@
           "candidate": {
             "$ref": "#/components/schemas/ReleaseVersion"
           },
+          "database_compatibility": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseDatabaseCompatibility"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/ReleaseReviewItem"
@@ -30830,6 +30916,252 @@
           "untracked_commits"
         ],
         "title": "ReleaseChecklist",
+        "type": "object"
+      },
+      "ReleaseDatabaseCompatibility": {
+        "additionalProperties": false,
+        "description": "A conservative result and module plan for exactly one release tuple.",
+        "properties": {
+          "candidate_artifact_id": {
+            "title": "Candidate Artifact Id",
+            "type": "string"
+          },
+          "candidate_image": {
+            "title": "Candidate Image",
+            "type": "string"
+          },
+          "candidate_manifest_sha256": {
+            "title": "Candidate Manifest Sha256",
+            "type": "string"
+          },
+          "changed_modules": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Modules",
+            "type": "array"
+          },
+          "changes": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ReleaseInputChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "classification": {
+            "enum": [
+              "compatible",
+              "database_changing"
+            ],
+            "title": "Classification",
+            "type": "string"
+          },
+          "install_modules": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Install Modules",
+            "type": "array"
+          },
+          "module_plan_complete": {
+            "default": false,
+            "title": "Module Plan Complete",
+            "type": "boolean"
+          },
+          "preserve_noupdate": {
+            "const": true,
+            "default": true,
+            "title": "Preserve Noupdate",
+            "type": "boolean"
+          },
+          "production_artifact_id": {
+            "title": "Production Artifact Id",
+            "type": "string"
+          },
+          "production_image": {
+            "title": "Production Image",
+            "type": "string"
+          },
+          "production_manifest_sha256": {
+            "title": "Production Manifest Sha256",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "retain_previous_assets": {
+            "default": false,
+            "title": "Retain Previous Assets",
+            "type": "boolean"
+          },
+          "update_modules": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Update Modules",
+            "type": "array"
+          },
+          "warm_assets": {
+            "default": false,
+            "title": "Warm Assets",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "candidate_artifact_id",
+          "candidate_image",
+          "candidate_manifest_sha256",
+          "changed_modules",
+          "changes",
+          "classification",
+          "install_modules",
+          "module_plan_complete",
+          "preserve_noupdate",
+          "production_artifact_id",
+          "production_image",
+          "production_manifest_sha256",
+          "reasons",
+          "retain_previous_assets",
+          "update_modules",
+          "warm_assets"
+        ],
+        "title": "ReleaseDatabaseCompatibility",
+        "type": "object"
+      },
+      "ReleaseInputChange": {
+        "additionalProperties": false,
+        "properties": {
+          "after_sha256": {
+            "default": "",
+            "title": "After Sha256",
+            "type": "string"
+          },
+          "before_sha256": {
+            "default": "",
+            "title": "Before Sha256",
+            "type": "string"
+          },
+          "input_name": {
+            "title": "Input Name",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "static",
+              "code",
+              "manifest_assets",
+              "database_data",
+              "model",
+              "migration",
+              "dependency",
+              "docs_ci",
+              "unknown"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "module": {
+            "default": "",
+            "title": "Module",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "after_sha256",
+          "before_sha256",
+          "input_name",
+          "kind",
+          "module",
+          "path"
+        ],
+        "title": "ReleaseInputChange",
+        "type": "object"
+      },
+      "ReleaseInputFile": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "static",
+              "code",
+              "manifest_assets",
+              "database_data",
+              "model",
+              "migration",
+              "dependency",
+              "docs_ci",
+              "unknown"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "manifest_database_sha256": {
+            "default": "",
+            "pattern": "^(|[0-9a-f]{64})$",
+            "title": "Manifest Database Sha256",
+            "type": "string"
+          },
+          "module": {
+            "default": "",
+            "pattern": "^[a-zA-Z0-9_]*$",
+            "title": "Module",
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "manifest_database_sha256",
+          "module",
+          "path",
+          "sha256"
+        ],
+        "title": "ReleaseInputFile",
+        "type": "object"
+      },
+      "ReleaseModuleDeclaration": {
+        "additionalProperties": false,
+        "properties": {
+          "depends": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Depends",
+            "type": "array"
+          },
+          "name": {
+            "pattern": "^[a-zA-Z0-9_]+$",
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "depends",
+          "name"
+        ],
+        "title": "ReleaseModuleDeclaration",
         "type": "object"
       },
       "ReleaseReviewDecisionEnvelope": {
@@ -31178,6 +31510,41 @@
           "required",
           "unavailable_reason"
         ]
+      },
+      "ReleaseSourceInventory": {
+        "additionalProperties": false,
+        "properties": {
+          "commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Commit",
+            "type": "string"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/ReleaseInputFile"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "input_name": {
+            "minLength": 1,
+            "title": "Input Name",
+            "type": "string"
+          },
+          "repository": {
+            "minLength": 1,
+            "title": "Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commit",
+          "files",
+          "input_name",
+          "repository"
+        ],
+        "title": "ReleaseSourceInventory",
+        "type": "object"
       },
       "ReleaseTupleRecord": {
         "additionalProperties": false,
