@@ -129,12 +129,13 @@ merge context; conflicting pending or failed gates veto reuse. This avoids full
 work when an all-no-op batch publishes the already-tested base, without trusting
 a fork or retargeted PR's merge-ref checks. Native construction uses
 `launchplane/construct/**`, outside the required workflows' push filters, and
-publishes the canonical train ref only after every entry is verified. New
-completed candidate commits still run full CI.
+publishes the canonical train ref only after every entry is verified. The
+controller's narrow single-entry exception is defined in
+[candidate construction](../merge-train-policy.md#candidate-construction).
 
 Main retains its existing PR-tree reuse, tightened to require that the base is
 an ancestor of the PR head as well as matching trees and a successful gate.
-The train does not extend that shortcut: a historical PR gate alone cannot
+The workflow does not extend that shortcut: a historical PR gate alone cannot
 identify the merge-ref tree tested before a retarget. PR events, unrelated
 branches, and missing API evidence run the full suite. Construction branches
 must remain outside required workflow triggers. Concurrency and required checks

@@ -2826,6 +2826,9 @@ original teardown request. Lifecycle cleanup can dispatch to
 this generic path only after a passing plan and a matching stored preview record
 are present. The descriptor routes remain discoverable.
 
+For reviewed reconciliation of provider-absent legacy preview history, see
+[legacy preview reconciliation](legacy-preview-reconciliation.md).
+
 ### Admin read endpoints
 
 - `GET /v1/products` (native FastAPI for bearer-token and human-session
