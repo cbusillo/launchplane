@@ -15,13 +15,30 @@ fixture_dir="$(mktemp -d "$scratch_root/lp-service-compose.XXXXXXXX")"
 project="$(basename "$fixture_dir" | tr '[:upper:].' '[:lower:]-')"
 compose=(docker compose --project-name "$project" --project-directory "$fixture_dir"
   --env-file "$fixture_dir/.env" --file "$fixture_dir/compose.json")
-services=(launchplane launchplane-odoo-workers launchplane-verireel-workers)
+services=(launchplane launchplane-odoo-workers launchplane-verireel-workers launchplane-ordinary-agent-workers)
+active_pid=""
+run_interruptible() {
+  "$@" <&0 &
+  active_pid="$!"
+  wait "$active_pid"
+  active_pid=""
+}
+cancel() {
+  trap '' INT TERM
+  if [ -n "$active_pid" ]; then
+    kill -KILL "$active_pid" 2>/dev/null || true
+    wait "$active_pid" 2>/dev/null || true
+  fi
+  exit "$1"
+}
 cleanup() {
   local result="$?"
   trap - EXIT
   trap '' INT TERM
   if [ -f "$fixture_dir/compose.json" ]; then
-    if [ "$result" -ne 0 ] && [ "$result" -ne 130 ]; then "${compose[@]}" logs --tail 30 >&2 || true; fi
+    if [ "$result" -ne 0 ] && [ "$result" -ne 130 ] && [ "$result" -ne 143 ]; then
+      "${compose[@]}" logs --tail 30 >&2 || true
+    fi
     if ! "${compose[@]}" down --volumes --remove-orphans --timeout 2; then
       echo "Fixture cleanup failed for project $project; retained $fixture_dir." >&2
       exit 1
@@ -31,7 +48,8 @@ cleanup() {
   exit "$result"
 }
 trap cleanup EXIT
-trap 'exit 130' INT TERM
+trap 'cancel 130' INT
+trap 'cancel 143' TERM
 
 docker image inspect "$image" >/dev/null
 docker pull "$postgres_image" >/dev/null
@@ -53,8 +71,10 @@ DOCKER_IMAGE_REFERENCE="$image" LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK=unused-fixt
     config --no-env-resolution --format json |
   jq --arg image "$image" --arg postgres_image "$postgres_image" --arg env_file "$fixture_dir/.env" '
     {services: (.services | with_entries(select(.key == "launchplane" or
-      .key == "launchplane-odoo-workers" or .key == "launchplane-verireel-workers") |
+      .key == "launchplane-odoo-workers" or .key == "launchplane-verireel-workers" or
+      .key == "launchplane-ordinary-agent-workers") |
       .value.image = $image | .value.pull_policy = "never" | .value.restart = "no" |
+      .value.deploy.replicas = 1 |
       .value.env_file = [$env_file] | .value.networks = ["qualification"] |
       .value.environment.DOCKER_IMAGE_REFERENCE = $image)),
       volumes: .volumes, networks: {qualification: {internal: true}}} |
@@ -79,7 +99,7 @@ check_workers() {
     test -n "$container_id"
     worker_ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container_id")"
     worker_started_at="$(docker inspect --format '{{.State.StartedAt}}' "$container_id")"
-    "${compose[@]}" exec -T -e QUALIFICATION_WORKER_IP="$worker_ip" \
+    run_interruptible "${compose[@]}" exec -T -e QUALIFICATION_WORKER_IP="$worker_ip" \
       -e QUALIFICATION_WORKER_STARTED_AT="$worker_started_at" launchplane /app/.venv/bin/python - <<'PY'
 import os
 import time
@@ -111,10 +131,10 @@ PY
   done
 }
 
-"${compose[@]}" up --detach --no-build --pull never --wait --wait-timeout 120
+run_interruptible "${compose[@]}" up --detach --no-build --pull never --wait --wait-timeout 120
 check_workers
 before="$("${compose[@]}" ps --quiet "${services[@]}" | sort)"
-"${compose[@]}" exec -T launchplane /app/.venv/bin/python - <<'PY'
+run_interruptible "${compose[@]}" exec -T launchplane /app/.venv/bin/python - <<'PY'
 import os
 from control_plane.service_deploy_drain import prepare, record_dispatch
 from control_plane.storage.postgres import PostgresRecordStore
@@ -132,13 +152,13 @@ finally:
     store.close()
 PY
 printf '%s\n' 'LAUNCHPLANE_DEPLOYMENT_MARKER=qualification-replacement' >>"$fixture_dir/.env"
-"${compose[@]}" up --detach --no-deps --no-build --pull never --force-recreate --timeout 10 \
+run_interruptible "${compose[@]}" up --detach --no-deps --no-build --pull never --force-recreate --timeout 10 \
   --wait --wait-timeout 120 "${services[@]}"
 after="$("${compose[@]}" ps --quiet "${services[@]}" | sort)"
 test -n "$after"
 test -z "$(comm -12 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
 check_workers
-"${compose[@]}" exec -T launchplane /app/.venv/bin/python - <<'PY'
+run_interruptible "${compose[@]}" exec -T launchplane /app/.venv/bin/python - <<'PY'
 import json
 import os
 import urllib.request

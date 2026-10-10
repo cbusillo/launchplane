@@ -330,7 +330,7 @@ jobs:
           docker run --rm --entrypoint gh "$LAUNCHPLANE_CI_IMAGE_TAG" --version
 
       - name: Qualify packaged service Compose restart
-        run: bash scripts/qualify-service-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG" "$LAUNCHPLANE_CI_POSTGRES_IMAGE"
+        run: exec bash scripts/qualify-service-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG" "$LAUNCHPLANE_CI_POSTGRES_IMAGE"
 
       - name: Qualify ordinary worker Compose lifecycle
         run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
@@ -422,7 +422,7 @@ jobs:
           docker run --rm --entrypoint gh "$LAUNCHPLANE_CI_IMAGE_TAG" --version
 
       - name: Qualify packaged service Compose restart
-        run: bash scripts/qualify-service-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG" "$LAUNCHPLANE_CI_POSTGRES_IMAGE"
+        run: exec bash scripts/qualify-service-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG" "$LAUNCHPLANE_CI_POSTGRES_IMAGE"
 
       - name: Qualify ordinary worker Compose lifecycle
         run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
