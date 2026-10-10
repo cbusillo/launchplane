@@ -18,6 +18,8 @@ import {
   productConfigRuntimeChange,
   productConfigRuntimeChangeKey,
   productConfigSelectionKey,
+  ProductConfigRecoveryStorageUnavailable,
+  validateProductConfigApplyReplay,
 } from "../src/product-config-operation.ts";
 
 test("managed-secret values are consumed and cleared before request state is retained", async () => {
@@ -227,4 +229,22 @@ test("configuration failure certainty distinguishes dispatch from proven refusal
     assert.equal(productConfigFailureCertainty(
       new LaunchplaneApiError("Refused", status, "trace", "refused"), true), "definitive");
   }
+  for (const code of ["secret_configuration_required", "secret_storage_unavailable"]) {
+    assert.equal(productConfigFailureCertainty(
+      new LaunchplaneApiError("Readiness refused", 503, "trace", code), true), "definitive");
+  }
+  assert.equal(productConfigFailureCertainty(new ProductConfigRecoveryStorageUnavailable("Not sent"), true), "definitive");
+});
+
+test("a rejected re-entry leaves original uncertainty evidence intact", async () => {
+  const scope = "example:testing:managed-secrets:apply";
+  const request = { managed_secrets: [{ binding_key: "SMTP_PASSWORD", value: "inert-secret" }] };
+  const dispatched = markBrowserOperationDispatched(beginBrowserOperation(await prepareBrowserOperation(scope, request)));
+  const original = failBrowserOperation(dispatched, { code: "gateway_error", message: "Unavailable", statusCode: 502, traceId: "original-trace" }, "uncertain");
+  await assert.rejects(validateProductConfigApplyReplay(scope, { replacement: true }, original), /uncertain/);
+  assert.equal(original.failure.traceId, "original-trace");
+  await validateProductConfigApplyReplay(scope, request, original);
+  const retry = markBrowserOperationDispatched(beginBrowserOperation(retryBrowserOperation(original)));
+  const prewrite = new LaunchplaneApiError("Storage unavailable", 503, "retry", "secret_storage_unavailable");
+  assert.equal(failBrowserOperation(retry, productConfigOperationFailure(prewrite), productConfigFailureCertainty(prewrite, true)).requiresIdempotencyContinuity, true);
 });

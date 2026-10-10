@@ -1,9 +1,20 @@
 import { LaunchplaneApiError } from "./api";
 import type { BrowserOperationFailure, BrowserOperationState } from "./browser-operation";
+import { prepareBrowserOperation } from "./browser-operation";
 import type { ProductEnvironmentManagedSecretInput } from "./generated/openapi.ts";
 
 export interface SecretValueInput {
   value: string;
+}
+
+export class ProductConfigRecoveryStorageUnavailable extends Error {}
+
+export async function validateProductConfigApplyReplay(
+  scope: string, request: unknown, state: BrowserOperationState,
+): Promise<void> {
+  if (state.requiresIdempotencyContinuity) {
+    await prepareBrowserOperation(scope, request, state);
+  }
 }
 
 export interface ManagedSecretSelection {
@@ -137,6 +148,13 @@ export function productConfigFailureCertainty(
   error: unknown,
   dispatched: boolean,
 ): "definitive" | "uncertain" {
+  if (error instanceof ProductConfigRecoveryStorageUnavailable) return "definitive";
+  // These service refusals occur before configuration planning or business writes.
+  // failBrowserOperation still preserves continuity when a retry began uncertain.
+  if (error instanceof LaunchplaneApiError &&
+      ["secret_configuration_required", "secret_storage_unavailable"].includes(error.code)) {
+    return "definitive";
+  }
   if (error instanceof LaunchplaneApiError && error.statusCode < 500) {
     return "definitive";
   }

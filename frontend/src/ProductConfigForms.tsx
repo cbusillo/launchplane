@@ -14,6 +14,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { applyProductEnvironmentConfig, readOwnerSecretInputs } from "./api";
 import type { BrowserOperationState } from "./browser-operation";
+import { recoverBrowserOperationState } from "./browser-operation";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import {
   clearManagedSecretInputs,
@@ -25,6 +26,8 @@ import {
   productConfigRuntimeChange,
   productConfigRuntimeChangeKey,
   productConfigSelectionKey,
+  ProductConfigRecoveryStorageUnavailable,
+  validateProductConfigApplyReplay,
   type RuntimeSettingsChange,
   type SiteSettingDraft,
 } from "./product-config-operation";
@@ -158,13 +161,21 @@ export function RuntimeSettingsChangePanel({
       return;
     }
     setApplyResult(null);
-    const response = await applyOperation.run({
+    const payload: EnvironmentConfigRequest = {
       schema_version: 1,
       mode: "apply",
       reason: reason.trim(),
       confirmation: availability.apply.confirmation_text,
       ...draftChange,
-    });
+    };
+    try {
+      await validateProductConfigApplyReplay(`${config.product}:${config.environment}:runtime-settings:apply`, payload, applyOperation.state);
+    } catch (error) {
+      setConfirmed(false);
+      setLocalError(error instanceof Error ? error.message : "Re-enter the original request.");
+      return;
+    }
+    const response = await applyOperation.run(payload);
     if (response) {
       setApplyResult(response);
       setConfirmed(false);
@@ -430,13 +441,21 @@ export function ManagedSecretsChangePanel({
       return;
     }
     setApplyResult(null);
-    const response = await applyOperation.run({
+    const payload: EnvironmentConfigRequest = {
       schema_version: 1,
       mode: "apply",
       reason: reason.trim(),
       confirmation: availability.apply.confirmation_text,
       managed_secrets: managedSecrets,
-    });
+    };
+    try {
+      await validateProductConfigApplyReplay(`${config.product}:${config.environment}:managed-secrets:apply`, payload, applyOperation.state);
+    } catch (error) {
+      setConfirmed(false);
+      setLocalError(error instanceof Error ? error.message : "Re-enter the original request.");
+      return;
+    }
+    const response = await applyOperation.run(payload);
     clearManagedSecretInputs(secretInputs.current);
     if (response) {
       setApplyResult(response);
@@ -1074,9 +1093,20 @@ function useProductConfigOperation(
     payload: EnvironmentConfigRequest,
     options: Parameters<typeof applyProductEnvironmentConfig>[3],
   ): Promise<ProductConfigApplyResponse> {
+    const dispatchOptions = {
+      ...options,
+      onDispatch: () => {
+        options.onDispatch?.();
+        if (!readOnly && recoverBrowserOperationState(scope).identity?.idempotencyKey !== options.idempotencyKey) {
+          throw new ProductConfigRecoveryStorageUnavailable(
+            "Apply was not sent because this tab could not preserve its operation key. Restore session storage and retry.",
+          );
+        }
+      },
+    };
     if (fixtureMode) {
       const fixtures = await loadDevFixtures();
-      options.onDispatch?.();
+      dispatchOptions.onDispatch();
       return fixtures.applyProductEnvironmentConfigForFixture(
         fixtureMode,
         product,
@@ -1085,7 +1115,7 @@ function useProductConfigOperation(
         options.signal,
       );
     }
-    return applyProductEnvironmentConfig(product, environment, payload, options);
+    return applyProductEnvironmentConfig(product, environment, payload, dispatchOptions);
   }
   return useBrowserOperationController({
     execute,

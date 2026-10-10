@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 for (const form of ["runtime-settings", "managed-secrets"] as const) {
-  test(`${form}: failed dry-run can be edited and repeated`, async ({ page }, testInfo) => {
+  for (const storageFailure of [false, true]) {
+  test(`${form}: ${storageFailure ? "storage refusal sends no Apply" : "exact-request recovery after reload"}`, async ({ page }, testInfo) => {
     await page.goto(`/ui/products/atlas-commerce/environments/prod/${form}?fixture=products`);
     const data = await page.evaluate(async () => {
       const f = await import("/ui/src/dev-fixtures.ts");
@@ -50,12 +51,27 @@ for (const form of ["runtime-settings", "managed-secrets"] as const) {
     await expect(page.getByText("Gateway unavailable", { exact: true })).toBeVisible();
     await page.getByLabel("Change reason").fill("Edited review");
     if (form === "managed-secrets") await valueInput.fill("inert-secret");
+    if (storageFailure) await page.evaluate(() => {
+      const original = Storage.prototype.setItem;
+      Storage.prototype.setItem = function(key, value) {
+        if (key.startsWith("launchplane.browser-operation.")) throw new DOMException("Blocked", "QuotaExceededError");
+        return original.call(this, key, value);
+      };
+    });
     await page.getByRole("button", { name: "Run dry-run" }).click();
     await expect.poll(() => plans.length).toBe(2);
     if (form === "managed-secrets") await valueInput.fill("inert-secret");
     const confirmation = page.getByRole("region", { name: "Apply confirmation" });
     await confirmation.getByRole("checkbox").check();
     await confirmation.getByRole("button", { name: "Apply reviewed change" }).click();
+    if (storageFailure) {
+      await expect(page.getByText(/Apply was not sent because this tab/)).toBeVisible();
+      expect(applies).toHaveLength(0);
+      await expect(page.getByLabel("Change reason")).toBeEnabled();
+      if (form === "managed-secrets") await expect(valueInput).toHaveValue("");
+      await page.screenshot({ path: testInfo.outputPath(`${form}-storage-refused.png`) });
+      return;
+    }
     await expect(page.getByText("Apply uncertain", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Change reason")).toBeDisabled();
     await expect(page.getByRole("button", { name: "Start over" })).toHaveCount(0);
@@ -70,6 +86,7 @@ for (const form of ["runtime-settings", "managed-secrets"] as const) {
     await recovery.getByRole("button", { name: "Retry original Apply" }).click();
     await expect(page.getByText(/Cannot create a new browser operation while the previous result is uncertain/)).toBeVisible();
     expect(applies).toHaveLength(1);
+    expect(await page.evaluate(() => JSON.stringify(sessionStorage))).toContain("gateway_error");
     if (form === "managed-secrets") await expect(valueInput).toHaveValue("");
     await valueInput.fill(form === "runtime-settings" ? "https://example.invalid" : "inert-secret");
     await recovery.getByRole("checkbox").check();
@@ -85,4 +102,5 @@ for (const form of ["runtime-settings", "managed-secrets"] as const) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath(`${form}-reset.png`) });
   });
+  }
 }
