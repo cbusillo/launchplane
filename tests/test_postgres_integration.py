@@ -29,6 +29,10 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.preview_generation_record import (
+    PreviewGenerationRecord,
+    PreviewPullRequestSummary,
+)
 from control_plane.odoo_import_overrides import plan_import_override_reconciliation
 from control_plane.workflows.odoo_post_deploy import _write_odoo_instance_override_apply_result
 from tests.test_odoo_import_override_reconciliation import (
@@ -42,6 +46,7 @@ from tests.test_odoo_addon_settings_override import _existing_record as _addon_o
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from tests import test_http_app_product_retirement as retirement_tests
+from tests import test_legacy_preview_reconciliation as legacy_preview_tests
 from tests.http_app_test_support import _asgi_request
 from control_plane import authz_grant_service, authz_policy_activation
 from control_plane.authz_candidate_preparation import (
@@ -948,6 +953,162 @@ def _owner_acceptance_system_event(
         source_event_id=source_event_id,
         reason="PostgreSQL subject sequence integration evidence.",
     )
+
+
+class RealPostgresLegacyPreviewReconciliationTests(
+    legacy_preview_tests.LegacyPreviewReconciliationTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    async def test_sibling_generation_write_does_not_deadlock_reconciliation(self) -> None:
+        sibling = self.preview.model_copy(update={"preview_id": "sibling", "anchor_pr_number": 7})
+        self.store.write_preview_record(sibling)
+        generation = PreviewGenerationRecord(
+            generation_id="sibling-generation",
+            preview_id=sibling.preview_id,
+            sequence=1,
+            state="ready",
+            requested_reason="fixture",
+            requested_at=sibling.created_at,
+            finished_at=sibling.created_at,
+            resolved_manifest_fingerprint="fixture-manifest",
+            anchor_summary=PreviewPullRequestSummary.model_validate(
+                {
+                    "repo": self.profile.repository,
+                    "pr_number": 7,
+                    "head_sha": "a" * 40,
+                    "pr_url": sibling.anchor_pr_url,
+                }
+            ),
+        )
+        plan = await self.plan()
+        generation_written = threading.Event()
+        release_writer = threading.Event()
+
+        def pause_generation_writer(
+            _connection: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            context: Any,
+            _executemany: bool,
+        ) -> None:
+            if context.isinsert and "launchplane_preview_generations" in statement:
+                generation_written.set()
+                if not release_writer.wait(10):
+                    raise ValueError("fixture writer timed out")
+
+        event.listen(self.store._engine, "after_cursor_execute", pause_generation_writer)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                writer = executor.submit(
+                    lambda: self.store.write_preview_generation_evidence_records(
+                        preview_record=sibling.model_copy(
+                            update={"latest_generation_id": generation.generation_id}
+                        ),
+                        generation_record=generation,
+                    )
+                )
+                try:
+                    self.assertTrue(await asyncio.to_thread(generation_written.wait, 5))
+                    apply = asyncio.create_task(self.apply(plan))
+                    blocked = False
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        with self.store._engine.connect() as connection:
+                            blocked = bool(
+                                connection.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_locks WHERE NOT granted "
+                                        "AND relation = to_regclass(:table_name)"
+                                    ),
+                                    {"table_name": "launchplane_preview_generations"},
+                                )
+                            )
+                        if blocked:
+                            break
+                        await asyncio.sleep(0.01)
+                    self.assertTrue(blocked, "Reconciliation never waited on generation evidence")
+                finally:
+                    release_writer.set()
+                await asyncio.to_thread(lambda: writer.result(timeout=5))
+                response = await asyncio.wait_for(apply, 5)
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(
+                    self.store.read_preview_generation_record(generation.generation_id), generation
+                )
+        finally:
+            release_writer.set()
+            event.remove(self.store._engine, "after_cursor_execute", pause_generation_writer)
+
+    def test_provider_waiters_preserve_record_pool_and_serialize_provider_work(self) -> None:
+        from control_plane.workflows.generic_web_preview import (
+            GenericWebPreviewDestroyRequest,
+            execute_generic_web_preview_destroy,
+            serialize_generic_web_preview_operation,
+        )
+
+        with (
+            ThreadPoolExecutor(max_workers=21) as executor,
+            patch(
+                "control_plane.workflows.generic_web_preview._execute_generic_web_preview_destroy_unserialized"
+            ) as provider,
+        ):
+            with serialize_generic_web_preview_operation(
+                record_store=self.store, profile=self.profile, preview_slug="pr-1"
+            ):
+                futures = [
+                    executor.submit(
+                        execute_generic_web_preview_destroy,
+                        control_plane_root=self.root,
+                        record_store=self.store,
+                        profile=self.profile,
+                        request=GenericWebPreviewDestroyRequest(
+                            product=self.profile.product,
+                            anchor_pr_number=1,
+                            destroy_reason="fixture",
+                        ),
+                    )
+                    for _ in range(20)
+                ]
+                assert self.store._preview_lock_engine is not None
+                deadline = time.monotonic() + 5
+                waiting = 0
+                while time.monotonic() < deadline:
+                    with self.store._preview_lock_engine.connect() as connection:
+                        waiting = connection.scalar(
+                            text(
+                                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                                "AND NOT granted AND database = "
+                                "(SELECT oid FROM pg_database WHERE datname = current_database())"
+                            )
+                        )
+                    if waiting == len(futures):
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(
+                    waiting, len(futures), "Provider calls did not all wait on the lock"
+                )
+                metadata = executor.submit(
+                    self.store.read_product_profile_record, self.profile.product
+                )
+                self.assertEqual(metadata.result(timeout=5), self.profile)
+                provider.assert_not_called()
+            for future in futures:
+                future.result(timeout=5)
+            self.assertEqual(provider.call_count, len(futures))
+
+    async def test_unrelated_preview_lock_does_not_block_plan(self) -> None:
+        from control_plane.workflows.generic_web_preview import (
+            serialize_generic_web_preview_operation,
+        )
+
+        with serialize_generic_web_preview_operation(
+            record_store=self.store, profile=self.profile, preview_slug="pr-7"
+        ):
+            plan = await self.plan()
+            self.assertTrue(plan["apply_eligible"])
 
 
 class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
