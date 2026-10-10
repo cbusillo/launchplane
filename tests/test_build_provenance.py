@@ -220,12 +220,15 @@ class BuildProvenanceTests(unittest.TestCase):
         assert manifest.source_build is not None
         self.assertEqual(manifest.source_build.purpose, "preview")
 
-        with self.assertRaisesRegex(BuildProvenanceError, "current head"):
+        with self.assertRaisesRegex(BuildProvenanceError, "current head") as caught:
             _verify(
                 FakeGitHub(runs=[run], pull_request_head=TIP),
                 purpose="preview",
                 pull_request_number=5,
             )
+
+        self.assertEqual(caught.exception.code, "pull_request_head_mismatch")
+        self.assertEqual(caught.exception.run_id, 7)
 
     def test_record_refuses_different_content_under_the_same_key(self) -> None:
         verified = _verify(FakeGitHub(runs=[_run()]))
@@ -313,8 +316,13 @@ class GenericWebBuildProvenanceTests(unittest.TestCase):
                 if allowed:
                     self.assertEqual(verify(), image)
                 else:
-                    with self.assertRaises(BuildProvenanceError):
+                    with self.assertRaises(BuildProvenanceError) as caught:
                         verify()
+                    self.assertEqual(
+                        caught.exception.code,
+                        "recorded_image_mismatch" if recorded else "pull_request_head_mismatch",
+                    )
+                    self.assertEqual(caught.exception.run_id, 7)
 
     def verify(self, github: FakeGitHub) -> str:
         return verify_generic_web_build(
@@ -335,16 +343,24 @@ class GenericWebBuildProvenanceTests(unittest.TestCase):
         odoo_manifest = artifact_manifest_v2(
             image_repository=IMAGE_REPOSITORY, tenant_source_repository=REPOSITORY
         ).model_dump(mode="json")
-        for manifest in (
-            _generic_web_manifest(source_commit="1" * 40),
-            _generic_web_manifest(
-                image={"repository": "ghcr.io/example/other", "digest": "sha256:" + "c" * 64}
+        for manifest, code in (
+            (_generic_web_manifest(source_commit="1" * 40), "manifest_commit_mismatch"),
+            (
+                _generic_web_manifest(
+                    image={"repository": "ghcr.io/example/other", "digest": "sha256:" + "c" * 64}
+                ),
+                "image_repository_mismatch",
             ),
-            _generic_web_manifest(image={"repository": IMAGE_REPOSITORY, "digest": "latest"}),
-            odoo_manifest,
+            (
+                _generic_web_manifest(image={"repository": IMAGE_REPOSITORY, "digest": "latest"}),
+                "manifest_invalid",
+            ),
+            (odoo_manifest, "manifest_invalid"),
         ):
-            with self.subTest(manifest=manifest), self.assertRaises(BuildProvenanceError):
+            with self.subTest(code=code), self.assertRaises(BuildProvenanceError) as caught:
                 self.verify(FakeGitHub(runs=[_run()], manifest=manifest))
+            self.assertEqual(caught.exception.code, code)
+            self.assertEqual(caught.exception.run_id, 7)
 
     def test_shares_the_run_checks_of_an_odoo_build(self) -> None:
         github = FakeGitHub(

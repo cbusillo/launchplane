@@ -1572,7 +1572,17 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         ):
             plan = self.reconcile()
         self.assertEqual((plan["action"], plan["reason"]), ("none", "no_verified_build"))
-        self.assertTrue(plan["rejected_builds"])
+        self.assertEqual(
+            plan["rejected_builds"],
+            [
+                {
+                    "commit": DEPLOYABLE,
+                    "run_id": 20,
+                    "code": "github_read_failed",
+                    "error": "Manifest unavailable",
+                }
+            ],
+        )
         self.assertEqual(self.deploys.runtime_identities, [])
 
     def test_legacy_baseline_does_not_admit_older_source_or_builds(self) -> None:
