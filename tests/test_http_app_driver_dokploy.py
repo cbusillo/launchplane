@@ -1081,10 +1081,8 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             payload = self._payload(
                 oauth_env={"LAUNCHPLANE_DEPLOYMENT_MARKER": "isolated-replacement"}
             )
-            for _ in range(2):
-                response = await _post_launchplane_self_deploy(
-                    app, payload, idempotency_key="isolated-drain"
-                )
+            for key in ("", "isolated-drain"):
+                response = await _post_launchplane_self_deploy(app, payload, idempotency_key=key)
                 self.assertEqual(response.status_code, 202, response.text)
                 self.assertEqual(response.json()["result"]["deploy_state"], "draining")
                 self.assertEqual(response.json()["result"]["running_operation_ids"], [backup_id])
@@ -1104,10 +1102,8 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.json()["result"]["deploy_state"], "dispatch_in_progress")
             deploy.assert_not_called()
             update.assert_not_called()
-            for _ in range(2):
-                response = await _post_launchplane_self_deploy(
-                    app, payload, idempotency_key="isolated-drain"
-                )
+            for key in ("isolated-drain", ""):
+                response = await _post_launchplane_self_deploy(app, payload, idempotency_key=key)
                 self.assertEqual(response.status_code, 202, response.text)
                 self.assertEqual(response.json()["result"]["deploy_state"], "requested")
                 self.assertTrue(response.json()["result"]["release_drain_complete"])
@@ -1255,6 +1251,71 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                                 store.reserve_mutation(**reservation)
                 finally:
                     store.close()
+
+    async def test_matching_runtime_read_confirms_a_startup_that_raced_a_refused_repair(
+        self,
+    ) -> None:
+        import os
+        from control_plane.service_deploy_drain import (
+            prepare,
+            confirm_startup,
+            record_dispatch,
+            record_pre_effect_refusal,
+            read_status,
+        )
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+            )
+            try:
+                store.ensure_schema()
+                policy = self._policy()
+                policy.github_actions[0].actions += ("launchplane_service.read",)
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(self._identity()),
+                    authz_policy=policy,
+                    record_store_factory=lambda: store,
+                )
+                first = dict(
+                    request_fingerprint="forward",
+                    target_type="compose",
+                    target_id="isolated",
+                    image_reference="example.invalid/image@sha256:" + "a" * 64,
+                    deployment_marker="forward-marker",
+                )
+                prepare(store, **first)
+                record_dispatch(store, "forward")
+                prepare(
+                    store,
+                    **{
+                        **first,
+                        "request_fingerprint": "repair",
+                        "deployment_marker": "repair-marker",
+                        "supersedes_deployment_marker": "forward-marker",
+                    },
+                )
+                with patch.dict(
+                    os.environ,
+                    {
+                        "DOCKER_IMAGE_REFERENCE": first["image_reference"],
+                        "LAUNCHPLANE_DEPLOYMENT_MARKER": "forward-marker",
+                    },
+                ):
+                    confirm_startup(store)
+                    self.assertEqual(read_status(store)["request_fingerprint"], "repair")
+                    record_pre_effect_refusal(store, "repair")
+                    self.assertEqual(read_status(store)["state"], "requested")
+                    response = await _asgi_get(
+                        app, "/v1/service/runtime", headers={"Authorization": "Bearer valid-token"}
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(
+                        response.json()["runtime"]["release_drain"]["state"], "confirmed"
+                    )
+                    self.assertFalse(read_status(store)["admission_paused"])
+            finally:
+                store.close()
 
     async def test_self_deploy_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

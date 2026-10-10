@@ -93,7 +93,7 @@ global.fetch = async (url, init) => {{
   return new Response(JSON.stringify({{
     ok: true,
     result: {{
-      refresh_status: refreshStatus,
+      [process.env.TEST_RESULT_FIELD || 'refresh_status']: refreshStatus,
       error_message: process.env.TEST_ERROR_MESSAGE || '',
       application_id: 'app-123'
       }}
@@ -897,6 +897,69 @@ process.on('beforeExit', () => {{
                 ["Bearer oidc-token-1", "Bearer oidc-token-2", "Bearer oidc-token-3"],
             )
             self.assertIn("refresh_status<<", output_path.read_text(encoding="utf-8"))
+
+    def test_result_polling_retries_network_error_with_the_same_payload_and_key(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/drivers/launchplane/self-deploy",
+                "payload": '{"deploy":{"image_reference":"synthetic"}}',
+                "idempotency-key": "drain-intent",
+                "poll-result-path": "result.deploy_state",
+                "poll-result-statuses": "draining,dispatch_in_progress",
+                "poll-retry-on-request-error": "true",
+                "poll-interval-ms": "1",
+                "poll-timeout-ms": "1000",
+                "retry-attempts": "1",
+                "log-response-body": "false",
+            },
+            environment={
+                "TEST_RESULT_FIELD": "deploy_state",
+                "TEST_REFRESH_STATUSES": "draining,draining,requested",
+                "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "2",
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [
+            call
+            for call in json.loads(result.stderr.strip().splitlines()[-1])
+            if call["url"].endswith("/self-deploy")
+        ]
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len({call["body"] for call in calls}), 1)
+        self.assertEqual({call["headers"]["Idempotency-Key"] for call in calls}, {"drain-intent"})
+
+    def test_poll_timeout_retains_latest_progress_but_network_failure_clears_it(self) -> None:
+        for network_failure in (False, True):
+            with self.subTest(network_failure=network_failure), TemporaryDirectory() as directory:
+                response_file = Path(directory) / "response.json"
+                result = self.run_action(
+                    inputs={
+                        "launchplane-url": "https://launchplane.example",
+                        "route-path": "/v1/drivers/launchplane/self-deploy",
+                        "payload": "{}",
+                        "poll-result-path": "result.deploy_state",
+                        "poll-result-statuses": "draining",
+                        "poll-interval-ms": "1",
+                        "poll-timeout-ms": "1" if not network_failure else "1000",
+                        "retry-attempts": "1",
+                        "response-output-file": str(response_file),
+                        "log-response-body": "false",
+                    },
+                    environment={
+                        "TEST_RESULT_FIELD": "deploy_state",
+                        "TEST_REFRESH_STATUS": "draining",
+                        "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "2" if network_failure else "",
+                    },
+                )
+                self.assertNotEqual(result.returncode, 0)
+                payload = json.loads(response_file.read_text())
+                if network_failure:
+                    self.assertIsNone(
+                        payload, "a newer uncertain request cannot retain stale draining proof"
+                    )
+                else:
+                    self.assertEqual(payload["result"]["deploy_state"], "draining")
 
     def test_fails_when_polling_times_out(self) -> None:
         result = self.run_action(

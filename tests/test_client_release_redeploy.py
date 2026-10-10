@@ -469,7 +469,14 @@ class ClientReleaseRedeployTests(unittest.TestCase):
                 if original_state == "requested":
                     record_dispatch(fixture.store, "rehearsal")
                 with self.assertRaises(ServiceDeployOutcomeUnknown):
-                    _prepare(fixture.store, "unbound-repair")
+                    prepare(
+                        fixture.store,
+                        request_fingerprint="unbound-repair",
+                        target_type="compose",
+                        target_id="isolated-control-plane",
+                        image_reference=IMAGE,
+                        deployment_marker="fresh-unbound-marker",
+                    )
                 for marker, target in (("wrong", "isolated-control-plane"), (MARKER, "wrong")):
                     with self.assertRaises(ServiceDeployOutcomeUnknown):
                         prepare(
@@ -541,6 +548,15 @@ class ClientReleaseRedeployTests(unittest.TestCase):
                 ):
                     self.assertTrue(read_status(fixture.store)["admission_paused"])
                 fixture.doCleanups()
+
+    def test_a_new_intent_cannot_reuse_a_previous_worker_generation_marker(self) -> None:
+        fixture = self.fixture("odoo")
+        _prepare(fixture.store)
+        record_dispatch(fixture.store, "rehearsal")
+        self.start_replacement_api(fixture)
+        with self.assertRaises(ValueError):
+            _prepare(fixture.store, "new-intent-old-marker")
+        self.assertEqual(read_status(fixture.store)["request_fingerprint"], "rehearsal")
 
     def test_expired_heartbeat_does_not_prove_an_admitted_effect_has_finished(self) -> None:
         fixture = self.fixture("odoo")

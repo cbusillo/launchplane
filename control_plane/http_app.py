@@ -5258,8 +5258,11 @@ def create_launchplane_fastapi_app(
             )
         )
         if isinstance(record_store, PostgresRecordStore):
-            from control_plane.service_deploy_drain import read_status
+            from control_plane.service_deploy_drain import confirm_startup, read_status
 
+            # Reconfirm this API's own image/marker when a refused repair restored
+            # a request whose initial startup raced the repair fence.
+            confirm_startup(record_store)
             runtime.release_drain = read_status(record_store)
         return LaunchplaneRuntimeResponse(trace_id=trace_id, runtime=runtime)
 
@@ -10501,7 +10504,9 @@ def create_launchplane_fastapi_app(
             ) from error
 
         normalized_idempotency_key = idempotency_key.strip()
-        payload_fingerprint = build_request_fingerprint(raw_payload)
+        payload_fingerprint = idempotency_request_fingerprint(
+            route_path=_LAUNCHPLANE_SELF_DEPLOY_ROUTE, payload=raw_payload
+        )
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="launchplane_service_deploy.execute",

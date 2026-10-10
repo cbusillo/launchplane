@@ -191,6 +191,19 @@ def prepare(
             raise ValueError(
                 "Self-deploy requires a fresh deployment marker before draining releases."
             )
+        if session.scalar(
+            select(LaunchplaneServiceDeployDrainRow.record_id)
+            .where(
+                LaunchplaneServiceDeployDrainRow.payload["deployment_marker"].as_string()
+                == deployment_marker,
+                LaunchplaneServiceDeployDrainRow.payload["request_fingerprint"].as_string()
+                != request_fingerprint,
+            )
+            .limit(1)
+        ):
+            raise ValueError(
+                "Self-deploy requires an unused deployment marker for each new request."
+            )
         repair_matches = current is not None and (
             supersedes_deployment_marker == current.deployment_marker
             and target_type == current.target_type

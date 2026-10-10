@@ -318,7 +318,9 @@ their effects. The release read explains the pause; the engineering runtime read
 exposes `runtime.release_drain` and its running operation IDs.
 
 `POST /v1/drivers/launchplane/self-deploy` uses its existing authorization and a
-fresh `deploy.oauth_env.LAUNCHPLANE_DEPLOYMENT_MARKER`. While operations run it
+fresh, never-reused `deploy.oauth_env.LAUNCHPLANE_DEPLOYMENT_MARKER`. The workflow
+generates it from the run and attempt; direct callers supply a new marker for
+each new intent. While operations run it
 returns `result.deploy_state=draining`, without changing provider configuration
 or caching that poll as a completed idempotent response. Repeat the same payload
 and key until it returns `requested`. The Deploy Launchplane workflow does this
@@ -334,7 +336,13 @@ An active provider request returns pollable `dispatch_in_progress`, also without
 caching the intermediate response. An expired release lease stays a drain
 blocker: losing its heartbeat does not prove the provider effect ended. Reconcile
 that operation through its existing recovery route before replacement.
-The request action tolerates network errors while polling the drain. A definite,
+The request action tolerates network errors while polling the drain. Its
+latest drain response is retained on timeout; a later failed request clears that
+response to retain uncertainty. Rollback skips only positively pre-effect
+outcomes. The authorized runtime read reconfirms its own matching image/marker
+when repair refusal restored a request whose startup raced the repair.
+Keyed and keyless self-deploys use the same canonical request fingerprint;
+per-caller idempotency response ownership is unchanged. A definite,
 non-retryable 4xx refusal of the first environment write records `refused`, frees
 this attempt's fence, and never dispatches or replays that request. The previous
 fence is restored: a refused repair cannot unlock an earlier uncertain replacement

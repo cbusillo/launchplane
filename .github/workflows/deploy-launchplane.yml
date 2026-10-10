@@ -977,8 +977,8 @@ jobs:
           set -euo pipefail
 
           if [ -s "${SELF_DEPLOY_RESPONSE_FILE:-}" ] \
-            && ! jq -e '(.result.deploy_state | IN("requested", "confirmed", "dispatch_in_progress"))
-              or .error.code == "self_deploy_reconciliation_required"' "$SELF_DEPLOY_RESPONSE_FILE" >/dev/null; then
+            && jq -e '.result.deploy_state == "draining"
+              or (.error.code | IN("self_deploy_refused", "self_deploy_fence_conflict", "invalid_request", "authorization_denied"))' "$SELF_DEPLOY_RESPONSE_FILE" >/dev/null; then
             echo "Forward request did not dispatch; no service rollback is needed."
             exit 0
           fi
