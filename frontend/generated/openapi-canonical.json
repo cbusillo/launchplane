@@ -29541,6 +29541,14 @@
             "title": "Monitoring Intent",
             "type": "string"
           },
+          "open_incidents": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductIncidentSummary"
+            },
+            "title": "Open Incidents",
+            "type": "array"
+          },
           "provenance": {
             "$ref": "#/components/schemas/DataProvenance"
           },

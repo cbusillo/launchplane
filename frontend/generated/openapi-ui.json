@@ -24929,6 +24929,14 @@
             "title": "Monitoring Intent",
             "type": "string"
           },
+          "open_incidents": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductIncidentSummary"
+            },
+            "title": "Open Incidents",
+            "type": "array"
+          },
           "provenance": {
             "$ref": "#/components/schemas/DataProvenance"
           },
@@ -24952,6 +24960,7 @@
         "required": [
           "checks",
           "monitoring_intent",
+          "open_incidents",
           "provenance",
           "public_incident_eligible",
           "trust_state"
