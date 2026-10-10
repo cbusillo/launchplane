@@ -344,7 +344,7 @@ def build_merge_train_dry_run_result(
                 )
                 if entry.eligible
                 and entry.owner_review_required
-                and (entry.required_checks_status != "pass" or entry.mergeable != "mergeable")
+                and (entry.required_checks_status != "pass" or entry.mergeable == "conflicting")
                 else entry
                 for entry in queue
             )

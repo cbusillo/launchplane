@@ -403,7 +403,7 @@ selects it together with the other ready admitted features for that repository
 and base. Pending, failed, unknown or conflicting Client features stay visible
 in the queue but outside that candidate; they do not delay accepted siblings.
 The existing CODEOWNERS individual-landing boundary still applies. Combined
-merge candidates preserve member heads without a branch refresh between them.
+merge-commit candidates preserve member heads without a branch refresh between them.
 The release invitation expands the recorded landing's members as described in
 [release review](release-review.md).
 

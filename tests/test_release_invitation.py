@@ -25,7 +25,10 @@ from control_plane.release_invitation import (
     release_request_issue_marker,
 )
 from control_plane.release_review import ReleaseReviewStore, build_release_review
-from control_plane.release_invitation_changes import ReleaseInvitationNotesUnavailable
+from control_plane.release_invitation_changes import (
+    ReleaseInvitationNotesUnavailable,
+    client_invitation_changes,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_release_review import decision, github_read, profile, seed
 
@@ -316,6 +319,25 @@ class ReleaseInvitationTests(unittest.TestCase):
         with self.assertRaisesRegex(ReleaseInvitationNotesUnavailable, "repeat"):
             self.publish()
         self.assertEqual(self.comments, [])
+
+    def test_batch_names_and_legacy_note_headings_remain_literal(self) -> None:
+        batch = self.seed_train_batch()
+        assert self.review.checklist is not None
+        for name in ("Support C#", "#"):
+            with self.subTest(name=name):
+                notes = (
+                    f"### #43 {name}\n\n## Check this\nUse the feature.\n### Details\nCheck again."
+                )
+                checklist = self.review.checklist.model_copy(
+                    update={"items": (batch.model_copy(update={"owner_test_notes": notes}),)}
+                )
+                changes = client_invitation_changes(
+                    cast(ReleaseReviewStore, self.store), self.profile, checklist
+                )
+                change = next(iter(changes.values()))
+                self.assertEqual(change.feature_name, name)
+                self.assertIn("Use the feature.", change.item.owner_test_notes)
+                self.assertIn("Check again.", change.item.owner_test_notes)
 
     def test_legacy_batch_receipt_is_adopted_without_another_ping(self) -> None:
         batch = self.seed_train_batch()

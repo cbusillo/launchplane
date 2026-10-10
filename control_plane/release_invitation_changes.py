@@ -72,17 +72,18 @@ def _release_items(
             sections: dict[int, tuple[str, list[str]]] = {}
             member: int | None = None
             for line, heading, _fence in _markdown_lines(item.owner_test_notes):
-                if heading and len(heading[1]) <= 3:
-                    member = None
-                    match = re.fullmatch(r"#([0-9]+)\s+(.+)", heading[2])
-                    if len(heading[1]) == 3 and match:
+                if heading and len(heading[1]) == 3:
+                    # These headings are generated, with literal PR titles.
+                    # CommonMark's optional closing hashes are title bytes here.
+                    match = re.fullmatch(r" {0,3}###\s+#([0-9]+)(?:[ \t]+(.*?))?[ \t]*", line)
+                    if match:
                         member = int(match[1])
                         if member in sections:
                             raise ReleaseInvitationNotesUnavailable(
                                 f"Release invitation batch notes repeat {repository}#{member}."
                             )
-                        sections[member] = (match[2].strip(), [])
-                    continue
+                        sections[member] = ((match[2] or "").strip(), [])
+                        continue
                 if member is not None:
                     sections[member][1].append(line)
             for entry in batch.entries:
