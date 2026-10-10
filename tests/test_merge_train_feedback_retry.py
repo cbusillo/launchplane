@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from datetime import datetime, timezone
 from email.message import Message
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -23,6 +24,7 @@ from control_plane.merge_train_pr_feedback import (
     MergeTrainPrFeedbackEnvelope,
     build_merge_train_pr_feedback_record,
     feedback_retry_is_due,
+    deliver_merge_train_pr_feedback_record,
     write_merge_train_pr_feedback_record,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -259,6 +261,69 @@ class MergeTrainFeedbackRetryTests(TestCase):
                 self.assertEqual(record.retryable, retryable)
                 self.assertFalse(feedback_retry_is_due(record, now="2026-10-01T06:00:59Z"))
                 self.assertEqual(feedback_retry_is_due(record, now=due), retryable)
+
+    def test_secondary_quota_without_retry_header_uses_actual_http_error_body(self) -> None:
+        for message, expected in (
+            ("You have exceeded a secondary rate limit. Please wait before you try again.", True),
+            ("Resource not accessible by integration", False),
+        ):
+            headers = Message()
+            headers["X-RateLimit-Remaining"] = "42"
+            import json
+
+            error = HTTPError(
+                "https://example.test/comment",
+                403,
+                "Forbidden",
+                headers,
+                BytesIO(json.dumps({"message": message}).encode()),
+            )
+            with patch("control_plane.workflows.launchplane.urlopen", side_effect=error):
+                record = _record()
+            self.assertEqual(record.retryable, expected)
+            self.assertEqual(bool(record.provider_retry_at), expected)
+            self.assertEqual(feedback_retry_is_due(record, now="2026-10-01T06:01:00Z"), expected)
+
+    def test_naive_retry_date_does_not_lose_failed_feedback(self) -> None:
+        headers = Message()
+        headers["Retry-After"] = "Thu, 01 Oct 2026 06:05:00 -0000"
+        error = HTTPError("https://example.test/comment", 503, "Unavailable", headers, None)
+        with patch(
+            "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+            side_effect=_failure(error),
+        ):
+            record = _record()
+        self.assertEqual(record.delivery_status, "failed")
+        self.assertTrue(feedback_retry_is_due(record, now="2026-10-01T06:01:00Z"))
+
+    def test_deferred_receipt_counts_only_actual_transport_attempts(self) -> None:
+        for event in ("completed", "waiting"):
+            with patch(
+                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment"
+            ) as comment:
+                record = build_merge_train_pr_feedback_record(
+                    request=MergeTrainPrFeedbackEnvelope(
+                        repository="cbusillo/alpha", pull_request_number=7, event=event
+                    ),
+                    policy_key="test",
+                    policy_sha256="digest",
+                    token="test-token",
+                    recorded_at=_TIME,
+                    response_trace_id=f"deferred-{event}",
+                    defer_until="2026-10-01T06:02:00Z",
+                )
+                comment.assert_not_called()
+            self.assertEqual(record.delivery_attempts, 0)
+            self.assertEqual(record.retryable, event == "completed")
+            with patch(
+                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                side_effect=_failure(URLError("outage")),
+            ):
+                attempted = deliver_merge_train_pr_feedback_record(
+                    record=record, token="test-token", attempted_at="2026-10-01T06:02:01Z"
+                )
+            self.assertEqual(attempted.delivery_attempts, 1)
+            self.assertTrue(feedback_retry_is_due(attempted, now="2026-10-01T06:03:01Z"))
 
     def test_provider_backoff_defers_other_pr_comments_and_retains_newer_status(self) -> None:
         policy = _policy_record(

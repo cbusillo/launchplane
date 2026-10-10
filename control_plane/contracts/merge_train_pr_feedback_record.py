@@ -42,7 +42,7 @@ class MergeTrainPrFeedbackRecord(BaseModel):
     comment_id: int = 0
     comment_url: str = ""
     error_message: str = ""
-    delivery_attempts: int = Field(default=1, ge=1)
+    delivery_attempts: int = Field(default=1, ge=0)
     retryable: bool = True
     retry_at: str = ""
     provider_retry_at: str = ""

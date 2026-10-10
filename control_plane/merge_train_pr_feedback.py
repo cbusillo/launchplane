@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from time import time_ns
@@ -158,6 +159,8 @@ def build_merge_train_pr_feedback_record(
         return record.model_copy(
             update={
                 "delivery_status": "failed",
+                "delivery_attempts": 0,
+                "retryable": record.event in {"completed", "stale_policy"},
                 "retry_at": defer_until,
                 "provider_retry_at": defer_until,
                 "error_message": "Comment delivery deferred by the provider quota deadline.",
@@ -250,20 +253,28 @@ def _delivery_retry(
         headers = cause.headers
         remaining = headers.get("x-ratelimit-remaining", "") if headers else ""
         retry_after = headers.get("retry-after", "") if headers else ""
+        secondary_limit = False
+        if cause.code == 403 and remaining != "0" and not retry_after:
+            try:
+                payload = json.loads(cause.read(4096))
+                message = payload.get("message") if isinstance(payload, dict) else None
+                secondary_limit = (
+                    isinstance(message, str) and "secondary rate limit" in message.casefold()
+                )
+            except (OSError, TypeError, ValueError):
+                pass
         rate_limited = cause.code == 429 or (
-            cause.code == 403 and (remaining == "0" or bool(retry_after))
+            cause.code == 403 and (remaining == "0" or bool(retry_after) or secondary_limit)
         )
-        transient = (
-            cause.code == 429
-            or cause.code >= 500
-            or (cause.code == 403 and (remaining == "0" or bool(retry_after)))
-        )
+        transient = rate_limited or cause.code >= 500
         if transient:
             if retry_after.isdigit():
                 deadlines.append(_timestamp(attempted_at) + timedelta(seconds=int(retry_after)))
             elif retry_after:
                 try:
-                    deadlines.append(parsedate_to_datetime(retry_after))
+                    parsed = parsedate_to_datetime(retry_after)
+                    if parsed.tzinfo is not None:
+                        deadlines.append(parsed)
                 except (ValueError, TypeError):
                     pass
             reset = headers.get("x-ratelimit-reset", "") if headers else ""
