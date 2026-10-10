@@ -52,6 +52,7 @@
     "eventDrivenDeploys": "docs/event-driven-deploys.md",
     "releaseReview": "docs/release-review.md",
     "productionBackupProvider": "docs/production-backup-provider.md",
+    "odooOnlineBackups": "docs/odoo-online-backups.md",
     "style": ["docs/style/python.md", "docs/style/testing.md"],
     "policies": ["docs/policies/coding-standards.md"]
   },
