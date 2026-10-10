@@ -26,8 +26,8 @@ against the provider and confirms containment in the target branch. It then
 clears the completed fence with `reason_code=completed_landing_policy_changed`,
 preserving the landing history and retaining the old candidate ref. It never
 re-admits or re-merges the root or repeats a stack collapse. For unfinished
-legacy stack disposition, the same supported controller pass verifies every
-unfinished child head against its PR and confirms containment in the landed
+legacy stack disposition, the same supported controller pass reads every
+unfinished child's current PR head and confirms its recorded head's containment in the landed
 root head before any provider write. Plain merge landings also require child
 containment in the merge commit; squash and rebase rely on the provider's
 exact merged-root head because those methods rewrite commit ancestry. It then resumes the
@@ -35,12 +35,18 @@ checkpointed comment, label and close effects using the current repository
 policy's disposition label; retries observe completed provider effects instead
 of repeating them. Completed non-stack history requires no provider writes.
 Persisted completed child dispositions are skipped, preserving any later work
-on a reopened child. Transient provider failures retain the controller's
+on a reopened child. If an unfinished child's head has moved, verified containment
+of its recorded head resolves only that historical disposition as `preserved`,
+with `preserved_head_sha` recording the observed newer head. The controller
+checkpoints this preservation before any remaining child effects. It never
+comments on, labels, closes, retargets or merges the changed PR; its new work
+continues through ordinary queue discovery. Landing and admission records and
+the original collapse progress remain unchanged. Transient provider failures retain the controller's
 retry classification and rate-limit reset evidence.
 
 Missing or incompatible recorded stack history stays fenced with
 `completed_landing_stack_reconciliation_required`. Missing current disposition
-configuration, changed child heads, unavailable child evidence and missing
+configuration, unavailable child evidence and missing
 containment return explicit `completed_landing_stack_*` reasons with the relevant
 record IDs. Conflicting or unavailable root evidence also preserves
 reconciliation. Diagnose through controller/status and resume through the

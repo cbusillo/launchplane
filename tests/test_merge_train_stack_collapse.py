@@ -310,6 +310,16 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             ["merge-32-31", "head-32"],
         )
 
+    def test_preserved_history_rejects_missing_or_unchanged_observed_head(self) -> None:
+        payload = _collapse_plan().model_dump(mode="json")
+        child = payload["child_dispositions"][0]
+        child["status"] = "preserved"
+        for head in ("", child["expected_head_sha"]):
+            with self.subTest(head=head):
+                child["preserved_head_sha"] = head
+                with self.assertRaisesRegex(ValueError, "different observed head"):
+                    MergeTrainStackCollapsePlan.model_validate(payload)
+
     def test_execute_plan_preserves_progress_before_failed_mutation(self) -> None:
         plan = _collapse_plan()
         branch_client = _RecordingStackCollapseBranchClient(

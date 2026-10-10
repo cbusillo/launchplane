@@ -1311,6 +1311,11 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 return True
         return False
 
+    def pull_request_head_sha(self, *, repository: str, pull_request_number: int) -> str:
+        return self._pull_request_head_sha(
+            pull_request_path=f"/repos/{_repository_path(repository)}/pulls/{pull_request_number}"
+        )
+
     def pull_request_is_closed(
         self, *, repository: str, pull_request_number: int, expected_head_sha: str
     ) -> bool:
