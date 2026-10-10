@@ -282,6 +282,39 @@ class ReleaseCompatibilityTests(unittest.TestCase):
         self.assertFalse(result.module_plan_complete)
         self.assertIn("unexamined_opaque_input_plan", result.reasons)
 
+    def test_non_module_build_config_requires_an_examined_plan_not_blanket_u(self) -> None:
+        for path in (
+            "pyproject.toml",
+            "docker-compose.yml",
+            ".dockerignore",
+            "package.json",
+            "tox.ini",
+        ):
+            with self.subTest(path=path):
+                before = artifact("old", files=(file(path, "dependency", module=""),))
+                after = artifact("new", files=(file(path, "dependency", module="", digest="b"),))
+                self.assertFalse(classify(before, after).module_plan_complete)
+                assert (
+                    before.release_compatibility is not None
+                    and after.release_compatibility is not None
+                )
+                before.release_compatibility = before.release_compatibility.model_copy(
+                    update={
+                        "opaque_inputs_sha256": release_opaque_inputs_sha256(before),
+                    }
+                )
+                after.release_compatibility = after.release_compatibility.model_copy(
+                    update={
+                        "opaque_inputs_sha256": release_opaque_inputs_sha256(after),
+                        "database_update_modules": (),
+                    }
+                )
+                result = classify(before, after)
+                self.assertEqual(result.classification, "database_changing")
+                self.assertTrue(result.module_plan_complete)
+                self.assertEqual(result.update_modules, ())
+                self.assertEqual(result.install_modules, ())
+
     def test_missing_history_declarations_or_full_inputs_cannot_be_compatible(self) -> None:
         after = artifact("new")
         self.assertEqual(classify(None, after).classification, "database_changing")

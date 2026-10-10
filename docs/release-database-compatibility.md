@@ -77,8 +77,12 @@ matching the fingerprint defined by `release_opaque_inputs_sha256` in
 semantic projection and hashing specification. The producer supplies
 `database_update_modules` naming the resolved update roots for its examined
 inputs. `null` means unexamined; an explicit empty list asserts no module DB
-work is required. Names must exist in the full module graph. Hash mismatch,
-missing baseline hash or missing candidate plan keeps execution incomplete.
+work is required. Names must exist in the full module graph. A non-addon dependency/build configuration file uses `kind=dependency` with
+an empty module and the same explicitly examined plan; that plan can be empty
+when no module work is required. This supports root `pyproject.toml`, Compose,
+Docker-ignore and package configuration changes without falsely treating them
+as documentation or guessing `-u`. Hash mismatch, missing baseline hash or
+missing candidate plan keeps execution incomplete.
 A matching plan stays `database_changing` and expands dependents, providing a
 supported path for framework/base-image and Python dependency updates without
 silently declaring overlap safe or copying the artifact install list.

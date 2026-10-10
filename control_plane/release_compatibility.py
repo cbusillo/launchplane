@@ -171,6 +171,11 @@ def classify_release_database_compatibility(
             old = production.release_compatibility
             new = candidate.release_compatibility
             assert old is not None and new is not None
+            examined_database_plan = (
+                old.opaque_inputs_sha256 == release_opaque_inputs_sha256(production)
+                and new.opaque_inputs_sha256 == release_opaque_inputs_sha256(candidate)
+                and new.database_update_modules is not None
+            )
             old_sources = {source.input_name: source for source in old.sources}
             for source in new.sources:
                 previous = old_sources.get(source.input_name)
@@ -197,14 +202,11 @@ def classify_release_database_compatibility(
                 reasons.add("read_write_compatibility_not_declared")
             if _opaque_inputs(production) != _opaque_inputs(candidate):
                 reasons.add("changed_base_dependency_or_build_inputs")
-                if (
-                    old.opaque_inputs_sha256 != release_opaque_inputs_sha256(production)
-                    or new.opaque_inputs_sha256 != release_opaque_inputs_sha256(candidate)
-                    or new.database_update_modules is None
-                ):
+                if not examined_database_plan:
                     complete = False
                     reasons.add("unexamined_opaque_input_plan")
                 else:
+                    assert new.database_update_modules is not None
                     update_roots.update(new.database_update_modules)
                     changed_modules.update(new.database_update_modules)
             graph = {module.name: set(module.depends) for module in new.modules}
@@ -258,6 +260,15 @@ def classify_release_database_compatibility(
                     update_roots.add(file.module)
                 elif file.kind in {"static", "manifest_assets"}:
                     warm_assets = True
+                elif file.kind == "dependency" and not file.module:
+                    reasons.add("changed_dependency")
+                    if examined_database_plan:
+                        assert new.database_update_modules is not None
+                        update_roots.update(new.database_update_modules)
+                        changed_modules.update(new.database_update_modules)
+                    else:
+                        reasons.add("unexamined_non_module_dependency_plan")
+                        complete = False
                 elif file.kind in {"database_data", "model", "migration", "dependency"}:
                     reasons.add(f"changed_{file.kind}")
                     update_roots.add(file.module)
