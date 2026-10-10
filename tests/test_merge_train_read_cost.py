@@ -242,7 +242,9 @@ class MergeTrainReadCostTests(unittest.TestCase):
                             stack_collapse_store=store,
                             controller_state_store=store,
                             admission_store=store,
-                            admission_evaluator=admission,
+                            admission_evaluator=cast(
+                                MergeAdmissionEvaluator, cast(object, admission)
+                            ),
                         )
                     )
                 deltas.append(provider.used - before)
