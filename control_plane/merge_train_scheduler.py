@@ -234,6 +234,7 @@ def _run_scheduled_target(
         requested_at=now(),
         current_policy_key=repository_policy.policy_key,
         current_policy_sha256=policy_record.policy_sha256,
+        policy_record=policy_record,
     )
     if admission.status != "admitted":
         return _target_result(
@@ -333,6 +334,7 @@ def _run_controller(
             github_token_scope=lambda **_: nullcontext(token),
             github_api=github_api_request,
             token_context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            reuse_commit_trees=True,
         ),
         technical_check_client=GitHubMergeTrainClient(
             transport=UrllibMergeTrainGitHubTransport(
