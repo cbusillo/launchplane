@@ -7,7 +7,7 @@ of its exact image and marker can confirm it. Old workers remain fenced even
 after confirmation, so overlapping containers cannot admit work before exiting.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from collections.abc import Iterator
 from contextlib import contextmanager
 import os
@@ -39,6 +39,14 @@ class ServiceDeployOutcomeUnknown(ValueError):
     """The provider dispatch may have happened; never replay it automatically."""
 
 
+class ServiceDeployDispatchBusy(ValueError):
+    """A live service request still owns dispatch; poll without caching this state."""
+
+
+class ServiceDeployFenceConflict(ServiceDeployOutcomeUnknown):
+    """This request did not acquire an earlier or mismatched replacement fence."""
+
+
 @contextmanager
 def dispatch_lock(store: Any) -> Iterator[None]:
     """A repair cannot overtake a still-running self-deploy provider call."""
@@ -59,7 +67,7 @@ def dispatch_lock(store: Any) -> Iterator[None]:
             text("select pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
             {"key": "launchplane:service-deploy-provider-dispatch"},
         ):
-            raise ServiceDeployOutcomeUnknown("A self-deploy provider call is still in progress.")
+            raise ServiceDeployDispatchBusy("A self-deploy provider call is still in progress.")
         yield
 
 
@@ -180,13 +188,13 @@ def prepare(
             and target_id == current.target_id
         )
         if supersedes_deployment_marker and not repair_matches:
-            raise ServiceDeployOutcomeUnknown("The superseded self-deploy fence does not match.")
+            raise ServiceDeployFenceConflict("The superseded self-deploy fence does not match.")
         if (
             current is not None
             and current.state in {"dispatching", "requested"}
             and not repair_matches
         ):
-            raise ServiceDeployOutcomeUnknown(
+            raise ServiceDeployFenceConflict(
                 "An earlier self-deploy requires matching startup or an explicit "
                 "marker-bound service repair."
             )
@@ -263,5 +271,7 @@ def read_status(store: Any) -> dict[str, object]:
             return {"state": "idle", "running_operation_ids": ()}
         result = record.model_dump()
         result["running_operation_ids"] = _running_operations(session)
-        result["admission_paused"] = not admission_allowed(session, datetime.now(UTC).isoformat())
+        result["admission_paused"] = not admission_allowed(
+            session, store._database_mutation_timestamp(session)
+        )
         return result

@@ -150,7 +150,6 @@ class ClientReleaseRedeployTests(unittest.TestCase):
                         )
                         effects.append("promote")
                         interrupt("promote")
-                        interrupt("post-check")
                         fixture.set_prod(accepted.checklist.candidate.artifact_id)
                         fixture.store.write_deployment_record(
                             odoo._deployment(
@@ -158,6 +157,9 @@ class ClientReleaseRedeployTests(unittest.TestCase):
                                 accepted.checklist.candidate.artifact_id,
                             )
                         )
+                        # The target and durable deployment now exist; post-checks
+                        # are still inside the admitted, unfinished operation.
+                        interrupt("post-check")
                         return OdooProdPromotionRunResult(
                             context=odoo.CONTEXT,
                             from_instance="testing",
@@ -504,6 +506,23 @@ class ClientReleaseRedeployTests(unittest.TestCase):
                     confirm_startup(fixture.store)
                     self.assertFalse(read_status(fixture.store)["admission_paused"])
                 fixture.doCleanups()
+
+    def test_expired_heartbeat_does_not_prove_an_admitted_effect_has_finished(self) -> None:
+        fixture = self.fixture("odoo")
+        fixture.accept()
+        fixture.advance()
+        operation = fixture.store.claim_next_verireel_prod_backup_gate_operation_record(
+            lease_owner="capture-still-running",
+            lease_expires_at=(datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+            claimed_at=datetime.now(UTC).isoformat(),
+        )
+        assert operation is not None
+        fixture.store.write_verireel_prod_backup_gate_operation_record(
+            operation.model_copy(update={"lease_expires_at": "2000-01-01T00:00:00Z"})
+        )
+        _, running, dispatch = _prepare(fixture.store)
+        self.assertEqual(running, (operation.operation_id,))
+        self.assertFalse(dispatch, "heartbeat loss cannot authorize killing a provider effect")
 
     def test_abandoned_pre_effect_drain_expires_without_expiring_dispatch(self) -> None:
         fixture = self.fixture("odoo")

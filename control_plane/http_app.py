@@ -896,7 +896,10 @@ from control_plane.preview_pr_feedback_remediation import (
     observe_managed_preview_pr_feedback,
     resolve_remediation_token,
 )
-from control_plane.workflows.launchplane_self_deploy import execute_launchplane_self_deploy
+from control_plane.workflows.launchplane_self_deploy import (
+    LaunchplaneSelfDeployResult,
+    execute_launchplane_self_deploy,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.launchplane import (
     github_api_request,
@@ -10539,29 +10542,45 @@ def create_launchplane_fastapi_app(
             )
         except (ValueError, click.ClickException) as error:
             from control_plane.service_deploy_drain import (
+                ServiceDeployDispatchBusy,
+                ServiceDeployFenceConflict,
                 ServiceDeployOutcomeUnknown,
             )
 
-            if isinstance(error, ServiceDeployOutcomeUnknown):
+            if isinstance(error, ServiceDeployDispatchBusy):
+                driver_result = LaunchplaneSelfDeployResult(
+                    target_type=self_deploy_request.deploy.target_type,
+                    target_id=self_deploy_request.deploy.target_id,
+                    image_reference=self_deploy_request.deploy.image_reference,
+                    image_reference_changed=False,
+                    authz_policy_changed=False,
+                    deploy_state="dispatch_in_progress",
+                )
+            elif isinstance(error, ServiceDeployOutcomeUnknown):
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
-                    code="self_deploy_reconciliation_required",
+                    code=(
+                        "self_deploy_fence_conflict"
+                        if isinstance(error, ServiceDeployFenceConflict)
+                        else "self_deploy_reconciliation_required"
+                    ),
                     message=str(error),
                 ) from error
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            ) from error
+            else:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="invalid_request",
+                    message="Request could not be completed.",
+                ) from error
 
         response = accepted_evidence_response(
             trace_id=trace_id,
             records=launchplane_self_deploy_records(driver_result),
             result=driver_result.model_dump(mode="json"),
         )
-        if driver_result.deploy_state == "draining":
+        if driver_result.deploy_state in {"draining", "dispatch_in_progress"}:
             # The next POST must re-read live progress, rather than replay this poll.
             return response
         store_apply_idempotency(

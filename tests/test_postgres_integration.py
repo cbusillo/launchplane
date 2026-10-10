@@ -3418,14 +3418,14 @@ def _owner_control_shadow_envelope(
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
     def test_self_deploy_repair_cannot_overtake_an_active_provider_dispatch(self) -> None:
-        from control_plane.service_deploy_drain import ServiceDeployOutcomeUnknown, dispatch_lock
+        from control_plane.service_deploy_drain import ServiceDeployDispatchBusy, dispatch_lock
 
         with _head_postgres_database() as url:
             original = PostgresRecordStore(database_url=url)
             repair = PostgresRecordStore(database_url=url)
             try:
                 with dispatch_lock(original):
-                    with self.assertRaises(ServiceDeployOutcomeUnknown):
+                    with self.assertRaises(ServiceDeployDispatchBusy):
                         with dispatch_lock(repair):
                             self.fail("Repair overtook the original provider dispatch")
                 with dispatch_lock(repair):

@@ -325,6 +325,10 @@ and key until it returns `requested`. The Deploy Launchplane workflow does this
 with its existing request action. Each drain poll renews a two-minute pre-effect
 fence; an abandoned drain expires without stranding pending Client releases.
 Final admission rechecks the fence and running operations under the same lock.
+An active provider request returns pollable `dispatch_in_progress`, also without
+caching the intermediate response. An expired release lease stays a drain
+blocker: losing its heartbeat does not prove the provider effect ended. Reconcile
+that operation through its existing recovery route before replacement.
 
 Provider dispatch is recorded before its first effect and never automatically
 replayed after an uncertain response. Per-request receipts survive later service
@@ -341,7 +345,11 @@ new key, a compatible immutable image, a fresh marker, and
 `runtime.release_drain`. The target must also match that fence. This deliberately
 requests one new service replacement; it never replays the original dispatch
 or clears the fence before healthy matching startup. Automatic service rollback
-uses the same marker-bound repair. After gated break-glass restores a compatible
+uses the same marker-bound repair, including same-image configuration failures.
+For a cancelled run, manually dispatch Deploy Launchplane with the compatible
+`image_reference`, a new `self_deploy_idempotency_key` and the exact
+`supersedes_deployment_marker` from `runtime.release_drain`; this uses the existing
+workflow authorization. Automatic runs cannot set the repair input. After gated break-glass restores a compatible
 service, use this route to reconcile any remaining fence; never edit its DB row.
 Provider-call serialization refuses a repair while an earlier service request
 is still executing, so a late original dispatch cannot overtake that repair.
@@ -372,6 +380,9 @@ both drivers, starts a separate replacement API process through its factory-stor
 lifespan and health read, reopens worker storage, resumes the drill once, and preserves failed
 forward outcomes after automatic recovery. PostgreSQL integration separately
 proves both admission-versus-drain race orders with real database locks.
+The local rehearsal uses synthetic providers and SQLite; its API starts in a
+new process while the test reopens worker storage. Installed worker-process and
+provider qualification remains the Supervisor's next step.
 
 ### Interrupted provider operations
 

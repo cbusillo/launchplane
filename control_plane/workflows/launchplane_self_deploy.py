@@ -224,7 +224,9 @@ class LaunchplaneSelfDeployResult(BaseModel):
     target_type: Literal["compose", "application"]
     target_id: str
     image_reference: str
-    deploy_state: Literal["draining", "requested", "confirmed"] = "requested"
+    deploy_state: Literal["draining", "dispatch_in_progress", "requested", "confirmed"] = (
+        "requested"
+    )
     running_operation_ids: tuple[str, ...] = ()
     release_drain_complete: bool = False
     image_reference_changed: bool

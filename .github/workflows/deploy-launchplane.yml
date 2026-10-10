@@ -43,6 +43,10 @@ on:
         description: Exact bounded idempotency key for a reviewed manual self-deploy.
         required: false
         type: string
+      supersedes_deployment_marker:
+        description: Exact unsettled runtime.release_drain marker for a reviewed service repair.
+        required: false
+        type: string
       omit_every_code_env:
         description: Temporarily omit Every Code env for one compatibility deploy.
         required: false
@@ -156,6 +160,7 @@ jobs:
           DISPATCH_ORDINARY_AGENT_WORKERS_EXPECTED_STATE: ${{ inputs.ordinary_agent_workers_expected_state }}
           DISPATCH_IMAGE_REFERENCE: ${{ inputs.image_reference }}
           DISPATCH_SELF_DEPLOY_IDEMPOTENCY_KEY: ${{ inputs.self_deploy_idempotency_key }}
+          DISPATCH_SUPERSEDES_DEPLOYMENT_MARKER: ${{ inputs.supersedes_deployment_marker }}
           EVENT_NAME: ${{ github.event_name }}
           WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           WORKFLOW_SHA: ${{ github.sha }}
@@ -271,6 +276,12 @@ jobs:
           fi
 
           forward_deployment_marker="github-actions:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:deploy"
+          supersedes_deployment_marker="${DISPATCH_SUPERSEDES_DEPLOYMENT_MARKER:-}"
+          validate_single_line_value "superseded deployment marker" "$supersedes_deployment_marker"
+          if [ -n "$supersedes_deployment_marker" ] && [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "Only manual deploys may supply supersedes_deployment_marker." >&2
+            exit 1
+          fi
           rollback_deployment_marker="github-actions:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:rollback"
           validate_single_line_value "forward deployment marker" "$forward_deployment_marker"
           validate_single_line_value "rollback deployment marker" "$rollback_deployment_marker"
@@ -296,6 +307,7 @@ jobs:
             printf 'ordinary_agent_workers=%s\n' "$ordinary_agent_workers"
             printf 'ordinary_agent_workers_expected_state=%s\n' "$ordinary_agent_workers_expected_state"
             printf 'self_deploy_idempotency_key=%s\n' "$self_deploy_idempotency_key"
+            printf 'supersedes_deployment_marker=%s\n' "$supersedes_deployment_marker"
             printf 'forward_deployment_marker=%s\n' "$forward_deployment_marker"
             printf 'rollback_deployment_marker=%s\n' "$rollback_deployment_marker"
           } >> "$GITHUB_OUTPUT"
@@ -441,6 +453,7 @@ jobs:
           ORDINARY_AGENT_WORKERS: ${{ steps.prep.outputs.ordinary_agent_workers }}
           ORDINARY_AGENT_WORKERS_EXPECTED_STATE: ${{ steps.prep.outputs.ordinary_agent_workers_expected_state }}
           DEPLOYMENT_MARKER: ${{ steps.prep.outputs.forward_deployment_marker }}
+          SUPERSEDES_DEPLOYMENT_MARKER: ${{ steps.prep.outputs.supersedes_deployment_marker }}
           DEPLOY_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
           IMAGE_REPOSITORY: ${{ steps.prep.outputs.image_repository }}
           LAUNCHPLANE_SECRET_KEYS_JSON: ${{ secrets.LAUNCHPLANE_SECRET_KEYS_JSON }}
@@ -714,6 +727,7 @@ jobs:
               --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
               --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
               --arg image_reference "$DEPLOY_IMAGE_REFERENCE" \
+              --arg supersedes_deployment_marker "${SUPERSEDES_DEPLOYMENT_MARKER:-}" \
               --argjson service_env "$service_env_json" \
               --argjson service_env_expected_absent "$service_env_expected_absent_json" \
               --argjson service_env_expected_values "$service_env_expected_values_json" \
@@ -721,6 +735,7 @@ jobs:
               --argjson ordinary_agent_worker_replicas "$ordinary_agent_worker_replicas_json" \
               '{schema_version: 1, product: "launchplane", deploy: (
                 {target_type: $target_type, target_id: $target_id, image_reference: $image_reference}
+                + (if $supersedes_deployment_marker != "" then {supersedes_deployment_marker: $supersedes_deployment_marker} else {} end)
                 + (if ($service_env | length) > 0 then {oauth_env: $service_env} else {} end)
                 + (if ($service_env_removals | length) > 0 then {oauth_env_removals: $service_env_removals} else {} end)
                 + (if ($service_env_expected_absent | length) > 0 then {oauth_env_expected_absent: $service_env_expected_absent} else {} end)
@@ -753,7 +768,7 @@ jobs:
           expected-status: "200,202"
           fail-result-paths: ""
           poll-result-path: result.deploy_state
-          poll-result-statuses: draining
+          poll-result-statuses: draining,dispatch_in_progress
           poll-interval-ms: "10000"
           poll-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.timeout_ms }}
           timeout-ms: "30000"
@@ -961,19 +976,14 @@ jobs:
           set -euo pipefail
 
           if [ -s "${SELF_DEPLOY_RESPONSE_FILE:-}" ] \
-            && jq -e '.result.deploy_state == "draining"' "$SELF_DEPLOY_RESPONSE_FILE" >/dev/null; then
-            echo "Release drain timed out before dispatch; no service rollback is needed."
+            && ! jq -e '(.result.deploy_state | IN("requested", "confirmed", "dispatch_in_progress"))
+              or .error.code == "self_deploy_reconciliation_required"' "$SELF_DEPLOY_RESPONSE_FILE" >/dev/null; then
+            echo "Forward request did not dispatch; no service rollback is needed."
             exit 0
           fi
           previous_image_reference="$PREVIOUS_IMAGE_REFERENCE"
           if [ -z "$previous_image_reference" ]; then
             echo "No previous Launchplane image reference is available for rollback."
-            exit 0
-          fi
-          if [ "$previous_image_reference" = "$DEPLOYED_IMAGE_REFERENCE" ] \
-            && [ "$BOOTSTRAP_SECRET_OPERATION" = "preserve" ] \
-            && [ "$ORDINARY_AGENT_WORKERS" = "preserve" ]; then
-            echo "No distinct previous Launchplane image reference is available for rollback."
             exit 0
           fi
 
@@ -1106,7 +1116,7 @@ jobs:
           expected-status: "200,202"
           fail-result-paths: ""
           poll-result-path: result.deploy_state
-          poll-result-statuses: draining
+          poll-result-statuses: draining,dispatch_in_progress
           poll-interval-ms: "10000"
           poll-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.timeout_ms }}
           timeout-ms: "30000"

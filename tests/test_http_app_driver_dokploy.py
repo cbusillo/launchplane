@@ -1090,6 +1090,19 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 deploy.assert_not_called()
                 update.assert_not_called()
             fixture.finish(backup_id)
+            from control_plane.service_deploy_drain import ServiceDeployDispatchBusy
+
+            with patch(
+                "control_plane.service_deploy_drain.dispatch_lock",
+                side_effect=ServiceDeployDispatchBusy("active request"),
+            ):
+                response = await _post_launchplane_self_deploy(
+                    app, payload, idempotency_key="isolated-drain"
+                )
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(response.json()["result"]["deploy_state"], "dispatch_in_progress")
+            deploy.assert_not_called()
+            update.assert_not_called()
             for _ in range(2):
                 response = await _post_launchplane_self_deploy(
                     app, payload, idempotency_key="isolated-drain"
