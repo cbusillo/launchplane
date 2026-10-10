@@ -111,7 +111,7 @@ def _passing_verification_evidence() -> dict[str, object]:
 
 def _passing_backup_capture_evidence() -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "backup_nonce": "c" * 64,
         "backup_record_id": "backup-gate-cm-prod-1",
         "database_name": "cm",
@@ -119,6 +119,13 @@ def _passing_backup_capture_evidence() -> dict[str, object]:
         "filestore_archive_sha256": "b" * 64,
         "database_dump_size": 4096,
         "filestore_archive_size": 8192,
+        "consistency_protocol": "postgres-exported-snapshot-odoo-hardlinks-v1",
+        "postgres_snapshot_id": "00000001-00000001-1",
+        "recovery_point_at": "2026-10-09T00:00:00+00:00",
+        "image_id": "sha256:" + "d" * 64,
+        "attachment_count": 2,
+        "attachment_file_count": 1,
+        "attachment_inventory_sha256": "e" * 64,
     }
 
 

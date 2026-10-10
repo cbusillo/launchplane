@@ -402,7 +402,7 @@ def _execute_land_mode(
                             (
                                 disposition.pull_request_number
                                 for disposition in progress_plan.child_dispositions
-                                if disposition.status != "closed"
+                                if not disposition.completed
                             ),
                             None,
                         ),
