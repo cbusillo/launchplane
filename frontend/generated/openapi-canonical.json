@@ -16365,7 +16365,8 @@
               "poll_interval_elapsed",
               "poll_interval_pending",
               "backoff_elapsed",
-              "backoff_pending"
+              "backoff_pending",
+              "github_rate_limit_pending"
             ],
             "title": "Reason Code",
             "type": "string"
