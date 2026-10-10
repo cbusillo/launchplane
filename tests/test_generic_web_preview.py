@@ -537,6 +537,26 @@ class GenericWebPreviewTests(unittest.TestCase):
                 label="Generic web preview refresh",
             )
 
+    def test_inventory_refuses_a_preview_with_missing_provider_identity(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture-token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
+                return_value=[
+                    {"environments": [{"applications": [{"name": "syo-preview-preview-42-site"}]}]}
+                ],
+            ),
+        ):
+            with self.assertRaises(click.ClickException):
+                execute_generic_web_preview_inventory(
+                    control_plane_root=Path("."),
+                    record_store=_GenericWebPreviewStore(_profile()),
+                    request=GenericWebPreviewInventoryRequest(product="sellyouroutboard"),
+                )
+
     def test_execute_generic_web_preview_inventory_filters_by_app_prefix(self) -> None:
         store = _GenericWebPreviewStore(_profile())
         raw_projects = [

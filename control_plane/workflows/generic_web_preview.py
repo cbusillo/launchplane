@@ -1649,7 +1649,9 @@ def execute_generic_web_preview_inventory(
             application.get("applicationId") or application.get("id") or ""
         ).strip()
         if not application_id:
-            continue
+            raise click.ClickException(
+                "Dokploy project inventory has incomplete application identity."
+            )
         preview_items.append(
             GenericWebPreviewInventoryItem(
                 applicationId=application_id,
