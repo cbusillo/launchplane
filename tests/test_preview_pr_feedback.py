@@ -73,6 +73,13 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
         self.assertIn("https://pr-42.preview.example.test", markdown)
         self.assertIn(review_url, markdown)
         self.assertNotIn("/files", markdown)
+        visible_lines = [
+            line for line in markdown.splitlines() if line and not line.startswith("<!--")
+        ]
+        self.assertIn("Change review (preview)", visible_lines[0])
+        self.assertIn("is this one change exactly right?", visible_lines[0])
+        self.assertIn("nothing goes live yet", markdown)
+        self.assertNotIn("Release review", markdown)
 
     def test_marked_pull_request_without_an_owner_says_so(self) -> None:
         markdown = self._ready_markdown(owner_review_requested=True)

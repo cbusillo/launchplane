@@ -8,6 +8,11 @@ The Client named on the product profile reviews a preview at `/ui/owner-review`.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
 Launchplane accepts a product-review decision.
 
+A preview invitation's first visible line names **Change review (preview)** and
+asks whether this one change is exactly right. It links that change's preview
+and explains that Accept approves the change while nothing goes live yet.
+The separate release invitation is described in [release-review.md](release-review.md).
+
 A Client does not need an authorization policy role to sign in. When GitHub
 sign-in finds no policy role but the user is the named Client of an active
 product, Launchplane issues an `owner` session. That session is accepted only by
