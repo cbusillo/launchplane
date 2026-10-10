@@ -455,6 +455,17 @@ The local rehearsal uses synthetic providers and SQLite; its API starts in a
 new process while the test reopens worker storage. Installed worker-process and
 provider qualification remains the Supervisor's next step.
 
+The runtime image uses the environment installed during its locked build;
+startup does not resolve or rebuild Python dependencies. This lets a compatible
+repair image start without package-registry access. CI qualifies the packaged
+API and both release-worker entrypoints on an isolated network with PostgreSQL,
+then recreates them against the same database and checks the replacement marker.
+It also starts an isolated ordinary-agent worker replica to check its sanitized
+startup probe uses the installed Python environment.
+For the local `qualityGate.build.serviceCompose` command, first set
+`LAUNCHPLANE_CI_POSTGRES_IMAGE` from the top-level environment in the CI workflow;
+that workflow owns the PostgreSQL test image pin.
+
 ### Interrupted provider operations
 
 Failures before any provider effect are recorded as terminal failures for this

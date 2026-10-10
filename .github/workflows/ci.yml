@@ -10,6 +10,9 @@ name: CI
   schedule:
     - cron: "17 9 * * *"
 
+env:
+  LAUNCHPLANE_CI_POSTGRES_IMAGE: &postgres_test_image postgres:17@sha256:0af65001d05296a2ead57ac4a6412433d8913d1bb5d0c88435a7d1e1ee5cb04b
+
 permissions:
   contents: read
 
@@ -326,6 +329,9 @@ jobs:
           docker run --rm --entrypoint ssh "$LAUNCHPLANE_CI_IMAGE_TAG" -V
           docker run --rm --entrypoint gh "$LAUNCHPLANE_CI_IMAGE_TAG" --version
 
+      - name: Qualify packaged service Compose restart
+        run: exec bash scripts/qualify-service-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG" "$LAUNCHPLANE_CI_POSTGRES_IMAGE"
+
       - name: Qualify ordinary worker Compose lifecycle
         run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
 
@@ -414,6 +420,9 @@ jobs:
         run: |
           docker run --rm --entrypoint ssh "$LAUNCHPLANE_CI_IMAGE_TAG" -V
           docker run --rm --entrypoint gh "$LAUNCHPLANE_CI_IMAGE_TAG" --version
+
+      - name: Qualify packaged service Compose restart
+        run: exec bash scripts/qualify-service-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG" "$LAUNCHPLANE_CI_POSTGRES_IMAGE"
 
       - name: Qualify ordinary worker Compose lifecycle
         run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
@@ -870,7 +879,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:17@sha256:0af65001d05296a2ead57ac4a6412433d8913d1bb5d0c88435a7d1e1ee5cb04b
+        image: *postgres_test_image
         env:
           POSTGRES_USER: launchplane_test
           POSTGRES_DB: launchplane_root
