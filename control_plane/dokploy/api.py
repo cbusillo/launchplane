@@ -356,7 +356,7 @@ def search_dokploy_applications(
 
 
 def fetch_dokploy_application_domains(
-    *, host: str, token: str, application_id: str
+    *, host: str, token: str, application_id: str, strict: bool = False
 ) -> tuple[JsonObject, ...]:
     normalized_application_id = application_id.strip()
     if not normalized_application_id:
@@ -371,7 +371,10 @@ def fetch_dokploy_application_domains(
         raise click.ClickException(
             "Dokploy application domain lookup returned an invalid response."
         )
-    return tuple(domain for item in payload if (domain := as_json_object(item)) is not None)
+    domains = tuple(domain for item in payload if (domain := as_json_object(item)) is not None)
+    if strict and len(domains) != len(payload):
+        raise click.ClickException("Dokploy domain inventory contains malformed entries.")
+    return domains
 
 
 def delete_dokploy_domain(*, host: str, token: str, domain_id: str) -> None:

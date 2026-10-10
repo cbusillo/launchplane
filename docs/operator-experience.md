@@ -258,7 +258,13 @@ Admins should not normally need to choose a raw context or understand provider
 lookup rows before taking safe action.
 
 Incidents remain children of product environments rather than a separate raw
-record browser. Product summaries surface active incident count and severity;
+record browser. Product summaries surface active incident count and severity
+from the canonical lane-wide `health_monitoring.open_incidents` collection,
+including generated TLS, cadence and deploy-fence occurrences. This collection
+reuses the incident-history summary and notification state; configured checks
+do not define the incident inventory. Resolved occurrences remain in history
+and disappear from the active overview. Open occurrences also block a green
+operational signal, even when ordinary health checks pass;
 the environment view owns lifecycle state, material evidence, observation
 history, and delivery evidence for one occurrence. GitHub, email, and Discord
 notifications are sinks, not authority. Incident surfaces are `inspect` actions
@@ -613,6 +619,12 @@ types remain only for UI state and view models.
 
 ### Browser Route Contract
 
+The light/dark switch saves only an explicit choice in browser local storage,
+scoped to the browser profile and Launchplane origin. The saved choice applies
+before the first render on every UI route, survives return visits, and updates
+other open tabs. Without a valid saved choice, the existing dark default applies.
+If the browser refuses storage, the switch still works for the current page.
+
 The clean-slate shell uses URL-owned product selection under the service-owned
 `/ui` prefix:
 
@@ -656,6 +668,11 @@ condition is failing. A provider-target record exposes recorded placement even
 without a public route binding, including for private-only services. That record
 does not establish public ingress, TLS ownership, or verified runtime identity;
 missing public route authority still blocks public-lane qualification.
+
+Products sidebar lane dots and their accessible descriptions use
+`environmentOperationalTone`, the same signal as product views. Absent lanes
+are neutral and described as absent (not recorded); missing or unsupported
+evidence stays unknown, warnings are amber, and failures are red.
 
 Open product inventories, workspaces, and environment evidence views refresh
 their read resources once a minute after a completed read. Hidden tabs pause

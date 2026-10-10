@@ -30,6 +30,17 @@ function environment() {
 test("a fresh identity and health verification makes a monitored lane green", () =>
   assert.equal(environmentOperationalTone(environment()), "verified"));
 
+test("a canonical generated occurrence blocks green independently of declared checks", () => {
+  const lane = environment();
+  const incident = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "prod").health_monitoring.open_incidents[0]);
+  incident.check_name = "launchplane-deploy-fence";
+  incident.check_kind = "provider";
+  lane.health_monitoring.open_incidents = [incident];
+  assert.equal(environmentOperationalTone(lane), "danger");
+  lane.health_monitoring.open_incidents = [];
+  assert.equal(environmentOperationalTone(lane), "verified");
+});
+
 test("stale or unverified identity cannot show green with passing HTTP", () => {
   /** @type {import("../src/generated/openapi.ts").DataProvenance["freshness_status"][]} */
   const statuses = ["stale", "recorded", "missing"];
