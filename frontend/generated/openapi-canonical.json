@@ -54928,6 +54928,11 @@
                         "title": "Policy B64",
                         "type": "string"
                       },
+                      "supersedes_deployment_marker": {
+                        "default": "",
+                        "title": "Supersedes Deployment Marker",
+                        "type": "string"
+                      },
                       "target_id": {
                         "title": "Target Id",
                         "type": "string"

@@ -309,8 +309,10 @@ the provider. Its transaction lock also covers backup and Odoo release claims
 (including failure recovery) and generic-web release reservations. A Client can
 accept while replacement is preparing; that decision and pending steps remain
 durable, but no new release effect starts behind the fence. Operations admitted
-before it finish their backup, deployment, drill, post-checks or compensation and
-commit normally. The API remains available during this drain. Completed step IDs
+before it finish their admitted backup, deployment, drill, post-checks or
+compensation and commit normally. Separately queued Odoo compensation remains
+durable and resumes on replacement workers if it was not yet admitted. The API
+remains available during this drain. Completed step IDs
 are reused after replacement, so polling or a worker restart cannot duplicate
 their effects. The release read explains the pause; the engineering runtime read
 exposes `runtime.release_drain` and its running operation IDs.
@@ -331,7 +333,19 @@ expire, and old worker processes remain fenced even after confirmation. Pending
 operations then run on the matching replacement workers. A changed candidate,
 revocation or admin release hold still refuses forward release work. A lost self-deploy dispatch response returns
 `self_deploy_reconciliation_required` on replay; matching replacement startup
-can settle it without another dispatch. Uncertain release outcomes retain their
+can settle it without another dispatch. If no matching replacement starts,
+the existing authorized self-deploy route accepts a new repair request with a
+new key, a compatible immutable image, a fresh marker, and
+`deploy.supersedes_deployment_marker` equal to the stuck fence's marker from
+`runtime.release_drain`. The target must also match that fence. This deliberately
+requests one new service replacement; it never replays the original dispatch
+or clears the fence before healthy matching startup. Automatic service rollback
+uses the same marker-bound repair. After gated break-glass restores a compatible
+service, use this route to reconcile any remaining fence; never edit its DB row.
+Provider-call serialization refuses a repair while an earlier service request
+is still executing, so a late original dispatch cannot overtake that repair.
+A drain timeout before dispatch requests no service rollback; its pre-effect
+fence expires. Uncertain release outcomes retain their
 existing stopped or reconciliation state and are never retried by replacement.
 The reconciliation routes described below remain their supported recovery path.
 
@@ -345,13 +359,16 @@ retains the existing service rollback and gated break-glass paths in
 [operations](operations.md#launchplane-service-deploy-posture).
 
 First rollout must still occur with no active or invited Client release:
-containers running earlier code do not enforce this fence. Qualify the installed
+containers running earlier code do not enforce this fence. The additive schema
+migration also requires a schema-compatible repair image; an older image whose
+schema guard rejects the new head cannot resume workers. Qualify the installed
 service and both worker families before the Supervisor retires its temporary
 Client-invitation landing hold. This protects planned service replacements, not
 arbitrary host loss or a forced kill of an unsafe provider effect; those remain
 truthfully interrupted and require the existing reconciliation path. The isolated
 rehearsal is `tests.test_client_release_redeploy`; it drains during each step for
-both drivers, reopens storage, resumes the drill once, and preserves failed
+both drivers, starts a separate replacement API process through its factory-store
+lifespan and health read, reopens worker storage, resumes the drill once, and preserves failed
 forward outcomes after automatic recovery. PostgreSQL integration separately
 proves both admission-versus-drain race orders with real database locks.
 

@@ -1100,6 +1100,61 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             deploy.assert_called_once()
             update.assert_called_once()
 
+    async def test_uncertain_self_deploy_requires_bound_repair_and_dispatches_repair_once(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                    return_value=("https://provider.example", "synthetic"),
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
+                    return_value=self._compose_target(self._BOOTSTRAP_ENV),
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment",
+                    side_effect=[ClickException("synthetic lost response"), None],
+                ) as dispatch,
+            ):
+                payload = self._payload(
+                    oauth_env={"LAUNCHPLANE_DEPLOYMENT_MARKER": "failed-marker"}
+                )
+                for _ in range(2):
+                    response = await _post_launchplane_self_deploy(
+                        app, payload, idempotency_key="failed-dispatch"
+                    )
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertEqual(
+                        response.json()["error"]["code"], "self_deploy_reconciliation_required"
+                    )
+                dispatch.assert_called_once()
+                repair = self._payload(oauth_env={"LAUNCHPLANE_DEPLOYMENT_MARKER": "repair-marker"})
+                repair_deploy = repair["deploy"]
+                assert isinstance(repair_deploy, dict)
+                repair_deploy["supersedes_deployment_marker"] = "failed-marker"
+                for _ in range(2):
+                    response = await _post_launchplane_self_deploy(
+                        app, repair, idempotency_key="explicit-repair"
+                    )
+                    self.assertEqual(response.status_code, 202, response.text)
+                    self.assertEqual(response.json()["result"]["deploy_state"], "requested")
+                self.assertEqual(dispatch.call_count, 2)
+
     async def test_self_deploy_replays_idempotent_response(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

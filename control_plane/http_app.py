@@ -4152,10 +4152,13 @@ def create_launchplane_fastapi_app(
         try:
             if health_monitor_scheduler is not None:
                 await run_in_threadpool(health_monitor_scheduler.start)
-            if isinstance(shared_record_store, PostgresRecordStore):
+            startup_record_store = (
+                record_store_factory() if record_store_factory is not None else shared_record_store
+            )
+            if isinstance(startup_record_store, PostgresRecordStore):
                 from control_plane.service_deploy_drain import confirm_startup
 
-                await run_in_threadpool(confirm_startup, shared_record_store)
+                await run_in_threadpool(confirm_startup, startup_record_store)
             yield
         finally:
             if health_monitor_scheduler is not None:

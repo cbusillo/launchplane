@@ -17,13 +17,27 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
         self.workflow = load_workflow(".github/workflows/deploy-launchplane.yml")
 
     def _run_step(
-        self, job: str, name: str, env: dict[str, str], directory: Path
+        self,
+        job: str,
+        name: str,
+        env: dict[str, str],
+        directory: Path,
+        expression_values: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         step = self.workflow.step_named(job, name)
         assert step is not None
         runtime = directory / "runtime.json"
         if not runtime.exists():
             runtime.write_text("{}\n", encoding="utf-8")
+        declared_env: dict[str, str] = {}
+        raw_env = step.data.get("env")
+        if isinstance(raw_env, dict):
+            for key, value in raw_env.items():
+                if isinstance(value, str):
+                    resolved = (expression_values or {}).get(value, value)
+                    resolved = resolved.replace("${{ runner.temp }}", str(directory))
+                    if "${{" not in resolved:
+                        declared_env[key] = resolved
         return subprocess.run(
             ["bash", "-c", step.run],
             cwd=Path.cwd(),
@@ -33,6 +47,7 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 "LANG": "C.UTF-8",
                 "GITHUB_OUTPUT": str(directory / "output"),
                 "RUNNER_TEMP": str(directory),
+                **declared_env,
                 "PREVIOUS_RUNTIME_RESPONSE_FILE": str(runtime),
                 "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
                 "LAUNCHPLANE_DOKPLOY_TARGET_ID": "compose-test",
@@ -110,17 +125,19 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
     ) -> None:
         with TemporaryDirectory() as directory_name:
             directory = Path(directory_name)
-            response = directory / "self-deploy.json"
+            response = directory / "launchplane-self-deploy-response.json"
             response.write_text(json.dumps({"result": {"release_drain_complete": True}}))
             result = self._run_step(
                 "deploy",
                 "Resolve deploy_runtime_wait remaining wait",
-                {
-                    "WAIT_DEADLINE_EPOCH": str(int(time.time()) - 10),
-                    "SELF_DEPLOY_RESPONSE_FILE": str(response),
-                    "DRAINED_WAIT_TIMEOUT_SECONDS": "17",
-                },
+                {},
                 directory,
+                expression_values={
+                    "${{ steps.deploy_wait_timeout.outputs.deadline_epoch }}": str(
+                        int(time.time()) - 10
+                    ),
+                    "${{ steps.deploy_wait_timeout.outputs.drained_timeout_seconds }}": "17",
+                },
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             values = dict(
@@ -141,6 +158,21 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 line.split("=", 1) for line in (directory / "output").read_text().splitlines()
             )
             self.assertLessEqual(int(later["timeout_ms"]), int(values["timeout_ms"]))
+
+    def test_timed_out_drain_does_not_request_service_rollback(self) -> None:
+        with TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            response = directory / "launchplane-self-deploy-response.json"
+            response.write_text(json.dumps({"result": {"deploy_state": "draining"}}))
+            result = self._run_step(
+                "deploy",
+                "Render Launchplane rollback request",
+                {"PREVIOUS_IMAGE_REFERENCE": "example.invalid/launchplane@sha256:" + "a" * 64},
+                directory,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((directory / "output").exists())
+            self.assertFalse((directory / "launchplane-self-deploy-rollback-payload.json").exists())
 
     def test_rendered_worker_changes_and_same_image_rollback_are_exact(self) -> None:
         base = {
@@ -167,6 +199,10 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 )
                 deploy = cast(dict[str, object], payload["deploy"])
                 self.assertEqual(deploy.get("ordinary_agent_worker_replicas"), wanted)
+                self.assertEqual(
+                    cast(dict[str, str], deploy["oauth_env"])["LAUNCHPLANE_DEPLOYMENT_MARKER"],
+                    base["DEPLOYMENT_MARKER"],
+                )
         rollback = self._render(
             "Render Launchplane rollback request",
             {
@@ -180,8 +216,13 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 "SELF_DEPLOY_IDEMPOTENCY_KEY": "self-deploy-key",
             },
         )
+        deploy = cast(dict[str, object], rollback["deploy"])
+        self.assertEqual(deploy["supersedes_deployment_marker"], "forward")
         self.assertEqual(
-            cast(dict[str, object], rollback["deploy"])["ordinary_agent_worker_replicas"],
+            cast(dict[str, str], deploy["oauth_env"])["LAUNCHPLANE_DEPLOYMENT_MARKER"], "rollback"
+        )
+        self.assertEqual(
+            deploy["ordinary_agent_worker_replicas"],
             {"expected": "1", "desired": "absent"},
         )
 

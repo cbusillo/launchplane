@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 import os
+import subprocess
+import sys
 from typing import Any
 import unittest
 from unittest.mock import patch
@@ -65,12 +67,29 @@ class ClientReleaseRedeployTests(unittest.TestCase):
         return fixture
 
     def restart(self, fixture: Any) -> None:
-        # A replacement process has no in-memory run state or old SQLAlchemy engine.
+        # Reopen durable records; replacement API startup is a separate process below.
         url = fixture.store.database_url
         fixture.store.close()
         fixture.store = PostgresRecordStore(database_url=url)
         self.addCleanup(fixture.store.close)
         fixture.store.ensure_schema()
+
+    def start_replacement_api(self, fixture: Any) -> None:
+        process = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tests.support.release_replacement_process",
+                fixture.store.database_url,
+            ],
+            env={"PATH": os.environ["PATH"], "LANG": "C.UTF-8", **_replacement_env()},
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(read_status(fixture.store)["state"], "confirmed")
 
     def capture(self, fixture: Any, interrupt: Any = None) -> BackupHost:
         host = BackupHost(after_snapshot=interrupt)
@@ -223,8 +242,7 @@ class ClientReleaseRedeployTests(unittest.TestCase):
                                 self.restart(fixture)
                                 confirm_startup(fixture.store)  # The old image cannot unlock it.
                                 self.assertEqual(read_status(fixture.store)["state"], "requested")
-                                with patch.dict(os.environ, _replacement_env()):
-                                    confirm_startup(fixture.store)
+                                self.start_replacement_api(fixture)
                                 self.assertEqual(
                                     fixture.advance(),
                                     (),
@@ -413,6 +431,52 @@ class ClientReleaseRedeployTests(unittest.TestCase):
             self.assertEqual(read_status(fixture.store)["state"], "confirmed")
             _, _, dispatch = _prepare(fixture.store)
             self.assertFalse(dispatch)
+
+    def test_marker_bound_repair_replaces_uncertain_dispatch_without_replaying_it(self) -> None:
+        for original_state in ("dispatching", "requested"):
+            with self.subTest(original_state=original_state):
+                fixture = self.fixture("odoo")
+                _prepare(fixture.store)
+                if original_state == "requested":
+                    record_dispatch(fixture.store, "rehearsal")
+                with self.assertRaises(ServiceDeployOutcomeUnknown):
+                    _prepare(fixture.store, "unbound-repair")
+                for marker, target in (("wrong", "isolated-control-plane"), (MARKER, "wrong")):
+                    with self.assertRaises(ServiceDeployOutcomeUnknown):
+                        prepare(
+                            fixture.store,
+                            request_fingerprint="repair",
+                            target_type="compose",
+                            target_id=target,
+                            image_reference=IMAGE,
+                            deployment_marker="repair-marker",
+                            supersedes_deployment_marker=marker,
+                        )
+                repair = dict(
+                    request_fingerprint="repair",
+                    target_type="compose",
+                    target_id="isolated-control-plane",
+                    image_reference=IMAGE,
+                    deployment_marker="repair-marker",
+                    supersedes_deployment_marker=MARKER,
+                )
+                _, running, dispatch = prepare(fixture.store, **repair)
+                self.assertTrue(dispatch)
+                self.assertFalse(running)
+                with self.assertRaises(ServiceDeployOutcomeUnknown):
+                    prepare(fixture.store, **repair)
+                record_dispatch(fixture.store, "repair")
+                self.assertFalse(prepare(fixture.store, **repair)[2])
+                with patch.dict(os.environ, _replacement_env()):
+                    confirm_startup(fixture.store)
+                self.assertEqual(read_status(fixture.store)["state"], "requested")
+                with patch.dict(
+                    os.environ,
+                    {**_replacement_env(), "LAUNCHPLANE_DEPLOYMENT_MARKER": "repair-marker"},
+                ):
+                    confirm_startup(fixture.store)
+                    self.assertFalse(read_status(fixture.store)["admission_paused"])
+                fixture.doCleanups()
 
     def test_abandoned_pre_effect_drain_expires_without_expiring_dispatch(self) -> None:
         fixture = self.fixture("odoo")

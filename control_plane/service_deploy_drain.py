@@ -8,7 +8,10 @@ after confirmation, so overlapping containers cannot admit work before exiting.
 """
 
 from datetime import UTC, datetime, timedelta
+from collections.abc import Iterator
+from contextlib import contextmanager
 import os
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -34,6 +37,30 @@ class ServiceDeployDraining(ValueError):
 
 class ServiceDeployOutcomeUnknown(ValueError):
     """The provider dispatch may have happened; never replay it automatically."""
+
+
+@contextmanager
+def dispatch_lock(store: Any) -> Iterator[None]:
+    """A repair cannot overtake a still-running self-deploy provider call."""
+    if store.database_dialect_name == "sqlite":
+        from control_plane.storage.filesystem import FilesystemRecordStore
+
+        database = store._engine.url.database
+        if not database or database == ":memory:":
+            raise ValueError("Self-deploy serialization requires a durable database.")
+        database_path = Path(database).resolve()
+        with FilesystemRecordStore(database_path.parent)._exclusive_record_lock(
+            "service-deploy-dispatch", str(database_path)
+        ):
+            yield
+        return
+    with store._session_factory() as session, session.begin():
+        if not session.scalar(
+            text("select pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": "launchplane:service-deploy-provider-dispatch"},
+        ):
+            raise ServiceDeployOutcomeUnknown("A self-deploy provider call is still in progress.")
+        yield
 
 
 def lock(store: Any, session: Any) -> None:
@@ -102,12 +129,14 @@ def prepare(
     target_id: str,
     image_reference: str,
     deployment_marker: str,
+    supersedes_deployment_marker: str = "",
 ) -> tuple[ServiceDeployDrainRecord, tuple[str, ...], bool]:
     """Return the durable fence, blockers, and one-time dispatch ownership.
 
     A repeated request after dispatch returns the saved state without dispatching
     again, including after a lost HTTP response. A different authorized self-deploy
-    can replace a requested fence (e.g. rollback), but cannot race a live drain.
+    can replace an unsettled fence with an explicitly marker-bound repair; this
+    is a new replacement intent, never a replay of the uncertain dispatch.
     """
     from control_plane.storage.postgres import LaunchplaneServiceDeployDrainRow
 
@@ -128,9 +157,21 @@ def prepare(
             raise ValueError(
                 "Self-deploy requires a fresh deployment marker before draining releases."
             )
-        if current is not None and current.state == "dispatching":
+        repair_matches = current is not None and (
+            supersedes_deployment_marker == current.deployment_marker
+            and target_type == current.target_type
+            and target_id == current.target_id
+        )
+        if supersedes_deployment_marker and not repair_matches:
+            raise ServiceDeployOutcomeUnknown("The superseded self-deploy fence does not match.")
+        if (
+            current is not None
+            and current.state in {"dispatching", "requested"}
+            and not repair_matches
+        ):
             raise ServiceDeployOutcomeUnknown(
-                "An earlier self-deploy dispatch requires provider reconciliation."
+                "An earlier self-deploy requires matching startup or an explicit "
+                "marker-bound service repair."
             )
         if (
             current is not None

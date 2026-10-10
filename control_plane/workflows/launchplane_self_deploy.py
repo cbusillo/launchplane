@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import urlparse
@@ -99,6 +100,7 @@ class LaunchplaneSelfDeployRequest(BaseModel):
     oauth_env_expected_absent: tuple[str, ...] = ()
     oauth_env_expected_values: dict[str, str] = Field(default_factory=dict)
     ordinary_agent_worker_replicas: OrdinaryAgentWorkerReplicasChange | None = None
+    supersedes_deployment_marker: str = ""
     no_cache: bool = False
 
     @model_validator(mode="before")
@@ -129,6 +131,9 @@ class LaunchplaneSelfDeployRequest(BaseModel):
             parse_authz_policy_toml(policy_text)
         self.target_id = self.target_id.strip()
         self.image_reference = self.image_reference.strip()
+        self.supersedes_deployment_marker = self.supersedes_deployment_marker.strip()
+        if "\n" in self.supersedes_deployment_marker or "\r" in self.supersedes_deployment_marker:
+            raise ValueError("The superseded deployment marker must be a single line.")
         self.policy_b64 = normalized_policy_b64
         normalized_oauth_env: dict[str, str] = {}
         for env_key, raw_value in self.oauth_env.items():
@@ -239,6 +244,29 @@ def execute_launchplane_self_deploy(
     record_store: object | None = None,
     request_fingerprint: str = "",
 ) -> LaunchplaneSelfDeployResult:
+    from control_plane.service_deploy_drain import dispatch_lock
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    with (
+        dispatch_lock(record_store)
+        if isinstance(record_store, PostgresRecordStore)
+        else nullcontext()
+    ):
+        return _execute_launchplane_self_deploy(
+            control_plane_root_path=control_plane_root_path,
+            request=request,
+            record_store=record_store,
+            request_fingerprint=request_fingerprint,
+        )
+
+
+def _execute_launchplane_self_deploy(
+    *,
+    control_plane_root_path: Path,
+    request: LaunchplaneSelfDeployRequest,
+    record_store: object | None,
+    request_fingerprint: str,
+) -> LaunchplaneSelfDeployResult:
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root_path)
     target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
@@ -309,6 +337,7 @@ def execute_launchplane_self_deploy(
             target_id=request.target_id,
             image_reference=request.image_reference,
             deployment_marker=request.oauth_env.get(LAUNCHPLANE_DEPLOYMENT_MARKER_ENV_KEY, ""),
+            supersedes_deployment_marker=request.supersedes_deployment_marker,
         )
         if not dispatch:
             return LaunchplaneSelfDeployResult(
@@ -322,27 +351,37 @@ def execute_launchplane_self_deploy(
                 release_drain_complete=drain.state != "draining",
             )
         release_drain_complete = True
-    if updated_env_map != previous_env_map:
-        dokploy_api.update_dokploy_target_env(
+    try:
+        if updated_env_map != previous_env_map:
+            dokploy_api.update_dokploy_target_env(
+                host=host,
+                token=token,
+                target_type=request.target_type,
+                target_id=request.target_id,
+                target_payload=target_payload,
+                env_text=updated_env_text,
+                launchplane_service_target=True,
+            )
+        dokploy_api.trigger_deployment(
             host=host,
             token=token,
             target_type=request.target_type,
             target_id=request.target_id,
-            target_payload=target_payload,
-            env_text=updated_env_text,
-            launchplane_service_target=True,
+            no_cache=request.no_cache,
         )
-    dokploy_api.trigger_deployment(
-        host=host,
-        token=token,
-        target_type=request.target_type,
-        target_id=request.target_id,
-        no_cache=request.no_cache,
-    )
-    if isinstance(record_store, PostgresRecordStore):
-        from control_plane.service_deploy_drain import record_dispatch
+        if isinstance(record_store, PostgresRecordStore):
+            from control_plane.service_deploy_drain import record_dispatch
 
-        record_dispatch(record_store, request_fingerprint)
+            record_dispatch(record_store, request_fingerprint)
+    except Exception as error:
+        if isinstance(record_store, PostgresRecordStore):
+            from control_plane.service_deploy_drain import ServiceDeployOutcomeUnknown
+
+            raise ServiceDeployOutcomeUnknown(
+                "Self-deploy provider outcome is unknown; use matching startup or "
+                "an explicit marker-bound service repair."
+            ) from error
+        raise
     return LaunchplaneSelfDeployResult(
         target_type=request.target_type,
         target_id=request.target_id,
