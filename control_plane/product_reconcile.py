@@ -38,6 +38,8 @@ import click
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
+from control_plane.client_test_notes import ClientTestNotes, change_client_review
+from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane import secrets
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
 from control_plane.dokploy.api import DokployRequestFailed
@@ -1428,8 +1430,21 @@ def _plan_preview_target(
     )
     if pull_request.get("state") != "open":
         return without_preview("pull_request_not_open")
-    # The agent that opened the PR marks it for the Owner with a label.
-    plan["owner_review_requested"] = profile.owner.review_label in _labels(pull_request)
+    intent = change_client_review(
+        body=str(pull_request.get("body") or ""),
+        labels=_labels(pull_request),
+        review_label=profile.owner.review_label,
+    )
+    if recorded_train_candidate(
+        store=record_store, repository=profile.repository, head=pull_request.get("head")
+    ):
+        intent = ClientTestNotes(False)
+    plan["owner_review_requested"] = intent.review_required and profile.owner.is_set
+    if profile.owner.is_set and intent.error:
+        plan.update(
+            action="wait", reason="client_test_notes_required", detail=intent.error, held=False
+        )
+        return _PreviewDecision(plan=plan, lifecycle_token=lifecycle_token, observed=observed)
     try:
         verified: VerifiedBuildArtifact | VerifiedGenericWebBuild = (
             verify_generic_web_build(

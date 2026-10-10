@@ -884,7 +884,7 @@ from control_plane.workflows.preview_pr_feedback import (
     EveryCodeWorkRequestReadStore,
     PreviewPrFeedbackPreviewReadStore,
     build_preview_pr_feedback_record,
-    pull_request_has_label,
+    pull_request_client_review,
 )
 from control_plane.preview_pr_feedback_remediation import (
     PreviewPrFeedbackRemediationStore,
@@ -22682,8 +22682,7 @@ def create_launchplane_fastapi_app(
             if supports_every_code_work_requests(record_store)
             else None
         )
-        # The agent that opened the pull request marks it for the Owner with a label;
-        # Launchplane does not try to detect Owner impact.
+        # Explicit test notes request Client review; the label remains an override.
         owner_review_requested = False
         owner_login = ""
         owner_review_url = ""
@@ -22693,13 +22692,14 @@ def create_launchplane_fastapi_app(
                 owner_profile = cast(
                     ProductProfileWriteStore, record_store
                 ).read_product_profile_record(feedback_request.product)
-                owner_review_requested = await run_in_threadpool(
-                    pull_request_has_label,
-                    control_plane_root=resolved_control_plane_root,
-                    context=effective_context,
-                    anchor_pr_url=feedback_request.anchor_pr_url,
-                    label=owner_profile.owner.review_label,
-                )
+                if owner_profile.owner.is_set:
+                    owner_review_requested = await run_in_threadpool(
+                        pull_request_client_review,
+                        control_plane_root=resolved_control_plane_root,
+                        context=effective_context,
+                        anchor_pr_url=feedback_request.anchor_pr_url,
+                        label=owner_profile.owner.review_label,
+                    )
                 if owner_review_requested and owner_profile.owner.is_set:
                     owner_login = owner_profile.owner.github_login
                     if human_session_manager is not None:
@@ -22709,8 +22709,12 @@ def create_launchplane_fastapi_app(
                             pull_request_number=feedback_request.anchor_pr_number,
                         )
             except (FileNotFoundError, OSError, RequestException, RuntimeError, ValueError):
-                _LOGGER.exception("Owner review mark could not be read during preview feedback.")
-                owner_review_requested = False
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="client_test_notes_required",
+                    message="Provide Client test notes or Nothing for the Client to test: <reason>.",
+                )
         try:
             feedback_record = build_preview_pr_feedback_record(
                 control_plane_root=resolved_control_plane_root,

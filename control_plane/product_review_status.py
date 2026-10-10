@@ -30,6 +30,7 @@ from control_plane.github_app_identity import (
     resolve_advisory_github_app_identity,
     revoke_installation_token,
 )
+from control_plane.client_test_notes import change_client_review
 from control_plane.product_review import ProductReviewStore
 from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 from control_plane.product_review_carry import carry_owner_acceptance, record_decision_base
@@ -68,6 +69,7 @@ class _PullRequestFacts:
     labels: frozenset[str]
     repository_id: str
     base_branch: str = ""
+    body: str = ""
 
 
 def owner_review_status(
@@ -190,7 +192,15 @@ class OwnerReviewStatusPublisher:
                                 "pull_request_number": pull_request_number,
                             },
                         )
-                    if profile.owner.review_label.strip().casefold() in facts.labels:
+                    intent = change_client_review(
+                        body=facts.body,
+                        labels=facts.labels,
+                        review_label=profile.owner.review_label,
+                    )
+                    if intent.review_required and (
+                        profile.owner.is_set
+                        or profile.owner.review_label.strip().casefold() in facts.labels
+                    ):
                         written = self._write_status(
                             store=store,
                             profile=profile,
@@ -299,6 +309,7 @@ class OwnerReviewStatusPublisher:
             labels=labels,
             repository_id=repository_id,
             base_branch=base_ref.strip() if isinstance(base_ref, str) else "",
+            body=str(payload.get("body") or ""),
         )
 
     def _write_status(
@@ -345,6 +356,11 @@ class OwnerReviewStatusPublisher:
             ),
             base_branch=facts.base_branch,
         )
+        intent = change_client_review(
+            body=facts.body, labels=facts.labels, review_label=profile.owner.review_label
+        )
+        if intent.error:
+            status = OwnerReviewStatus(state="failure", description=intent.error)
         if not facts.repository_id or not self.public_origin:
             raise ValueError("Client review check requires the Advisory App and public origin.")
         projection = AdvisoryCheckProjection(

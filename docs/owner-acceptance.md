@@ -5,6 +5,15 @@ title: Client Review and Retired Acceptance History
 ## Current Client review
 
 The Client named on the product profile reviews a preview at `/ui/owner-review`.
+Launchplane requests review when a pull request has real `Client test notes`
+(`Owner test notes` remains a supported heading). No label is needed. The
+product's review label remains an explicit override requiring real test notes.
+`Nothing for the Client to test: <reason>` with a nonempty reason marks an
+engineering-only change; it cannot be used with the review label. Missing notes,
+empty template comments, or a malformed engineering-only declaration visibly
+refuse preview readiness and merge admission for repositories feeding a Client
+release. Shared inputs are resolved from recorded production/testing artifacts,
+not a checked-in repository list.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
 Launchplane accepts a product-review decision.
 

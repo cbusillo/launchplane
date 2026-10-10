@@ -183,7 +183,10 @@ def _preview_feedback(
     failure_summary = ""
     waiting_for = ""
     status: PreviewPrFeedbackStatus
-    if action == "wait" and plan.get("reason") == "no_verified_build":
+    if action == "wait" and plan.get("reason") == "client_test_notes_required":
+        status = "pending"
+        waiting_for = _text(plan.get("detail"))
+    elif action == "wait" and plan.get("reason") == "no_verified_build":
         status = "pending"
         waiting_for = "a verified build of this commit"
     elif action == "apply" and error:

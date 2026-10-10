@@ -552,3 +552,42 @@ class ReleaseGitHubTests(unittest.TestCase):
         )
         self.assertEqual(len(items), 1)
         self.assertEqual(uncovered, ())
+
+
+class EngineeringNotesReleaseTests(unittest.TestCase):
+    def test_engineering_notes_allow_client_decision_but_bad_notes_do_not(self) -> None:
+        from control_plane.release_review import checklist_blockers
+
+        with TemporaryDirectory() as temporary:
+            store = FilesystemRecordStore(Path(temporary))
+            seed(store)
+            for notes, labels, blocked in (
+                ("Nothing for the Client to test: CI only.", [], False),
+                ("Nothing for the Client to test: CI only.", [{"name": "owner-review"}], True),
+                ("Nothing for the Client to test:", [], True),
+                ("", [], True),
+            ):
+                with self.subTest(notes=notes, labels=labels):
+
+                    def read(path: str) -> object:
+                        value = github_read(path)
+                        if isinstance(value, list):
+                            value[0]["body"] = "## Client test notes\n" + notes
+                            value[0]["labels"] = labels
+                        return value
+
+                    review = build_release_review(store=store, profile=profile(), read=read)
+                    assert review.checklist is not None
+                    self.assertEqual(bool(checklist_blockers(review.checklist)), blocked)
+                    if not blocked:
+                        accepted = ReleaseReviewDecisionRecord(
+                            record_id="engineering-accepted",
+                            product=profile().product,
+                            checklist_digest=review.checklist_digest,
+                            checklist=review.checklist,
+                            decision="accepted",
+                            actor_github_id=profile().owner.github_id,
+                            actor_github_login=profile().owner.github_login,
+                            decided_at="2026-10-10T00:00:00Z",
+                        )
+                        self.assertEqual(accepted.decision, "accepted")

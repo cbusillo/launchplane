@@ -313,6 +313,42 @@ def _github_repository_user_owner_login(*, owner: str, repo: str, token: str) ->
     return login.strip()
 
 
+def pull_request_client_review(
+    *, control_plane_root: Path, context: str, anchor_pr_url: str, label: str
+) -> bool:
+    from control_plane.client_test_notes import change_client_review
+
+    reference = github_pull_request_reference(pr_url=anchor_pr_url)
+    if reference is None:
+        raise ValueError("Client review requires a pull request reference.")
+    repository = f"{reference['owner']}/{reference['repo']}"
+    with launchplane_github_token(
+        token_resolver=resolve_launchplane_github_token,
+        api_request=github_api_request,
+        control_plane_root=control_plane_root,
+        context_name=context,
+        repository=repository,
+        purpose="repository_read",
+    ) as token:
+        payload = github_api_request(
+            path=f"/repos/{repository}/pulls/{reference['pr_number']}", token=token
+        )
+    if not isinstance(payload, dict):
+        raise ValueError("Client review notes could not be read.")
+    intent = change_client_review(
+        body=str(payload.get("body") or ""),
+        labels=(
+            str(item.get("name") or "")
+            for item in payload.get("labels", ())
+            if isinstance(item, dict)
+        ),
+        review_label=label,
+    )
+    if intent.error:
+        raise ValueError(intent.error)
+    return intent.review_required
+
+
 def pull_request_has_label(
     *, control_plane_root: Path, context: str, anchor_pr_url: str, label: str
 ) -> bool:

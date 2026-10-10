@@ -126,6 +126,46 @@ class SharedReleaseReviewTests(unittest.TestCase):
             self.assertIn(source.items[0].owner_test_notes, body)
         self.assertEqual(self.store.list_deployment_records(), ())
 
+    def test_shared_engineering_notes_allow_release_and_empty_reasons_block(self) -> None:
+        self.github.notes = "Nothing for the Client to test: Shared CI maintenance only."
+        accepted = self.accept()
+        self.assertTrue(self.review().approved)
+        self.assertTrue(accepted.checklist.shared_sources)
+        self.github.notes = "Nothing for the Client to test:"
+        review = self.review()
+        self.assertFalse(review.approved)
+        self.assertTrue(any("nonempty reason" in blocker for blocker in review.blockers))
+
+    def test_shared_release_membership_comes_from_recorded_artifact_sources(self) -> None:
+        from control_plane.client_release_repositories import client_release_profiles
+        from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
+        from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+        from typing import Any, cast
+
+        self.assertEqual(
+            client_release_profiles(store=self.store, repository="EXAMPLE/shared-addons"),
+            (profile(),),
+        )
+        self.assertEqual(
+            client_release_profiles(store=self.store, repository="example/unrelated"), ()
+        )
+        reader = GitHubMergeTrainSnapshotReader(
+            transport=RecordingMergeTrainGitHubTransport(responses=()),
+            branch_refresh_store=cast(Any, self.store),
+        )
+        self.assertTrue(
+            reader.client_review_intent(
+                labels=(), repository="example/shared-addons", body=""
+            ).error
+        )
+        self.assertFalse(
+            reader.client_review_intent(
+                labels=(),
+                repository="example/shared-addons",
+                body="## Client test notes\nNothing for the Client to test: CI only.",
+            ).error
+        )
+
     def test_shared_only_changes_still_have_a_checklist(self) -> None:
         artifact = self.store.read_artifact_manifest("artifact-testing")
         self.store.write_artifact_manifest(artifact.model_copy(update={"source_commit": BASE}))

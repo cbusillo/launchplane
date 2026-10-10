@@ -51,6 +51,12 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralEntryBinding,
     MergeTrainStructuralProvenance,
 )
+from control_plane.client_test_notes import ClientTestNotes, change_client_review
+from control_plane.client_release_repositories import (
+    ClientReleaseRepositoryStore,
+    client_release_profiles,
+    recorded_train_candidate,
+)
 from control_plane.github_payload import json_object
 from control_plane.github_payload import required_positive_int
 from control_plane.github_payload import required_string_text
@@ -2018,9 +2024,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         review_reader = GitHubMergeTrainSnapshotReader(
             transport=self.transport, branch_refresh_store=self._branch_refresh_store
         )
-        if require_client_review and review_reader.client_review_required(
-            labels=_labels(pull_request.get("labels")), repository=repository_path
-        ):
+        intent = review_reader.client_review_intent(
+            labels=_labels(pull_request.get("labels")),
+            repository=repository_path,
+            body=str(pull_request.get("body") or ""),
+        )
+        if intent.error:
+            raise MergeAdmissionDeniedError(intent.error, reason_code="client_test_notes_required")
+        if require_client_review and intent.review_required:
             review_status = _owner_review_status(
                 _list_check_runs(
                     transport=self.transport,
@@ -2197,9 +2208,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         review_reader = GitHubMergeTrainSnapshotReader(
             transport=self.transport, branch_refresh_store=self._branch_refresh_store
         )
-        if not review_reader.client_review_required(
-            labels=_labels(pull_request.get("labels")), repository=repository_path
-        ):
+        intent = review_reader.client_review_intent(
+            labels=_labels(pull_request.get("labels")),
+            repository=repository_path,
+            body=str(pull_request.get("body") or ""),
+        )
+        if intent.error:
+            raise MergeTrainGitHubStaleHeadError(intent.error, status_code=409)
+        if not intent.review_required:
             return
         review_status = _owner_review_status(
             _list_check_runs(
@@ -2848,11 +2864,17 @@ class GitHubMergeTrainSnapshotReader:
             )
             else None
         )
-        owner_review_required = self.client_review_required(
-            labels=labels, repository=base_repository
+        review_intent = self.client_review_intent(
+            labels=labels, repository=base_repository, body=str(source.get("body") or "")
         )
+        if recorded_train_candidate(
+            store=self._branch_refresh_store, repository=base_repository, head=head
+        ):
+            review_intent = ClientTestNotes(False)
+        owner_review_required = review_intent.review_required
         return MergeTrainPullRequestSnapshot(
             owner_review_required=owner_review_required,
+            client_test_notes_error=review_intent.error,
             number=pull_request_number,
             url=str(source.get("html_url") or "").strip(),
             title=str(source.get("title") or "").strip(),
@@ -2872,7 +2894,9 @@ class GitHubMergeTrainSnapshotReader:
             base_ref=_required_text(base.get("ref"), "GitHub pull request base requires ref."),
             base_repository=base_repository,
             mergeable=_mergeable_state(source) if enrich else "unknown",
-            required_checks_status=self._required_checks_status(
+            required_checks_status="fail"
+            if review_intent.error
+            else self._required_checks_status(
                 repository_path=repository_path,
                 head_sha=head_sha,
                 owner_review_required=owner_review_required,
@@ -3155,16 +3179,30 @@ class GitHubMergeTrainSnapshotReader:
             raise
         return "repo_admin" if str(payload.get("permission") or "") == "admin" else "unknown"
 
-    def client_review_required(self, *, labels: tuple[str, ...], repository: str) -> bool:
-        review_labels: set[str] = set()
-        list_profiles = getattr(self._branch_refresh_store, "list_product_profile_records", None)
-        if callable(list_profiles):
-            review_labels.update(
-                profile.owner.review_label.strip().casefold()
-                for profile in list_profiles()
-                if profile.is_active and profile.repository.casefold() == repository.casefold()
-            )
-        return bool(review_labels.intersection(label.casefold() for label in labels))
+    def client_review_intent(
+        self, *, labels: tuple[str, ...], repository: str, body: str
+    ) -> ClientTestNotes:
+        if not callable(getattr(self._branch_refresh_store, "list_product_profile_records", None)):
+            return ClientTestNotes(False)
+        profiles = client_release_profiles(
+            store=cast(ClientReleaseRepositoryStore, self._branch_refresh_store),
+            repository=repository,
+        )
+        intents = tuple(
+            change_client_review(body=body, labels=labels, review_label=profile.owner.review_label)
+            for profile in profiles
+        )
+        return ClientTestNotes(
+            any(intent.review_required for intent in intents),
+            next((intent.error for intent in intents if intent.error), ""),
+        )
+
+    def client_review_required(
+        self, *, labels: tuple[str, ...], repository: str, body: str = ""
+    ) -> bool:
+        return self.client_review_intent(
+            labels=labels, repository=repository, body=body
+        ).review_required
 
     def _required_checks_status(
         self, *, repository_path: str, head_sha: str, owner_review_required: bool = False

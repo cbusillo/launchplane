@@ -2944,11 +2944,17 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             ("owner-review", (_owner_review_check("success", head_sha="older-head"),), "pending"),
             ("missing-app", (_owner_review_check("success"),), "pending"),
             ("client-check", (), "pending"),
+            ("notes-without-label", (), "pending"),
             ("unrelated", (_owner_review_check("failure"),), "pass"),
         )
         for label, checks, expected in cases:
             with self.subTest(label=label, checks=checks):
                 pull = _github_pull_request(42)
+                pull["body"] = "## Client test notes\n" + (
+                    "Nothing for the Client to test: CI only."
+                    if label == "unrelated"
+                    else "Try the changed page."
+                )
                 pull["labels"] = [{"name": "ready-to-merge"}, {"name": label}]
                 transport = RecordingMergeTrainGitHubTransport(
                     responses=(
@@ -2969,7 +2975,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     is_active=True,
                     repository="cbusillo/sellyouroutboard",
                     owner=SimpleNamespace(
-                        review_label=label if label != "unrelated" else "client-check"
+                        is_set=True,
+                        review_label=label
+                        if label not in {"unrelated", "notes-without-label"}
+                        else "client-check",
                     ),
                 )
                 store = SimpleNamespace(
@@ -2990,14 +2999,14 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 SimpleNamespace(
                     is_active=False,
                     repository="cbusillo/sellyouroutboard",
-                    owner=SimpleNamespace(review_label="owner-review"),
+                    owner=SimpleNamespace(is_set=True, review_label="owner-review"),
                 ),
             ),
             (
                 SimpleNamespace(
                     is_active=True,
                     repository="cbusillo/sellyouroutboard",
-                    owner=SimpleNamespace(review_label="client-check"),
+                    owner=SimpleNamespace(is_set=True, review_label="client-check"),
                 ),
             ),
         ):
@@ -3010,7 +3019,9 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 )
                 self.assertFalse(
                     reader.client_review_required(
-                        labels=("owner-review",), repository="cbusillo/sellyouroutboard"
+                        labels=("unrelated",),
+                        repository="cbusillo/sellyouroutboard",
+                        body="## Client test notes\nNothing for the Client to test: CI only.",
                     )
                 )
 

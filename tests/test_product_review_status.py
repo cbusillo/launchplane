@@ -58,6 +58,11 @@ class _GitHub:
         labels: tuple[str, ...] = ("owner-review",),
         head_sha: str = _HEAD_SHA,
     ) -> None:
+        self.body = "## Client test notes\n" + (
+            "Try the changed page."
+            if "owner-review" in labels
+            else "Nothing for the Client to test: CI only."
+        )
         self.repository = repository
         self.labels = labels
         self.head_sha = head_sha
@@ -95,6 +100,7 @@ class _GitHub:
             self.writes.append((method, path, body))
         if path == f"{repository_path}/pulls/{_PULL_REQUEST}":
             return {
+                "body": self.body,
                 "head": {"sha": self.head_sha},
                 "labels": [{"name": label} for label in self.labels],
                 "base": {"repo": {"id": 5150}},
@@ -334,6 +340,16 @@ class OwnerReviewStatusTests(unittest.TestCase):
             github.statuses[0]["description"], "Waiting for @site-owner to review the preview"
         )
 
+    def test_real_notes_without_label_publish_review_and_missing_notes_fail(self) -> None:
+        github = _GitHub(labels=())
+        github.body = "## Client test notes\nTry the changed prices."
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "pending")
+        github.body = "## Client test notes\n<!-- empty template -->"
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        self.assertIn("missing", str(github.statuses[0]["description"]))
+
     def test_marked_pull_request_without_an_owner_says_so(self) -> None:
         github = _GitHub()
 
@@ -567,6 +583,9 @@ class OwnerReviewStatusTests(unittest.TestCase):
 
 class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        review_read = patch("control_plane.http_app.pull_request_client_review", return_value=True)
+        review_read.start()
+        self.addCleanup(review_read.stop)
         temporary_directory = TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         self.root = Path(temporary_directory.name)
