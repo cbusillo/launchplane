@@ -9,6 +9,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.generic_web_preview import GenericWebPreviewDestroyResult
 from control_plane.workflows.preview_lifecycle_cleanup import build_preview_lifecycle_cleanup_record
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewDestroyResult
+from tests.test_generic_web_preview import _profile
 
 
 class PreviewLifecycleCleanupTests(unittest.TestCase):
@@ -20,7 +21,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                 PreviewRecord(
                     preview_id="preview-syo-testing-sellyouroutboard-pr-42",
                     context="sellyouroutboard-testing",
-                    anchor_repo="sellyouroutboard",
+                    anchor_repo="site-repository",
                     anchor_pr_number=42,
                     anchor_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/42",
                     preview_label="sellyouroutboard/pr-42",
@@ -55,6 +56,25 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                     application_id="app-42",
                 ),
             ) as destroy:
+                refused = build_preview_lifecycle_cleanup_record(
+                    plan=plan,
+                    requested_at="2026-04-30T21:02:00Z",
+                    source="test",
+                    apply=True,
+                    destroy_reason="test_cleanup",
+                    control_plane_root=root,
+                    record_store=store,
+                    timeout_seconds=300,
+                    driver_id="generic-web",
+                    preview_slug_template="preview-{number}-site",
+                    profile=_profile().model_copy(update={"repository": "example/unrelated"}),
+                )
+                self.assertEqual(refused.status, "blocked")
+                destroy.assert_not_called()
+                self.assertEqual(
+                    store.read_preview_record("preview-syo-testing-sellyouroutboard-pr-42").state,
+                    "active",
+                )
                 record = build_preview_lifecycle_cleanup_record(
                     plan=plan,
                     requested_at="2026-04-30T21:02:00Z",
@@ -66,11 +86,13 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                     timeout_seconds=300,
                     driver_id="generic-web",
                     preview_slug_template="preview-{number}-site",
+                    profile=_profile().model_copy(update={"repository": "example/site-repository"}),
                 )
 
             self.assertEqual(record.status, "pass")
             self.assertEqual(record.destroyed_slugs, ("preview-42-site",))
             self.assertEqual(record.results[0].anchor_pr_number, 42)
+            self.assertEqual(record.results[0].anchor_repo, "site-repository")
             destroy.assert_called_once()
             preview = store.read_preview_record("preview-syo-testing-sellyouroutboard-pr-42")
             self.assertEqual(preview.state, "destroyed")

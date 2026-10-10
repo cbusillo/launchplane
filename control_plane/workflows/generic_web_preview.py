@@ -320,7 +320,7 @@ class GenericWebPreviewSmokeResult(BaseModel):
     failure_summary: str = ""
 
 
-def _anchor_repo(repository: str) -> str:
+def generic_web_preview_anchor_repo(repository: str) -> str:
     owner, separator, repo = repository.strip().partition("/")
     if not separator or not owner.strip() or not repo.strip() or "/" in repo.strip():
         raise click.ClickException("GitHub repository must use owner/repo format.")
@@ -458,21 +458,30 @@ def _iter_dokploy_applications(raw_projects: object) -> Iterator[JsonObject]:
     for raw_project in raw_projects:
         project = dokploy_api.as_json_object(raw_project)
         if project is None:
-            continue
+            raise click.ClickException("Dokploy project inventory contains an invalid project.")
         raw_environments = project.get("environments")
         if not isinstance(raw_environments, list):
-            continue
+            raise click.ClickException("Dokploy project inventory has incomplete environments.")
         for raw_environment in raw_environments:
             environment = dokploy_api.as_json_object(raw_environment)
             if environment is None:
-                continue
+                raise click.ClickException(
+                    "Dokploy project inventory contains an invalid environment."
+                )
             raw_applications = environment.get("applications")
             if not isinstance(raw_applications, list):
-                continue
+                raise click.ClickException("Dokploy project inventory has incomplete applications.")
             for raw_application in raw_applications:
                 application = dokploy_api.as_json_object(raw_application)
-                if application is not None:
-                    yield application
+                if application is None:
+                    raise click.ClickException(
+                        "Dokploy project inventory contains an invalid application."
+                    )
+                if not str(application.get("name") or "").strip():
+                    raise click.ClickException(
+                        "Dokploy project inventory contains an unnamed application."
+                    )
+                yield application
 
 
 def _find_application_by_name(*, host: str, token: str, application_name: str) -> JsonObject | None:
@@ -481,7 +490,8 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
         token=token,
         path="/api/project.all",
     )
-    for application in _iter_dokploy_applications(raw_projects):
+    # Validate the complete inventory before accepting a match or proving absence.
+    for application in tuple(_iter_dokploy_applications(raw_projects)):
         if str(application.get("name") or "").strip() == application_name:
             return application
     return None
@@ -1633,7 +1643,7 @@ def discover_generic_web_preview_desired_state(
         source=request.source,
         discovered_at=discovered_at,
         repository=resolved_profile.repository,
-        anchor_repo=_anchor_repo(resolved_profile.repository),
+        anchor_repo=generic_web_preview_anchor_repo(resolved_profile.repository),
         preview_slug_prefix=_preview_slug_prefix(resolved_profile.preview.slug_template),
         preview_slug_template=resolved_profile.preview.slug_template,
         max_pages=request.max_pages,
@@ -1736,11 +1746,24 @@ def _execute_generic_web_preview_destroy_unserialized(
         preview_slug=request.preview_slug,
     )
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
-    application = _find_application_by_name(
-        host=host,
-        token=token,
-        application_name=application_name,
-    )
+    try:
+        application = _find_application_by_name(
+            host=host,
+            token=token,
+            application_name=application_name,
+        )
+    except click.ClickException as error:
+        return GenericWebPreviewDestroyResult(
+            destroy_status="fail",
+            destroy_started_at=started_at,
+            destroy_finished_at=utc_now_timestamp(),
+            product=resolved_profile.product,
+            context=resolved_profile.preview.context,
+            preview_slug=request.preview_slug,
+            application_name=application_name,
+            application_id="",
+            error_message=str(error),
+        )
     if application is None:
         finished_at = utc_now_timestamp()
         return GenericWebPreviewDestroyResult(

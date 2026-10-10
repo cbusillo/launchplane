@@ -2121,6 +2121,56 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(result.error_message, "")
         self.assertEqual([request["path"] for request in requests], ["/api/project.all"])
 
+    def test_destroy_refuses_incomplete_inventory_without_provider_effects(self) -> None:
+        malformed_inventories: tuple[object, ...] = (
+            [{"projectId": "p"}],
+            [None],
+            [{"environments": {}}],
+            [{"environments": [None]}],
+            [{"environments": [{"applications": "malformed"}]}],
+            [{"environments": [{"applications": [None]}]}],
+            [{"environments": [{"applications": [{"applicationId": "opaque"}]}]}],
+            # An early match must not hide a broken remainder of the inventory.
+            [
+                {
+                    "environments": [
+                        {
+                            "applications": [
+                                {"name": "syo-preview-preview-42-site", "applicationId": "app-42"},
+                            ]
+                        }
+                    ]
+                },
+                {"projectId": "missing-relations"},
+            ],
+        )
+        for inventory in malformed_inventories:
+            with (
+                self.subTest(inventory=inventory),
+                patch(
+                    "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
+                    return_value=("https://provider.invalid", "inert-token"),
+                ),
+                patch(
+                    "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
+                    return_value=inventory,
+                ) as provider,
+            ):
+                result = execute_generic_web_preview_destroy(
+                    control_plane_root=Path("."),
+                    record_store=_GenericWebPreviewStore(_profile()),
+                    request=GenericWebPreviewDestroyRequest(
+                        product="sellyouroutboard",
+                        preview_slug="preview-42-site",
+                        destroy_reason="test",
+                    ),
+                )
+                self.assertEqual(result.destroy_status, "fail")
+                self.assertIn("inventory", result.error_message)
+                self.assertEqual(
+                    [call.kwargs["path"] for call in provider.call_args_list], ["/api/project.all"]
+                )
+
     def test_execute_generic_web_preview_destroy_uses_inventory_id_fallback(self) -> None:
         store = _GenericWebPreviewStore(_profile())
         requests: list[dict[str, object]] = []

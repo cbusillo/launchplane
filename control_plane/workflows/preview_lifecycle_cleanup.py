@@ -17,6 +17,7 @@ from control_plane.workflows.launchplane import find_preview_record
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyRequest,
     execute_generic_web_preview_destroy,
+    generic_web_preview_anchor_repo,
     preview_pr_number_from_slug,
 )
 from control_plane.workflows.verireel_preview_driver import (
@@ -106,7 +107,7 @@ def _build_generic_web_cleanup_record(
             error_message="Cleanup requires enabled previews and a plan matching its product/preview context; generate a fresh plan within the caller's existing authority.",
         )
     parsed_previews: list[tuple[str, int]] = []
-    anchor_repo = plan.product
+    anchor_repo = generic_web_preview_anchor_repo(profile.repository) if profile else plan.product
     for preview_slug in plan.orphaned_slugs:
         anchor_pr_number = preview_pr_number_from_slug(
             preview_slug=preview_slug,
