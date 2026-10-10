@@ -20,6 +20,9 @@ from control_plane.github_app_identity import (
     mint_pull_request_feedback_installation_token,
 )
 from control_plane.merge_train_github_token import resolve_merge_train_github_token
+from control_plane.github_read_cache import GitHubReadCache
+from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
+from tests.test_merge_train_read_cost import _Provider
 
 
 class MergeTrainGitHubTokenTests(unittest.TestCase):
@@ -138,6 +141,46 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                 },
             },
         )
+
+    def test_fresh_tokens_reuse_validators_only_for_the_same_validated_identity_and_key(
+        self,
+    ) -> None:
+        cache = GitHubReadCache()
+        http = _Provider()
+        with (
+            patch(
+                "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                return_value=self.private_key,
+            ),
+            patch(
+                "control_plane.github_app_identity._github_api_request", side_effect=self.provider
+            ),
+            patch("control_plane.merge_train_github_token.MERGE_TRAIN_READ_CACHE", cache),
+            patch("control_plane.merge_train_github.urlopen", http),
+        ):
+            tokens = [self.resolve(), self.resolve()]
+            for token in tokens:
+                UrllibMergeTrainGitHubTransport(token=token, read_cache=cache).request(
+                    method="GET", path="/value"
+                )
+            self.assertNotEqual(tokens[0], tokens[1])
+            self.assertEqual(self.minted, 2)
+            self.assertEqual(http.used, 1)
+            other_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            other_pem = other_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            ).decode()
+            with patch(
+                "control_plane.merge_train_github_token.secrets.resolve_context_secret_value",
+                return_value=other_pem,
+            ):
+                rotated = self.resolve()
+            UrllibMergeTrainGitHubTransport(token=rotated, read_cache=cache).request(
+                method="GET", path="/value"
+            )
+            self.assertEqual(http.used, 2)
 
     def test_shared_installation_write_grants_are_downscoped_for_observation(self) -> None:
         self.installation_permissions.update(checks="write", statuses="write")

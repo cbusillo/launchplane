@@ -143,7 +143,13 @@ class MergeTrainReadCostTests(unittest.TestCase):
         policy = build_test_merge_train_policy().policies[0]
         policy.enqueue.dependency_update_github_user_ids = (1001,)
         provider = _Provider()
-        provider.pulls = [dict(_github_pull_request(1), labels=[])]
+        provider.pulls = [
+            dict(
+                _github_pull_request(1),
+                labels=[],
+                user={"id": 1001, "type": "Bot", "login": "updates"},
+            )
+        ]
         reader = GitHubMergeTrainSnapshotReader(
             transport=UrllibMergeTrainGitHubTransport(
                 token="fixture", read_cache=GitHubReadCache()
@@ -153,7 +159,9 @@ class MergeTrainReadCostTests(unittest.TestCase):
         with patch("control_plane.merge_train_github.urlopen", provider):
             with self.assertRaises(KeyError):
                 reader.read_merge_train_snapshot(repository=policy.repository, base_branch="main")
-            self.assertTrue(provider.requests[-1].full_url.endswith("/pulls/1"))
+            self.assertTrue(
+                provider.requests[-1].full_url.endswith("/pulls/1/commits?per_page=100")
+            )
             policy.enqueue.label_required = False
             provider.pulls = [dict(_github_pull_request(2), labels=[])]
             with self.assertRaises(KeyError):
@@ -235,7 +243,7 @@ class MergeTrainReadCostTests(unittest.TestCase):
                 with self.assertRaises(MergeTrainGitHubError):
                     transport.request(method="GET", path=path)
 
-    def test_commit_pinned_contents_and_absence_are_reused_but_new_base_is_read(self) -> None:
+    def test_commit_pinned_contents_are_reused_but_new_base_and_absence_are_read(self) -> None:
         provider = _Provider()
         contents = "/repos/example/repo/contents/.github/CODEOWNERS"
         provider.payloads[contents] = {"content": "encoded owners"}
@@ -253,7 +261,7 @@ class MergeTrainReadCostTests(unittest.TestCase):
                 with self.assertRaises(MergeTrainGitHubError) as refusal:
                     transport.request(method="GET", path=absent)
                 self.assertEqual(refusal.exception.status_code, 404)
-            self.assertEqual(request.call_count, 1)
+            self.assertEqual(request.call_count, 2)
 
     def test_large_response_eviction_preserves_revalidation(self) -> None:
         provider = _Provider()

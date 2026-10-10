@@ -1,6 +1,9 @@
 """Resolve only the credential source declared by a merge-train policy."""
 
 import logging
+from datetime import datetime
+from hashlib import sha256
+import json
 from pathlib import Path
 
 import click
@@ -13,6 +16,7 @@ from control_plane.github_app_identity import (
     GitHubAppPermissionError,
     mint_merge_train_installation_token,
 )
+from control_plane.github_read_cache import MERGE_TRAIN_READ_CACHE
 
 MERGE_TRAIN_GITHUB_APP_SECRET_INTEGRATION = "merge_train_github_app"
 _LOGGER = logging.getLogger(__name__)
@@ -34,11 +38,31 @@ def resolve_merge_train_github_token(
                     "Merge train App credentials unavailable: exact_key_binding_missing"
                 )
                 return ""
-            return mint_merge_train_installation_token(
+            issued = mint_merge_train_installation_token(
                 identity=GitHubAppIdentity(app_id=app.app_id, private_key=private_key),
                 repository=repository,
                 repository_id=str(app.repository_id),
-            ).token
+            )
+            # Mint and validate exactly as before. Only validators are shared
+            # across fresh tokens for the same observed installation/grants.
+            scope = sha256(
+                json.dumps(
+                    {
+                        "app_id": issued.app_id,
+                        "installation_id": issued.installation_id,
+                        "repository_id": issued.repository_id,
+                        "permissions": sorted(issued.permissions),
+                        "key_sha256": sha256(private_key.encode()).hexdigest(),
+                    },
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+            MERGE_TRAIN_READ_CACHE.register_token_scope(
+                issued.token,
+                scope=scope,
+                expires_at=datetime.fromisoformat(issued.expires_at.replace("Z", "+00:00")),
+            )
+            return issued.token
         except GitHubAppPermissionError as error:
             # Only schema-owned permission names/levels; never provider errors or secret values.
             _LOGGER.warning(

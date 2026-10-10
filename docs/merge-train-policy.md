@@ -60,13 +60,16 @@ every non-draft PR. Unqueued and draft entries carry unknown readiness and canno
 justify a landing. A newly applied label is observed on the next list read.
 
 Authenticated REST GETs retain response bodies and ETags in a bounded process-local
-cache separated by credential and API origin. Paths include revision identifiers
+cache separated by credential scope and API origin. Native App tokens share
+validators only after mint-time validation binds the same App, installation,
+repository, permissions and managed-key fingerprint; token minting and grant
+validation remain fresh on every pass. Other credentials stay isolated by token. Paths include revision identifiers
 where the provider exposes them, including CODEOWNERS' base SHA and check results'
-head SHA. Commit-pinned contents and missing files are reused by that immutable
+head SHA. Successfully read commit-pinned contents are reused by that immutable
 revision; a moved base reads its own ownership file. Author permissions are shared
 by login only within the snapshot. Every mutable observation revalidates with GitHub; a terminal check can
 still be rerun or superseded. A 304 supplies the previously observed body and quota
-headers without charging primary quota. A restart or credential rotation starts
+headers without charging primary quota. A restart, grant change or managed-key rotation starts
 cold; a denied or failed read never supplies a cached answer.
 
 A dry-run controller invocation reuses its snapshot within that invocation and

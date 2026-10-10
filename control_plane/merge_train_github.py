@@ -247,7 +247,9 @@ class UrllibMergeTrainGitHubTransport:
         ).rstrip("/")
         self.response_headers_observer = response_headers_observer
         self._read_cache = read_cache if read_cache is not None else MERGE_TRAIN_READ_CACHE
-        self._cache_namespace = sha256(f"{self.api_base_url}\0{self.token}".encode()).hexdigest()
+        self._cache_namespace = self._read_cache.namespace(
+            token=self.token, api_origin=self.api_base_url
+        )
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         request_body = None
@@ -265,10 +267,6 @@ class UrllibMergeTrainGitHubTransport:
             and re.fullmatch(r"/repos/[^/]+/[^/]+/contents/[^?]+\?ref=[0-9a-fA-F]{40}", path)
         )
         if cached is not None and immutable_contents:
-            if cached.not_found:
-                raise MergeTrainGitHubError(
-                    "GitHub contents were absent at this commit.", status_code=404
-                )
             return cached.payload
         if cached is not None and cached.etag:
             headers["If-None-Match"] = cached.etag
@@ -308,10 +306,6 @@ class UrllibMergeTrainGitHubTransport:
             if error.code == 304 and cached is not None and method == "GET":
                 notify_github_quota_response_headers(self.response_headers_observer, error.headers)
                 return cached.payload
-            if error.code == 404 and immutable_contents:
-                self._read_cache.put(
-                    self._cache_namespace, path, etag="", payload=None, not_found=True
-                )
             raise _github_http_error(
                 method=method, path=path, status_code=error.code, error=error
             ) from error
@@ -2600,6 +2594,7 @@ class GitHubMergeTrainSnapshotReader:
         self._repository_policy = repository_policy
         self._actor_roles: dict[tuple[str, str], str] = {}
         self._author_roles: dict[tuple[str, str], str] = {}
+        self._dependency_classes: dict[tuple[str, int, str, str], DependencyUpdateClass] = {}
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -2660,11 +2655,30 @@ class GitHubMergeTrainSnapshotReader:
             return False
         user = _json_object(pull_request.get("user"), "GitHub pull request user")
         head = _json_object(pull_request.get("head"), "GitHub pull request head")
-        return (
+        if (
             not policy.enqueue.label_required
             or policy.enqueue_label in _labels(pull_request.get("labels"))
-            or user.get("id") in policy.enqueue.dependency_update_github_user_ids
             or str(head.get("ref") or "").startswith("launchplane/train/")
+        ):
+            return True
+        if (
+            user.get("id") not in policy.enqueue.dependency_update_github_user_ids
+            or user.get("type") != "Bot"
+        ):
+            return False
+        base = _json_object(pull_request.get("base"), "GitHub pull request base")
+        return (
+            self._safe_dependency_update_class(
+                repository_path=_repository_path(policy.repository),
+                pull_request_number=_required_int(
+                    pull_request.get("number"), "GitHub pull request requires number."
+                ),
+                author_id=_required_int(user.get("id"), "GitHub pull request user requires id."),
+                head_sha=_required_text(head.get("sha"), "GitHub pull request head requires sha."),
+                base_branch=str(base.get("ref") or ""),
+                base_sha=str(base.get("sha") or ""),
+            )
+            == "patch_or_minor"
         )
 
     def read_pull_request_snapshot(
@@ -2816,7 +2830,12 @@ class GitHubMergeTrainSnapshotReader:
                 base_branch=str(base.get("ref") or ""),
                 base_sha=str(base.get("sha") or ""),
             )
-            if enrich and str(user.get("type") or "") == "Bot"
+            if str(user.get("type") or "") == "Bot"
+            and (
+                enrich
+                or (repository_path, pull_request_number, head_sha, str(base.get("sha") or ""))
+                in self._dependency_classes
+            )
             else None
         )
         owner_review_required = self.client_review_required(
@@ -2866,8 +2885,11 @@ class GitHubMergeTrainSnapshotReader:
         base_sha: str,
     ) -> DependencyUpdateClass:
         # A read failure only withholds label-free admission; it must not stop the train.
+        key = (repository_path, pull_request_number, head_sha, base_sha)
+        if key in self._dependency_classes:
+            return self._dependency_classes[key]
         try:
-            return self._dependency_update_class(
+            result = self._dependency_update_class(
                 repository_path=repository_path,
                 pull_request_number=pull_request_number,
                 author_id=author_id,
@@ -2876,7 +2898,9 @@ class GitHubMergeTrainSnapshotReader:
                 base_sha=base_sha,
             )
         except MergeTrainGitHubError:
-            return "needs_review"
+            result = "needs_review"
+        self._dependency_classes[key] = result
+        return result
 
     def _dependency_update_class(
         self,
@@ -2926,13 +2950,16 @@ class GitHubMergeTrainSnapshotReader:
             if not isinstance(author, dict) or author.get("id") != author_id:
                 return "needs_review"
             messages.append(str(detail.get("message") or ""))
+        update_class = classify_dependency_update(messages)
+        if update_class != "patch_or_minor":
+            return update_class
         if self._force_pushed_by_other(
             repository_path=repository_path,
             pull_request_number=pull_request_number,
             author_id=author_id,
         ):
             return "needs_review"
-        return classify_dependency_update(messages)
+        return update_class
 
     def _recorded_base_refresh(
         self,
