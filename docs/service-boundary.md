@@ -1269,14 +1269,11 @@ policy-backed batch-landing phase for a requested repository/base branch. The
 native FastAPI route accepts `mode: plan` with a passed batch-candidate record id
 or `mode: land` with a landing-plan record id. Plan mode writes a
 `launchplane_merge_train_batch_landing_plans` record with the original PR order,
-expected head SHAs, expected base SHA, and policy merge method. Land mode merges
-the original PRs in that order through GitHub's PR merge endpoint. Before each
-merge it requires the PR to remain open at the recorded head SHA and target the
-recorded base ref and rolling base SHA, then also uses GitHub's head-SHA guard.
-Recovery adopts a merged PR only when the recorded target branch contains its
-reported merge commit. A later commit after the final merge is accepted only
-when the final merge commit remains in target-branch history; divergence and
-force-push removal stay stale conflicts. When landing a collapsed stack root,
+expected head SHAs, expected base SHA, and policy merge method. Land mode follows
+the canonical [PR-Native Landing](merge-train-policy.md#pr-native-landing)
+contract, which owns the provider target, landing-mode exceptions and completion
+evidence. [Batch And Recovery](merge-admission.md#batch-and-recovery) owns
+admission and outcome reconciliation. When landing a collapsed stack root,
 the route validates the linked
 stack-collapse record before the root merge and then writes stack-child
 disposition evidence after the landing record is persisted. Accepted calls
