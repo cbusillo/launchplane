@@ -551,6 +551,11 @@ result, trace, and failure evidence. An uncertain apply locks every editable
 draft field so the only mutation retry preserves the original operation key and
 payload. Live-target endpoints returned in `next_actions` are rendered as
 inspect-only evidence until they have a separate generated browser adapter.
+For both configuration forms, a server or gateway 5xx after dispatch keeps the
+Apply uncertain even when the error response is valid JSON. The retained key and
+fingerprint survive navigation/reload; a pre-dispatch failure or explicit client
+refusal remains definitive. A retry that began uncertain still requires evidence
+that the original operation settled before its identity can be discarded.
 
 The environment Managed secrets form can also select a credential supplied by the
 named Client. The Client receives the focused `/ui/owner-secrets` page, containing

@@ -136,7 +136,7 @@ export function productConfigFailureCertainty(
   error: unknown,
   dispatched: boolean,
 ): "definitive" | "uncertain" {
-  if (error instanceof LaunchplaneApiError) {
+  if (error instanceof LaunchplaneApiError && error.statusCode < 500) {
     return "definitive";
   }
   return dispatched ? "uncertain" : "definitive";
