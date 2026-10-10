@@ -41,7 +41,11 @@ for (const evidence of ["route", "tls"] as const) for (const environmentView of 
     });
     await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { error: { code: "authorization_denied" } } }));
     await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: fixture.identity } }));
-    await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", products: [fixture.product] } }));
+    await page.route("**/v1/products", route => {
+      const product = structuredClone(fixture.product);
+      if (mode === "fresh") setDeadlines(product, start + 10 * READ_REFRESH_INTERVAL_MS);
+      return route.fulfill({ json: { status: "ok", products: [product] } });
+    });
     const productUrl = `**/v1/products/${fixture.product.product}`;
     const detailUrl = `${productUrl}/environments/testing`;
     if (environmentView) await page.route(productUrl, route => route.fulfill({ json: { status: "ok", product: fixture.product } }));
@@ -63,6 +67,8 @@ for (const evidence of ["route", "tls"] as const) for (const environmentView of 
         : page.getByText("Route authority", { exact: true }).locator("..")
       : page.locator(".signal-tile").filter({ hasText: /^Testing/i });
     const assertState = async (expired: boolean) => {
+      const dot = page.locator(".rail-product-link").filter({ hasText: fixture.product.display_name }).locator('[data-lane="testing"]');
+      await expect(dot).toHaveAttribute("data-tone", expired ? "warning" : "verified");
       if (environmentView) await expect(page.getByLabel("Lane status")).toHaveAttribute("data-tone", expired ? "warning" : "verified");
       if (environmentView && evidence === "tls") await expect(page.locator(".tls-domain-list li").first()).toHaveAttribute("data-tone", expired ? "warning" : "pass");
       if (environmentView && evidence === "route") await expect(signal).toContainText(expired ? "Stale" : "Recorded");
@@ -93,6 +99,8 @@ for (const evidence of ["route", "tls"] as const) for (const environmentView of 
     await assertState(true);
     mode = "fresh";
     releaseRead!();
+    // The sidebar has an independent collection read; let it receive fresh proof too.
+    await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
     await assertState(false);
     expect(mutations).toEqual([]);
     expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
