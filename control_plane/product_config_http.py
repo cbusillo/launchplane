@@ -450,6 +450,38 @@ class ProductEnvironmentConfigRefused(ValueError):
         self.status_code = status_code
 
 
+def product_config_has_undeclared_runtime_settings(
+    *, profile: LaunchplaneProductProfileRecord, request: ProductConfigApplyEnvelope
+) -> bool:
+    lane = next(
+        (
+            lane
+            for lane in profile.lanes
+            if lane.context.strip() == request.context and lane.instance.strip() == request.instance
+        ),
+        None,
+    )
+    declared = {
+        requirement.key
+        for requirement in profile.expected_config.runtime_environment_keys
+        if lane is not None
+        and product_config_requirement_applies_to_lane(
+            requirement_context=requirement.context,
+            requirement_instance=requirement.instance,
+            lane=lane,
+        )
+    }
+    for runtime_input in (request.runtime_env, request.runtime_environment):
+        values = (
+            runtime_input.env
+            if isinstance(runtime_input, ProductConfigRuntimeInput)
+            else runtime_input
+        )
+        if values and set(key.strip() for key in values) - declared:
+            return True
+    return False
+
+
 def product_environment_config_apply_request(
     *,
     profile: LaunchplaneProductProfileRecord,
@@ -457,7 +489,6 @@ def product_environment_config_apply_request(
     request: ProductEnvironmentConfigApplyEnvelope,
     owner_submission_resolver: Callable[[ProductSecretConfigRequirement, str], str] | None = None,
     current_retired_provider_keys: tuple[str, ...] = (),
-    undeclared_settings_allowed: bool = True,
 ) -> ProductConfigApplyEnvelope:
     runtime_requirements = {
         requirement.key
@@ -488,19 +519,12 @@ def product_environment_config_apply_request(
     # A site's own settings need no declaration (#2467); no declaration vouches for them,
     # so each must be a plain setting rather than a credential.
     site_setting_keys = sorted(set(request.runtime_settings) - runtime_requirements)
-    if site_setting_keys and not undeclared_settings_allowed:
-        raise ProductEnvironmentConfigRefused(
-            "A live product's undeclared settings are recorded by an admin, "
-            "not with the local_operator credential the Director's agent uses.",
-            code="live_product_requires_operator",
-            status_code=403,
-        )
     secret_binding_keys = {binding_key for _, binding_key in secret_requirements}
     for key in site_setting_keys:
         if (
             not _ENV_KEY_PATTERN.fullmatch(key)
             or key in secret_binding_keys
-            or provider_key_adoption.looks_like_credential(key, str(request.runtime_settings[key]))
+            or provider_key_adoption.looks_like_credential(key, "")
         ):
             raise ProductEnvironmentConfigRefused(
                 f"Site setting {key!r} must be an env key name holding a plain setting; "
