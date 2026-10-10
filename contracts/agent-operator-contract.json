@@ -52,11 +52,12 @@
         "method": "POST",
         "modes": [
           "dry-run",
-          "apply"
+          "apply",
+          "reconcile"
         ],
         "operation_id": "restart_lane_service",
         "path": "/v1/drivers/odoo/service-restart",
-        "purpose": "Inspect or restart one existing lane service on its current accepted artifact.",
+        "purpose": "Inspect or restart one existing lane service on its current accepted artifact, or reconcile its original receipt without another restart.",
         "response_statuses": [
           "200",
           "409",
@@ -67,7 +68,7 @@
           "current_artifact_identity",
           "release_lane_exclusion"
         ],
-        "schema_fingerprint_sha256": "8200f8c6836964e88c68bcb0d1feed3bd96e52b7ede46eacc2883ed49f624e2b",
+        "schema_fingerprint_sha256": "453c60609347a5292b904587cd76174202f7399e371d35b2346e99204c87b5c7",
         "supported_surfaces": [
           "bounded_admin_helper",
           "operator_ui",
@@ -623,8 +624,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "2ce93edda4058ec34a4addfda28c08193f984373"
+    "source_commit_sha": "ea545371d435a0038c15b6a301b8783f221cfdc1"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "b5a323dbe8bd0efd2577e989e1acfaf69adb79e313958f163534c3424dc498a2"
+  "semantic_digest_sha256": "a84b55f3b54416fbd230db1f70f96d34783ee97789fc70c24f39f0bf29fe24c9"
 }

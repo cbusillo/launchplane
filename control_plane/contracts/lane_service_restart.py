@@ -3,9 +3,10 @@
 import hashlib
 import json
 import re
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 SERVICE_RESTART_ROUTE = "/v1/drivers/odoo/service-restart"
@@ -23,7 +24,7 @@ class LaneServiceRestartRequest(BaseModel):
     instance: str = Field(min_length=1, max_length=128)
     service: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,127}$")
     reason: str = Field(min_length=1, max_length=1000)
-    mode: Literal["dry-run", "apply"] = "dry-run"
+    mode: Literal["dry-run", "apply", "reconcile"] = "dry-run"
     reviewed_plan_sha256: str = ""
 
     @model_validator(mode="after")
@@ -33,7 +34,7 @@ class LaneServiceRestartRequest(BaseModel):
             if not value:
                 raise ValueError(f"Restart requires {name}.")
             setattr(self, name, value)
-        if self.mode == "apply" and not re.fullmatch(r"[a-f0-9]{64}", self.reviewed_plan_sha256):
+        if self.mode != "dry-run" and not re.fullmatch(r"[a-f0-9]{64}", self.reviewed_plan_sha256):
             raise ValueError("Apply requires the reviewed restart plan digest.")
         if self.mode == "dry-run" and self.reviewed_plan_sha256:
             raise ValueError("Dry-run cannot carry a reviewed plan digest.")
@@ -51,6 +52,14 @@ class RestartContainerIdentity(BaseModel):
     running: bool
     health: str
     runtime_identity_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @field_validator("started_at")
+    @classmethod
+    def validate_start_time(cls, value: str) -> str:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.year < 1970:
+            raise ValueError("Container start time is unavailable or ambiguous.")
+        return value
 
 
 class LaneServiceRestartPlan(BaseModel):
@@ -100,3 +109,18 @@ class LaneServiceRestartResponse(BaseModel):
     original_trace_id: str | None = Field(
         default=None, json_schema_extra={"x-launchplane-optional-response": True}
     )
+
+
+class LaneServiceRestartRecoveryRequest(LaneServiceRestartRequest):
+    """Serialized request evidence, separate from the API input's optional defaults."""
+
+    mode: Literal["apply"] = "apply"
+
+
+class LaneServiceRestartRecovery(BaseModel):
+    """An original request handle; it grants no authority to its reader."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request: LaneServiceRestartRecoveryRequest
+    idempotency_key: str = Field(min_length=1, max_length=200)

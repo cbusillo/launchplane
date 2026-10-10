@@ -24,6 +24,7 @@ from control_plane.http_routes.support import (
     HttpErrorFactory,
 )
 from control_plane.drivers import native_routes
+from control_plane.dokploy.api import redact_dokploy_log_line
 from control_plane.lane_service_restart import (
     ServiceRestartAdapter,
     ServiceRestartRefused,
@@ -60,6 +61,7 @@ def register_service_restart_route(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> LaneServiceRestartResponse:
         trace = dependencies.next_trace_id()
+        payload = payload.model_copy(update={"reason": redact_dokploy_log_line(payload.reason)})
 
         def refuse(code: str, message: str, status: int = 409) -> None:
             raise dependencies.http_error(
@@ -70,7 +72,7 @@ def register_service_restart_route(
             isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
         )
         # Reuse the existing runtime-operation authority; no grant is added.
-        if payload.mode == "apply":
+        if payload.mode != "dry-run":
             allowed = native_routes.native_driver_route_authorization_allows(
                 endpoint=restart_lane_service,
                 authorization_allows=dependencies.authorization_allows,
@@ -103,15 +105,21 @@ def register_service_restart_route(
         )
         scope = restart_activity_scope(payload.product)
         fingerprint = hashlib.sha256(
-            (actor + "\n" + payload.model_dump_json()).encode()
+            (actor + "\n" + payload.model_copy(update={"mode": "apply"}).model_dump_json()).encode()
         ).hexdigest()
         key = idempotency_key.strip()
-        if payload.mode == "apply":
+        if payload.mode != "dry-run":
             if not key or len(key) > 200:
                 refuse("idempotency_key_required", "Apply requires a bounded Idempotency-Key.", 400)
             original = record_store.read_idempotency_record(
                 scope=scope, route_path=SERVICE_RESTART_ROUTE, idempotency_key=key
             )
+            if payload.mode == "reconcile" and original is None:
+                refuse(
+                    "restart_receipt_unavailable",
+                    "No original restart receipt exists; reconciliation cannot dispatch a restart.",
+                    404,
+                )
             if original is not None:
                 if original.request_fingerprint != fingerprint:
                     refuse(
@@ -128,24 +136,62 @@ def register_service_restart_route(
                     )
 
         def execute() -> LaneServiceRestartResponse:
+            original = (
+                record_store.read_idempotency_record(
+                    scope=scope, route_path=SERVICE_RESTART_ROUTE, idempotency_key=key
+                )
+                if payload.mode != "dry-run"
+                else None
+            )
+            if original is not None:
+                if original.request_fingerprint != fingerprint:
+                    refuse(
+                        "idempotency_key_reused", "The key belongs to a different restart request."
+                    )
+                if original.state == "completed":
+                    response = LaneServiceRestartResponse.model_validate(original.response_payload)
+                    return response.model_copy(
+                        update={
+                            "trace_id": trace,
+                            "original_trace_id": original.response_trace_id,
+                            "replayed": True,
+                        }
+                    )
+            recovering = original is not None
+            if payload.mode == "reconcile" and not recovering:
+                refuse(
+                    "restart_receipt_unavailable",
+                    "No original restart receipt exists; reconciliation cannot dispatch a restart.",
+                    404,
+                )
             try:
                 with record_store.odoo_synchronous_lane_reservation(
                     product=payload.product, context=payload.context, instance=payload.instance
                 ) as owner:
                     if owner is not None:
                         raise ServiceRestartRefused("A release operation holds this lane.")
-                    plan, expected, host, token, health_url = plan_service_restart(
-                        store=record_store,
-                        root=dependencies.control_plane_root,
-                        request=payload,
-                        actor=actor,
-                    )
+                plan, expected, host, token, health_url = plan_service_restart(
+                    store=record_store,
+                    root=dependencies.control_plane_root,
+                    request=payload,
+                    actor=actor,
+                )
             except FileNotFoundError:
+                if recovering:
+                    refuse(
+                        "mutation_reconciliation_required",
+                        "Original restart is unsettled; its identity is temporarily unavailable. Preserve the original request.",
+                    )
                 refuse(
                     "restart_identity_unavailable", "Recorded restart identity is unavailable.", 404
                 )
                 raise AssertionError
             except (ValueError, click.ClickException, OSError):
+                if recovering:
+                    refuse(
+                        "mutation_reconciliation_required",
+                        "Original restart is unsettled; the lane or identity is temporarily unavailable. Preserve the original request.",
+                    )
                 refuse(
                     "restart_refused",
                     "Restart identity is ambiguous, unsupported, or the lane is held by a release.",
@@ -163,6 +209,15 @@ def register_service_restart_route(
             )
             if original is not None and original.request_fingerprint != fingerprint:
                 refuse("idempotency_key_reused", "The key belongs to a different restart request.")
+            if original is not None and original.state == "completed":
+                response = LaneServiceRestartResponse.model_validate(original.response_payload)
+                return response.model_copy(
+                    update={
+                        "trace_id": trace,
+                        "replayed": True,
+                        "original_trace_id": original.response_trace_id,
+                    }
+                )
             recovering = original is not None and original.state != "completed"
             if recovering and original is not None:
                 plan = LaneServiceRestartPlan.model_validate_json(original.reconciliation_key)
@@ -192,7 +247,7 @@ def register_service_restart_route(
                     lease_owner=trace,
                     response_trace_id=trace,
                     adapter=adapter,
-                    allow_mutation=not recovering,
+                    allow_mutation=not recovering and payload.mode == "apply",
                 )
             except ServiceRestartRefused:
                 refuse(

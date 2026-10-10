@@ -1,6 +1,6 @@
-import { useState } from "react";
-import { LaunchplaneApiError, restartLaneService } from "./api";
-import type { LaneServiceRestartResponse, ProductEnvironmentDetail, RestartLaneServiceData } from "./generated/openapi.ts";
+import { useEffect, useState } from "react";
+import { LaunchplaneApiError, readProductActivity, restartLaneService } from "./api";
+import type { LaneServiceRestartResponse, ProductActivityEvent, ProductEnvironmentDetail, RestartLaneServiceData } from "./generated/openapi.ts";
 
 type PendingRestart = { payload: RestartLaneServiceData["body"]; key: string };
 
@@ -25,6 +25,17 @@ export function ServiceRestartPanel({ detail, fixtureMode, onRefresh }: {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(pending ? "The previous restart has not settled. Resume only that request." : "");
   const [confirmed, setConfirmed] = useState(false);
+  const [recoveries, setRecoveries] = useState<ProductActivityEvent[]>([]);
+  const [recoveryError, setRecoveryError] = useState("");
+  useEffect(() => {
+    if (fixtureMode) return;
+    const controller = new AbortController();
+    void readProductActivity(detail.product, controller.signal).then(response => {
+      setRecoveries(response.activity.events.filter(event => event.context === detail.context
+        && event.environment === detail.environment && event.restart_recovery));
+    }).catch(error => { if (!controller.signal.aborted) setRecoveryError(error instanceof Error ? error.message : "Activity recovery is unavailable."); });
+    return () => controller.abort();
+  }, [detail.product, detail.context, detail.environment, fixtureMode]);
   const blocked = fixtureMode || busy || !!pending;
 
   function clearReview() { setReview(null); setConfirmed(false); setMessage(""); }
@@ -43,19 +54,20 @@ export function ServiceRestartPanel({ detail, fixtureMode, onRefresh }: {
     if (!pending && (!review || !confirmed)) return;
     const attempt = pending ?? { key: crypto.randomUUID(), payload: {
       product: detail.product, context: detail.context, instance: detail.environment,
-      service, reason, mode: "apply", reviewed_plan_sha256: review!.result.plan_sha256,
+      service, reason: review!.result.plan.reason, mode: "apply", reviewed_plan_sha256: review!.result.plan_sha256,
     } } satisfies PendingRestart;
     setPending(attempt); setBusy(true); setMessage("Restarting; verifying the same artifact and health…");
     try { sessionStorage.setItem(storageKey, JSON.stringify(attempt)); } catch { /* Server also fences unknown effects. */ }
     try {
-      const response = await restartLaneService(attempt.payload, attempt.key);
+      const response = await restartLaneService({ ...attempt.payload, mode: pending ? "reconcile" : "apply" }, attempt.key);
       setMessage(response.result.status === "pass" ? "Restart verified. Same version; service healthy."
         : response.result.error_message || "Restart did not verify. Inspect product activity before another attempt.");
       setReview(null); setConfirmed(false); setPending(null);
+      setRecoveries(events => events.filter(event => event.restart_recovery?.idempotency_key !== attempt.key));
       try { sessionStorage.removeItem(storageKey); } catch { /* Optional browser storage. */ }
       onRefresh();
     } catch (error) {
-      const refused = error instanceof LaunchplaneApiError && (
+      const refused = !pending && error instanceof LaunchplaneApiError && (
         [400, 401, 403, 404, 422].includes(error.statusCode)
         || ["restart_refused", "restart_identity_changed", "idempotency_key_reused"].includes(error.code)
       );
@@ -84,6 +96,17 @@ export function ServiceRestartPanel({ detail, fixtureMode, onRefresh }: {
       <button className="danger-button" type="button" disabled={blocked || !confirmed} onClick={() => void restart()}>Restart {service} (same version)</button>
     </div> : null}
     {pending ? <button className="secondary-button" type="button" disabled={fixtureMode || busy} onClick={() => void restart()}>Resume existing restart request</button> : null}
+    {!pending ? recoveries.map(event => <div key={event.event_id}>
+      <p>{event.title}. Resume with the identity that started this request.</p>
+      <button className="secondary-button" type="button" disabled={fixtureMode || busy} onClick={() => {
+        const recovery = event.restart_recovery!;
+        const attempt = { payload: recovery.request, key: recovery.idempotency_key };
+        setPending(attempt); setReview(null); setConfirmed(false);
+        setMessage("Original request restored from activity. Resume to read its result; no new restart will be dispatched.");
+        try { sessionStorage.setItem(storageKey, JSON.stringify(attempt)); } catch { /* Activity retains the handle. */ }
+      }}>Recover restart from activity</button>
+    </div>) : null}
+    {recoveryError ? <p>Activity recovery unavailable: {recoveryError}</p> : null}
     <p role="status">{message}</p>
   </section>;
 }

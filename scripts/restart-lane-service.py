@@ -15,12 +15,14 @@ from control_plane.contracts.lane_service_restart import (
     SERVICE_RESTART_ROUTE,
     LaneServiceRestartRequest,
     LaneServiceRestartResponse,
+    LaneServiceRestartRecovery,
 )
+from control_plane.dokploy.api import redact_dokploy_log_line
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("dry-run", "apply"))
+    parser.add_argument("mode", choices=("dry-run", "apply", "resume"))
     parser.add_argument(
         "--operator-helper",
         type=Path,
@@ -36,13 +38,26 @@ def main() -> int:
     parser.add_argument("--reviewed-dry-run", action="store_true")
     parser.add_argument("--idempotency-key", default="")
     args = parser.parse_args()
+    if args.mode == "dry-run" and args.evidence_file.exists():
+        parser.error("The evidence file already exists; choose a new file for this inspection.")
     payload = LaneServiceRestartRequest(
         product=args.product,
         context=args.context,
         instance=args.instance,
         service=args.service,
-        reason=args.reason,
+        reason=redact_dokploy_log_line(args.reason),
     )
+    if args.mode == "resume":
+        recovery = LaneServiceRestartRecovery.model_validate_json(args.evidence_file.read_text())
+        if any(
+            getattr(recovery.request, field) != getattr(payload, field)
+            for field in ("product", "context", "instance", "service", "reason")
+        ):
+            parser.error("The recovery handle does not match this original restart request.")
+        if args.idempotency_key and args.idempotency_key != recovery.idempotency_key:
+            parser.error("Use the original recovery handle's idempotency key.")
+        args.idempotency_key = recovery.idempotency_key
+        payload = recovery.request.model_copy(update={"mode": "reconcile"})
     if args.mode == "apply":
         if not args.reviewed_dry_run or not args.idempotency_key.strip():
             parser.error(
@@ -110,7 +125,10 @@ def main() -> int:
         )
         return 1
     if args.mode == "dry-run":
-        descriptor = os.open(args.evidence_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            descriptor = os.open(args.evidence_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError:
+            parser.error("Cannot create the private evidence file; choose a new writable path.")
         with os.fdopen(descriptor, "w") as output:
             output.write(response.model_dump_json(indent=2) + "\n")
     print(

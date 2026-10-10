@@ -19,6 +19,11 @@ import uvicorn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from control_plane.contracts.product_environment_read_model import build_product_activity_read_model
+from control_plane.contracts.lane_service_restart import (
+    LaneServiceRestartRecovery,
+    LaneServiceRestartRecoveryRequest,
+    LaneServiceRestartResponse,
+)
 from control_plane.contracts.runtime_identity import runtime_identity_env
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_lane_service_restart import seed_lane
@@ -252,6 +257,30 @@ HTTPServer(("0.0.0.0",8000),Handler).serve_forever()
                     timeout=30,
                 )
             )
+            reviewed = LaneServiceRestartResponse.model_validate_json(
+                (root / "review.json").read_text()
+            )
+            recovery = LaneServiceRestartRecovery(
+                request=LaneServiceRestartRecoveryRequest(
+                    product=expected.product,
+                    context=expected.context,
+                    instance="testing",
+                    service="web",
+                    reason=reviewed.result.plan.reason,
+                    mode="apply",
+                    reviewed_plan_sha256=reviewed.result.plan_sha256,
+                ),
+                idempotency_key=project,
+            )
+            recovery_path = root / "recovery.json"
+            recovery_path.write_text(recovery.model_dump_json())
+            recovery_path.chmod(0o600)
+            resumed = json.loads(
+                subprocess.check_output(
+                    [*common[:-1], str(recovery_path), "resume"], env=env, text=True, timeout=30
+                )
+            )
+            assert resumed["replayed"] and len(writes) == 1
             current_db = json.loads(docker("inspect", ids[1]))[0]
             assert initial_db["State"]["StartedAt"] == current_db["State"]["StartedAt"]
             assert applied["status"] == "pass" and replay["replayed"] and len(writes) == 1
@@ -270,6 +299,7 @@ HTTPServer(("0.0.0.0",8000),Handler).serve_forever()
                         "dry_run": dry,
                         "apply": applied,
                         "replay": replay,
+                        "read_only_resume": resumed,
                         "provider_writes": writes,
                         "database_start_unchanged": True,
                         "activity_result": event.status,

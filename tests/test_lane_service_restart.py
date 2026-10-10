@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import redirect_stderr
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import io
 from pathlib import Path
+import runpy
+import sys
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
@@ -29,6 +33,7 @@ from control_plane.contracts.release_review import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.service_auth import BearerIdentityConfig
+from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.auth import StubVerifier, identity, local_operator_policy
 from tests.support.http import request as http_request
@@ -112,6 +117,7 @@ class RestartProvider:
         self.duplicate = False
         self.unknown = False
         self.after_bad_image = False
+        self.rejection: int | None = None
         self.config: dict[str, Any] = {
             "Id": self.container_id,
             "Image": "sha256:" + "e" * 64,
@@ -151,6 +157,13 @@ class RestartProvider:
             return [value]
         if path == "/api/docker.restartContainer":
             self.writes.append(kwargs)
+            if self.rejection is not None:
+                raise DokployRequestFailed(
+                    method="POST",
+                    path=path,
+                    detail="private credential=must-not-leak",
+                    status_code=self.rejection,
+                )
             self.config["State"].update(
                 StartedAt="2026-10-10T00:02:00Z", Health={"Status": "healthy"}
             )
@@ -200,6 +213,7 @@ class ServiceRestartTests(unittest.TestCase):
         *,
         actions: tuple[str, ...] = ("live_target_runtime.plan", "live_target_runtime.apply"),
         contexts: tuple[str, ...] = ("cm",),
+        subject: str = "local-owner-agent",
     ) -> Any:
         return create_launchplane_fastapi_test_app(
             local_record_store_for_tests=self.store,
@@ -207,11 +221,11 @@ class ServiceRestartTests(unittest.TestCase):
             control_plane_root_path=self.root,
             verifier=StubVerifier(identity()),
             authz_policy=local_operator_policy(
-                actions=actions, products=("odoo-tenant-cm",), contexts=contexts
+                actions=actions, products=("odoo-tenant-cm",), contexts=contexts, subject=subject
             ),
             bearer_identity_config=BearerIdentityConfig(
                 local_operator_token="isolated-token",
-                local_operator_subject="local-owner-agent",
+                local_operator_subject=subject,
                 local_operator_token_label="local-owner-write",
             ),
         )
@@ -369,3 +383,120 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertEqual(status, 200, response)
         self.assertEqual(response["result"]["plan"]["acceptance_record_id"], decision.record_id)
         self.assertEqual(self.provider.writes, [])
+
+    def test_ambiguous_start_time_and_missing_http_identity_refuse_before_effect(self) -> None:
+        for started_at in ("unavailable", "2026-10-10T00:00:00", "0001-01-01T00:00:00Z"):
+            with self.subTest(started_at=started_at):
+                self.provider.config["State"]["StartedAt"] = started_at
+                self.assertEqual(self.invoke()[0], 409)
+        self.provider.config["State"]["StartedAt"] = "2026-10-10T00:01:00Z"
+        profile = self.store.read_product_profile_record(self.expected.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(update={"health_url": ""}) for lane in profile.lanes
+                    )
+                }
+            )
+        )
+        self.assertEqual(self.invoke()[0], 409)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_definite_provider_rejection_records_failure_replays_and_releases_fence(self) -> None:
+        self.review()
+        self.provider.rejection = 403
+        status, response = self.invoke(key="rejected")
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["result"]["status"], "fail")
+        self.assertNotIn("must-not-leak", json.dumps(response))
+        self.assertTrue(self.invoke(key="rejected")[1]["replayed"])
+        self.assertEqual(len(self.provider.writes), 1)
+        self.provider.rejection = None
+        self.assertEqual(self.invoke(key="new-after-rejection")[1]["result"]["status"], "pass")
+
+    def test_activity_restores_original_request_and_reconcile_never_starts_new_effect(self) -> None:
+        self.review()
+        self.provider.unknown = True
+        self.assertEqual(self.invoke(key="lost-tab")[0], 409)
+        event = next(
+            event
+            for event in build_product_activity_read_model(
+                record_store=self.store, product=self.expected.product
+            ).events
+            if event.event_type == "service_restart"
+        )
+        self.assertIsNotNone(event.restart_recovery)
+        assert event.restart_recovery is not None
+        self.payload = event.restart_recovery.request.model_dump(mode="json")
+        self.payload["mode"] = "reconcile"
+        # Even a correctly reviewed request cannot use reconciliation to create a new operation.
+        self.assertEqual(self.invoke(key="missing-original")[0], 404)
+        self.app = self.create_app(subject="different-authorized-operator")
+        self.assertEqual(self.invoke(key=event.restart_recovery.idempotency_key)[0], 409)
+        self.app = self.create_app()
+        self.provider.config["State"]["Restarting"] = True
+        status, response = self.invoke(key=event.restart_recovery.idempotency_key)
+        self.assertEqual(status, 409, response)
+        self.assertEqual(response["error"]["code"], "mutation_reconciliation_required")
+        self.provider.config["State"]["Restarting"] = False
+        self.provider.config["State"]["StartedAt"] = datetime.now(timezone.utc).isoformat()
+        self.assertEqual(
+            self.invoke(key=event.restart_recovery.idempotency_key)[1]["result"]["status"], "pass"
+        )
+        self.assertEqual(len(self.provider.writes), 1)
+
+    def test_redacted_reason_activity_handle_matches_the_original_request(self) -> None:
+        self.payload["reason"] = "Recover worker credential=must-not-leak"
+        self.review()
+        self.provider.unknown = True
+        self.assertEqual(self.invoke(key="safe-reason")[0], 409)
+        event = next(
+            event
+            for event in build_product_activity_read_model(
+                record_store=self.store, product=self.expected.product
+            ).events
+            if event.event_type == "service_restart"
+        )
+        assert event.restart_recovery is not None
+        self.assertNotIn("must-not-leak", event.model_dump_json())
+        self.payload = event.restart_recovery.request.model_dump(mode="json")
+        self.payload["mode"] = "reconcile"
+        self.provider.config["State"]["StartedAt"] = datetime.now(timezone.utc).isoformat()
+        self.assertEqual(self.invoke(key=event.restart_recovery.idempotency_key)[0], 200)
+
+    def test_helper_refuses_existing_evidence_before_loading_transport_or_requesting(self) -> None:
+        helper = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts" / "restart-lane-service.py")
+        )["main"]
+        evidence = self.root / "review.json"
+        evidence.write_text("retained review")
+        args = [
+            "restart-lane-service.py",
+            "dry-run",
+            "--operator-helper",
+            "/unavailable/launchplane-write-action.py",
+            "--product",
+            "example",
+            "--context",
+            "example",
+            "--instance",
+            "testing",
+            "--service",
+            "web",
+            "--reason",
+            "Recover worker.",
+            "--evidence-file",
+            str(evidence),
+        ]
+        stderr = io.StringIO()
+        with (
+            patch.object(sys, "argv", args),
+            patch("runpy.run_path", side_effect=AssertionError("transport loaded")),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as exited,
+        ):
+            helper()
+        self.assertEqual(exited.exception.code, 2)
+        self.assertIn("already exists", stderr.getvalue())
+        self.assertEqual(evidence.read_text(), "retained review")

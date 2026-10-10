@@ -41,6 +41,7 @@
     "engineeringReviewRuns": "docs/engineering-review-runs.md",
     "engineeringReviewDecisions": "docs/engineering-review-decisions.md",
     "operations": "docs/operations.md",
+    "laneServiceRestart": "docs/lane-service-restart.md",
     "records": "docs/records.md",
     "secrets": "docs/secrets.md",
     "githubActionsSecurity": "docs/github-actions-security.md",

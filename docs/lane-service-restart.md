@@ -12,8 +12,8 @@ or hotfix authority.
 ## Supported lane and identity
 
 `POST /v1/drivers/odoo/service-restart` accepts product, context, instance, service,
-reason and mode (`dry-run` or `apply`). Only an authenticated admin session or
-scoped local operator/admin credential may call it. It uses existing
+reason and mode (`dry-run`, `apply` or read-only `reconcile`). Only an authenticated admin session or
+scoped local admin credential (`LocalOperatorIdentity` or `LocalAdminIdentity`) may call it. It uses existing
 `live_target_runtime.plan` and `live_target_runtime.apply` authority with the
 explicit product, context and instance; no access rule is installed.
 
@@ -27,9 +27,9 @@ release enqueues, workers and synchronous releases.
 Container selection requires inspected project and service labels and exactly
 one non-one-off container. Name matches alone never authorize a restart. The
 container must report the recorded deployment identity and immutable artifact
-image, and have a container health check. Missing or ambiguous identity refuses
+image, a valid timezone-aware start time and a container health check. Missing or ambiguous identity refuses
 without a restart. `web` additionally verifies the lane's HTTP runtime identity
-after restart; other named services verify their own container health and identity.
+after restart and requires that endpoint before the restart; other named services verify their own container health and identity.
 
 Apply requires `reviewed_plan_sha256` from inspection and an `Idempotency-Key`.
 Launchplane acquires the release lane reservation, rechecks the reviewed identity
@@ -71,12 +71,23 @@ uv run python scripts/restart-lane-service.py apply \
 The review file is created exclusively with mode 0600. Keep the same review file,
 payload and key on retries. Repeated keys replay the original completed result.
 A lost HTTP response retains the browser request across reloads. A definite
-pre-effect refusal releases the browser draft for another inspection.
+pre-effect refusal releases a new browser draft for another inspection; errors on
+an existing request retain its handle, including an expired session or a lane
+temporarily held by a release. After closing a tab, **Recover restart from
+activity** restores the original request. Resume with the original actor;
+the handle grants no authority to a reader or another admin.
+
+Activity's `restart_recovery` contains the original redacted request and key.
+The bounded helper also accepts `resume --evidence-file <private-recovery.json>`
+with that object and the original coordinates/reason. This sends `reconcile`,
+which refuses a missing original receipt and can never dispatch a restart.
 
 An unknown provider outcome holds the target against another restart under any
 key. Resuming the original request performs read-only reconciliation: unchanged
 identity, a healthy later start after its effect checkpoint, and HTTP runtime
-identity for web can settle the receipt without another POST. A request that
+identity for web can settle the receipt without another POST. A definite,
+nonretryable provider 4xx settles as a failed receipt and releases the fence;
+timeouts, retryable replies and genuinely uncertain effects stay held. A request that
 stopped before any effect checkpoint can settle as undispatched. Changed or
 unverifiable evidence remains unknown; inspect its activity and provider evidence
 rather than deleting its reservation or inventing a new key.

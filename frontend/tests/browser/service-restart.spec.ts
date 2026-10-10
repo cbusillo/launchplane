@@ -28,19 +28,27 @@ for (const outcome of ["success", "uncertain", "stale"]) {
       error: { code: "fixture_readiness_unavailable", message: "Readiness is unavailable in this isolated restart journey." },
     } }));
     const applies: Array<{ key: string; body: unknown }> = [];
+    await page.route("**/v1/products/atlas-commerce/activity", route => route.fulfill({ json: {
+      status: "ok", trace_id: "activity", activity: { events: uncertain && applies.length ? [{
+        event_id: "original-restart", context: environment.context, environment: "testing",
+        title: "Restart web: unknown", restart_recovery: { request: applies[0].body, idempotency_key: applies[0].key },
+      }] : [] },
+    } }));
     await page.route("**/v1/drivers/odoo/service-restart", async route => {
       const body = route.request().postDataJSON();
       expect(route.request().headers()["x-csrf-token"]).toBe("fixture-csrf");
-      if (body.mode === "apply") {
+      if (body.mode !== "dry-run") {
         applies.push({ key: route.request().headers()["idempotency-key"], body });
         if (uncertain && applies.length === 1) { await route.abort(); return; }
+        if (uncertain && applies.length === 2) { await route.fulfill({ status: 401, json: { error: { code: "session_expired", message: "Sign in again." } } }); return; }
+        if (uncertain && applies.length === 3) { await route.fulfill({ status: 409, json: { error: { code: "restart_refused", message: "Lane temporarily held." } } }); return; }
         if (outcome === "stale" && applies.length === 1) {
           await route.fulfill({ status: 409, json: { error: { code: "restart_identity_changed", message: "Service identity changed." } } }); return;
         }
       }
       await route.fulfill({ json: { status: "accepted", trace_id: "restart", records: {}, result: {
         status: body.mode === "dry-run" ? "ready" : "pass", plan_sha256: "a".repeat(64),
-        plan: { artifact_id: "fixture-current-artifact", service: body.service, before: { container_id: "b".repeat(64) } },
+        plan: { artifact_id: "fixture-current-artifact", service: body.service, reason: body.reason, before: { container_id: "b".repeat(64) } },
         after: null, error_message: "",
       } } });
     });
@@ -61,12 +69,21 @@ for (const outcome of ["success", "uncertain", "stale"]) {
     await panel.getByRole("button", { name: "Restart web (same version)", exact: true }).click();
     if (uncertain) {
       await expect(panel.getByRole("button", { name: "Resume existing restart request" })).toBeEnabled();
+      await page.evaluate(() => sessionStorage.clear());
       await page.reload();
       panel = page.getByRole("region", { name: "Restart on the same version" });
+      await panel.getByRole("button", { name: "Recover restart from activity" }).click();
       await expect(panel.getByLabel("Reason", { exact: true })).toBeDisabled();
       await panel.getByRole("button", { name: "Resume existing restart request" }).click();
       await expect.poll(() => applies.length).toBe(2);
-      expect(applies[1]).toEqual(applies[0]);
+      await expect(panel.getByRole("status")).toContainText("Sign in again");
+      await page.reload();
+      panel = page.getByRole("region", { name: "Restart on the same version" });
+      await panel.getByRole("button", { name: "Resume existing restart request" }).click();
+      await expect(panel.getByRole("status")).toContainText("Lane temporarily held");
+      await panel.getByRole("button", { name: "Resume existing restart request" }).click();
+      await expect.poll(() => applies.length).toBe(4);
+      for (const resumed of applies.slice(1)) expect(resumed).toEqual({ key: applies[0].key, body: { ...(applies[0].body as object), mode: "reconcile" } });
     } else if (outcome === "stale") {
       await expect(panel.getByRole("status")).toContainText("refused before a service change");
       await expect(panel.getByLabel("Reason", { exact: true })).toBeEnabled();

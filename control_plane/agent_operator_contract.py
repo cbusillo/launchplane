@@ -85,9 +85,9 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         SERVICE_RESTART_ROUTE,
-        "Inspect or restart one existing lane service on its current accepted artifact.",
+        "Inspect or restart one existing lane service on its current accepted artifact, or reconcile its original receipt without another restart.",
         ("bounded_admin_helper", "operator_ui", "service_api"),
-        ("dry-run", "apply"),
+        ("dry-run", "apply", "reconcile"),
         "apply",
         ("reviewed_plan_digest", "current_artifact_identity", "release_lane_exclusion"),
     ),

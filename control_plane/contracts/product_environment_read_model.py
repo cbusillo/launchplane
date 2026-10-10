@@ -19,6 +19,7 @@ from control_plane.contracts.deployment_record import (
 )
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.lane_service_restart import LaneServiceRestartRecovery
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
@@ -591,6 +592,9 @@ class ProductActivityEvent(BaseModel):
     summary: str = ""
     records: tuple[ProductActivityRecordLink, ...] = ()
     trust_state: FreshnessStatus = "recorded"
+    restart_recovery: LaneServiceRestartRecovery | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
 
 
 class ProductActivityReadModel(BaseModel):
@@ -1088,6 +1092,7 @@ def _service_restart_activity_events(
 ) -> tuple[ProductActivityEvent, ...]:
     from control_plane.contracts.lane_service_restart import (
         LaneServiceRestartPlan,
+        LaneServiceRestartRecoveryRequest,
         LaneServiceRestartResult,
     )
     from control_plane.storage.postgres import PostgresRecordStore
@@ -1131,6 +1136,20 @@ def _service_restart_activity_events(
                     f"Result: {status}. {result.error_message if result else 'Do not repeat an unsettled restart.'}"
                 ),
                 records=(_record_link("service_restart", record.record_id),),
+                restart_recovery=LaneServiceRestartRecovery(
+                    request=LaneServiceRestartRecoveryRequest(
+                        product=plan.product,
+                        context=plan.context,
+                        instance=plan.instance,
+                        service=plan.service,
+                        reason=plan.reason,
+                        mode="apply",
+                        reviewed_plan_sha256=plan.digest(),
+                    ),
+                    idempotency_key=record.idempotency_key,
+                )
+                if record.state != "completed"
+                else None,
             )
         )
     return tuple(events)

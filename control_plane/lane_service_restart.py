@@ -55,6 +55,8 @@ def plan_service_restart(
     )
     if not profile.is_active or lane is None:
         raise ServiceRestartRefused("The requested active product lane is not recorded.")
+    if request.service == "web" and not lane.health_url.strip():
+        raise ServiceRestartRefused("The lane's HTTP runtime identity endpoint is unavailable.")
     # These lanes have a shared mutex respected by release enqueues, workers and
     # synchronous releases. Other drivers must supply equivalent exclusion first.
     if profile.driver_id != "odoo":
@@ -322,6 +324,29 @@ class ServiceRestartAdapter:
                     container_id=self.plan.before.container_id,
                     server_id=self.plan.server_id,
                 )
+            except api.DokployRequestFailed as error:
+                if (
+                    error.status_code is not None
+                    and 400 <= error.status_code < 500
+                    and not error.retryable
+                ):
+                    result = LaneServiceRestartResult(
+                        status="fail",
+                        plan=self.plan,
+                        plan_sha256=self.plan.digest(),
+                        error_message="The provider rejected this restart request.",
+                    )
+                    return ProviderMutationOutcome(
+                        response_status_code=200,
+                        response_payload=provider_operation_response_payload(
+                            trace_id=self.trace_id,
+                            records={},
+                            result=result.model_dump(mode="json"),
+                        ),
+                    )
+                raise ProviderMutationUnknownError(
+                    "Container restart outcome is unknown; do not repeat it."
+                ) from error
             except (ValueError, click.ClickException, OSError) as error:
                 raise ProviderMutationUnknownError(
                     "Container restart outcome is unknown; do not repeat it."

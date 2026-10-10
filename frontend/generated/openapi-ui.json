@@ -12298,6 +12298,84 @@
         "title": "LaneServiceRestartPlan",
         "type": "object"
       },
+      "LaneServiceRestartRecovery": {
+        "additionalProperties": false,
+        "description": "An original request handle; it grants no authority to its reader.",
+        "properties": {
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/components/schemas/LaneServiceRestartRecoveryRequest"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "request"
+        ],
+        "title": "LaneServiceRestartRecovery",
+        "type": "object"
+      },
+      "LaneServiceRestartRecoveryRequest": {
+        "additionalProperties": false,
+        "description": "Serialized request evidence, separate from the API input's optional defaults.",
+        "properties": {
+          "context": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "const": "apply",
+            "default": "apply",
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          },
+          "service": {
+            "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+            "title": "Service",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "instance",
+          "mode",
+          "product",
+          "reason",
+          "reviewed_plan_sha256",
+          "service"
+        ],
+        "title": "LaneServiceRestartRecoveryRequest",
+        "type": "object"
+      },
       "LaneServiceRestartRequest": {
         "additionalProperties": false,
         "properties": {
@@ -12317,7 +12395,8 @@
             "default": "dry-run",
             "enum": [
               "dry-run",
-              "apply"
+              "apply",
+              "reconcile"
             ],
             "title": "Mode",
             "type": "string"
@@ -23261,6 +23340,17 @@
             },
             "title": "Records",
             "type": "array"
+          },
+          "restart_recovery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LaneServiceRestartRecovery"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "status": {
             "title": "Status",

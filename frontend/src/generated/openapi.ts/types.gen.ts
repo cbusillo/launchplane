@@ -859,10 +859,25 @@ export type LaneServiceRestartPlan = {
     target_id: string;
 };
 
+export type LaneServiceRestartRecovery = {
+    idempotency_key: string;
+    request: LaneServiceRestartRecoveryRequest;
+};
+
+export type LaneServiceRestartRecoveryRequest = {
+    context: string;
+    instance: string;
+    mode: 'apply';
+    product: string;
+    reason: string;
+    reviewed_plan_sha256: string;
+    service: string;
+};
+
 export type LaneServiceRestartRequest = {
     context: string;
     instance: string;
-    mode?: 'dry-run' | 'apply';
+    mode?: 'dry-run' | 'apply' | 'reconcile';
     product: string;
     reason: string;
     reviewed_plan_sha256?: string;
@@ -2670,6 +2685,7 @@ export type ProductActivityEvent = {
     occurred_at: string;
     product: string;
     records: Array<ProductActivityRecordLink>;
+    restart_recovery?: LaneServiceRestartRecovery | null;
     status: string;
     summary: string;
     title: string;
