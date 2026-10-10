@@ -13,7 +13,11 @@ engineering-only change; it cannot be used with the review label. Missing notes,
 empty template comments, or a malformed engineering-only declaration visibly
 refuse preview readiness and merge admission for repositories feeding a Client
 release. Shared inputs are resolved from recorded production/testing artifacts,
-not a checked-in repository list.
+not a checked-in repository list. Shared inputs require valid notes and remain
+covered by the consuming product's release review; they do not gain a separate
+preview check on a repository without a product preview. Historical engineering
+notes using the older role word still require a reason (a colon or sentence
+separator is supported) and cannot override a review label.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
 Launchplane accepts a product-review decision.
 

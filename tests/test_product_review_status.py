@@ -815,6 +815,41 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(github.comments, [])
 
+    async def test_ready_feedback_separates_invalid_notes_from_read_failures(self) -> None:
+        from control_plane.client_test_notes import ClientTestNotesRequired
+
+        payload = product_profile_payload("verireel")
+        payload["owner"] = {"github_login": "site-owner", "github_id": str(_OWNER_GITHUB_ID)}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(_preview_pr_feedback_identity()),
+            authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+            control_plane_root_path=self.root,
+            record_store_factory=lambda: self.store,
+        )
+        for error, status, code in (
+            (
+                ClientTestNotesRequired("The Client review label requires real Client test notes."),
+                409,
+                "client_test_notes_required",
+            ),
+            (
+                RuntimeError("private provider diagnostic"),
+                503,
+                "client_review_evidence_unavailable",
+            ),
+        ):
+            with (
+                self.subTest(code=code),
+                patch("control_plane.http_app.pull_request_client_review", side_effect=error),
+            ):
+                response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+                self.assertEqual(response.status_code, status)
+                self.assertIn(code, response.text)
+                self.assertNotIn("private provider diagnostic", response.text)
+
     async def test_ready_preview_feedback_writes_the_status_and_retires_leftovers(self) -> None:
         github = _GitHub(repository="every/verireel")
         github.statuses = [

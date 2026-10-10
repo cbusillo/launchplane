@@ -314,9 +314,15 @@ def _github_repository_user_owner_login(*, owner: str, repo: str, token: str) ->
 
 
 def pull_request_client_review(
-    *, control_plane_root: Path, context: str, anchor_pr_url: str, label: str
+    *,
+    control_plane_root: Path,
+    context: str,
+    anchor_pr_url: str,
+    label: str,
+    record_store: object = None,
 ) -> bool:
-    from control_plane.client_test_notes import change_client_review
+    from control_plane.client_test_notes import ClientTestNotesRequired, change_client_review
+    from control_plane.client_release_repositories import recorded_train_candidate
 
     reference = github_pull_request_reference(pr_url=anchor_pr_url)
     if reference is None:
@@ -335,6 +341,10 @@ def pull_request_client_review(
         )
     if not isinstance(payload, dict):
         raise ValueError("Client review notes could not be read.")
+    if recorded_train_candidate(
+        store=record_store, repository=repository, head=payload.get("head")
+    ):
+        return False
     intent = change_client_review(
         body=str(payload.get("body") or ""),
         labels=(
@@ -345,7 +355,7 @@ def pull_request_client_review(
         review_label=label,
     )
     if intent.error:
-        raise ValueError(intent.error)
+        raise ClientTestNotesRequired(intent.error)
     return intent.review_required
 
 

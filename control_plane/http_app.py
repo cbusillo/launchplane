@@ -434,6 +434,7 @@ from control_plane.service_github_delivery_controls import (
     read_service_github_delivery,
 )
 from control_plane.launchplane_github_delivery import delivery_github_credentials_ready
+from control_plane.client_test_notes import ClientTestNotesRequired
 from control_plane.product_review_status import (
     OwnerReviewStatusPublisher,
     owner_review_reference_url,
@@ -22699,6 +22700,7 @@ def create_launchplane_fastapi_app(
                         context=effective_context,
                         anchor_pr_url=feedback_request.anchor_pr_url,
                         label=owner_profile.owner.review_label,
+                        record_store=record_store,
                     )
                 if owner_review_requested and owner_profile.owner.is_set:
                     owner_login = owner_profile.owner.github_login
@@ -22708,13 +22710,27 @@ def create_launchplane_fastapi_app(
                             repository=feedback_request.repository,
                             pull_request_number=feedback_request.anchor_pr_number,
                         )
-            except (FileNotFoundError, OSError, RequestException, RuntimeError, ValueError):
+            except ClientTestNotesRequired as error:
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
                     code="client_test_notes_required",
-                    message="Provide Client test notes or Nothing for the Client to test: <reason>.",
-                )
+                    message=str(error),
+                ) from error
+            except (
+                FileNotFoundError,
+                OSError,
+                RequestException,
+                RuntimeError,
+                ValueError,
+                click.ClickException,
+            ) as error:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="client_review_evidence_unavailable",
+                    message="Client review notes could not be read. Retry after source-control access is restored.",
+                ) from error
         try:
             feedback_record = build_preview_pr_feedback_record(
                 control_plane_root=resolved_control_plane_root,

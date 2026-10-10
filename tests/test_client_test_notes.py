@@ -51,6 +51,74 @@ class ClientTestNotesTests(unittest.TestCase):
             ).error
         )
 
+    def test_historical_engineering_notes_still_require_reason_and_respect_label(self) -> None:
+        for notes in (
+            "Nothing for the owner to test: CI only.",
+            "Nothing for the owner to test. CI only.",
+        ):
+            with self.subTest(notes=notes):
+                self.assertFalse(client_test_notes(notes).review_required)
+                self.assertFalse(client_test_notes(notes).error)
+                self.assertTrue(client_test_notes(notes, review_override=True).error)
+        self.assertTrue(client_test_notes("Nothing for the owner to test").error)
+
+    def test_workflow_feedback_reads_notes_and_skips_only_bound_train_heads(self) -> None:
+        from contextlib import nullcontext
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from control_plane.client_test_notes import ClientTestNotesRequired
+        from control_plane.workflows.preview_pr_feedback import pull_request_client_review
+
+        head: dict[str, object] = {
+            "ref": "launchplane/train/example/site/main/batch",
+            "sha": "a" * 40,
+            "repo": {"full_name": "example/site"},
+        }
+        payload: dict[str, object] = {
+            "body": "## Client test notes\nTry the price list.",
+            "head": head,
+            "labels": [],
+        }
+        candidate = SimpleNamespace(
+            candidate_ref="refs/heads/launchplane/train/example/site/main/batch",
+            candidate_sha="a" * 40,
+        )
+        store = SimpleNamespace(
+            list_merge_train_batch_candidate_records=lambda **_: (
+                SimpleNamespace(candidate=candidate),
+            )
+        )
+        with (
+            patch(
+                "control_plane.workflows.preview_pr_feedback.launchplane_github_token",
+                return_value=nullcontext("test-token"),
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.github_api_request",
+                return_value=payload,
+            ),
+        ):
+
+            def read(record_store: object = None) -> bool:
+                return pull_request_client_review(
+                    control_plane_root=Path("."),
+                    context="test",
+                    anchor_pr_url="https://github.com/example/site/pull/42",
+                    label="owner-review",
+                    record_store=record_store,
+                )
+
+            self.assertTrue(read())
+            self.assertFalse(read(store))
+            payload["head"] = head | {"sha": "b" * 40}
+            self.assertTrue(read(store))
+            payload["body"] = "## Client test notes\nNothing for the Client to test: CI only."
+            self.assertFalse(read())
+            payload["labels"] = [{"name": "owner-review"}]
+            with self.assertRaises(ClientTestNotesRequired):
+                read()
+
 
 class BatchNotesTests(unittest.TestCase):
     def test_engineering_batch_reasons_are_validated_per_member(self) -> None:

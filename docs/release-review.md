@@ -174,9 +174,11 @@ with the trace ID and logged with it: `testing_lane_missing`,
 `candidate_identity_missing`, `release_record_missing`, or `github_read_failed`.
 Provider error text is never returned or logged, because it can contain private
 URLs. Missing test notes and commits without a merged pull request are
-visible checklist blockers. `Nothing for the Client to test` is valid test notes.
-Pull requests written before the role words changed say `Owner test notes` and
-`Nothing for the owner to test`; Launchplane and the CI action read both.
+visible checklist blockers. The [Client notes contract](owner-acceptance.md)
+owns valid engineering-only declarations and supported historical spellings.
+Previously merged notes in the bare or malformed new form must be corrected
+on their source PR before the Client can accept the release; the visible
+checklist blocker names that PR. The changed checklist needs fresh acceptance.
 Previous preview acceptance is an annotation, never release approval.
 Changes to existing shared Odoo addon sources appear in separate Client checklist
 sections, with each repository's exact production-to-testing SHA range, merged

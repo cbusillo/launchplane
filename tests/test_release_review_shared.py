@@ -158,6 +158,13 @@ class SharedReleaseReviewTests(unittest.TestCase):
                 labels=(), repository="example/shared-addons", body=""
             ).error
         )
+        real = reader.client_review_intent(
+            labels=(),
+            repository="example/shared-addons",
+            body="## Client test notes\nTry staff sign-in.",
+        )
+        self.assertFalse(real.error)
+        self.assertFalse(real.review_required)
         self.assertFalse(
             reader.client_review_intent(
                 labels=(),

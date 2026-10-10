@@ -55,6 +55,12 @@ def owner_test_notes(body: str) -> str:
 
 
 NOTHING_TO_TEST = "Nothing for the Client to test"
+# role-words: legacy notes written before the role names changed.
+LEGACY_NOTHING_TO_TEST = "Nothing for the owner to test"
+
+
+class ClientTestNotesRequired(ValueError):
+    """Readable notes explicitly failed validation, rather than a provider read."""
 
 
 @dataclass(frozen=True)
@@ -78,10 +84,23 @@ def client_test_notes(notes: str, *, review_override: bool = False) -> ClientTes
     value = re.sub(r"<!--[\s\S]*?-->", "", notes).strip()
     if not value or value.casefold() in {"none", "n/a", "todo", "tbd"}:
         return ClientTestNotes(True, "Client test notes are missing.")
-    if value.casefold().startswith(NOTHING_TO_TEST.casefold()):
+    marker = next(
+        (
+            marker
+            for marker in (NOTHING_TO_TEST, LEGACY_NOTHING_TO_TEST)
+            if value.casefold().startswith(marker.casefold())
+        ),
+        "",
+    )
+    if marker:
+        suffix = value[len(marker) :]
+        # Older notes used a sentence separator; retain that spelling with a reason.
+        separators = {":", "."} if marker == LEGACY_NOTHING_TO_TEST else {":"}
         if (
-            not value.startswith(NOTHING_TO_TEST + ":")
-            or not value[len(NOTHING_TO_TEST) + 1 :].strip()
+            (marker == NOTHING_TO_TEST and not value.startswith(marker))
+            or not suffix
+            or suffix[0] not in separators
+            or not suffix[1:].strip()
         ):
             return ClientTestNotes(
                 True, "Use Nothing for the Client to test: <reason> with a nonempty reason."

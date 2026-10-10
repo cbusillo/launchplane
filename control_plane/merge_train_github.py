@@ -52,6 +52,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralProvenance,
 )
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
+from control_plane.release_review_shared import repository_key
 from control_plane.client_release_repositories import (
     ClientReleaseRepositoryStore,
     client_release_profiles,
@@ -3193,7 +3194,11 @@ class GitHubMergeTrainSnapshotReader:
             for profile in profiles
         )
         return ClientTestNotes(
-            any(intent.review_required for intent in intents),
+            any(
+                intent.review_required
+                for profile, intent in zip(profiles, intents, strict=True)
+                if repository_key(profile.repository) == repository_key(repository)
+            ),
             next((intent.error for intent in intents if intent.error), ""),
         )
 
