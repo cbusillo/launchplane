@@ -71,6 +71,9 @@ identity, so reapplying settings cannot replace the serving lane's credentials.
 Switch-back, including recovery of an unfinished compatible release, requires
 fresh old-slot readiness and the exact current route;
 its intent is persisted so an uncertain switch-back can be reconciled.
+Its deployment event has real times and republishes the retained artifact's
+production tuple together with inventory. Default rollback uses the cutover's
+own retained artifact, rather than inferring it from null-finished history rows.
 
 A database-changing release first prepares and browser-checks the bound
 [public bundle](prepared-public-serving.md). The pause begins before form
@@ -114,6 +117,10 @@ that original admission, while still checking current authority, retention and
 competing consumption. A failed continuation keeps unfinished work held. New
 releases cannot bypass another unfinished cutover; recover it first. Configured
 two-slot lanes also refuse an in-place rollback after a switch-back event.
+Authorization is checked again at recovery boundaries. Denial performs no
+effects and keeps the unfinished cutover's lane hold. The direct promotion
+route uses the original logical-backup identity for a stable recovery key;
+native queued releases retain their existing operation identity.
 
 Persist intent before publication, maintenance, switch and resumption. Failed
 preparation/readiness keeps old traffic or verified prepared traffic intact.

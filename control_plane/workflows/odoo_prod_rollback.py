@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
@@ -114,6 +113,31 @@ def _require_record_store(record_store: object) -> OdooProdRollbackStore:
 
 class OdooProdRollbackTargetMissingError(click.ClickException):
     """No earlier passing deployment exists to roll back to."""
+
+
+def _lane_cutover_deployment(
+    store: OdooProdRollbackStore, request: OdooProdRollbackRequest
+) -> DeploymentRecord | None:
+    attempts = tuple(
+        record
+        for record in store.list_deployment_records(
+            context_name=request.context, instance_name=request.instance
+        )
+        if record.odoo_cutover is not None
+        and record.odoo_cutover.step not in {"complete", "rolled_back"}
+    )
+    if len(attempts) > 1:
+        raise click.ClickException("Multiple unfinished cutovers require lane reconciliation.")
+    if attempts:
+        return attempts[0]
+    try:
+        inventory = store.read_environment_inventory(
+            context_name=request.context, instance_name=request.instance
+        )
+        current = store.read_deployment_record(inventory.deployment_record_id)
+    except FileNotFoundError:
+        return None
+    return current if current.odoo_cutover is not None else None
 
 
 def _read_previous_prod_deployment(
@@ -286,8 +310,23 @@ def resolve_odoo_prod_rollback_target(
     """
 
     typed_record_store = _require_record_store(record_store)
+    current_cutover = _lane_cutover_deployment(typed_record_store, request)
     if request.artifact_id:
         target = OdooProdRollbackTarget(artifact_id=request.artifact_id)
+    elif current_cutover is not None:
+        assert current_cutover.odoo_cutover is not None
+        target = OdooProdRollbackTarget(
+            artifact_id=current_cutover.odoo_cutover.plan.production.artifact_id
+        )
+        if not request.promotion_record_id:
+            from control_plane.odoo_cutover_plan import cutover_record_id
+
+            request = request.model_copy(
+                update={
+                    "promotion_record_id": "promotion-cutover-"
+                    + cutover_record_id(current_cutover.odoo_cutover.plan)
+                }
+            )
     else:
         previous_deployment, artifact_id = _read_previous_prod_deployment(
             record_store=typed_record_store, request=request
@@ -341,6 +380,7 @@ def execute_odoo_prod_rollback(
     if not normalized_product or normalized_product == "odoo":
         raise click.ClickException("Odoo prod rollback requires a DB-backed product profile key.")
     typed_record_store = _require_record_store(record_store)
+    current_deployment = _lane_cutover_deployment(typed_record_store, request)
     previous_deployment: DeploymentRecord | None = None
     artifact_id = request.artifact_id
     if target is not None:
@@ -349,8 +389,22 @@ def execute_odoo_prod_rollback(
             record_store=typed_record_store, target=target
         )
     elif not artifact_id:
-        previous_deployment, artifact_id = _read_previous_prod_deployment(
-            record_store=typed_record_store, request=request
+        if current_deployment is not None:
+            assert current_deployment.odoo_cutover is not None
+            artifact_id = current_deployment.odoo_cutover.plan.production.artifact_id
+        else:
+            previous_deployment, artifact_id = _read_previous_prod_deployment(
+                record_store=typed_record_store, request=request
+            )
+    if current_deployment is not None and not request.promotion_record_id:
+        from control_plane.odoo_cutover_plan import cutover_record_id
+
+        assert current_deployment.odoo_cutover is not None
+        request = request.model_copy(
+            update={
+                "promotion_record_id": "promotion-cutover-"
+                + cutover_record_id(current_deployment.odoo_cutover.plan)
+            }
         )
     artifact_manifest = _read_artifact_manifest(
         record_store=typed_record_store,
@@ -389,36 +443,6 @@ def execute_odoo_prod_rollback(
         "fail" if request.verify_health else "skipped"
     )
     try:
-        attempts = tuple(
-            record
-            for record in typed_record_store.list_deployment_records(
-                context_name=request.context, instance_name=request.instance
-            )
-            if record.odoo_cutover is not None
-            and record.odoo_cutover.step not in {"complete", "rolled_back"}
-        )
-        current_deployment = None
-        if attempts:
-            current_deployment = max(
-                attempts,
-                key=lambda record: (
-                    record.odoo_cutover.began_at
-                    if record.odoo_cutover
-                    else datetime.min.replace(tzinfo=UTC)
-                ),
-            )
-        else:
-            try:
-                inventory = typed_record_store.read_environment_inventory(
-                    context_name=request.context, instance_name=request.instance
-                )
-                current_deployment = typed_record_store.read_deployment_record(
-                    inventory.deployment_record_id
-                )
-            except FileNotFoundError:
-                # Legacy pinned Client recovery predates inventory; a full
-                # lane read above proves there is no unresolved cutover to bypass.
-                current_deployment = None
         if current_deployment is not None and current_deployment.odoo_cutover is not None:
             if current_deployment.odoo_cutover.plan.compatibility.classification != "compatible":
                 raise click.ClickException(
@@ -429,6 +453,13 @@ def execute_odoo_prod_rollback(
             if cutover_provider is None:
                 raise click.ClickException(
                     "Compatible cutover rollback requires its bound slot provider; in-place fallback is refused."
+                )
+            if (
+                rollback_source.artifact_id
+                != current_deployment.odoo_cutover.plan.production.artifact_id
+            ):
+                raise click.ClickException(
+                    "Cutover rollback requires its exact retained production artifact."
                 )
             before_provider_effect(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
             replacement_result = execute_odoo_cutover_rollback_deployment(

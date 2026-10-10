@@ -4,9 +4,11 @@ from typing import Protocol
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.odoo_cutover import OdooCutoverRecord
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 
 
 class DeploymentStore(Protocol):
+    def write_release_tuple_record(self, record: ReleaseTupleRecord) -> object: ...
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
     def write_deployment_record(self, record: DeploymentRecord) -> object: ...
 

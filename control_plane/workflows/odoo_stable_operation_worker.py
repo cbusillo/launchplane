@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 
@@ -363,6 +364,8 @@ class OdooStableOperationWorkerStore(Protocol):
 
 class OdooProdPromotionOperationWorkerStore(Protocol):
     """Database-backed stores also run queued Odoo prod promotions."""
+
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
     def list_odoo_prod_promotion_operation_records(
         self,
@@ -1514,6 +1517,7 @@ def _run_release_operation(
     boundary_effects: frozenset[str],
     run: Callable[[Callable[[str], None], Callable[[str], None]], Any],
     terminal: Callable[[Any, Any], Any],
+    retain_denied_hold: Callable[[], bool] = lambda: False,
 ) -> bool:
     """Lease, heartbeat, authority checks, and the terminal write for a queued release.
 
@@ -1582,7 +1586,22 @@ def _run_release_operation(
             raise authorization_guard.denial_error
     except DurableOperationAuthorizationDeniedError as error:
         logging.warning("%s operation %s was denied: %s", label, operation.operation_id, error)
-        terminal_operation = failed(str(error), error.code)
+        if retain_denied_hold():
+            terminal_operation = read_current().model_copy(
+                update={
+                    "status": "reconciliation_required",
+                    "updated_at": _utc_now_timestamp(),
+                    "finished_at": "",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
+                    "result": None,
+                    "error_code": error.code,
+                    "error_message": "Unfinished cutover recovery was denied; retain the lane hold without effects.",
+                }
+            )
+        else:
+            terminal_operation = failed(str(error), error.code)
     except Exception as error:
         logging.exception(
             "%s operation %s failed before producing a result.", label, operation.operation_id
@@ -1631,6 +1650,36 @@ def _execute_prod_promotion_operation(
     heartbeat_seconds: int,
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> bool:
+    def retain_denied_cutover_hold() -> bool:
+        known_write = odoo_release_wrote_production(operation)
+        if cutover_provider_factory is None:
+            return False
+        if not known_write:
+            known_write = odoo_release_wrote_production(
+                record_store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+            )
+        if not known_write:
+            return False
+        from control_plane.odoo_cutover_plan import cutover_identity
+
+        try:
+            deployment = record_store.read_deployment_record(
+                "deployment-cutover-"
+                + cutover_identity(
+                    operation.product,
+                    operation.context,
+                    operation.instance,
+                    operation.request.request_id,
+                )
+            )
+        except Exception:
+            # A failed read after the known effect cannot establish completion.
+            return True
+        return deployment.odoo_cutover is not None and deployment.odoo_cutover.step not in {
+            "complete",
+            "rolled_back",
+        }
+
     def run(
         checkpoint_phase: Callable[[str], None],
         checkpoint_provider_effect: Callable[[str], None],
@@ -1714,6 +1763,7 @@ def _execute_prod_promotion_operation(
         ),
         run=run,
         terminal=terminal,
+        retain_denied_hold=retain_denied_cutover_hold,
     )
 
 

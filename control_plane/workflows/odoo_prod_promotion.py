@@ -174,7 +174,7 @@ def execute_odoo_prod_promotion(
                     context=request.context,
                     instance=request.to_instance,
                     artifact_id=request.artifact_id,
-                    release_id=promotion_record_id,
+                    release_id=request.backup_record_id,
                 )
             except FileNotFoundError:
                 # Existing approval/backup gates retain their original order for

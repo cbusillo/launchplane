@@ -111,6 +111,17 @@ def admit_odoo_prod_promotion_run(
             release_id=request.request_id,
         )
         recovery = persisted_cutover(record_store, admitted_plan)
+        if admitted_plan is not None and any(
+            item.odoo_cutover is not None
+            and item.odoo_cutover.step not in {"complete", "rolled_back"}
+            and item.odoo_cutover.plan != admitted_plan
+            for item in record_store.list_deployment_records(
+                context_name=request.context, instance_name=request.to_instance
+            )
+        ):
+            raise click.ClickException(
+                "Another unfinished cutover must be recovered before this release."
+            )
         require_production_promotion_backup(
             record_store=record_store,
             product=request.product,

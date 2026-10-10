@@ -251,15 +251,37 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 )
                 if reconcile:
                     return store.claim_odoo_cutover_reconciliation_record(
-                        **arguments, max_attempts=3
+                        **arguments, max_attempts=10
                     )
                 return store.claim_next_odoo_prod_promotion_operation_record(**arguments)
 
-            def work(current: OdooProdPromotionOperationRecord | None) -> bool:
+            def work(current: OdooProdPromotionOperationRecord | None, denial: str = "") -> bool:
                 assert current is not None
-                with patch(
-                    "control_plane.workflows.odoo_stable_operation_worker.read_active_authz_policy_record",
-                    return_value=policy,
+                from control_plane.durable_operation_authorization import (
+                    DurableOperationAuthorizationGuard,
+                )
+                from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+
+                boundary = ["start"]
+                original_check = DurableOperationAuthorizationGuard.recheck_provider_effect
+
+                def recheck(guard: DurableOperationAuthorizationGuard, effect: str) -> None:
+                    boundary[0] = effect
+                    original_check(guard, effect)
+
+                def read_policy(_store: object) -> LaunchplaneAuthzPolicyRecord:
+                    if boundary[0] == denial:
+                        raise RuntimeError("fixture policy read unavailable")
+                    return policy
+
+                with (
+                    patch.object(
+                        DurableOperationAuthorizationGuard, "recheck_provider_effect", recheck
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_operation_worker.read_active_authz_policy_record",
+                        side_effect=read_policy,
+                    ),
                 ):
                     return _execute_prod_promotion_operation(
                         record_store=store,
@@ -280,6 +302,29 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             )
             assert deployment.odoo_cutover is not None
             self.assertEqual(deployment.odoo_cutover.step, "switching")
+            from control_plane.workflows.odoo_prod_promotion_run import (
+                ODOO_LOGICAL_BACKUP_EFFECT,
+                ODOO_PROD_DEPLOY_EFFECT,
+            )
+            from control_plane.workflows.odoo_prod_rollback import (
+                resolve_odoo_prod_rollback_target,
+                execute_odoo_prod_rollback,
+                OdooProdRollbackRequest,
+            )
+
+            target = resolve_odoo_prod_rollback_target(
+                record_store=store, request=OdooProdRollbackRequest(context=request.context)
+            )
+            self.assertEqual(target.artifact_id, plan.production.artifact_id)
+            for denial in ("start", ODOO_LOGICAL_BACKUP_EFFECT, ODOO_PROD_DEPLOY_EFFECT):
+                before = list(provider.actions)
+                self.assertTrue(work(claim(reconcile=True), denial))
+                self.assertEqual(
+                    store.read_odoo_prod_promotion_operation_record(operation.operation_id).status,
+                    "reconciliation_required",
+                )
+                self.assertEqual(provider.actions, before)
+                self.assertEqual(capture.call_count, 1)
             resumed = claim(reconcile=True)
             self.assertIsNotNone(resumed)
             with patch(
@@ -299,6 +344,32 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 ).runtime_identity,
                 plan.new.runtime_identity,
             )
+            rolled = execute_odoo_prod_rollback(
+                control_plane_root=self.root,
+                record_store=store,
+                product=request.product,
+                request=OdooProdRollbackRequest(context=request.context),
+                cutover_provider=provider,
+            )
+            self.assertEqual(rolled.rollback_status, "pass")
+            self.assertEqual(
+                store.read_release_tuple_record(
+                    context_name=request.context, channel_name="prod"
+                ).artifact_id,
+                plan.production.artifact_id,
+            )
+            switched = store.read_deployment_record(rolled.deployment_record_id)
+            self.assertTrue(switched.deploy.started_at and switched.deploy.finished_at)
+            next_plan = resolve_profile_cutover_plan(
+                store,
+                product=request.product,
+                context=request.context,
+                instance="prod",
+                artifact_id=plan.candidate.artifact_id,
+                release_id="next-accepted-release",
+            )
+            assert next_plan is not None
+            self.assertEqual(next_plan.old.runtime_identity, plan.old.runtime_identity)
 
     def setUp(self) -> None:
         setup_memory_files(self)

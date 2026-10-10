@@ -165,7 +165,8 @@ def require_production_promotion_backup(
         # This is continuation of the already admitted release, not a fresh
         # promotion of today's data under an expired capture. Authority,
         # retention and competing consumption are still checked below.
-        now = cutover_recovery.began_at
+        admitted_at = admitted.backup_gate.evidence.get("admission_checked_at", "")
+        now = datetime.fromisoformat(admitted_at) if admitted_at else cutover_recovery.began_at
     for field, maximum_age in (
         ("snapshot_finished_at", binding.policy.fast_snapshot.max_evidence_age_seconds),
         (
@@ -227,6 +228,7 @@ def require_production_promotion_backup(
             **evidence,
             "backup_record_id": record.record_id,
             "backup_operation_id": operation.operation_id,
+            "admission_checked_at": now.isoformat(),
         },
     )
 

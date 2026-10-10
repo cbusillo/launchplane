@@ -1,6 +1,7 @@
 """Adapt the cutover executor to the existing promotion/deployment record path."""
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -16,6 +17,10 @@ from control_plane.odoo_cutover_plan import cutover_record_id
 from control_plane.odoo_cutover_storage import DeploymentCutoverStore, DeploymentStore
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider, execute_odoo_cutover
 from control_plane.workflows.odoo_cutover import rollback_compatible_cutover
+from control_plane.release_tuples import (
+    build_release_tuple_record_from_artifact_manifest,
+    should_mint_release_tuple_for_channel,
+)
 
 
 class OdooCutoverApplyResult(BaseModel):
@@ -56,6 +61,7 @@ def execute_odoo_cutover_deployment(
             target_name=plan.new.slot_id,
             deploy_mode="atomic-two-slot",
             deployment_id=plan.release_id,
+            started_at=datetime.now(UTC).isoformat(),
         ),
     )
     store = DeploymentCutoverStore(record_store, deployment)
@@ -104,8 +110,10 @@ def execute_odoo_cutover_rollback_deployment(
     if record is None or artifact_id != record.plan.production.artifact_id:
         raise ValueError("cutover rollback requires its exact retained production artifact")
     store = DeploymentCutoverStore(record_store, deployment)
+    rollback_started_at = record.updated_at if record.step == "rolling_back" else datetime.now(UTC)
     rolled = rollback_compatible_cutover(store, provider, record.record_id)
     old = rolled.plan.old
+    finished_at = datetime.now(UTC).isoformat()
     rollback_id = deployment.record_id + "-switch-back"
     previous = deployment.model_copy(
         update={
@@ -126,15 +134,30 @@ def execute_odoo_cutover_rollback_deployment(
                 target_name=old.slot_id,
                 deploy_mode="atomic-switch-back",
                 deployment_id=record.plan.release_id,
+                started_at=rollback_started_at.isoformat(),
+                finished_at=finished_at,
             ),
             "post_deploy_update": PostDeployUpdateEvidence(attempted=False, status="skipped"),
             "destination_health": rolled.route.public_health if rolled.route else None,
         }
     )
     record_store.write_deployment_record(previous)
+    # Publish the same tuple semantics as the existing stable deployment path.
+    release_tuple_id = ""
+    if should_mint_release_tuple_for_channel(previous.instance):
+        release_tuple = build_release_tuple_record_from_artifact_manifest(
+            context_name=previous.context,
+            channel_name=previous.instance,
+            artifact_manifest=rolled.plan.production,
+            deployment_record_id=previous.record_id,
+            minted_at=finished_at,
+        )
+        record_store.write_release_tuple_record(release_tuple)
+        release_tuple_id = release_tuple.tuple_id
     return OdooCutoverApplyResult(
         deployment_record_id=rollback_id,
         deploy_status="pass",
         post_deploy_status="skipped",
         health_status="pass",
+        release_tuple_id=release_tuple_id,
     )
