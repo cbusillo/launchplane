@@ -184,6 +184,34 @@ def _replacement_result(
 
 
 class OdooProdRollbackWorkflowTests(unittest.TestCase):
+    def test_recorded_database_cutover_cannot_redeploy_only_an_image(self) -> None:
+        from tempfile import TemporaryDirectory
+        from tests.test_odoo_cutover import IsolatedCutoverProvider, cutover_store
+        from control_plane.workflows.odoo_cutover import execute_odoo_cutover
+
+        with TemporaryDirectory() as directory:
+            provider = IsolatedCutoverProvider(Path(directory), database_changing=True)
+            self.addCleanup(provider.engine.dispose)
+            cutover = execute_odoo_cutover(
+                provider.cutover, cutover_store(Path(directory)), provider, record_id="c" * 32
+            )
+            records = self._record_store()
+            records.read_deployment_record.return_value = _deployment_record().model_copy(
+                update={"odoo_cutover": cutover}
+            )
+            with patch(
+                "control_plane.workflows.odoo_prod_rollback.execute_odoo_stable_target_replacement_apply"
+            ) as legacy:
+                result = execute_odoo_prod_rollback(
+                    control_plane_root=Path(directory),
+                    record_store=records,
+                    product="fixture",
+                    request=OdooProdRollbackRequest(context="opw"),
+                )
+            self.assertEqual(result.rollback_status, "fail")
+            self.assertIn("image-only rollback is refused", result.error_message)
+            legacy.assert_not_called()
+
     def test_rollback_request_accepts_profile_owned_context(self) -> None:
         request = OdooProdRollbackRequest(context=" New-Site ")
 

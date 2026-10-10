@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.workflows.odoo_cutover import OdooCutoverProvider
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
@@ -555,6 +558,7 @@ def run_odoo_stable_operation_worker_once(
     lease_seconds: int = DEFAULT_ODOO_STABLE_WORKER_LEASE_SECONDS,
     heartbeat_seconds: int = DEFAULT_ODOO_STABLE_WORKER_HEARTBEAT_SECONDS,
     max_attempts: int = DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> OdooStableOperationWorkerResult:
     normalized_lease_owner = lease_owner.strip()
     if not normalized_lease_owner:
@@ -706,6 +710,7 @@ def run_odoo_stable_operation_worker_once(
             record_store=promotion_store,
             control_plane_root_path=control_plane_root_path,
             operation=promotion_operation,
+            cutover_provider_factory=cutover_provider_factory,
             lease_owner=normalized_lease_owner,
             lease_seconds=lease_seconds,
             heartbeat_seconds=heartbeat_seconds,
@@ -790,6 +795,7 @@ def reconcile_stale_odoo_stable_operation_records(
     *,
     record_store: OdooStableOperationWorkerStore,
     max_attempts: int = DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
     now: str | None = None,
 ) -> OdooStableOperationReconcileResult:
     if max_attempts < 1:
@@ -859,6 +865,7 @@ def run_odoo_stable_operation_worker_loop(
     lease_seconds: int = DEFAULT_ODOO_STABLE_WORKER_LEASE_SECONDS,
     heartbeat_seconds: int = DEFAULT_ODOO_STABLE_WORKER_HEARTBEAT_SECONDS,
     max_attempts: int = DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
     poll_seconds: int = DEFAULT_ODOO_STABLE_WORKER_POLL_SECONDS,
     error_backoff_seconds: int = DEFAULT_ODOO_STABLE_WORKER_ERROR_BACKOFF_SECONDS,
     max_consecutive_errors: int = DEFAULT_ODOO_STABLE_WORKER_MAX_CONSECUTIVE_ERRORS,
@@ -949,6 +956,7 @@ def run_odoo_stable_operation_worker_loop(
                     lease_seconds=lease_seconds,
                     heartbeat_seconds=heartbeat_seconds,
                     max_attempts=max_attempts,
+                    cutover_provider_factory=cutover_provider_factory,
                 )
             except Exception:
                 error_count += 1
@@ -1610,6 +1618,7 @@ def _execute_prod_promotion_operation(
     lease_owner: str,
     lease_seconds: int,
     heartbeat_seconds: int,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> bool:
     def run(
         checkpoint_phase: Callable[[str], None],
@@ -1634,6 +1643,7 @@ def _execute_prod_promotion_operation(
             phase_checkpoint=checkpoint_phase,
             provider_effect_checkpoint=before_effect,
             hold_uncertain_effects=True,
+            cutover_provider_factory=cutover_provider_factory,
         )
 
     def terminal(

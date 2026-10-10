@@ -25,6 +25,9 @@ from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateRequest,
     execute_odoo_prod_backup_gate,
 )
+from control_plane.workflows.odoo_cutover import OdooCutoverProvider
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+
 from control_plane.workflows.odoo_prod_promotion import (
     OdooProdPromotionResult,
     OdooProdPromotionStore,
@@ -124,6 +127,7 @@ def execute_odoo_prod_promotion_run(
     phase_checkpoint: Callable[[OdooProdPromotionOperationPhase], None] | None = None,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     hold_uncertain_effects: bool = False,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> OdooProdPromotionRunResult:
     """Run one promotion; the durable worker passes checkpoints, the sync route does not.
 
@@ -149,6 +153,29 @@ def execute_odoo_prod_promotion_run(
             run_status="blocked",
             error_message=admission.blocked_reason,
         )
+    cutover_provider = None
+    if request.cutover_plan is not None:
+        plan = request.cutover_plan
+        if (
+            plan.candidate.artifact_id != inputs_result.artifact_id
+            or plan.new.binding.product_id != request.product
+            or plan.new.binding.environment_id != request.to_instance
+            or plan.new.runtime_identity.context != request.context
+        ):
+            return _result_from_inputs(
+                request=request,
+                inputs_result=inputs_result,
+                run_status="blocked",
+                error_message="Cutover plan differs from the admitted artifact/product/lane.",
+            )
+        if cutover_provider_factory is None:
+            return _result_from_inputs(
+                request=request,
+                inputs_result=inputs_result,
+                run_status="blocked",
+                error_message="Two-slot release requires an activated lane-bound provider; in-place fallback is refused.",
+            )
+        cutover_provider = cutover_provider_factory(request.cutover_plan)
     record_phase("validated")
     if provider_effect_checkpoint is not None:
         provider_effect_checkpoint(ODOO_LOGICAL_BACKUP_EFFECT)
@@ -195,9 +222,11 @@ def execute_odoo_prod_promotion_run(
             verify_health=request.verify_health,
             health_timeout_seconds=request.health_timeout_seconds,
             no_cache=request.no_cache,
+            cutover_plan=request.cutover_plan,
         ),
         provider_effect_checkpoint=provider_effect_checkpoint,
         hold_uncertain_effects=hold_uncertain_effects,
+        cutover_provider=cutover_provider,
     )
     run_status: Literal["pass", "fail"] = (
         "pass"

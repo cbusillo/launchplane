@@ -417,6 +417,7 @@ export type DeploymentRecordOutput = {
     instance: string;
     integration_key_readback: IntegrationKeyReadbackEvidence | null;
     no_cache: boolean;
+    odoo_cutover: OdooCutoverRecord | null;
     post_deploy_update: PostDeployUpdateEvidence;
     record_id: string;
     resolved_target: ResolvedTargetEvidence | null;
@@ -1555,6 +1556,36 @@ export type OdooConfigParameterOverride = {
     value: OdooOverrideValue;
 };
 
+export type OdooCutoverPlan = {
+    candidate: ArtifactIdentityManifest;
+    compatibility: ReleaseDatabaseCompatibility;
+    host: string;
+    new: OdooSlot;
+    old: OdooSlot;
+    production: ArtifactIdentityManifest;
+    release_id: string;
+    route_id: string;
+    writers: Array<WriterTarget>;
+};
+
+export type OdooCutoverRecord = {
+    backup: OdooRecoveryTuple | null;
+    began_at: string;
+    ended_at: string | null;
+    error: string;
+    maintenance: OdooMaintenanceReceipt | null;
+    old_connections_drained: boolean;
+    pause: PublicPauseRecord | null;
+    plan: OdooCutoverPlan;
+    previous_slot_retained: boolean;
+    public_site: PreparedPublicSite | null;
+    readiness: OdooSlotReadiness | null;
+    record_id: string;
+    route: OdooRouteObservation | null;
+    step: 'preparing' | 'prepared' | 'pausing' | 'backing_up' | 'maintaining' | 'ready' | 'switching' | 'resuming' | 'draining' | 'complete' | 'rolling_back' | 'rolled_back';
+    updated_at: string;
+};
+
 export type OdooInstanceOverrideRecord = {
     addon_settings: Array<OdooAddonSettingOverride>;
     apply_on: Array<'restore' | 'deploy' | 'promotion' | 'preview' | 'manual'>;
@@ -1566,6 +1597,19 @@ export type OdooInstanceOverrideRecord = {
     source_label: string;
     updated_at: string;
     website_bootstrap: OdooWebsiteBootstrapPayload | null;
+};
+
+export type OdooMaintenanceReceipt = {
+    binding: PublicSiteBinding;
+    candidate_manifest_sha256: string;
+    credential_commit_id: string;
+    credential_commit_verified_before_registry: true;
+    evidence_id: string;
+    image: string;
+    install_modules: Array<string>;
+    module_readback: true;
+    release_id: string;
+    update_modules: Array<string>;
 };
 
 export type OdooOverrideApplyResult = {
@@ -1614,6 +1658,7 @@ export type OdooProdPromotionRunEnvelope = {
 export type OdooProdPromotionRunRequest = {
     backup_timeout_seconds?: number | null;
     context: string;
+    cutover_plan?: OdooCutoverPlan | null;
     expected_artifact_id?: string;
     from_instance?: string;
     health_timeout_seconds?: number | null;
@@ -1713,6 +1758,58 @@ export type OdooProdRollbackResult = {
     rollback_started_at: string;
     rollback_status: 'pass' | 'fail';
     source_channel: string;
+};
+
+export type OdooRecoveryTuple = {
+    binding: PublicSiteBinding;
+    coherence_verified: true;
+    database_dump_sha256: string;
+    filestore_archive_sha256: string;
+    image: string;
+    independent_backup_verified: true;
+    infrastructure_record_id: string;
+    logical_record_id: string;
+    recovery_point_at: string;
+    restore_verified: true;
+};
+
+export type OdooRouteObservation = {
+    applied: true;
+    authoritative_router_count: 1;
+    binding: PublicSiteBinding;
+    evidence_id: string;
+    host: string;
+    public_identity: true;
+    route_id: string;
+    runtime_identity: RuntimeIdentity | null;
+    slot_id: string;
+    target_url: string;
+};
+
+export type OdooSlot = {
+    binding: PublicSiteBinding;
+    compose_id: string;
+    image: string;
+    private_url: string;
+    runtime_identity: RuntimeIdentity;
+    slot_id: string;
+};
+
+export type OdooSlotReadiness = {
+    assets: true;
+    binding: PublicSiteBinding;
+    browser: true;
+    evidence_id: string;
+    host: string;
+    image: string;
+    observed_at: string;
+    pending_modules: false;
+    registry: true;
+    render: true;
+    retained_previous_assets: true;
+    runtime_identity: RuntimeIdentity;
+    side_effects_fenced: true;
+    slot_id: string;
 };
 
 export type OdooWebsiteBootstrapPayload = {
@@ -2289,6 +2386,24 @@ export type PostDeployUpdateEvidence = {
         [key: string]: string;
     };
     status: 'pending' | 'pass' | 'fail' | 'skipped';
+};
+
+export type PreparedPublicSite = {
+    content_digest: string;
+    plan: PublicSitePlan;
+    prepared_at: string;
+    resources: Array<PreparedResource>;
+};
+
+export type PreparedResource = {
+    body_base64: string;
+    content_type: string;
+    headers: Array<[
+        string,
+        string
+    ]>;
+    path: string;
+    status: number;
 };
 
 export type PreviewGenerationRecord = {
@@ -3913,6 +4028,42 @@ export type ProviderTargetRecord = {
     updated_at: string;
 };
 
+export type PublicPauseRecord = {
+    began_at: string;
+    binding: PublicSiteBinding;
+    content_digest: string;
+    duration_seconds: number | null;
+    ended_at: string | null;
+    pause_id: string;
+    recovery_binding: PublicSiteBinding | null;
+    reduced_service: true;
+    served_mode: 'unverified' | 'prepared-public';
+    state: 'fencing' | 'drained' | 'resuming' | 'complete';
+    writers: Array<WriterObservation>;
+};
+
+export type PublicSiteBinding = {
+    artifact_id: string;
+    database: string;
+    environment_id: string;
+    image_digest: string;
+    product_id: string;
+    release_id: string;
+};
+
+export type PublicSitePlan = {
+    binding: PublicSiteBinding;
+    excluded_prefixes: Array<string>;
+    max_resource_bytes: number;
+    max_resources: number;
+    max_total_bytes: number;
+    notice: string;
+    origin: string;
+    public_routes: Array<string>;
+    retained_assets: Array<string>;
+    writers: Array<WriterTarget>;
+};
+
 export type RecordFailure = {
     code: string;
     description: string;
@@ -4135,16 +4286,20 @@ export type RuntimeEnvironmentRecord = {
 export type RuntimeIdentity = {
     artifact_id: string;
     context: string;
+    database_uuid: string;
     deployed_at: string;
     deployment_record_id: string;
     environment_kind: string;
+    image_digest: string;
     image_reference: string;
     instance: string;
     preview_generation_id: string;
     preview_id: string;
     product: string;
+    release_id: string;
     release_tuple_id: string;
     schema_version: number;
+    slot: string;
     source_git_ref: string;
 };
 
@@ -4486,6 +4641,20 @@ export type WorkGraphSnapshotResponse = {
     };
     status: 'ok';
     trace_id: string;
+};
+
+export type WriterObservation = {
+    active_jobs: number;
+    binding: PublicSiteBinding;
+    evidence_id: string;
+    fenced: boolean;
+    pause_id: string;
+    writer: WriterTarget;
+};
+
+export type WriterTarget = {
+    kind: 'web' | 'cron' | 'queue' | 'mail' | 'integration' | 'asset_gc';
+    writer_id: string;
 };
 
 export type OwnerSecretInputEnvelopeWritable = {

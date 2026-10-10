@@ -36,6 +36,14 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     execute_odoo_stable_target_replacement_apply,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.workflows.odoo_cutover import OdooCutoverProvider
+from control_plane.workflows.odoo_cutover_deployment import (
+    OdooCutoverApplyResult,
+    execute_odoo_cutover_rollback_deployment,
+)
+from control_plane.contracts.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementApplyResult,
+)
 
 
 @dataclass(frozen=True)
@@ -321,6 +329,7 @@ def execute_odoo_prod_rollback(
     target: OdooProdRollbackTarget | None = None,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     hold_uncertain_effects: bool = False,
+    cutover_provider: OdooCutoverProvider | None = None,
 ) -> OdooProdRollbackResult:
     """Roll prod back; a queued rollback passes the ``target`` it fixed at enqueue."""
 
@@ -369,32 +378,55 @@ def execute_odoo_prod_rollback(
             provider_effect_checkpoint(effect_name)
         provider_effect_started = True
 
-    replacement_result = None
+    replacement_result: OdooStableTargetReplacementApplyResult | OdooCutoverApplyResult | None = (
+        None
+    )
     health_status: Literal["pass", "fail", "skipped"] = (
         "fail" if request.verify_health else "skipped"
     )
     try:
-        replacement_result = execute_odoo_stable_target_replacement_apply(
-            control_plane_root=control_plane_root,
-            record_store=typed_record_store,
-            request=OdooStableTargetReplacementApplyRequest(
-                product=normalized_product,
-                instance=request.instance,
-                artifact_id=rollback_source.artifact_id,
-                source_git_ref=rollback_source.source_git_ref,
-                allow_empty_data=True,
-                data_source_mode="existing",
-                verify_health=request.verify_health,
-                verify_canonical=request.verify_health,
-                verify_logo=request.verify_health,
-                timeout_seconds=request.timeout_seconds,
-                health_timeout_seconds=request.health_timeout_seconds,
-                no_cache=request.no_cache,
-            ),
-            provider_effect_checkpoint=before_provider_effect,
-            hold_uncertain_effects=hold_uncertain_effects,
-            rollback=True,
+        inventory = _read_prod_inventory(record_store=typed_record_store, request=request)
+        current_deployment = typed_record_store.read_deployment_record(
+            inventory.deployment_record_id
         )
+        if current_deployment.odoo_cutover is not None:
+            if current_deployment.odoo_cutover.plan.compatibility.classification != "compatible":
+                raise click.ClickException(
+                    "Database-changing cutover recovery requires the authorized coherent image/DB/filestore backup restore workflow; image-only rollback is refused."
+                )
+            if cutover_provider is None:
+                raise click.ClickException(
+                    "Compatible cutover rollback requires its bound slot provider; in-place fallback is refused."
+                )
+            before_provider_effect("cutover_switch_back")
+            replacement_result = execute_odoo_cutover_rollback_deployment(
+                deployment=current_deployment,
+                record_store=typed_record_store,
+                provider=cutover_provider,
+                artifact_id=rollback_source.artifact_id,
+            )
+        else:
+            replacement_result = execute_odoo_stable_target_replacement_apply(
+                control_plane_root=control_plane_root,
+                record_store=typed_record_store,
+                request=OdooStableTargetReplacementApplyRequest(
+                    product=normalized_product,
+                    instance=request.instance,
+                    artifact_id=rollback_source.artifact_id,
+                    source_git_ref=rollback_source.source_git_ref,
+                    allow_empty_data=True,
+                    data_source_mode="existing",
+                    verify_health=request.verify_health,
+                    verify_canonical=request.verify_health,
+                    verify_logo=request.verify_health,
+                    timeout_seconds=request.timeout_seconds,
+                    health_timeout_seconds=request.health_timeout_seconds,
+                    no_cache=request.no_cache,
+                ),
+                provider_effect_checkpoint=before_provider_effect,
+                hold_uncertain_effects=hold_uncertain_effects,
+                rollback=True,
+            )
         deployment_record = typed_record_store.read_deployment_record(
             replacement_result.deployment_record_id
         )
@@ -403,7 +435,7 @@ def execute_odoo_prod_rollback(
             raise click.ClickException(
                 replacement_result.error_message or "Odoo prod rollback deploy failed."
             )
-        if replacement_result.post_deploy_status != "pass":
+        if replacement_result.post_deploy_status not in {"pass", "skipped"}:
             raise click.ClickException(
                 replacement_result.error_message or "Odoo prod rollback post-deploy failed."
             )

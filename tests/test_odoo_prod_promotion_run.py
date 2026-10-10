@@ -24,6 +24,52 @@ class OdooProdPromotionRunTests(unittest.TestCase):
     def setUp(self) -> None:
         stub_verified_promotion_backup(self, "control_plane.workflows.odoo_prod_promotion_run")
 
+    def test_two_slot_request_without_activated_provider_has_no_backup_or_fallback(self) -> None:
+        from tempfile import TemporaryDirectory
+        from tests.test_odoo_cutover import IsolatedCutoverProvider
+
+        with TemporaryDirectory() as directory:
+            provider = IsolatedCutoverProvider(Path(directory))
+            self.addCleanup(provider.engine.dispose)
+            from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+
+            payload = provider.cutover.model_dump()
+            for name in ("old", "new"):
+                payload[name]["binding"]["environment_id"] = "prod"
+                payload[name]["runtime_identity"]["instance"] = "prod"
+            plan = OdooCutoverPlan.model_validate(payload)
+            request = OdooProdPromotionRunRequest(
+                context="fixture",
+                product=plan.new.binding.product_id,
+                request_id="cutover",
+                cutover_plan=plan,
+            )
+            with (
+                patch(
+                    "control_plane.workflows.odoo_prod_promotion_run.resolve_odoo_prod_promotion_inputs",
+                    return_value=_inputs_result().model_copy(
+                        update={"artifact_id": plan.candidate.artifact_id, "context": "fixture"}
+                    ),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_prod_promotion_run.execute_odoo_prod_backup_gate"
+                ) as backup,
+                patch(
+                    "control_plane.workflows.odoo_prod_promotion_run.execute_odoo_prod_promotion"
+                ) as promotion,
+            ):
+                result = execute_odoo_prod_promotion_run(
+                    control_plane_root=Path(directory),
+                    state_dir=Path(directory),
+                    database_url=None,
+                    record_store=cast(OdooProdPromotionRunStore, cast(object, _promotion_store())),
+                    request=request,
+                )
+            self.assertEqual(result.run_status, "blocked")
+            self.assertIn("in-place fallback", result.error_message)
+            backup.assert_not_called()
+            promotion.assert_not_called()
+
     def test_run_request_requires_testing_to_prod(self) -> None:
         with self.assertRaises(ValidationError):
             OdooProdPromotionRunRequest(
