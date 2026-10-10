@@ -80,6 +80,12 @@ test("policy history stays visible without blocking current controller status", 
   history.historical = true;
   history.status = "passed";
 
+  state.reconciliation_status = "adopted";
+  await page.getByRole("button", { name: "Refresh status", exact: true }).click();
+  await expect(controller).toHaveAttribute("data-tone", "pending");
+  await expect(page.locator(".engineering-status-chip").getByText("Adopted", { exact: true })).toBeVisible();
+  state.reconciliation_status = "clean";
+
   // A currently referenced stale record still requires attention, even if its
   // stored status looks terminal. The service's reference owns applicability.
   state.status = "running";

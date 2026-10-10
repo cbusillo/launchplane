@@ -1372,7 +1372,9 @@ controller action when their policy key and digest match the active repository
 policy; stale records remain visible in the summaries with a stale reason. The
 read model qualifies each lineage's `historical` flag with the controller's stored
 progress selector, before current-policy filtering. Completed/retired history is
-distinct from unfinished old-policy work awaiting retirement. The workbench uses
+distinct from unfinished old-policy evidence requiring attention. Completion
+qualification reads each candidate's stored batch lineage even when its landing
+has fallen outside the recent-record display window. The workbench uses
 that qualification and active controller references for current attention.
 An idle, reconciled train does not
 become blocked solely because old-policy history remains visible; those rows are

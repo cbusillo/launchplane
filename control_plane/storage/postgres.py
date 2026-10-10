@@ -19024,6 +19024,7 @@ class PostgresRecordStore(HumanSessionStore):
         status: str = "",
         record_id: str = "",
         limit: int | None = None,
+        batch_id: str = "",
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
         filters: list[object] = []
         if repository:
@@ -19037,6 +19038,8 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.status == status)
         if record_id:
             filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.record_id == record_id)
+        if batch_id:
+            filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.batch_id == batch_id)
         return self._list_models(
             model_type=MergeTrainBatchLandingPlanRecord,
             orm_model=LaunchplaneMergeTrainBatchLandingPlanRow,

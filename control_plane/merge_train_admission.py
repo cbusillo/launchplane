@@ -26,6 +26,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
 )
 from control_plane.workflows.merge_train_controller import (
     decide_merge_train_controller_record_action,
+    latest_completed_merge_train_batch_landing_plan_record,
 )
 
 MergeTrainControllerPolicyStatus = Literal["current", "stale", "unchecked"]
@@ -216,6 +217,7 @@ class MergeTrainRunHistoryStore(Protocol):
         base_branch: str = "",
         status: str = "",
         limit: int | None = None,
+        batch_id: str = "",
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]: ...
 
     def list_merge_train_stack_collapse_plan_records(
@@ -379,6 +381,7 @@ def build_merge_train_controller_status_read_model(
             generated_at=generated_at,
         ),
         controller_records=_summarize_controller_records(
+            store=store,
             controller_records=controller_records,
             current_policy_key=current_policy_key,
             current_policy_sha256=current_policy_sha256,
@@ -838,6 +841,7 @@ def _string_tuple_field(payload: dict[str, object], key: str) -> tuple[str, ...]
 
 def _summarize_controller_records(
     *,
+    store: MergeTrainRunHistoryStore,
     controller_records: MergeTrainControllerRecords,
     current_policy_key: str = "",
     current_policy_sha256: str = "",
@@ -868,7 +872,7 @@ def _summarize_controller_records(
             for record in controller_records.stack_collapse_plan_records
         ),
     ]
-    historical_ids = _historical_controller_record_ids(controller_records)
+    historical_ids = _historical_controller_record_ids(controller_records, store=store)
     return tuple(
         summary.model_copy(update={"historical": summary.record_id in historical_ids})
         for summary in sorted(
@@ -877,7 +881,9 @@ def _summarize_controller_records(
     )
 
 
-def _historical_controller_record_ids(records: MergeTrainControllerRecords) -> set[str]:
+def _historical_controller_record_ids(
+    records: MergeTrainControllerRecords, *, store: MergeTrainRunHistoryStore
+) -> set[str]:
     """Qualify history with the same stored-progress selector the controller uses.
 
     Evaluate each lineage before current-policy filtering: an obsolete unfinished
@@ -888,10 +894,13 @@ def _historical_controller_record_ids(records: MergeTrainControllerRecords) -> s
         candidates = tuple(
             record for record in records.candidate_records if record.candidate.batch_id == batch_id
         )
-        landings = tuple(
-            record
-            for record in records.landing_plan_records
-            if record.landing_plan.batch_id == batch_id
+        candidate = candidates[0].candidate
+        # Completion can be outside the dashboard's recent-record window.
+        landings = store.list_merge_train_batch_landing_plan_records(
+            repository=candidate.repository,
+            base_branch=candidate.base_branch,
+            status="active",
+            batch_id=batch_id,
         )
         decision = decide_merge_train_controller_record_action(
             candidate_records=candidates,
@@ -909,7 +918,16 @@ def _historical_controller_record_ids(records: MergeTrainControllerRecords) -> s
         decision = decide_merge_train_controller_record_action(
             candidate_records=(), landing_plan_records=landings, stack_collapse_plan_records=()
         )
-        if decision.action == "idle":
+        plan = landings[0].landing_plan
+        if (
+            decision.action == "idle"
+            and latest_completed_merge_train_batch_landing_plan_record(
+                landing_plan_records=landings,
+                batch_id=plan.batch_id,
+                candidate_sha=plan.candidate_sha,
+            )
+            is not None
+        ):
             historical.update(record.record_id for record in landings)
     for collapse_id in {record.plan.collapse_id for record in records.stack_collapse_plan_records}:
         collapses = tuple(

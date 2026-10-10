@@ -388,7 +388,10 @@ function ControllerStatus({
           {controllerTone === "blocked"
             ? "Attention required"
             : controllerTone === "pending"
-              ? "Running"
+              ? status.controller_state?.reconciliation_status === "adopted" ||
+                status.controller_diagnostics?.reconciliation_status === "adopted"
+                ? "Adopted"
+                : "Running"
               : controllerTone === "pass"
                 ? "Clean"
                 : "Unknown"}
