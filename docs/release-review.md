@@ -279,6 +279,12 @@ not implemented behavior. Until it is built and activated, this contract
 provides no way to start one; an admin override or existing grant is not that
 path.
 
+That path uses the same verified backup, release record, post-deploy checks,
+and automatic rollback. Launchplane immediately sends the Client a release
+review for the exact candidate, marked as an urgent temporary fix with the
+reason. Acceptance hands the final check back to the Client; a rejection
+rolls back to their last accepted release.
+
 ## Acceptance starts the release
 
 Each product profile records `release_on_acceptance`: `held` (the default for

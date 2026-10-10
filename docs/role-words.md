@@ -26,10 +26,8 @@ TLS.
 ## Release Rule
 
 The Director's [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
-owns release authority, including standing acceptance for the Director's own
-products and the temporary hotfix path for live breakage. The
-[release contract](release-review.md) describes what is implemented; a role
-definition grants no release authority.
+owns release authority. The [release contract](release-review.md) describes
+the mechanics and what is implemented; a role definition grants no release authority.
 
 ## Legacy Identifiers
 
