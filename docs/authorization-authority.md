@@ -714,8 +714,9 @@ label and the product's one lane context:
 
 The set deliberately leaves out:
 
-- `product_profile.write`. It also lets the holder override release review,
-  and a production release needs the Client's acceptance. The Director sets the
+- `product_profile.write`. It also lets the holder override release review;
+  the [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
+  owns release authority. The Director sets the
   Client, image repository, `production_use`, and whether the Client's acceptance
   starts the release (`release_on_acceptance`) in the Client panel under
   `product_profile.write`. Each control dry-runs and reads back the profile; the
