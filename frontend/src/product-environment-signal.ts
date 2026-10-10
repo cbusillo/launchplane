@@ -21,8 +21,8 @@ function publicTopologyEvidence(topology: Topology): Evidence[] {
 }
 
 function publicTopologyApplicable(topology: Topology): boolean {
-  // Consume the server's explicit applicability when supplied; do not infer it
-  // from private health monitoring or replace the product's declared intent.
+  // #3189 / PR #3215 owns this forthcoming server field. Older replies omit it.
+  // Consume it when present without inferring intent from private monitoring.
   return !("public_website" in topology.desired && topology.desired.public_website === "none");
 }
 

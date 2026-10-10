@@ -172,6 +172,18 @@
   color: var(--danger);
 }
 
+.environment-operational-status[data-tone="recorded"] {
+  color: var(--preview);
+}
+
+.environment-operational-status[data-tone="missing"] {
+  color: var(--danger);
+}
+
+.environment-operational-status[data-tone="unsupported"] {
+  color: var(--unknown);
+}
+
 .environment-operational-status > span {
   background: currentColor;
 }

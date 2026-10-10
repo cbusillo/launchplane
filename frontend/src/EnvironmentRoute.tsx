@@ -433,7 +433,7 @@ function EnvironmentPage({
                 {heading}
               </h1>
             </div>
-            <span className="evidence-badge environment-operational-status" data-tone={operationalTone} aria-label="Lane status">
+            <span className="evidence-badge environment-operational-status" data-tone={operationalTone} role="status" aria-label="Lane status">
               <span aria-hidden="true" />
               <strong>{signalHeadline(detail, operationalTone)}</strong>
             </span>

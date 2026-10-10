@@ -21,7 +21,8 @@ for (const evidence of ["route", "tls"] as const) for (const environmentView of 
       return { product, detail, incidents, identity: module.fixtureIdentity };
     });
     const start = Date.parse(fixture.detail.provenance.refreshed_at);
-    await page.clock.install({ time: new Date(start) });
+    await page.clock.install({ time: new Date(start - READ_REFRESH_INTERVAL_MS) });
+    await page.clock.pauseAt(new Date(start));
     setDeadlines(fixture.product, start + 10 * READ_REFRESH_INTERVAL_MS);
     setDeadlines(fixture.detail, start + 10 * READ_REFRESH_INTERVAL_MS);
     const summary = fixture.product.environments.find(lane => lane.environment === "testing")!;
