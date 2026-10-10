@@ -400,7 +400,7 @@ including label-free dependency updates, so the next controller pass can select
 other eligible work. Remove the block label after resolving the failure to admit
 that PR again. Applied-block PR feedback explains the failure and how to rejoin.
 
-Automatically admitted within-major dependency updates use current-head check and
+Within-major dependency updates admitted through the required-label exception use current-head check and
 mergeability evidence for failure holds, rather than acquiring a persistent block
 label. Controller and dry-run queue entries report the observed head and its
 refusal reason; GitHub's current checks also remain visible. The service excludes
@@ -414,6 +414,12 @@ label uses the normal block path above. Every existing block label remains a hol
 including labels applied by earlier controller versions: no actor or historical
 record is used to guess that a generic hold may be cleared. Those PRs retain the
 supported remove-label path. The single-transition worker is unchanged.
+
+Landing admission rereads the same queue rule. If an included dependency head
+starts failing or conflicting after candidate planning, its changed eligibility
+invalidates that landing lineage; the controller must retire/replan the candidate
+before independent work can proceed. Passing candidate checks do not override a
+constituent's current failure.
 
 The GitHub adapter creates a missing policy label when label
 application is refused because it does not exist; other provider errors remain

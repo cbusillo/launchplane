@@ -351,6 +351,25 @@ class MergeTrainDryRunTests(unittest.TestCase):
             build_merge_train_dry_run_result(policy=policy, snapshot=snapshot).intended_next_action,
             "block",
         )
+        no_label_policy = policy.model_copy(
+            update={
+                "policies": (
+                    policy.policies[0].model_copy(
+                        update={
+                            "enqueue": policy.policies[0].enqueue.model_copy(
+                                update={"label_required": False}
+                            )
+                        }
+                    ),
+                )
+            }
+        )
+        self.assertEqual(
+            build_merge_train_dry_run_result(
+                policy=no_label_policy, snapshot=snapshot, batch_landing=True
+            ).intended_next_action,
+            "block",
+        )
         for classification in ("needs_review", None):
             result = build_merge_train_dry_run_result(
                 policy=policy,
@@ -360,7 +379,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
                             update.model_copy(
                                 update={
                                     "dependency_update_class": classification,
-                                    "required_checks_status": "pass",
+                                    "required_checks_status": "fail",
                                 }
                             ),
                         )

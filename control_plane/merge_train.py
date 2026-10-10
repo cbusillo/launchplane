@@ -661,6 +661,7 @@ def _build_queue_entry(
     if (
         skip_blocked
         and pull_request.state == "open"
+        and repository_policy.enqueue.label_required
         and is_dependency_update
         and pull_request.dependency_update_class == "patch_or_minor"
         and label_refusal
