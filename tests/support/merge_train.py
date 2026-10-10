@@ -76,11 +76,17 @@ class _FakeMergeTrainGitHubClient:
         self.transport = transport
         self.branch_refresh_recorder = branch_refresh_recorder
         self._branch_refresh_store = branch_refresh_store
+        self._snapshot_policy = None
+        self._reuse_snapshots = False
+        self._snapshots: dict[tuple[str, str], MergeTrainDryRunSnapshot] = {}
         self.semantic_effect_executor = (
             effect_executor
             if effect_executor is not None
             else LegacyMergeTrainEffectExecutor(client=cast(GitHubMergeTrainClient, self))
         )
+
+    begin_snapshot_pass = GitHubMergeTrainClient.begin_snapshot_pass
+    end_snapshot_pass = GitHubMergeTrainClient.end_snapshot_pass
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -562,7 +568,13 @@ class _NoopMergeTrainGitHubClient:
 
 
 class _FakeMergeTrainSnapshotReader:
-    def __init__(self, *, transport: object, branch_refresh_store: object | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        transport: object,
+        branch_refresh_store: object | None = None,
+        repository_policy: object | None = None,
+    ) -> None:
         self.transport = transport
 
     def read_merge_train_snapshot(
@@ -628,7 +640,13 @@ class _FakeExpandedMergeTrainSnapshotReader(_FakeMergeTrainSnapshotReader):
 
 
 class _FakeEmptyMergeTrainSnapshotReader:
-    def __init__(self, *, transport: object, branch_refresh_store: object | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        transport: object,
+        branch_refresh_store: object | None = None,
+        repository_policy: object | None = None,
+    ) -> None:
         self.transport = transport
 
     def read_merge_train_snapshot(
@@ -643,7 +661,13 @@ class _FakeEmptyMergeTrainSnapshotReader:
 
 
 class _FakeStackedMergeTrainSnapshotReader:
-    def __init__(self, *, transport: object, branch_refresh_store: object | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        transport: object,
+        branch_refresh_store: object | None = None,
+        repository_policy: object | None = None,
+    ) -> None:
         self.transport = transport
 
     def read_merge_train_snapshot(

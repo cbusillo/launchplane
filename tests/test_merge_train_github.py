@@ -3026,7 +3026,6 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
                 _github_pull_request(43, base_ref="feature-root", head_ref="feature-child"),
-                {"permission": "admin"},
                 _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
@@ -3071,7 +3070,6 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 "/repos/cbusillo/sellyouroutboard/commits/head-42/status?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-42/check-runs?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/pulls/43",
-                "/repos/cbusillo/sellyouroutboard/collaborators/cbusillo/permission",
                 "/repos/cbusillo/sellyouroutboard/issues/43/events?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-43/status?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-43/check-runs?per_page=100&page=1",
@@ -3278,7 +3276,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             responses.extend(
                 [
                     _github_pull_request(number),
-                    {"permission": "admin"},
+                    *([{"permission": "admin"}] if number == 1 else []),
                     _label_events(),
                     _combined_status(),
                     {"check_runs": [_check_run("completed", "success")]},

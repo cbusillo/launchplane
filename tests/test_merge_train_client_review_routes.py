@@ -181,7 +181,6 @@ class StandaloneCandidatePlanningClientReviewTests(unittest.TestCase):
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
                 second,
-                {"permission": "admin"},
                 _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
