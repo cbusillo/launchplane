@@ -15439,7 +15439,9 @@ def create_launchplane_fastapi_app(
             )
         try:
             request_payload = canonical_product_config_request_payload(
-                product_config_request.model_dump(mode="json", exclude_none=True, exclude_unset=True)
+                product_config_request.model_dump(
+                    mode="json", exclude_none=True, exclude_unset=True
+                )
             )
         except control_plane_product_config.ProductConfigError as error:
             product_config_error = (
