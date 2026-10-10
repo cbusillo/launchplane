@@ -36,7 +36,8 @@ events (verifying a build and deploying it to that site's previews and testing
 lane) or from a Client's recorded release acceptance (the gated promotion).
 Requests from people or other agents still need grants. The overall direction
 owns release authority, including its Director-started temporary hotfix path;
-neither that path nor these grants replace a backup gate.
+neither that path nor these grants replace the Director's approval at a stop
+boundary or a backup gate.
 
 Code and tests are upkeep. A change that deletes code or tests without losing
 a behavior needs no other reason. A test earns its place by catching a real
@@ -61,7 +62,7 @@ acceptance. Admin is a permission, not a role; the Director normally holds it.
 
 An agent asks the Director before:
 
-- changing a real live site outside the Client's accepted release; a deploy or promotion there comes from that accepted release or a Director-started temporary hotfix for live breakage under the overall direction, and rolling back to an earlier Client-accepted release is part of that gated path
+- changing a real live site outside the Client's accepted release; a deploy or promotion there comes from that accepted release or a Director-started temporary hotfix for live breakage, which rolls back unless the Client accepts it, under the overall direction, and rolling back to an earlier Client-accepted release is part of that gated path
 - restoring or deleting a live site's data, or weakening a backup gate that protects a live site
 - creating credentials that can reach a live site, granting access, or changing who can merge
 - spending money or creating paid resources
