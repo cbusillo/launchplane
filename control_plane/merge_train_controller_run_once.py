@@ -4743,7 +4743,14 @@ def _controller_exception_reconciliation_detail(error: Exception) -> str:
                 if quota_error.retry_after_seconds is not None
                 else ""
             )
-            return "retryable:github_rate_limited" + suffix + reset + retry_after
+            primary_exhausted = (
+                f"; primary_exhausted:{str(quota_error.primary_quota_exhausted).lower()}"
+                if quota_error.primary_quota_exhausted is not None
+                else ""
+            )
+            return (
+                "retryable:github_rate_limited" + suffix + reset + retry_after + primary_exhausted
+            )
         if error.status_code is None or error.status_code >= 500:
             return "retryable:github_request_failed" + suffix
         return "operator_required:github_request_rejected" + suffix
