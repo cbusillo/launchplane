@@ -213,13 +213,9 @@ class OwnerReviewStatusPublisher:
                         },
                         base_branch=facts.base_branch,
                     )
-                    if (
-                        not synthetic
-                        and intent.review_required
-                        and (
-                            profile.owner.is_set
-                            or profile.owner.review_label.strip().casefold() in facts.labels
-                        )
+                    if not synthetic and (
+                        profile.owner.is_set
+                        or profile.owner.review_label.strip().casefold() in facts.labels
                     ):
                         written = self._write_status(
                             store=store,
@@ -346,46 +342,24 @@ class OwnerReviewStatusPublisher:
         facts: _PullRequestFacts,
         token: str,
     ) -> OwnerReviewStatus:
-        try:
-            record_decision_base(
-                store=store,
-                profile=profile,
-                pull_request_number=pull_request_number,
-                head_sha=facts.head_sha,
-                base_branch=facts.base_branch,
-            )
-            carry_owner_acceptance(
-                store=store,
-                profile=profile,
-                pull_request_number=pull_request_number,
-                head_sha=facts.head_sha,
-                base_branch=facts.base_branch,
-                read=lambda path: self.api_request(path=path, token=token),
-            )
-        except Exception:
-            # Not carried: the head waits for the Client, as it would without a carry.
-            _LOGGER.warning(
-                "Client acceptance could not be checked for a carry.",
-                exc_info=True,
-                extra={
-                    "repository": profile.repository,
-                    "pull_request_number": pull_request_number,
-                },
-            )
-        status = owner_review_status(
-            owner=profile.owner,
-            head_sha=facts.head_sha,
-            decisions=store.list_product_review_decision_records(
-                repository=profile.repository,
-                pull_request_number=pull_request_number,
-            ),
-            base_branch=facts.base_branch,
-        )
         intent = change_client_review(
             body=facts.body, labels=facts.labels, review_label=profile.owner.review_label
         )
         if intent.error:
             status = OwnerReviewStatus(state="failure", description=intent.error)
+        elif not intent.review_required:
+            status = OwnerReviewStatus(
+                state="success",
+                description="Engineering-only change; no Client preview review required",
+            )
+        else:
+            status = self._required_review_status(
+                store=store,
+                profile=profile,
+                pull_request_number=pull_request_number,
+                facts=facts,
+                token=token,
+            )
         if not facts.repository_id or not self.public_origin:
             raise ValueError("Client review check requires the Advisory App and public origin.")
         projection = AdvisoryCheckProjection(
@@ -419,6 +393,51 @@ class OwnerReviewStatusPublisher:
                 api_request=self.api_request,
             )
         return status
+
+    def _required_review_status(
+        self,
+        *,
+        store: ProductReviewStore,
+        profile: LaunchplaneProductProfileRecord,
+        pull_request_number: int,
+        facts: _PullRequestFacts,
+        token: str,
+    ) -> OwnerReviewStatus:
+        try:
+            record_decision_base(
+                store=store,
+                profile=profile,
+                pull_request_number=pull_request_number,
+                head_sha=facts.head_sha,
+                base_branch=facts.base_branch,
+            )
+            carry_owner_acceptance(
+                store=store,
+                profile=profile,
+                pull_request_number=pull_request_number,
+                head_sha=facts.head_sha,
+                base_branch=facts.base_branch,
+                read=lambda path: self.api_request(path=path, token=token),
+            )
+        except Exception:
+            # Not carried: the head waits for the Client, as it would without a carry.
+            _LOGGER.warning(
+                "Client acceptance could not be checked for a carry.",
+                exc_info=True,
+                extra={
+                    "repository": profile.repository,
+                    "pull_request_number": pull_request_number,
+                },
+            )
+        return owner_review_status(
+            owner=profile.owner,
+            head_sha=facts.head_sha,
+            decisions=store.list_product_review_decision_records(
+                repository=profile.repository,
+                pull_request_number=pull_request_number,
+            ),
+            base_branch=facts.base_branch,
+        )
 
     def _advisory_token(self, repository: str, repository_id: str) -> GitHubAppInstallationToken:
         if self.github_app_token is not None:

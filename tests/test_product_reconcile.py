@@ -3609,6 +3609,27 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             tuple(self.owner_review_status_calls), calls_before_refusal + (("site", 5),)
         )
 
+    def test_notes_status_refreshes_without_a_verified_build_or_comment_change(self) -> None:
+        payload = _profile()
+        payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        self.github.pull_request["body"] = "## Client test notes\n"
+        self.assertEqual(self.reconcile_preview()["reason"], "client_test_notes_required")
+        self.owner_review_status_calls.clear()
+
+        self.github.pull_request["body"] = (
+            "## Client test notes\nNothing for the Client to test: CI tools only."
+        )
+        for _ in range(2):
+            result = self.reconcile_preview()
+            self.assertEqual(result["reason"], "no_verified_build")
+            self.assertIs(result["owner_review_requested"], False)
+        self.assertEqual(self.owner_review_status_calls, [("site", 5), ("site", 5)])
+        self.assertEqual(self.provider.applied, [])
+        self.assertNotIn("@site-owner", self.comment_body())
+
     def test_ready_preview_on_an_accepted_head_says_so_instead_of_asking_again(self) -> None:
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}

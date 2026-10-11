@@ -221,21 +221,21 @@ def _preview_feedback(
     owner_review = ""
     owner_review_url = ""
     owner_review_accepted = ""
-    if plan.get("reason") == "client_test_notes_required" and owner_review_status is not None:
-        # A notes refusal must not prevent delivery of an already-saved decision.
+    # Notes and review intent can change without a build or a comment change.
+    # Refresh their check before comment deduplication, including engineering-only
+    # PRs whose earlier missing-note failure must no longer block delivery.
+    written = (
         owner_review_status(profile, request.pull_request_number)
+        if owner_review_status is not None and status in {"pending", "ready"}
+        else None
+    )
     if status == "ready" and plan.get("owner_review_requested") is True:
         owner_review, owner_review_url = _owner_review(
             profile=profile,
             pull_request_number=request.pull_request_number,
             public_origin=public_origin,
         )
-        written = (
-            owner_review_status(profile, request.pull_request_number)
-            if owner_review_status is not None and owner_review == "mentioned"
-            else None
-        )
-        if written is not None and written.state == "success":
+        if owner_review == "mentioned" and written is not None and written.state == "success":
             # Said without the @, so an accepted change does not page the Owner again.
             owner_review = "accepted"
             owner_review_accepted = written.description.replace("@", "")
