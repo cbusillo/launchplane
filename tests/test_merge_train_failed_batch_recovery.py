@@ -32,6 +32,13 @@ from tests.test_merge_train_github import _protected_branch_with_checks, _requir
 class _RerunProvider(_BatchProvider):
     checks_failed = True
     checks_missing = False
+    batch_head_sha: str | None = None
+
+    def pull_request(self, number: int) -> dict[str, object]:
+        payload = super().pull_request(number)
+        if number == self.number and self.batch_head_sha is not None:
+            cast(dict[str, object], payload["head"])["sha"] = self.batch_head_sha
+        return payload
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         if method == "GET" and path.endswith("/branches/main"):
@@ -183,7 +190,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             self.assertEqual(evidence.candidate_sha, self.candidate.candidate_sha)
             self.assertEqual(evidence.required_checks_status, "pass")
             self.assertEqual(evidence.closed_batch_pull_request_number, self.provider.number)
-            self.assertEqual(evidence.observed_at, active[0].updated_at)
+            self.assertEqual(evidence.controller_pass_recorded_at, active[0].updated_at)
             # The rebuild uses ordinary batch creation and must receive its own CI.
             built = replacement.model_copy(
                 update={"candidate_sha": "rebuilt-sha", "status": "ready_for_checks"}
@@ -270,26 +277,21 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             self.reflow_client.add_pull_request_label.assert_not_called()
 
     def test_passing_checks_cannot_retry_missing_open_merged_or_unbound_batch(self) -> None:
-        from control_plane.merge_admission import MergeAdmissionReconciliationRequiredError
-
         self.provider.checks_failed = False
-        for state in ("open", "merged", "missing", "wrong_binding"):
+        for state in ("open", "merged", "missing", "wrong_binding", "wrong_sha"):
             with self.subTest(state=state), TemporaryDirectory() as directory:
                 self.provider.closed = state != "open"
                 self.provider.merged = state == "merged"
                 self.provider.created = state != "missing"
+                self.provider.batch_head_sha = "wrong-sha" if state == "wrong_sha" else None
                 self.provider.body = (
                     "unbound"
                     if state == "wrong_binding"
                     else batch_pull_request_body(client=self.client, candidate=self.candidate)
                 )
                 store = FilesystemRecordStore(state_dir=Path(directory))
-                try:
-                    result = self._reflow(store, self.candidate, observe_checks=True)
-                except MergeAdmissionReconciliationRequiredError:
-                    self.assertEqual(state, "merged")
-                else:
-                    self.assertNotEqual(result.get("reason_code"), "candidate_checks_recovered")
+                result = self._reflow(store, self.candidate, observe_checks=True)
+                self.assertEqual(result["controller_action"], "candidate_failed")
                 self.assertFalse(
                     any(
                         record.candidate.check_retry_of

@@ -124,7 +124,7 @@ class MergeTrainCheckRetryEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidate_sha: str = Field(min_length=1)
-    observed_at: str = Field(min_length=1)
+    controller_pass_recorded_at: str = Field(min_length=1)
     required_checks_status: Literal["pass"] = "pass"
     closed_batch_pull_request_number: int = Field(gt=0)
 

@@ -1404,7 +1404,7 @@ Controller actions have these retry/stop semantics:
   `reason_code: candidate_checks_recovered`, provided its service PR is exactly
   bound, closed and confirmed unmerged. The new record's `check_retry_of` points
   to the failed record, preserving its SHA and failure history.
-  `check_retry_evidence` durably records the observed SHA, observation time,
+  `check_retry_evidence` durably records the observed SHA, controller-pass timestamp,
   passing status and closed batch PR. The response exposes the same observation.
   The same ordered
   heads/base may use this rebuild only once, across restarts and replay of the

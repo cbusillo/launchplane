@@ -339,6 +339,7 @@ class CulpritIsolationTests(unittest.TestCase):
             client = Mock()
             client.read_merge_train_snapshot.return_value = train.snapshot
             client.read_candidate_check_failures.return_value = TEST_FAILURE
+            client.observe_batch_candidate_checks.return_value = failed_record.candidate
             with patch(
                 "control_plane.merge_train_controller_run_once.changed_closed_batch_body",
                 return_value=False,
@@ -406,6 +407,7 @@ class CulpritIsolationTests(unittest.TestCase):
                 client.read_candidate_check_failures.side_effect = evidence
             else:
                 client.read_candidate_check_failures.return_value = evidence
+            client.observe_batch_candidate_checks.return_value = failed_record.candidate
             with patch(
                 "control_plane.merge_train_controller_run_once.changed_closed_batch_body",
                 return_value=False,
