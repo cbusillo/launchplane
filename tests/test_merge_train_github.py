@@ -51,6 +51,7 @@ from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionD
 from control_plane.merge_train_structural_provenance import (
     evaluate_merge_train_structural_candidate,
 )
+from control_plane.merge_train_candidate_failures import classify_candidate_check_failures
 
 from tests.test_merge_train_dependency_updates import INDIRECT_PATCH
 
@@ -1485,6 +1486,168 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             candidate=_batch_candidate()
         )
         self.assertEqual(built.status, "ready_for_checks")
+
+    def test_base_check_status_reads_exact_base_with_candidate_check_rules(self) -> None:
+        candidate = _batch_candidate().model_copy(update={"candidate_sha": "failed-candidate"})
+        for conclusion, expected in (("success", "pass"), ("failure", "fail"), (None, "pending")):
+            with self.subTest(conclusion=conclusion):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate"),
+                        _combined_status(),
+                        {
+                            "check_runs": [
+                                _required_check_run(
+                                    "ci-gate",
+                                    "queued" if conclusion is None else "completed",
+                                    conclusion,
+                                )
+                            ]
+                        },
+                    )
+                )
+                status = GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                    candidate=candidate, failed_check_names=("ci-gate",)
+                )
+                self.assertEqual(status, expected)
+                self.assertEqual(
+                    [request.path for request in transport.requests],
+                    [
+                        f"/repos/{candidate.repository}/branches/{candidate.base_branch}",
+                        f"/repos/{candidate.repository}/commits/{candidate.base_sha}/status?per_page=100&page=1",
+                        f"/repos/{candidate.repository}/commits/{candidate.base_sha}/check-runs?per_page=100&page=1",
+                    ],
+                )
+                self.assertTrue(all(request.method == "GET" for request in transport.requests))
+
+    def test_base_missing_required_check_is_not_treated_as_green(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _protected_branch_with_checks(),
+                _combined_status(),
+                {"check_runs": [_required_check_run("ci-gate", "completed", "success")]},
+            )
+        )
+        self.assertEqual(
+            GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                candidate=_batch_candidate(), failed_check_names=("ci-gate",)
+            ),
+            "unknown",
+        )
+
+    def test_same_failed_nonrequired_check_on_base_prevents_blame(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _protected_branch_with_checks("ci-gate"),
+                _combined_status(),
+                {
+                    "check_runs": [
+                        _required_check_run("ci-gate", "completed", "success"),
+                        _required_check_run("test_shard (0)", "completed", "failure"),
+                    ]
+                },
+            )
+        )
+        self.assertEqual(
+            GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                candidate=_batch_candidate(), failed_check_names=("test_shard (0)",)
+            ),
+            "fail",
+        )
+
+    def test_unrelated_base_only_checks_do_not_stop_isolation(self) -> None:
+        for status, conclusion in (("completed", "failure"), ("queued", None)):
+            with self.subTest(status=status):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate"),
+                        _combined_status(),
+                        {
+                            "check_runs": [
+                                _required_check_run("ci-gate", "completed", "success"),
+                                _required_check_run("deploy", status, conclusion),
+                            ]
+                        },
+                    )
+                )
+                self.assertEqual(
+                    GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                        candidate=_batch_candidate(), failed_check_names=("test_shard (0)",)
+                    ),
+                    "pass",
+                )
+
+    def test_base_commit_status_only_stops_blame_when_implicated(self) -> None:
+        for context, expected in (("external/gate", "fail"), ("deploy", "pass")):
+            with self.subTest(context=context):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate"),
+                        {"statuses": [{"context": context, "state": "failure"}]},
+                        {"check_runs": [_required_check_run("ci-gate", "completed", "success")]},
+                    )
+                )
+                self.assertEqual(
+                    GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                        candidate=_batch_candidate(), failed_check_names=("external/gate",)
+                    ),
+                    expected,
+                )
+
+    def test_base_without_any_check_evidence_cannot_identify_a_culprit(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _protected_branch_with_checks("ci-gate"),
+                {"statuses": []},
+                {"check_runs": []},
+            )
+        )
+        self.assertEqual(
+            GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                candidate=_batch_candidate(), failed_check_names=("ci-gate",)
+            ),
+            "unknown",
+        )
+
+    def test_base_failure_comparison_uses_provider_names_instead_of_display_names(self) -> None:
+        for source in ("check_run", "commit_status"):
+            for candidate_name, base_name, expected in (
+                ("test_shard  (0)", "test_shard  (0)", "fail"),
+                ("QA & integration", "QA & integration", "fail"),
+                ("QA & integration", "Deploy & monitoring", "pass"),
+            ):
+                with self.subTest(
+                    source=source, candidate_name=candidate_name, base_name=base_name
+                ):
+                    failures = classify_candidate_check_failures(
+                        check_runs=[_required_check_run(candidate_name, "completed", "failure")]
+                        if source == "check_run"
+                        else [],
+                        commit_statuses=[{"context": candidate_name, "state": "failure"}]
+                        if source == "commit_status"
+                        else [],
+                        read_annotations=lambda _: [],
+                    )
+                    runs = [_required_check_run("ci-gate", "completed", "success")]
+                    statuses = _combined_status()
+                    if source == "check_run":
+                        runs.append(_required_check_run(base_name, "completed", "failure"))
+                    else:
+                        statuses = {"statuses": [{"context": base_name, "state": "failure"}]}
+                    transport = RecordingMergeTrainGitHubTransport(
+                        responses=(
+                            _protected_branch_with_checks("ci-gate"),
+                            statuses,
+                            {"check_runs": runs},
+                        )
+                    )
+                    self.assertEqual(
+                        GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                            candidate=_batch_candidate(),
+                            failed_check_names=failures.check_identity_names,
+                        ),
+                        expected,
+                    )
 
     def test_observe_batch_candidate_checks_marks_passed_candidate(self) -> None:
         candidate = _batch_candidate().model_copy(

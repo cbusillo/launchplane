@@ -955,6 +955,51 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             status=candidate_status,
         )
 
+    def read_base_check_status(
+        self, *, candidate: MergeTrainBatchCandidate, failed_check_names: tuple[str, ...]
+    ) -> MergeTrainCheckStatus:
+        """Verify required base checks and checks implicated by the failed candidate."""
+        repository_path = _repository_path(candidate.repository)
+        required_checks = _required_branch_checks(
+            transport=self.transport,
+            repository_path=repository_path,
+            base_branch=candidate.base_branch,
+        )
+        encoded_sha = quote(
+            _required_value(candidate.base_sha, "Merge train candidate base SHA is required."),
+            safe="",
+        )
+        statuses = _list_commit_statuses(
+            transport=self.transport, repository_path=repository_path, encoded_head_sha=encoded_sha
+        )
+        check_runs = _list_check_runs(
+            transport=self.transport, repository_path=repository_path, encoded_head_sha=encoded_sha
+        )
+        required_status, missing = _required_check_evidence_status(
+            required_checks=required_checks, status_payload=statuses, check_runs_payload=check_runs
+        )
+        implicated = {name.casefold() for name in failed_check_names}
+        matching_statuses: dict[str, object] = {
+            "statuses": [
+                item
+                for item in cast(list[dict[str, object]], statuses["statuses"])
+                if cast(str, item["context"]).casefold() in implicated
+            ]
+        }
+        matching_runs: dict[str, object] = {
+            "check_runs": [
+                item
+                for item in cast(list[dict[str, object]], check_runs["check_runs"])
+                if cast(str, item["name"]).casefold() in implicated
+            ]
+        }
+        status = _combine_check_statuses(
+            required_status,
+            _combined_status_state(matching_statuses),
+            _check_runs_status(matching_runs),
+        )
+        return "unknown" if missing and status != "fail" else status
+
     def read_candidate_check_failures(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> CandidateCheckFailures:

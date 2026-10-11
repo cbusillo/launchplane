@@ -40,6 +40,8 @@ class CandidateCheckFailure:
     runner_lost: bool = False
     failed_tests: tuple[str, ...] = ()
     source: Literal["check_run", "commit_status"] = "check_run"
+    # Provider identity stays separate from the sanitized name rendered in feedback.
+    identity_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,10 @@ class CandidateCheckFailures:
     @property
     def check_names(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(check.name for check in self.checks if check.name))
+
+    @property
+    def check_identity_names(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(check.identity_name or check.name for check in self.checks))
 
     @property
     def failed_tests(self) -> tuple[str, ...]:
@@ -119,6 +125,7 @@ def classify_candidate_check_failures(
         failures.append(
             CandidateCheckFailure(
                 name=_safe_check_name(name),
+                identity_name=name,
                 conclusion=conclusion,
                 url=_safe_url(check_run.get("html_url")),
                 runner_lost=runner_lost,
@@ -136,6 +143,7 @@ def classify_candidate_check_failures(
             failures.append(
                 CandidateCheckFailure(
                     name=_safe_check_name(context),
+                    identity_name=context,
                     conclusion=state,
                     url="",
                     source="commit_status",
