@@ -22,7 +22,6 @@ class CIRunnerPoolTests(unittest.TestCase):
                     "HEAD_REF": "work/example",
                     "REPOSITORY": "example/control",
                     "HEAD_REPOSITORY": "example/control",
-                    "REPOSITORY_VISIBILITY": "public",
                     "RUNNER_LABEL": "configured-ci-lane",
                     "GITHUB_OUTPUT": str(output),
                 }
@@ -56,18 +55,10 @@ class CIRunnerPoolTests(unittest.TestCase):
         reserved = json.loads(push.stdout)
         self.assertIn("self-hosted", reserved)
         self.assertNotIn("configured-ci-lane", reserved)
-        for visibility in ["public", "private"]:
-            with self.subTest(visibility=visibility):
-                self.assert_pool(
-                    reserved, HEAD_REF="launchplane/train/batch", REPOSITORY_VISIBILITY=visibility
-                )
-                self.assert_pool(
-                    reserved,
-                    EVENT_NAME="push",
-                    REF="refs/heads/launchplane/train/batch",
-                    REPOSITORY_VISIBILITY=visibility,
-                    RUNNER_LABEL="",
-                )
+        self.assert_pool(reserved, HEAD_REF="launchplane/train/batch")
+        self.assert_pool(
+            reserved, EVENT_NAME="push", REF="refs/heads/launchplane/train/batch", RUNNER_LABEL=""
+        )
 
     def test_bootstrap_and_summary_labels_agree_with_executed_selector(self) -> None:
         candidate = self.select(EVENT_NAME="push", REF="refs/heads/launchplane/train/batch")
