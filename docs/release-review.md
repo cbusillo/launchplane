@@ -537,9 +537,11 @@ retains the existing service rollback and gated break-glass paths in
 First rollout must still occur with no active or invited Client release:
 containers running earlier code do not enforce this fence. The additive schema
 migration also requires a schema-compatible repair image; an older image whose
-schema guard rejects the new head cannot resume workers. Qualify the installed
-service and both worker families before the Supervisor retires its temporary
-Client-invitation landing hold. This protects planned service replacements, not
+schema guard rejects the new head cannot resume workers. The installed service
+and both worker families were qualified (#3145), so Launchplane lands normally
+during Client releases (Q160); a release holds only its own product's merge
+train, as [merge-train policy](merge-train-policy.md#candidate-construction)
+describes. This protects planned service replacements, not
 arbitrary host loss or a forced kill of an unsafe provider effect; those remain
 truthfully interrupted and require the existing reconciliation path. The isolated
 rehearsal is `tests.test_client_release_redeploy`; it drains during each step for
@@ -548,8 +550,7 @@ lifespan and health read, reopens worker storage, resumes the drill once, and pr
 forward outcomes after automatic recovery. PostgreSQL integration separately
 proves both admission-versus-drain race orders with real database locks.
 The local rehearsal uses synthetic providers and SQLite; its API starts in a
-new process while the test reopens worker storage. Installed worker-process and
-provider qualification remains the Supervisor's next step.
+new process while the test reopens worker storage.
 
 The runtime image uses the environment installed during its locked build;
 startup does not resolve or rebuild Python dependencies. This lets a compatible
