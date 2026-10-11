@@ -274,16 +274,9 @@ dispatches a workflow. The [overall direction](https://github.com/cbusillo/direc
 owns who may start a release; the normal acceptance-started implementation is
 described below.
 
-The Director-started temporary hotfix path for live breakage is direction,
-not implemented behavior. Until it is built and activated, this contract
-provides no way to start one; an admin override or existing grant is not that
-path.
-
-That path uses the same verified backup, release record, post-deploy checks,
-and automatic rollback. Launchplane immediately sends the Client a release
-review for the exact candidate, marked as an urgent temporary fix with the
-reason. Acceptance hands the final check back to the Client; a rejection
-rolls back to their last accepted release.
+The Director can also ship a temporary hotfix for live breakage before the
+Client accepts it; see [Temporary hotfix](#temporary-hotfix). An admin override
+or an existing grant is not that path.
 
 ## Acceptance starts the release
 
@@ -346,6 +339,86 @@ while a release is running still returns the original decision.
 The stable worker advances Client releases on one background thread per replica,
 so a generic-web deploy or rollback wait does not block queued Odoo operations.
 Shutdown finishes an admitted operation and starts no further product release.
+
+## Temporary hotfix
+
+The [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
+lets the Director ship a temporary hotfix for live breakage before the Client
+accepts it. On the review page, the Director, and nobody else, sees a
+**Temporary hotfix** section. The Director is the signed-in person whom the active
+authorization policy names as administrator by immutable GitHub ID. The section
+puts exactly the listed candidate live and asks why. The browser records it
+through `POST /v1/release-review/decisions` with `decision: temporary_hotfix`, the
+current `checklist_digest` and a required `reason`, under the session's CSRF
+protection.
+
+The route refuses with `403 temporary_hotfix_denied`:
+
+- agent and workflow tokens
+- other admins, including holders of `product_profile.write`
+- the product's own Client
+
+It refuses with `409`:
+
+- `temporary_hotfix_unavailable` for a prelaunch, `director_standing` or
+  non-Odoo/non-generic-web product, or one without a prod lane or Client
+- `temporary_hotfix_unavailable` while a release step is running
+- `temporary_hotfix_unavailable` when testing carries what production runs
+- `temporary_hotfix_unavailable` when no Client-accepted release has a passing
+  production deployment to roll back to; the admin override and hand promotion
+  remain available then
+- `release_checklist_changed` for a stale or unavailable checklist
+- `release_checklist_incomplete` for an incomplete one
+
+The decision binds the exact checklist digest, so it puts live exactly the
+changes listed. Keeping it to one small change is the Director's judgment.
+
+The hotfix runs on the gated path described above, whatever
+`release_on_acceptance` says; that setting only decides what a Client's Accept
+does. The worker records a verified backup, then the promotion, with its release
+record, post-deploy and health checks, and automatic rollback or Odoo recovery.
+Each step carries a `temporary_hotfix` grant that names the decision and the
+Director. Before each step and each provider effect, the worker checks again that:
+
+- the decision is still the product's newest one
+- the active policy still names the Director as administrator
+- the lanes still carry the checklist's versions
+
+Removing the Director from the policy, or recording a newer decision, therefore
+stops the hotfix before its next effect.
+
+The hotfix's release record is created in the product repository before
+anything deploys. It is the Client's notice:
+
+- it mentions the Client
+- it says plainly that an urgent temporary fix is going live before their review
+- it gives the reason and links the review page (built from
+  `LAUNCHPLANE_PUBLIC_URL`)
+
+While the hotfix is going live, Client decisions return
+`409 temporary_hotfix_in_progress`. Once it is live, the Client's review page
+shows that exact checklist (`reviewing_temporary_hotfix: true`) with the reason:
+
+- **Accept** records a normal accepted release with no `release_start`; the
+  fix is already live.
+- **Request changes** records the decision with `release_start: rollback`.
+  The worker then rolls production back to the newest Client-accepted release
+  with a passing production deployment, under the Client's release grant. It
+  uses the existing paths: an Odoo rollback operation, or generic web's fenced
+  rollback. This rollback runs even while releases are held.
+
+The admin override is refused while a live hotfix awaits the Client. The
+Director keeps seeing the current testing candidate, so a further hotfix binds
+the right version. A later hotfix replaces the pending review, and a rejection
+still returns to the last Client-accepted release. There is no deadline,
+extension or per-product limit. The next normal release includes or replaces
+the fix as usual. A failed hotfix stops like any release; the Client's review
+then shows the ordinary checklist.
+
+The isolated rehearsal, `tests.test_temporary_hotfix`, runs on the
+`example-site` test product with SQLite and synthetic providers. It covers
+start, Client acceptance, Client rejection with rollback, the refusals, and
+the policy recheck.
 
 ### A control-plane replacement drains release effects first
 

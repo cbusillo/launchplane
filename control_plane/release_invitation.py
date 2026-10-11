@@ -348,6 +348,12 @@ def publish_release_invitation(
         for decision in store.list_release_review_decision_records(product=profile.product, limit=1)
     ):
         return
+    # A live temporary hotfix awaits the Client's review first; its release record
+    # already asked them, and their review page shows that hotfix until they decide.
+    from control_plane.client_release import live_temporary_hotfix
+
+    if live_temporary_hotfix(store, profile) is not None:
+        return
     # Do not compile a large checklist on every worker poll. This is a read
     # throttle only; GitHub's candidate marker remains the durable receipt.
     fingerprint = (

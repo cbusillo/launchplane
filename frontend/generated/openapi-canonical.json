@@ -37398,7 +37398,8 @@
             "enum": [
               "accepted",
               "changes_requested",
-              "overridden"
+              "overridden",
+              "temporary_hotfix"
             ],
             "title": "Decision",
             "type": "string"
@@ -37463,7 +37464,8 @@
             "enum": [
               "accepted",
               "changes_requested",
-              "overridden"
+              "overridden",
+              "temporary_hotfix"
             ],
             "title": "Decision",
             "type": "string"
@@ -37494,7 +37496,8 @@
             "enum": [
               "",
               "promote",
-              "promote_with_rollback_drill"
+              "promote_with_rollback_drill",
+              "rollback"
             ],
             "title": "Release Start",
             "type": "string"
@@ -37573,6 +37576,11 @@
             "title": "Can Override",
             "type": "boolean"
           },
+          "can_start_temporary_hotfix": {
+            "default": false,
+            "title": "Can Start Temporary Hotfix",
+            "type": "boolean"
+          },
           "display_name": {
             "title": "Display Name",
             "type": "string"
@@ -37613,6 +37621,11 @@
           },
           "review": {
             "$ref": "#/components/schemas/ReleaseReviewStatus"
+          },
+          "reviewing_temporary_hotfix": {
+            "default": false,
+            "title": "Reviewing Temporary Hotfix",
+            "type": "boolean"
           },
           "trace_id": {
             "title": "Trace Id",

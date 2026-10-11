@@ -298,7 +298,13 @@ def build_release_review(
     complete = not blockers
     approved = bool(latest_decision and latest_decision.release_issue_url) and (
         bool(latest_decision and latest_decision.decision == "overridden")
-        or bool(not blockers and latest_decision and latest_decision.decision == "accepted")
+        # The Director's temporary hotfix approves its exact, complete checklist; the
+        # Client reviews it afterwards (control_plane.client_release).
+        or bool(
+            not blockers
+            and latest_decision
+            and latest_decision.decision in ("accepted", "temporary_hotfix")
+        )
     )
     if latest_decision and not latest_decision.release_issue_url:
         blockers += (RELEASE_RECORD_PENDING,)

@@ -3221,6 +3221,8 @@ export function releaseReviewForFixture(mode: string): import("./generated/opena
     release_on_acceptance: mode === "products" ? "promote_with_rollback_drill" : "held",
     live_site_url: mode === "products" ? "https://www.example.invalid" : "",
     release_run: null,
+    // The operator fixture is the Director: it may ship a temporary hotfix.
+    can_start_temporary_hotfix: mode === "operator", reviewing_temporary_hotfix: false,
     review: {
       required: true, approved: false, checklist_complete: !additionalChanges.length && mode !== "denied", checklist_digest: "a".repeat(64), latest_decision: null, unavailable_reason: null,
       blockers: additionalChanges.length ? additionalChanges : ["Client approval of this release is required."],
@@ -3258,8 +3260,9 @@ export function releaseDecisionForFixture(
 ): import("./generated/openapi.ts").ReleaseReviewResponse {
   const checklist = response.review.checklist;
   if (!checklist) return response;
-  const releaseStart = decision === "accepted" && published && response.release_on_acceptance !== "held"
-    ? response.release_on_acceptance === "director_standing" ? "promote" : response.release_on_acceptance : "";
+  const releaseStart = decision === "temporary_hotfix" && published ? "promote"
+    : decision === "accepted" && published && response.release_on_acceptance !== "held"
+      ? response.release_on_acceptance === "director_standing" ? "promote" : response.release_on_acceptance : "";
   const steps = releaseStart === "promote_with_rollback_drill"
     ? (["backup", "promote", "rollback", "backup", "promote"] as const) : (["backup", "promote"] as const);
   return { ...response, release_run: releaseStart ? {
@@ -3272,8 +3275,8 @@ export function releaseDecisionForFixture(
     latest_decision: {
       record_id: "fixture-release-decision", product: response.product,
       checklist_digest: response.review.checklist_digest, checklist, decision, reason,
-      actor_github_id: decision === "overridden" ? "9002" : "9001",
-      actor_github_login: decision === "overridden" ? "site-operator" : "site-owner",
+      actor_github_id: decision === "overridden" || decision === "temporary_hotfix" ? "9002" : "9001",
+      actor_github_login: decision === "overridden" || decision === "temporary_hotfix" ? "site-operator" : "site-owner",
       decided_at: "2026-09-26T12:00:00Z", release_issue_url: published ? "https://github.com/example/site/issues/43" : "",
       release_start: releaseStart,
       acceptance_source: "client_session",

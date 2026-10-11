@@ -15,6 +15,12 @@ newest one, accepted by its recorded Client, with releases not held. The promoti
 still checks release approval for the exact candidate and the verified backup.
 Each step's operation id derives from the decision, so the run needs no record of
 its own and a second worker replica finds the same operations.
+
+The Director's temporary hotfix runs the same backup and promotion under a grant that
+names the hotfix decision and the Director, whom the active policy must still name as
+administrator. Once it is live, the Client reviews that exact checklist: acceptance
+starts nothing more, and a request for changes rolls production back to the newest
+Client-accepted release with a passing production deployment, under the Client's grant.
 """
 
 from __future__ import annotations
@@ -42,9 +48,15 @@ from control_plane.contracts.generic_web_rollback import (
 )
 from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
 from control_plane.contracts.durable_operation_authorization import (
+    RELEASE_DECISION_GRANTS,
     DurableOperationAuthorization,
     DurableOperationCallerIdentity,
 )
+from control_plane.durable_operation_authorization import (
+    launchplane_identity_from_durable_caller,
+    read_active_authz_policy_record,
+)
+from control_plane.service_auth import GitHubHumanIdentity
 from control_plane.contracts.odoo_prod_promotion_operation import (
     ODOO_PROD_PROMOTION_RUN_ACTION,
     OdooProdPromotionCheckpoint,
@@ -66,7 +78,11 @@ from control_plane.contracts.production_backup_gate import (
     PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
     ProductionBackupGateRequest,
 )
-from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, ReleaseStart
+from control_plane.contracts.release_review import (
+    AcceptanceReleaseStart,
+    ReleaseReviewDecisionRecord,
+    ReleaseStart,
+)
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
@@ -186,6 +202,8 @@ def client_release_steps(release_start: ReleaseStart) -> tuple[ClientReleaseStep
         return _PROMOTE_STEPS + _DRILL_STEPS
     if release_start == "promote":
         return _PROMOTE_STEPS
+    if release_start == "rollback":
+        return (ClientReleaseStep("rollback", 1),)
     return ()
 
 
@@ -237,7 +255,7 @@ def client_release_step_operation_id(
 
 def release_start_for_acceptance(
     *, store: object, profile: LaunchplaneProductProfileRecord
-) -> ReleaseStart:
+) -> AcceptanceReleaseStart:
     """How a Client's acceptance recorded now runs; "" when it starts nothing.
 
     An Odoo or generic-web product with a prod lane, not prelaunch and not held, starts a
@@ -286,15 +304,85 @@ def client_release_grant(
         context=context,
         instances=("prod",),
         authorized_at=authorized_at,
-        caller=DurableOperationCallerIdentity(
-            identity_type="github_human",
-            login=decision.actor_github_login,
-            github_id=int(decision.actor_github_id),
-            role="client",
-        ),
-        grant="client_release_acceptance",
+        caller=_decision_caller(decision),
+        grant="temporary_hotfix"
+        if decision.decision == "temporary_hotfix"
+        else "client_release_acceptance",
         release_decision_record_id=decision.record_id,
     )
+
+
+def _decision_caller(decision: ReleaseReviewDecisionRecord) -> DurableOperationCallerIdentity:
+    return DurableOperationCallerIdentity(
+        identity_type="github_human",
+        login=decision.actor_github_login,
+        github_id=int(decision.actor_github_id),
+        role="admin" if decision.decision == "temporary_hotfix" else "client",
+    )
+
+
+def names_director(store: object, decision: ReleaseReviewDecisionRecord) -> bool:
+    """Whether the active policy still names the hotfix's Director as administrator."""
+
+    identity = launchplane_identity_from_durable_caller(_decision_caller(decision))
+    try:
+        policy = read_active_authz_policy_record(store).policy
+    except (LookupError, TypeError):
+        return False
+    return isinstance(identity, GitHubHumanIdentity) and policy.names_administrator(identity)
+
+
+def rejection_rollback_target(
+    store: PostgresRecordStore, profile: LaunchplaneProductProfileRecord
+) -> DeploymentRecord | None:
+    """The newest Client-accepted release with a passing production deployment."""
+
+    owner = profile.owner.github_id
+    deployments = store.list_deployment_records(
+        context_name=_prod_context(profile), instance_name="prod"
+    )
+    for decision in store.list_release_review_decision_records(product=profile.product):
+        if (
+            decision.decision != "accepted"
+            or not owner
+            or decision.actor_github_id != owner
+            or decision.checklist.owner_github_id != owner
+        ):
+            continue
+        version = decision.checklist.candidate
+        for deployment in deployments:
+            if (
+                deployment.artifact_identity is not None
+                and deployment.artifact_identity.artifact_id == version.artifact_id
+                and (
+                    profile.driver_id != "generic-web"
+                    or deployment.source_git_ref == version.source_commit
+                )
+                and deployment_record_passed(deployment)
+            ):
+                return deployment
+    return None
+
+
+def live_temporary_hotfix(
+    store: object, profile: LaunchplaneProductProfileRecord
+) -> ReleaseReviewDecisionRecord | None:
+    """The newest decision when it is a temporary hotfix now live and awaiting the Client."""
+
+    if not isinstance(store, PostgresRecordStore):
+        return None
+    latest = store.list_release_review_decision_records(product=profile.product, limit=1)
+    if not latest or latest[0].decision != "temporary_hotfix":
+        return None
+    hotfix = latest[0]
+    run = read_client_release_run(store=store, profile=profile, decision=hotfix)
+    try:
+        production = release_version(store=store, profile=profile, instance="prod")
+    except (FileNotFoundError, ValueError):
+        return None
+    if run is None or run.state != "passed" or production != hotfix.checklist.candidate:
+        return None
+    return hotfix
 
 
 def _covering_decision(
@@ -311,7 +399,6 @@ def _covering_decision(
         not profile.is_active
         or profile.driver_id not in {"odoo", "generic-web"}
         or profile.production_use == "prelaunch"
-        or profile.release_on_acceptance == "held"
         or not profile.owner.github_id
     ):
         return None
@@ -321,11 +408,30 @@ def _covering_decision(
     decision = latest[0]
     if (
         (decision_record_id and decision.record_id != decision_record_id)
-        or decision.decision != "accepted"
         or not decision.release_start
         or not decision.release_issue_url
-        or decision.actor_github_id != profile.owner.github_id
         or decision.checklist.owner_github_id != profile.owner.github_id
+    ):
+        return None
+    if decision.decision == "temporary_hotfix":
+        # The Director started it; the Client's release setting governs only Accept.
+        return (profile, decision) if names_director(record_store, decision) else None
+    if decision.decision == "changes_requested":
+        # The Client rejected a live temporary hotfix: roll back to their last
+        # accepted release, even while forward releases are held.
+        rejected_hotfix = any(
+            previous.decision == "temporary_hotfix"
+            and previous.checklist_digest == decision.checklist_digest
+            and previous.release_issue_url
+            for previous in record_store.list_release_review_decision_records(product=product)
+        )
+        if decision.actor_github_id != profile.owner.github_id or not rejected_hotfix:
+            return None
+        return profile, decision
+    if (
+        decision.decision != "accepted"
+        or profile.release_on_acceptance == "held"
+        or decision.actor_github_id != profile.owner.github_id
         or (
             decision.acceptance_source == "director_standing"
             and profile.release_on_acceptance != "director_standing"
@@ -338,9 +444,9 @@ def _covering_decision(
 def client_release_grant_allows(
     store: object, authorization: DurableOperationAuthorization
 ) -> bool:
-    """The worker's re-check of a Client release grant before each provider effect."""
+    """The worker's re-check of a release decision grant before each provider effect."""
 
-    if authorization.grant != "client_release_acceptance" or authorization.instances != ("prod",):
+    if authorization.grant not in RELEASE_DECISION_GRANTS or authorization.instances != ("prod",):
         return False
     covered = _covering_decision(
         store,
@@ -352,20 +458,34 @@ def client_release_grant_allows(
     profile, decision = covered
     context = _prod_context(profile)
     checklist = decision.checklist
+    expected = _decision_caller(decision)
     try:
         record_store = cast(PostgresRecordStore, store)
         testing = release_version(store=record_store, profile=profile, instance="testing")
         production = release_version(store=record_store, profile=profile, instance="prod")
     except (FileNotFoundError, ValueError):
         return False
+    if (
+        authorization.context != context
+        or authorization.grant
+        != ("temporary_hotfix" if expected.role == "admin" else "client_release_acceptance")
+        or authorization.caller.github_id != expected.github_id
+        or authorization.caller.role != expected.role
+    ):
+        return False
+    if decision.release_start == "rollback":
+        # The rejected hotfix's candidate is live until the rollback restores the
+        # Client's last accepted release; testing may already carry newer work.
+        target = rejection_rollback_target(record_store, profile)
+        return target is not None and production.artifact_id in (
+            checklist.candidate.artifact_id,
+            target.artifact_identity.artifact_id if target.artifact_identity else "",
+        )
     # Every step happens while testing carries the accepted candidate, and production
     # runs either the checklist's production version or that candidate.
-    return (
-        authorization.context == context
-        and str(authorization.caller.github_id) == decision.actor_github_id
-        and authorization.caller.role == "client"
-        and testing == checklist.candidate
-        and production in (checklist.production, checklist.candidate)
+    return testing == checklist.candidate and production in (
+        checklist.production,
+        checklist.candidate,
     )
 
 
@@ -552,7 +672,10 @@ def read_client_release_run(
 
     if state in {"waiting", "running"} and read_status(store).get("admission_paused"):
         blocked_reason = "Launchplane is draining admitted release steps before replacement. Pending steps will resume on the replacement worker."
-    if profile.driver_id == "odoo" and state == "waiting":
+    if decision.release_start == "rollback" and state == "waiting":
+        if rejection_rollback_target(store, profile) is None:
+            blocked_reason = "No Client-accepted release has a passing production deployment to roll back to. An admin must roll back by hand."
+    elif profile.driver_id == "odoo" and state == "waiting":
         try:
             pin_odoo_release_recovery_target(store, decision, _prod_context(profile))
         except ValueError:
@@ -864,6 +987,10 @@ def _advance(
             # Running, or stopped: a stopped release never continues by itself.
             return ""
         authorized_at = utc_now_timestamp()
+        if decision.release_start == "rollback":
+            return _queue_rejection_rollback(
+                store, control_plane_root, profile, decision, step, context, authorized_at
+            )
         if step.kind == "rollback":
             return _queue_rollback(
                 store, control_plane_root, profile, decision, step, context, authorized_at
@@ -1159,3 +1286,92 @@ def _generic_web_drill_target(
             raise ClientReleaseNotReady("rollback_not_ready")
         return deployment
     raise ClientReleaseNotReady("rollback_target_missing")
+
+
+def _queue_rejection_rollback(
+    store: PostgresRecordStore,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    step: ClientReleaseStep,
+    context: str,
+    authorized_at: str,
+) -> str:
+    """Return production from a rejected temporary hotfix to the last accepted release."""
+
+    try:
+        production = release_version(store=store, profile=profile, instance="prod")
+    except (FileNotFoundError, ValueError) as error:
+        raise ClientReleaseNotReady("release_record_missing") from error
+    if production.artifact_id != decision.checklist.candidate.artifact_id:
+        raise ClientReleaseNotReady("release_changed")
+    deployment = rejection_rollback_target(store, profile)
+    if deployment is None or deployment.artifact_identity is None:
+        raise ClientReleaseNotReady("rollback_target_missing")
+    grant = client_release_grant(
+        decision=decision,
+        action="generic_web_rollback.execute"
+        if profile.driver_id == "generic-web"
+        else ODOO_PROD_ROLLBACK_ACTION,
+        context=context,
+        authorized_at=authorized_at,
+    )
+    expected_id = client_release_step_operation_id(profile=profile, decision=decision, step=step)
+    if profile.driver_id == "generic-web":
+        plan = build_generic_web_rollback_plan(
+            record_store=store,
+            request=GenericWebRollbackPlanRequest(
+                product=profile.product, rollback_deployment_record_id=deployment.record_id
+            ),
+        )
+        if plan.status != "ready":
+            raise ClientReleaseNotReady("rollback_not_ready")
+
+        def validate_checkpoint() -> None:
+            if not client_release_grant_allows(store, grant):
+                raise click.ClickException("The Client's request for changes no longer applies.")
+
+        operation_id = run_generic_web_rollback_drill(
+            store=store,
+            control_plane_root=control_plane_root,
+            profile=profile,
+            decision=decision,
+            deployment=deployment,
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            idempotency_key=_step_key(decision, step),
+            validate_checkpoint=validate_checkpoint,
+        )
+        return expected_id if operation_id == expected_id else ""
+    request = OdooProdRollbackRequest(
+        context=context,
+        artifact_id=deployment.artifact_identity.artifact_id,
+        reason=f"The Client requested changes to temporary hotfix {decision.record_id}.",
+    )
+    try:
+        resolve_odoo_prod_rollback_target(record_store=store, request=request)
+    except click.ClickException as error:
+        raise ClientReleaseNotReady("rollback_not_ready") from error
+    operation = OdooProdRollbackOperationRecord(
+        operation_id=expected_id,
+        product=profile.product,
+        context=context,
+        instance="prod",
+        idempotency_key=_step_key(decision, step),
+        idempotency_scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+        request_fingerprint=odoo_prod_rollback_request_fingerprint(
+            product=profile.product, request=request
+        ),
+        request=request,
+        target=OdooProdRollbackTarget(
+            artifact_id=deployment.artifact_identity.artifact_id,
+            deployment_record_id=deployment.record_id,
+        ),
+        authorization=grant,
+        created_at=authorized_at,
+        updated_at=authorized_at,
+        runner_trace_id=f"client-release-{decision.record_id}",
+    )
+    persisted, _created = store.create_odoo_prod_rollback_operation_record_if_no_active_lane(
+        operation
+    )
+    return persisted.operation_id if persisted.operation_id == operation.operation_id else ""

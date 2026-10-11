@@ -3979,7 +3979,7 @@ export type ReleaseModuleDeclaration = {
 
 export type ReleaseReviewDecisionEnvelope = {
     checklist_digest: string;
-    decision: 'accepted' | 'changes_requested' | 'overridden';
+    decision: 'accepted' | 'changes_requested' | 'overridden' | 'temporary_hotfix';
     product: string;
     reason?: string;
 };
@@ -3991,12 +3991,12 @@ export type ReleaseReviewDecisionRecord = {
     checklist: ReleaseChecklist;
     checklist_digest: string;
     decided_at: string;
-    decision: 'accepted' | 'changes_requested' | 'overridden';
+    decision: 'accepted' | 'changes_requested' | 'overridden' | 'temporary_hotfix';
     product: string;
     reason: string;
     record_id: string;
     release_issue_url: string;
-    release_start: '' | 'promote' | 'promote_with_rollback_drill';
+    release_start: '' | 'promote' | 'promote_with_rollback_drill' | 'rollback';
 };
 
 export type ReleaseReviewItem = {
@@ -4012,6 +4012,7 @@ export type ReleaseReviewItem = {
 
 export type ReleaseReviewResponse = {
     can_override: boolean;
+    can_start_temporary_hotfix: boolean;
     display_name: string;
     live_site_url: string;
     owner_github_login: string;
@@ -4019,6 +4020,7 @@ export type ReleaseReviewResponse = {
     release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing';
     release_run: ClientReleaseRunView | null;
     review: ReleaseReviewStatus;
+    reviewing_temporary_hotfix: boolean;
     trace_id: string;
     viewer_is_owner: boolean;
 };
