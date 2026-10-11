@@ -165,6 +165,28 @@ shard plan includes per-target timing-source diagnostics:
 - `default`: no timing history exists yet, so the planner uses the conservative
   default estimate until a shard timing artifact teaches it better.
 
+Train candidate CI and Security use the reserved `launchplane-candidate`
+self-hosted label for both push and generated candidate PR events, including
+bootstrap, browser, and summary jobs. The reserved lanes and their live
+qualification are owned by [shiny-infra-ops#488](https://github.com/cbusillo/shiny-infra-ops/issues/488).
+Ordinary jobs keep their existing hosted or configured self-hosted routing.
+Forks stay hosted. The shared selector in `scripts/select-ci-runner.sh` fails
+closed when ordinary self-hosted work has no configured label. Dynamic jobs
+retain independent same-repository guards because a fork controls its checkout;
+bootstrap and summary runner expressions enforce that boundary before checkout.
+Every existing gate still runs. Self-hosted browser jobs install Chromium into
+the runner cache and use preinstalled system libraries; only hosted jobs run
+Playwright's system-package installation. CodeQL retains its separate hosted
+workflow.
+Existing PR-number concurrency cancels superseded PR runs; candidate creation
+and reset pushes retain the SHA-isolated concurrency documented in
+[merge-train policy](../merge-train-policy.md#candidate-construction).
+
+The test aggregate and summary gates use `!cancelled()` so they still report
+failed prerequisites but do not remain queued after a superseding push cancels
+the run. An `always()` aggregate can retain the old workflow's concurrency slot
+while it waits for a runner, preventing the new head's CI from starting.
+
 GitHub Actions remains the source of truth for required pull-request gates.
 Local validation should be proportionate: use targeted behavior proof by
 default, then add the full suite, PostgreSQL integration, browser, generated-
@@ -224,9 +246,18 @@ type, OpenAPI, and production-build gate:
 ```bash
 pnpm --dir frontend exec playwright install chromium
 pnpm --dir frontend test:browser
+pnpm --dir frontend exec node --test tests/browser-support/server-isolation.test.mjs
 ```
 
-The Playwright suite starts the Vite development server and uses only repo-local
+The Playwright suite starts its own Vite development server on an OS-assigned
+loopback port. Playwright captures the listener URL from Vite's startup output
+and passes it to workers; overlapping runner jobs never reuse another job's
+server. The isolation test holds two focused browser probes open together using
+the smoke configuration and checks that their origins differ. It runs as part
+of `test:browser`; the standalone command above is for focused diagnosis.
+It writes only task-local test artifacts.
+
+The suite uses only repo-local
 development fixtures. Product-detail journeys use `?fixture=products`; product
 inventory boundaries use `?fixture=empty` and `?fixture=error`. Anonymous
 authentication is simulated by intercepting only `/v1/auth/session`; no product
@@ -241,7 +272,7 @@ mutation requests, console errors, uncaught page errors, failed requests, or
 HTTP error responses.
 
 Screenshots, traces, and failure evidence are written under
-`tmp/browser-smoke/`. CI uploads that directory from the dedicated hosted browser
+`tmp/browser-smoke/`. CI uploads that directory from the dedicated browser
 job. Every run clears prior evidence first and verifies the complete desktop and
 narrow screenshot set before passing. These screenshots are review evidence
 rather than pixel-diff baselines, so intentional visual changes do not require
