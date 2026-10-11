@@ -15,6 +15,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from fastapi import FastAPI
 
 from tests.http_app_test_support import (
+    _AsgiResponse,
     _asgi_get,
     _asgi_request,
     _local_operator_bearer_config,
@@ -218,6 +219,90 @@ class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([token for token, _ in revocations], ["token"])
         self.assertNotEqual(revocations[0][1], loop_thread)
+
+    async def test_same_key_apply_waits_for_the_running_worker_after_disconnect(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        observations = 0
+
+        def observation(**_: object) -> PreviewPrFeedbackObservation:
+            nonlocal observations
+            observations += 1
+            if observations == 2:
+                started.set()
+                if not release.wait(5):
+                    raise ValueError("fixture timed out")
+            return PreviewPrFeedbackObservation(
+                state="absent",
+                digest_sha256="a" * 64,
+                token_actor_id=101,
+                token_actor_login="launchplane-bot",
+            )
+
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = _operator_app(root, store)
+
+            async def remediate(mode: str) -> _AsgiResponse:
+                return await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/remediation",
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "same-key",
+                    },
+                    payload=_payload(mode=mode),
+                )
+
+            with (
+                patch(
+                    "control_plane.preview_pr_feedback_remediation.resolve_launchplane_github_token",
+                    return_value="token",
+                ),
+                patch(
+                    "control_plane.preview_pr_feedback_remediation.github_api_request",
+                    return_value=None,
+                ),
+                patch(
+                    "control_plane.http_app.observe_managed_preview_pr_feedback",
+                    side_effect=observation,
+                ),
+            ):
+                dry_run = await remediate("dry-run")
+                self.assertEqual(dry_run.status_code, 202, dry_run.text)
+                first_apply = asyncio.ensure_future(remediate("apply"))
+                try:
+                    self.assertTrue(await asyncio.to_thread(started.wait, 3))
+                    first_apply.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await first_apply
+                    duplicate = await asyncio.wait_for(remediate("apply"), 2)
+                finally:
+                    release.set()
+                self.assertEqual(duplicate.status_code, 409, duplicate.text)
+                self.assertEqual(duplicate.json()["error"]["code"], "mutation_in_progress")
+                replay = None
+                for _ in range(50):
+                    replay = await remediate("apply")
+                    if replay.status_code != 409:
+                        break
+                    await asyncio.sleep(0.1)
+
+            applies = [
+                record
+                for record in store.list_preview_pr_feedback_remediation_records(
+                    actor="local-operator:local-owner-agent",
+                    idempotency_key="same-key",
+                )
+                if record.mode == "apply"
+            ]
+
+        assert replay is not None
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        self.assertEqual(len(applies), 1)
 
     async def test_github_actions_identity_cannot_use_operator_route(self) -> None:
         app = create_launchplane_fastapi_app(

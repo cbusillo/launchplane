@@ -14,14 +14,21 @@ LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _LOGGER = logging.getLogger(__name__)
 
 
-async def run_in_worker_thread[Result](operation: Callable[[], Result]) -> Result:
+async def run_in_worker_thread[Result](
+    operation: Callable[[], Result],
+    *,
+    on_finished: Callable[[], None] | None = None,
+) -> Result:
     """Run a blocking provider operation, with its whole credential lifetime, off the loop.
 
     A client disconnect cancels only the wait. The worker thread still finishes, so a
     token it minted is still revoked, and a late failure is logged instead of being
-    left unretrieved.
+    left unretrieved. `on_finished` runs on the event loop when the worker finishes,
+    not when the client disconnects.
     """
     task = asyncio.ensure_future(asyncio.to_thread(operation))
+    if on_finished is not None:
+        task.add_done_callback(lambda _: on_finished())
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:

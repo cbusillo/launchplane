@@ -22412,6 +22412,8 @@ def create_launchplane_fastapi_app(
                 message=safe_message,
             ) from error
 
+    remediation_applies_in_flight: set[tuple[str, str]] = set()
+
     async def remediate_preview_pr_feedback(
         request: Request,
         remediation_request: PreviewPrFeedbackRemediationRequest,
@@ -22619,7 +22621,26 @@ def create_launchplane_fastapi_app(
                 )
                 return response
 
-        return await run_in_worker_thread(execute)
+        apply_key = (idempotency_scope(identity), idempotency_key.strip())
+        if remediation_request.mode == "dry-run" or not apply_key[1]:
+            return await run_in_worker_thread(execute)
+        # The replay check and the provider mutation are not one atomic step, so the same
+        # key must not apply twice at once, including after its first client disconnects.
+        if apply_key in remediation_applies_in_flight:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=next_trace_id(),
+                code="mutation_in_progress",
+                message=(
+                    "A matching preview PR feedback remediation is already running. "
+                    "Retry with the same Idempotency-Key."
+                ),
+            )
+        remediation_applies_in_flight.add(apply_key)
+        return await run_in_worker_thread(
+            execute,
+            on_finished=lambda: remediation_applies_in_flight.discard(apply_key),
+        )
 
     async def apply_preview_pr_feedback(
         request: Request,
