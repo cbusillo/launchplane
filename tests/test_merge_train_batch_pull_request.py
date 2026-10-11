@@ -416,10 +416,12 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         from control_plane.merge_train_batch_pull_request import _batch_owner_test_notes
 
         class DependabotProvider(_BatchProvider):
+            review_labels: tuple[str, ...] = ()
+
             def pull_request(self, number: int) -> dict[str, object]:
                 return super().pull_request(number) | {
                     "user": {"login": "dependabot[bot]", "type": "Bot"},
-                    "labels": [],
+                    "labels": [{"name": label} for label in self.review_labels],
                 }
 
             def request(
@@ -437,6 +439,29 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         intent = client_test_notes(owner_test_notes(body))
         self.assertFalse(intent.error)
         self.assertFalse(intent.review_required)
+
+        provider.review_labels = ("owner-review",)
+        provider.member_bodies = {
+            entry.pull_request_number: "## Client test notes\nCheck checkout after the SDK update."
+            for entry in provider.candidate.entries
+        }
+        profile = SimpleNamespace(
+            is_active=True,
+            repository=provider.repository_name,
+            owner=SimpleNamespace(is_set=True, review_label="owner-review"),
+        )
+        body = _batch_owner_test_notes(
+            client=GitHubMergeTrainClient(
+                transport=provider,
+                branch_refresh_store=cast(
+                    Any, SimpleNamespace(list_product_profile_records=lambda: (profile,))
+                ),
+            ),
+            candidate=self.guard.candidate_record.candidate,
+        )
+        labeled_intent = client_test_notes(owner_test_notes(body))
+        self.assertFalse(labeled_intent.error)
+        self.assertTrue(labeled_intent.review_required)
 
     def test_both_entries_land_through_one_sha_guarded_protected_merge(self) -> None:
         landed = self.land()
