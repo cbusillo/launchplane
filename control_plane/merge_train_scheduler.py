@@ -438,8 +438,16 @@ def _controller_can_continue(result: dict[str, object]) -> bool:
         return candidate.get("status") in {"ready_for_checks", "passed"}
     if action == "observe_candidate" and isinstance(candidate, dict):
         return candidate.get("status") == "passed"
+    if action == "land_batch":
+        # A finished landing leaves the rest of the queue with nothing external
+        # to wait on; the next action plans it against the moved base.
+        return (
+            result.get("mode") == "land"
+            and result.get("landing_progress") in {None, "complete"}
+            and result.get("candidate_ref_cleanup_status") != "failed"
+        )
     # Branch updates, stack collapse and candidate publication start CI. Blocks,
-    # waits, reconciliation and landing outcomes end this bounded pass.
+    # waits, reconciliation and unfinished landings end this bounded pass.
     return False
 
 

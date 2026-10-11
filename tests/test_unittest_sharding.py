@@ -1,3 +1,4 @@
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -330,6 +331,42 @@ class UnittestShardingTests(unittest.TestCase):
         self.assertTrue(summary.successful)
         self.assertEqual(summary.modules[0].module, "sample_run_tests.test_sample.SampleTests")
         self.assertEqual(summary.modules[0].tests_run, 1)
+
+    def test_run_names_each_failed_test_in_an_annotation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            package = _write_test_package(root, package_name="sample_failing_tests")
+            (package / "test_failing.py").write_text(
+                "import unittest\n\n"
+                "class FailingTests(unittest.TestCase):\n"
+                "    def test_fails(self):\n"
+                "        self.fail('broken')\n\n"
+                "    def test_errors(self):\n"
+                "        raise RuntimeError('broken')\n\n"
+                "    def test_subtests(self):\n"
+                "        for value in (1, 2):\n"
+                "            with self.subTest(value=value):\n"
+                "                self.assertEqual(value, 0)\n",
+                encoding="utf-8",
+            )
+            annotations = io.StringIO()
+            with (root / "test-output.txt").open("w", encoding="utf-8") as stream:
+                summary = run_test_modules(
+                    ("sample_failing_tests.test_failing", "sample_failing_tests.test_sample"),
+                    shard_index=0,
+                    shard_count=1,
+                    import_root=root,
+                    stream=stream,
+                    annotation_stream=annotations,
+                )
+            _remove_imported_package("sample_failing_tests")
+
+        self.assertFalse(summary.successful)
+        prefix = "::error title=Failed test::sample_failing_tests.test_failing.FailingTests."
+        self.assertEqual(
+            sorted(annotations.getvalue().splitlines()),
+            [f"{prefix}test_errors", f"{prefix}test_fails", f"{prefix}test_subtests"],
+        )
 
     def test_aggregate_requires_all_shard_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory_name:

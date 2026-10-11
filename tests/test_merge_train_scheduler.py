@@ -174,7 +174,7 @@ class MergeTrainSchedulerPassTests(TestCase):
         self.assertEqual(reads, ["token", "token", "token"])
         self.assertEqual(revoked, [])
 
-    def test_one_pass_advances_planning_and_passed_checks_to_landing(self) -> None:
+    def test_one_pass_lands_and_starts_the_next_queued_batch(self) -> None:
         feedback = patch.object(
             merge_train_scheduler, "_deliver_controller_feedback", return_value=(0, 0)
         )
@@ -186,23 +186,61 @@ class MergeTrainSchedulerPassTests(TestCase):
         self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
             "admitted"
         )
-        actions = (
-            ("admit_collapsed_root", "planned"),
-            ("build_candidate", "ready_for_checks"),
-            ("observe_candidate", "passed"),
-            ("plan_landing", "passed"),
-            ("land_batch", "passed"),
+        actions: tuple[dict[str, object], ...] = (
+            {"controller_action": "admit_collapsed_root", "candidate": {"status": "planned"}},
+            {"controller_action": "build_candidate", "candidate": {"status": "ready_for_checks"}},
+            {"controller_action": "observe_candidate", "candidate": {"status": "passed"}},
+            {"controller_action": "plan_landing", "candidate": {"status": "passed"}},
+            {
+                "controller_action": "land_batch",
+                "mode": "land",
+                "candidate_ref_cleanup_status": "deleted",
+            },
+            # The rest of the queue builds against the new base and waits on its CI.
+            {"controller_action": "plan_candidate", "candidate": {"status": "planned"}},
+            {"controller_action": "build_candidate", "candidate": {"status": "ready_for_checks"}},
+            {"controller_action": "observe_candidate", "candidate": {"status": "ready_for_checks"}},
         )
         self.mocks["execute_merge_train_controller_run_once"].side_effect = [
-            MergeTrainControllerRunOnceResult(
-                accepted_result={"controller_action": action, "candidate": {"status": status}},
-                records={},
-            )
-            for action, status in actions
+            MergeTrainControllerRunOnceResult(accepted_result=action, records={})
+            for action in actions
         ]
         results = self._run()
         self.assertEqual(len(results), len(actions))
         self.assertFalse(results[-1].continue_pass)
+
+    def test_an_unfinished_landing_ends_the_pass(self) -> None:
+        feedback = patch.object(
+            merge_train_scheduler, "_deliver_controller_feedback", return_value=(0, 0)
+        )
+        feedback.start()
+        self.addCleanup(feedback.stop)
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+        unfinished: dict[str, dict[str, object]] = {
+            "partial": {"mode": "land", "landing_progress": "partial"},
+            "cleanup pending": {"mode": "land", "landing_progress": "cleanup_pending"},
+            "candidate ref kept": {"mode": "land", "candidate_ref_cleanup_status": "failed"},
+            "stale": {"mode": "stale_landing", "error": {"code": "stale"}},
+            "blocked": {"mode": "blocked"},
+        }
+        for name, landing in unfinished.items():
+            with self.subTest(name):
+                self.mocks["execute_merge_train_controller_run_once"].reset_mock()
+                self.mocks["execute_merge_train_controller_run_once"].side_effect = [
+                    MergeTrainControllerRunOnceResult(
+                        accepted_result={"controller_action": "land_batch", **landing},
+                        records={},
+                    ),
+                    MergeTrainControllerRunOnceResult(
+                        accepted_result={"controller_action": "plan_candidate"}, records={}
+                    ),
+                ]
+                self.assertEqual(len(self._run()), 1)
 
     def test_pending_candidate_checks_end_the_pass(self) -> None:
         feedback = patch.object(
