@@ -3585,6 +3585,78 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(stored.display_name, "Now Live")
                 self.assertEqual(stored.expected_config.managed_secret_bindings, ())
 
+    async def test_apply_product_expected_config_reports_profile_removed_before_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            read_profile = record_store.read_product_profile_record
+
+            def read_then_remove(product: str) -> LaunchplaneProductProfileRecord:
+                profile = read_profile(product)
+                record_store._record_path("launchplane_product_profiles", product).unlink()
+                return profile
+
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=_product_expected_config_policy(),
+                record_store_factory=lambda: record_store,
+            )
+            with patch.object(
+                record_store, "read_product_profile_record", side_effect=read_then_remove
+            ):
+                response = await _post_product_expected_config(
+                    app,
+                    {**_product_expected_config_payload(), "mode": "apply"},
+                    idempotency_key="expected-config-removed",
+                )
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_apply_product_expected_config_commits_replay_with_database_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            record_store.ensure_schema()
+            record_store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=_product_expected_config_policy(),
+                record_store_factory=lambda: record_store,
+            )
+            payload = {**_product_expected_config_payload(), "mode": "apply"}
+            with patch.object(
+                record_store,
+                "write_idempotency_record",
+                side_effect=AssertionError("replay result must commit with the profile"),
+            ):
+                first = await _post_product_expected_config(
+                    app, payload, idempotency_key="expected-config-atomic"
+                )
+            replay = await _post_product_expected_config(
+                app, payload, idempotency_key="expected-config-atomic"
+            )
+            stored = record_store.read_product_profile_record("sellyouroutboard")
+
+        self.assertEqual(first.status_code, 202, first.text)
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        self.assertEqual(replay.json()["original_trace_id"], first.json()["trace_id"])
+        self.assertEqual(
+            [binding.binding_key for binding in stored.expected_config.managed_secret_bindings],
+            ["SMTP_PASSWORD"],
+        )
+
     async def test_apply_product_expected_config_reports_missing_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
