@@ -18,13 +18,39 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' || (startsWith(github.ref, 'refs/heads/launchplane/train/') && !github.event.created && !github.event.forced) }}
 
 jobs:
+  runner_pool:
+    runs-on: >-
+      ${{ fromJSON(
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/heads/launchplane/train/')) ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'launchplane/train/'))) &&
+      '["self-hosted","launchplane-candidate"]' || '["ubuntu-latest"]') }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      runner: ${{ steps.select.outputs.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select CI runner pool
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          RUNNER_LABEL: ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+        run: bash scripts/select-ci-runner.sh
+
   workflow_lint:
+    needs: runner_pool
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     permissions:
       contents: read
 
@@ -87,12 +113,11 @@ jobs:
             -config-file .github/actionlint.yaml
 
   secret_scan:
+    needs: runner_pool
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     permissions:
       contents: read
 
@@ -146,21 +171,29 @@ jobs:
 
   security_gate:
     name: security-gate
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/heads/launchplane/train/')) ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'launchplane/train/'))) &&
+      '["self-hosted","launchplane-candidate"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     needs:
+      - runner_pool
       - workflow_lint
       - workflow_lint_fork
       - secret_scan
       - secret_scan_fork
     if: >-
-      always() &&
+      !cancelled() &&
       (github.event_name == 'pull_request' || github.event_name == 'push')
     permissions:
       contents: read
     steps:
       - name: Require successful security path
         env:
+          RUNNER_POOL_RESULT: ${{ needs.runner_pool.result }}
           BASE_REPOSITORY: ${{ github.repository }}
           HEAD_REPOSITORY: >-
             ${{ github.event.pull_request.head.repo.full_name || github.repository }}
@@ -179,6 +212,7 @@ jobs:
             fi
           }
 
+          require_success runner_pool "${RUNNER_POOL_RESULT}"
           if [ "${HEAD_REPOSITORY}" = "${BASE_REPOSITORY}" ]; then
             require_success workflow_lint "${WORKFLOW_LINT_RESULT}"
             require_success secret_scan "${SECRET_SCAN_RESULT}"
