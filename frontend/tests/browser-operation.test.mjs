@@ -246,24 +246,38 @@ test("punctuation-distinct products keep separate recovery", async () => {
   );
 });
 
-test("a pre-upgrade record keeps its guard until its operation is carried or settled", async () => {
+test("a pre-upgrade record keeps its shared guard until its operation settles", async () => {
   const storage = memoryStorage();
-  const scope = "example-site:testing:runtime-settings:apply";
+  const ownerScope = "example-site:testing:runtime-settings:apply";
+  const twinScope = "example_site:testing:runtime-settings:apply";
   const legacyKey = "launchplane.browser-operation.example-site-testing-runtime-settings-apply";
-  const legacy = await dispatchedOperation(scope, { product: "example-site" });
+  const legacy = await dispatchedOperation(ownerScope, { product: "example-site" });
   storage.setItem(legacyKey, JSON.stringify(legacy));
 
-  const recovered = recoverBrowserOperationState(scope, storage);
-  assert.equal(recovered.phase, "uncertain");
-  assert.equal(recovered.requiresIdempotencyContinuity, true);
-  assert.deepEqual(recovered.identity, legacy.identity);
+  const owner = recoverBrowserOperationState(ownerScope, storage);
+  assert.equal(owner.phase, "uncertain");
+  assert.equal(owner.requiresIdempotencyContinuity, true);
+  assert.deepEqual(owner.identity, legacy.identity);
 
-  persistBrowserOperationState(scope, recovered, storage);
+  // Navigating to the punctuation twin persists what it recovered; the owner's guard stays.
+  const twin = recoverBrowserOperationState(twinScope, storage);
+  persistBrowserOperationState(twinScope, twin, storage);
+  persistBrowserOperationState(ownerScope, owner, storage);
+  assert.deepEqual(recoverBrowserOperationState(ownerScope, storage).identity, legacy.identity);
+  assert.equal(recoverBrowserOperationState(ownerScope, storage).requiresIdempotencyContinuity, true);
+
+  const settled = reconcileBrowserOperation(owner, legacy.identity, {
+    trace_id: "replay",
+    original_trace_id: "original",
+    replayed: true,
+  });
+  persistBrowserOperationState(ownerScope, settled, storage);
   assert.equal(storage.getItem(legacyKey), null);
-  assert.deepEqual(recoverBrowserOperationState(scope, storage).identity, legacy.identity);
+  assert.equal(recoverBrowserOperationState(ownerScope, storage).identity, null);
+  assert.equal(recoverBrowserOperationState(twinScope, storage).identity, null);
 });
 
-test("an unrelated pre-upgrade record survives another scope's settlement", async () => {
+test("another scope's own operation never removes a pre-upgrade record", async () => {
   const storage = memoryStorage();
   const ownerScope = "example-site:testing:runtime-settings:apply";
   const otherScope = "example_site:testing:runtime-settings:apply";

@@ -144,16 +144,18 @@ export function persistBrowserOperationState(
   }
   const key = browserOperationStorageKey(scope);
   try {
-    if (
-      state.identity &&
-      (state.phase === "submitting" || state.requiresIdempotencyContinuity)
-    ) {
+    const continuing =
+      state.identity !== null &&
+      (state.phase === "submitting" || state.requiresIdempotencyContinuity);
+    if (persistLegacyOperation(scope, state, continuing, storage)) {
+      return;
+    }
+    if (continuing) {
       const stored: StoredBrowserOperationState = { ...state, scope };
       storage.setItem(key, JSON.stringify(stored));
     } else {
       storage.removeItem(key);
     }
-    removeCarriedLegacyRecord(scope, state, storage);
   } catch {
     return;
   }
@@ -176,26 +178,37 @@ function legacyBrowserOperationStorageKey(scope: string): string {
   return `launchplane.browser-operation.${normalizedScope || "operation"}`;
 }
 
-// Once this scope carries or settles the pre-upgrade operation, its old copy is removed.
-function removeCarriedLegacyRecord(
+// A pre-upgrade operation stays in its shared slot, exactly as before this change, so
+// the scope that owns it keeps its guard; it leaves that slot only once it settles,
+// which takes evidence about its own idempotency key.
+function persistLegacyOperation(
   scope: string,
   state: BrowserOperationState,
+  continuing: boolean,
   storage: BrowserOperationStorage,
-): void {
+): boolean {
+  if (!state.identity) {
+    return false;
+  }
   const key = legacyBrowserOperationStorageKey(scope);
   const value = storage.getItem(key);
-  if (!value || !state.identity) {
-    return;
+  if (!value) {
+    return false;
   }
   try {
     const legacy = JSON.parse(value) as Partial<BrowserOperationState>;
     if (legacy.identity?.idempotencyKey !== state.identity.idempotencyKey) {
-      return;
+      return false;
     }
   } catch {
-    return;
+    return false;
   }
-  storage.removeItem(key);
+  if (continuing) {
+    storage.setItem(key, JSON.stringify(state));
+  } else {
+    storage.removeItem(key);
+  }
+  return true;
 }
 
 export async function browserOperationIdentity(
