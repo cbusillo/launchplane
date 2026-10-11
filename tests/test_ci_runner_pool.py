@@ -39,11 +39,19 @@ class CIRunnerPoolTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), expected)
 
+    def assert_hosted_pool(self, **overrides: str) -> None:
+        result = self.select(**overrides)
+        fork_pool = self.select(HEAD_REPOSITORY="outside/fork")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(fork_pool.returncode, 0, fork_pool.stderr)
+        labels = json.loads(result.stdout)
+        self.assertNotIn("self-hosted", labels)
+        self.assertNotIn("configured-ci-lane", labels)
+        self.assertEqual(labels, json.loads(fork_pool.stdout))
+
     def test_public_candidates_bypass_the_self_hosted_queue(self) -> None:
-        self.assert_pool(
-            ["ubuntu-latest"], EVENT_NAME="push", REF="refs/heads/launchplane/train/batch"
-        )
-        self.assert_pool(["ubuntu-latest"], HEAD_REF="launchplane/train/batch")
+        self.assert_hosted_pool(EVENT_NAME="push", REF="refs/heads/launchplane/train/batch")
+        self.assert_hosted_pool(HEAD_REF="launchplane/train/batch")
 
     def test_ordinary_work_keeps_its_configured_lane(self) -> None:
         for event in ["pull_request", "push", "schedule", "workflow_dispatch"]:
@@ -67,8 +75,7 @@ class CIRunnerPoolTests(unittest.TestCase):
                 )
 
     def test_fork_branches_never_reach_the_private_lane(self) -> None:
-        self.assert_pool(
-            ["ubuntu-latest"],
+        self.assert_hosted_pool(
             HEAD_REPOSITORY="outside/fork",
             HEAD_REF="launchplane/train/batch",
             RUNNER_LABEL="",
@@ -78,7 +85,7 @@ class CIRunnerPoolTests(unittest.TestCase):
         result = self.select(RUNNER_LABEL="")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not configured", result.stderr)
-        self.assert_pool(["ubuntu-latest"], HEAD_REF="launchplane/train/batch", RUNNER_LABEL="")
+        self.assert_hosted_pool(HEAD_REF="launchplane/train/batch", RUNNER_LABEL="")
 
     def test_selector_failure_is_reported_by_both_summary_gates(self) -> None:
         for workflow, job, name in [
