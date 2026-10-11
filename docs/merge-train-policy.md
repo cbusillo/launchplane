@@ -685,7 +685,11 @@ so re-running the failed check lets it continue once the re-run is no longer
 failing. A multi-entry batch whose batch PR was closed is never reopened. A
 changed generated batch body, confirmed closed and unmerged binding, and a
 persisted unused retry budget allow one rebuild of the same members, as
-described under `candidate_failed` below. Otherwise an unchanged failed
+described under `candidate_failed` below. Fresh passing required checks at the
+failed candidate's exact SHA also allow one audited rebuild of a bound closed,
+unmerged batch, even when its generated body is unchanged. The replacement
+records `check_retry_of` and uses a separate `-check-retry` ref; it receives its
+own checks and normal landing admission. Otherwise an unchanged failed
 candidate moves on through [blocker isolation](#blocker-isolation) rather than
 being rebuilt in a loop.
 
@@ -1388,13 +1392,26 @@ Controller actions have these retry/stop semantics:
   supersede and replan it against the unchanged queue after a transient build
   failure is repaired. Failed candidates with a recorded candidate SHA are not
   rebuilt with the same members until the queue or base changes, except for the
-  single batch-body and infrastructure retries; a check failure otherwise moves
+  single batch-body, infrastructure, and recovered-check retries; a check failure otherwise moves
   through [blocker isolation](#blocker-isolation), returning `plan_candidate`
   with `reason_code: failure_isolation` or `infrastructure_retry`, or `block`
-  for the isolated pull request. If one failed on check evidence and a
+  for the isolated pull request. For a single-entry candidate or squash/rebase
+  landing, if one failed on check evidence and a
   re-run of the failed check at that SHA is now pending or passing, the controller
   returns `observe_candidate`, retires the failed record, and continues from the
-  re-read evidence. A multi-entry merge batch whose service PR is closed and
+  re-read evidence. For a multi-entry merge batch, fresh passing required checks
+  at its recorded SHA return `plan_candidate` with
+  `reason_code: candidate_checks_recovered`, provided its service PR is exactly
+  bound, closed and confirmed unmerged. The new record's `check_retry_of` points
+  to the failed record, preserving its SHA and failure history; the response
+  names the observed SHA, passing status and closed batch PR. The same ordered
+  heads/base may use this rebuild only once, across restarts and replay of the
+  original failed record. A spent budget reports `candidate_check_retry_used`
+  without blaming a member. Pending, missing or unreadable check evidence does
+  not authorize this retry. Dry runs report the plan without consuming a budget
+  or changing a ref, record, PR or label. A replacement that fails real checks
+  still goes through blocker isolation. The batch-body and infrastructure
+  budgets remain separate. A multi-entry merge batch whose service PR is closed and
   confirmed unmerged may be rebuilt once for the same ordered heads and base,
   only when the body Launchplane would generate now differs from that bound
   failed PR's body. The replacement uses a separate candidate ref and persists

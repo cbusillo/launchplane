@@ -139,6 +139,8 @@ class MergeTrainBatchCandidate(BaseModel):
     batch_body_retry_of: str = Field(default="", exclude_if=lambda value: not value)
     # Record id of the failed candidate this one rebuilds after an infrastructure failure.
     infrastructure_retry_of: str = Field(default="", exclude_if=lambda value: not value)
+    # Failed record whose exact SHA subsequently passed checks before this rebuild.
+    check_retry_of: str = Field(default="", exclude_if=lambda value: not value)
     stack_collapse_root: MergeTrainStackCollapseRootProof | None = None
     structural_provenance: MergeTrainStructuralProvenance | None = None
     required_checks_status: Literal["unknown", "pending", "pass", "fail"] = "unknown"
