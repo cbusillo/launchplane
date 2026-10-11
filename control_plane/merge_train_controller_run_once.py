@@ -70,6 +70,7 @@ from control_plane.merge_train_batch_pull_request import (
     changed_closed_batch_body,
 )
 from control_plane.merge_train_batch_candidate import (
+    MergeTrainBatchCandidateBaseHistoryReadStore,
     MergeTrainBatchCandidateRecordStore,
     merge_train_snapshot_has_stack_topology,
 )
@@ -4521,7 +4522,9 @@ def _resume_known_failed_batch(
     failed_record = next(
         (
             record
-            for record in candidate_store.list_merge_train_batch_candidate_records(
+            for record in cast(
+                MergeTrainBatchCandidateBaseHistoryReadStore, candidate_store
+            ).list_merge_train_batch_candidate_records(
                 repository=snapshot.repository,
                 base_branch=snapshot.base_branch,
                 base_sha=snapshot.base_sha,
