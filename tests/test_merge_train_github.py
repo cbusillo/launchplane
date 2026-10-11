@@ -52,7 +52,7 @@ from control_plane.merge_train_structural_provenance import (
     evaluate_merge_train_structural_candidate,
 )
 
-from tests.test_merge_train_dependency_updates import INDIRECT_PATCH
+from tests.test_merge_train_dependency_updates import INDIRECT_PATCH, SCOPED_MINOR
 
 
 class _ReadOnlyMergeTrainTransport(RecordingMergeTrainGitHubTransport):
@@ -3199,6 +3199,12 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             ...,
         ] = (
             ("bot commit", [own], [], "patch_or_minor"),
+            (
+                "quoted scoped dependency name",
+                [_github_commit(49699333, SCOPED_MINOR, sha="head-16")],
+                [],
+                "patch_or_minor",
+            ),
             ("bot rebased itself", [own], bot_push, "patch_or_minor"),
             (
                 "another author added a commit",

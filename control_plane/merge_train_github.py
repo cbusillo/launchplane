@@ -69,7 +69,10 @@ from control_plane.github_read_cache import GitHubReadCache, MERGE_TRAIN_READ_CA
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.merge_train_candidate_failures import CandidateCheckFailures
 from control_plane.merge_train_candidate_failures import classify_candidate_check_failures
-from control_plane.merge_train_codeowners import individual_landing_snapshots
+from control_plane.merge_train_codeowners import (
+    individual_landing_snapshots,
+    carried_change_requires_individual_landing,
+)
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
 from control_plane.source_control_change import change_fingerprint
@@ -1247,7 +1250,12 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
 
     def verify_unlanded_batch(
-        self, *, landing_plan: MergeTrainBatchLandingPlan, allow_changed_base: bool = False
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        allow_changed_base: bool = False,
+        allow_moved_heads: bool = False,
+        observed_pr_heads: dict[int, tuple[str, str]] | None = None,
     ) -> tuple[str, str]:
         """Prove that a changed-policy plan can be retired without losing a landing."""
         if any(entry.status not in {"planned", "merging"} for entry in landing_plan.entries):
@@ -1273,6 +1281,19 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             raise MergeTrainGitHubStaleHeadError(
                 "Policy-change recovery cannot prove the base is unchanged.", status_code=409
             )
+        if allow_moved_heads:
+            if any(
+                entry.status != "planned" for entry in landing_plan.entries
+            ) or self.branch_contains_commit(
+                repository=landing_plan.repository,
+                branch_ref=observed_base[0],
+                commit_sha=landing_plan.candidate_sha,
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "Retirement cannot discard completed or uncertain candidate effects.",
+                    status_code=409,
+                )
+        observed_heads: dict[int, str] = {}
         for entry in landing_plan.entries:
             head_sha, head_tree_sha = _git_commit_identity(
                 transport=self.transport,
@@ -1283,13 +1304,21 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 raise MergeTrainGitHubStaleHeadError(
                     "Policy-change recovery cannot prove the recorded head tree.", status_code=409
                 )
-            self._validate_open_landing_pull_request(
-                repository_path=repository_path,
-                entry=entry,
-                expected_base_ref=landing_plan.base_branch,
-                expected_base_sha=observed_base[0],
-                expected_base_tree_sha=observed_base[1],
-            )
+            if allow_moved_heads:
+                observed_heads[entry.pull_request_number] = self._open_head_for_retirement(
+                    repository=landing_plan.repository,
+                    pull_request_number=entry.pull_request_number,
+                    base_ref=landing_plan.base_branch,
+                    base_sha=observed_base[0],
+                )
+            else:
+                self._validate_open_landing_pull_request(
+                    repository_path=repository_path,
+                    entry=entry,
+                    expected_base_ref=landing_plan.base_branch,
+                    expected_base_sha=observed_base[0],
+                    expected_base_tree_sha=observed_base[1],
+                )
         if (
             _base_branch_identity(
                 transport=self.transport,
@@ -1301,7 +1330,64 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             raise MergeTrainGitHubStaleHeadError(
                 "Base branch moved during policy-change recovery.", status_code=409
             )
+        for number, head in observed_heads.items():
+            if (
+                self._open_head_for_retirement(
+                    repository=landing_plan.repository,
+                    pull_request_number=number,
+                    base_ref=landing_plan.base_branch,
+                    base_sha=observed_base[0],
+                )
+                != head
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "Pull request moved during no-effect retirement proof.", status_code=409
+                )
+        if observed_pr_heads is not None:
+            for number, head in observed_heads.items():
+                observed_pr_heads[number] = _git_commit_identity(
+                    transport=self.transport, repository_path=repository_path, commit_sha=head
+                )
         return observed_base
+
+    def _open_head_for_retirement(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        base_ref: str,
+        base_sha: str,
+    ) -> str:
+        detail = self._pull_request_detail(
+            repository=repository, pull_request_number=pull_request_number
+        )
+        if (
+            _required_text(detail.get("state"), "Retirement requires PR state.") != "open"
+            or detail.get("merged") is not False
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Retirement requires a confirmed open, unmerged PR.", status_code=409
+            )
+        base = _json_object(detail.get("base"), "Retirement PR base")
+        if base.get("ref") != base_ref:
+            raise MergeTrainGitHubStaleHeadError(
+                "Retirement requires the current protected base binding.", status_code=409
+            )
+        projected_sha = _required_text(base.get("sha"), "Retirement requires base projection SHA.")
+        if (
+            projected_sha != base_sha
+            and _base_branch_sha(
+                transport=self.transport,
+                repository_path=_repository_path(repository),
+                base_branch=base_ref,
+            )
+            != base_sha
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Protected base moved during retirement.", status_code=409
+            )
+        head = _json_object(detail.get("head"), "Retirement PR head")
+        return _required_text(head.get("sha"), "Retirement requires current PR head.")
 
     def land_batch_candidate(
         self,
@@ -2280,6 +2366,22 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 f"Pull request #{pull_request_number} no longer has current-head Client review.",
                 status_code=409,
             )
+
+    def carried_change_requires_individual_landing(
+        self,
+        *,
+        repository: str,
+        base_sha: str,
+        parent_head_sha: str,
+        child_head_sha: str,
+    ) -> bool:
+        return carried_change_requires_individual_landing(
+            transport=self.transport,
+            repository_path=_repository_path(repository),
+            base_sha=base_sha,
+            parent_head_sha=parent_head_sha,
+            child_head_sha=child_head_sha,
+        )
 
     def merge_pull_request(
         self,
