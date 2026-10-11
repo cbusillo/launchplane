@@ -1248,6 +1248,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         landing_plan: MergeTrainBatchLandingPlan,
         allow_changed_base: bool = False,
         allow_moved_heads: bool = False,
+        observed_pr_heads: dict[int, tuple[str, str]] | None = None,
     ) -> tuple[str, str]:
         """Prove that a changed-policy plan can be retired without losing a landing."""
         if any(entry.status not in {"planned", "merging"} for entry in landing_plan.entries):
@@ -1335,6 +1336,11 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 raise MergeTrainGitHubStaleHeadError(
                     "Pull request moved during no-effect retirement proof.", status_code=409
                 )
+        if observed_pr_heads is not None:
+            for number, head in observed_heads.items():
+                observed_pr_heads[number] = _git_commit_identity(
+                    transport=self.transport, repository_path=repository_path, commit_sha=head
+                )
         return observed_base
 
     def _open_head_for_retirement(
@@ -1356,9 +1362,22 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 "Retirement requires a confirmed open, unmerged PR.", status_code=409
             )
         base = _json_object(detail.get("base"), "Retirement PR base")
-        if base.get("ref") != base_ref or base.get("sha") != base_sha:
+        if base.get("ref") != base_ref:
             raise MergeTrainGitHubStaleHeadError(
                 "Retirement requires the current protected base binding.", status_code=409
+            )
+        projected_sha = _required_text(base.get("sha"), "Retirement requires base projection SHA.")
+        if (
+            projected_sha != base_sha
+            and _base_branch_sha(
+                transport=self.transport,
+                repository_path=_repository_path(repository),
+                base_branch=base_ref,
+            )
+            != base_sha
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Protected base moved during retirement.", status_code=409
             )
         head = _json_object(detail.get("head"), "Retirement PR head")
         return _required_text(head.get("sha"), "Retirement requires current PR head.")

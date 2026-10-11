@@ -91,6 +91,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         policy_companion: bool = False,
         move_after_landing: bool = False,
         interrupt_retirement: bool = False,
+        ancestry_unknown: bool = False,
         moved: bool,
         child_changed: bool = False,
         deeper: bool = False,
@@ -110,6 +111,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         landing_attempts: list[int] = []
         landed_prs: set[int] = set()
         no_effect_reads: list[tuple[int, ...]] = []
+        retirement_observations: dict[int, tuple[str, str]] = {}
         comments: list[int] = []
         comment_bodies: dict[int, list[str]] = {}
         closed: set[int] = set()
@@ -237,6 +239,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 landing_plan: Any,
                 allow_changed_base: bool = False,
                 allow_moved_heads: bool = False,
+                observed_pr_heads: dict[int, tuple[str, str]] | None = None,
             ) -> tuple[str, str]:
                 if retirement_unknown:
                     raise MergeTrainGitHubError("No-effect proof unavailable", status_code=503)
@@ -262,6 +265,15 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                         raise MergeTrainGitHubStaleHeadError(
                             "No-effect head moved", status_code=409
                         )
+                if observed_pr_heads is not None:
+                    observed_pr_heads.update(
+                        {
+                            number: (pr.head_sha, "fixture-tree")
+                            for number, pr in provider_prs.items()
+                        }
+                    )
+                if observed_pr_heads is not None:
+                    retirement_observations.update(observed_pr_heads)
                 no_effect_reads.append(
                     tuple(entry.pull_request_number for entry in landing_plan.entries)
                 )
@@ -322,6 +334,10 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             def branch_contains_commit(
                 self, *, repository: str, branch_ref: str, commit_sha: str
             ) -> bool:
+                if ancestry_unknown and legacy_code_owned:
+                    raise MergeTrainGitHubStaleHeadError(
+                        "Stored child changed or unavailable", status_code=409
+                    )
                 return graph.contains(branch_ref, commit_sha)
 
             def find_pull_request_comment_url(self, **kwargs: Any) -> str:
@@ -650,6 +666,11 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                                         if r.record_id == old.record_id
                                     )
                                     self.assertEqual(retained.plan, old.plan)
+                                if move_after_landing:
+                                    self.assertEqual(
+                                        retirement_observations[1],
+                                        ("late-root-push", "fixture-tree"),
+                                    )
                                 if policy_companion:
                                     details = result["details"]
                                     self.assertEqual(
@@ -1045,4 +1066,14 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             preserve_original_review=True,
             landing_prepared=True,
             unrelated=True,
+        )
+
+    async def test_unknown_held_stack_does_not_stop_unrelated_active_landing(self) -> None:
+        await self._recovery(
+            checkpointed=False,
+            moved=False,
+            preserve_original_review=True,
+            change_policy=False,
+            unrelated=True,
+            ancestry_unknown=True,
         )

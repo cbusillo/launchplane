@@ -1068,6 +1068,14 @@ def _advance_active_landing_record(
     history = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
         repository=request.repository, base_branch=request.base_branch
     )
+    landing_numbers = {
+        entry.pull_request_number for entry in active_landing_record.landing_plan.entries
+    }
+    history = tuple(
+        record
+        for record in history
+        if any(entry.pull_request_number in landing_numbers for entry in record.plan.entries)
+    )
     if history and not _ordinary_landing_terminal_success(active_landing_record):
         snapshot = github_client.read_merge_train_snapshot(
             repository=request.repository, base_branch=request.base_branch
@@ -1576,11 +1584,13 @@ def _retire_changed_policy_landing(
         raise MergeTrainControllerRequestError(
             "Policy-change recovery requires the exact recorded candidate."
         )
+    observed_pr_heads: dict[int, tuple[str, str]] = {}
     observed_base_sha, observed_base_tree_sha = _verify_retirement_has_no_effect(
         github_client=github_client,
         admission_store=admission_store,
         plan=plan,
         allow_moved_heads=retirement_source == "original-review-recovery",
+        observed_pr_heads=observed_pr_heads,
     )
     if not request.mutate:
         return {
@@ -1600,12 +1610,15 @@ def _retire_changed_policy_landing(
         trace_id=trace_id,
     )
     for entry in plan.entries:
+        observed_head, observed_tree = observed_pr_heads.get(
+            entry.pull_request_number, (entry.expected_head_sha, entry.expected_head_tree_sha)
+        )
         guard.reconcile_existing_no_effect(
             entry=entry,
             observed_base_sha=observed_base_sha,
             observed_base_tree_sha=observed_base_tree_sha,
-            observed_head_sha=entry.expected_head_sha,
-            observed_head_tree_sha=entry.expected_head_tree_sha,
+            observed_head_sha=observed_head,
+            observed_head_tree_sha=observed_tree,
             observed_pull_request_state="open",
             observed_at=guard.observation_time_provider(),
         )
@@ -1640,6 +1653,7 @@ def _verify_retirement_has_no_effect(
     admission_store: MergeAdmissionRecordStore,
     plan: MergeTrainBatchLandingPlan,
     allow_moved_heads: bool = False,
+    observed_pr_heads: dict[int, tuple[str, str]] | None = None,
 ) -> tuple[str, str]:
     allow_changed_base = True
     for entry in plan.entries:
@@ -1660,6 +1674,7 @@ def _verify_retirement_has_no_effect(
             landing_plan=plan,
             allow_changed_base=allow_changed_base,
             allow_moved_heads=True,
+            observed_pr_heads=observed_pr_heads,
         )
     return github_client.verify_unlanded_batch(
         landing_plan=plan,
