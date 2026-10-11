@@ -290,9 +290,22 @@ class ServiceRestartTests(unittest.TestCase):
 
     def test_legacy_container_identity_keeps_its_reviewed_restart_digest(self) -> None:
         # A container deployed before the two-slot contract has no slot fields.
-        legacy_identity = self.expected.model_dump(
-            mode="json", exclude={"slot", "release_id", "image_digest", "database_uuid"}
-        )
+        # Keep the historical wire shape independent of new model defaults.
+        legacy_identity = {
+            "schema_version": 1,
+            "product": self.expected.product,
+            "context": self.expected.context,
+            "instance": self.expected.instance,
+            "environment_kind": "stable",
+            "deployment_record_id": self.expected.deployment_record_id,
+            "artifact_id": self.expected.artifact_id,
+            "source_git_ref": self.expected.source_git_ref,
+            "image_reference": self.expected.image_reference,
+            "release_tuple_id": "",
+            "preview_id": "",
+            "preview_generation_id": "",
+            "deployed_at": "",
+        }
         legacy_json = json.dumps(legacy_identity, sort_keys=True, separators=(",", ":"))
         self.provider.config["Config"]["Env"] = [RUNTIME_IDENTITY_ENV_KEY + "=" + legacy_json]
         reviewed = self.review()
