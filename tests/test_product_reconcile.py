@@ -3546,11 +3546,15 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         result = self.reconcile()
         self.assertEqual(result["action"], "apply")
         self.assertIn("@site-owner", self.comment_body())
+        calls_before_refusal = tuple(self.owner_review_status_calls)
         self.github.pull_request["body"] = "## Client test notes\n<!-- fill me in -->"
         self.request("preview", 5)
         result = self.reconcile()
         self.assertEqual(result["reason"], "client_test_notes_required")
         self.assertIn("Client test notes are missing", self.comment_body())
+        self.assertEqual(
+            tuple(self.owner_review_status_calls), calls_before_refusal + (("site", 5),)
+        )
 
     def test_ready_preview_on_an_accepted_head_says_so_instead_of_asking_again(self) -> None:
         payload = _profile()

@@ -353,6 +353,16 @@ class MergeTrainDryRunTests(unittest.TestCase):
             build_merge_train_dry_run_result(policy=policy, snapshot=snapshot).intended_next_action,
             "block",
         )
+        invalid_notes = update.model_copy(
+            update={"client_test_notes_error": "Client test notes are missing."}
+        )
+        held = build_merge_train_dry_run_result(
+            policy=policy,
+            snapshot=snapshot.model_copy(update={"pull_requests": (invalid_notes,)}),
+            batch_landing=True,
+        )
+        self.assertEqual(held.queue_order, ())
+        self.assertIn(invalid_notes.client_test_notes_error, held.queue[0].ineligible_reasons)
         no_label_policy = policy.model_copy(
             update={
                 "policies": (

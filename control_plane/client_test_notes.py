@@ -119,9 +119,9 @@ def client_test_notes(notes: str, *, review_override: bool = False) -> ClientTes
                 True, "The Client review label requires real Client test notes.", True
             )
         return ClientTestNotes(False)
-    if any(
-        marker.casefold() in value.casefold()
-        for marker in (NOTHING_TO_TEST, LEGACY_NOTHING_TO_TEST)
+    undecorated = re.sub(r"^(?:[\s>*_`+\-]|\d+[.)]\s)+", "", value)
+    if undecorated.casefold().startswith(
+        (NOTHING_TO_TEST.casefold(), LEGACY_NOTHING_TO_TEST.casefold())
     ):
         return ClientTestNotes(
             True,

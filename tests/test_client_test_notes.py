@@ -87,6 +87,11 @@ class ClientTestNotesTests(unittest.TestCase):
         ):
             with self.subTest(notes=notes):
                 self.assertTrue(client_test_notes(notes).error)
+        intent = client_test_notes(
+            "Confirm the help text explains Nothing for the Client to test correctly."
+        )
+        self.assertTrue(intent.review_required)
+        self.assertFalse(intent.error)
 
     def test_workflow_feedback_reads_notes_and_skips_only_bound_train_heads(self) -> None:
         from contextlib import nullcontext

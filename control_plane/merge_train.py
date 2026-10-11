@@ -686,7 +686,9 @@ def _build_queue_entry(
         # persistent label. The next snapshot requalifies it without clearing
         # any manual hold or guessing who applied an existing block label.
         ineligible_reasons.append(
-            "dependency update current-head merge conflicts"
+            pull_request.client_test_notes_error
+            if pull_request.client_test_notes_error
+            else "dependency update current-head merge conflicts"
             if pull_request.mergeable == "conflicting"
             else "dependency update current-head mergeability unknown"
             if pull_request.mergeable == "unknown"
