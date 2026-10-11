@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from typing import Protocol, cast
 from urllib.parse import parse_qs, urlsplit
 
+from control_plane.client_test_notes import _markdown_lines
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.release_review import ReleaseChecklist, ReleaseReviewItem
 from control_plane.product_review import source_control_pull_request_url
 from control_plane.release_review import ReleaseReviewStore
-from control_plane.release_review_github import _markdown_lines
 
 
 class InvitationEvidenceStore(ReleaseReviewStore, Protocol):
