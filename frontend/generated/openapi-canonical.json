@@ -46762,6 +46762,144 @@
         "title": "TrustedMaintenancePolicyRecord",
         "type": "object"
       },
+      "UpdaterFileChange": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "100644",
+                  "100755"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "path": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "title": "UpdaterFileChange",
+        "type": "object"
+      },
+      "UpdaterProposalRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "base_sha": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "body": {
+            "default": "",
+            "maxLength": 16384,
+            "title": "Body",
+            "type": "string"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/UpdaterFileChange"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "title": "Files",
+            "type": "array"
+          },
+          "repository": {
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+            "title": "Repository",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "base_sha",
+          "title",
+          "files"
+        ],
+        "title": "UpdaterProposalRequest",
+        "type": "object"
+      },
+      "UpdaterProposalResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "branch": {
+            "title": "Branch",
+            "type": "string"
+          },
+          "disposition": {
+            "default": "created",
+            "enum": [
+              "created",
+              "replayed",
+              "pending"
+            ],
+            "title": "Disposition",
+            "type": "string"
+          },
+          "head_sha": {
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "pull_request_number": {
+            "exclusiveMinimum": 0.0,
+            "title": "Pull Request Number",
+            "type": "integer"
+          },
+          "pull_request_url": {
+            "title": "Pull Request Url",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "branch",
+          "head_sha",
+          "pull_request_number",
+          "pull_request_url"
+        ],
+        "title": "UpdaterProposalResponse",
+        "type": "object"
+      },
       "UrgentReleaseReviewEnvelope": {
         "additionalProperties": false,
         "description": "An admin's request to ask the Client about an engineering-only release now.",
@@ -91692,6 +91830,66 @@
           }
         },
         "summary": "Read VeriReel prod backup gate operation worker status"
+      }
+    },
+    "/v1/source-control/updater-proposals": {
+      "post": {
+        "operationId": "create_updater_proposal_v1_source_control_updater_proposals_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdaterProposalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdaterProposalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Create Updater Proposal"
       }
     },
     "/v1/tenant-admission/repository-classifications/apply": {
