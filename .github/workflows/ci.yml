@@ -779,8 +779,9 @@ jobs:
 
   test:
     needs: [runner_pool, verified_tree, test_timing_snapshot, test_shards]
+    # Report shard failures, but release the runner queue on superseding pushes.
     if: >-
-      always() && needs.runner_pool.result == 'success' &&
+      !cancelled() && needs.runner_pool.result == 'success' &&
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)

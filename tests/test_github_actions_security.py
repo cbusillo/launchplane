@@ -499,7 +499,13 @@ class GitHubActionsSecurityTests(TestCase):
                     for label in labels
                 ):
                     continue
-                if not _requires_conjunct(str(job.get("if", "")), same_repo_guard):
+                condition = str(job.get("if", ""))
+                if "always()" in condition and not _requires_conjunct(condition, "!cancelled()"):
+                    violations.append(
+                        f"{path}:{job_id}: self-hosted pull_request jobs using always() "
+                        "must stop on cancellation so they release superseded runs."
+                    )
+                if not _requires_conjunct(condition, same_repo_guard):
                     violations.append(
                         f"{path}:{job_id}: self-hosted pull_request jobs must be gated to "
                         "same-repository pull requests."

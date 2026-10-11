@@ -106,6 +106,37 @@ class CIRunnerPoolTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn(f"runner_pool concluded with: {status}", result.stderr)
 
+    def test_failed_aggregate_still_fails_the_ci_gate(self) -> None:
+        step = load_workflow(".github/workflows/ci.yml").step_named(
+            "ci_gate", "Require successful CI path"
+        )
+        assert step is not None
+        for status in ["failure", "skipped"]:
+            with self.subTest(status=status):
+                result = subprocess.run(
+                    ["bash", "-c", step.run],
+                    env=os.environ
+                    | {
+                        "RUNNER_POOL_RESULT": "success",
+                        "AUDIT_POLICY_RESULT": "success",
+                        "REPOSITORY_PINS_RESULT": "success",
+                        "VERIFIED_TREE": "false",
+                        "BASE_REPOSITORY": "example/control",
+                        "HEAD_REPOSITORY": "example/control",
+                        "STATIC_CHECKS_RESULT": "success",
+                        "CONTAINER_SCAN_RESULT": "success",
+                        "FRONTEND_VALIDATE_RESULT": "success",
+                        "FRONTEND_BROWSER_SMOKE_RESULT": "success",
+                        "TEST_RESULT": status,
+                        "POSTGRES_INTEGRATION_RESULT": "success",
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"test concluded with: {status}", result.stderr)
+
     def test_runner_label_is_json_encoded(self) -> None:
         label = 'lane"with\\characters'
         self.assert_pool(["self-hosted", label], RUNNER_LABEL=label)
