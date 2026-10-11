@@ -66,6 +66,7 @@ from control_plane.merge_train_pr_feedback import (
     feedback_provider_backoff_is_active,
     require_merge_train_pr_feedback_record_store,
 )
+from control_plane.merge_train_release_hold import merge_train_release_hold_reader
 from control_plane.merge_train_run_once import (
     MergeTrainRunOnceEnvelope,
     execute_recorded_merge_train_run_once,
@@ -365,6 +366,7 @@ def _run_controller(
             admission_store=require_merge_admission_record_store(record_store),
             admission_evaluator=admission_evaluator,
             branch_refresh_store=optional_merge_train_branch_refresh_store(record_store),
+            release_hold_reader=merge_train_release_hold_reader(record_store),
         )
     delivered = 0
     failed = 0

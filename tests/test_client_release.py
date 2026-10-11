@@ -41,7 +41,11 @@ from control_plane.contracts.production_backup_authority import ProductionBackup
 from control_plane.contracts.production_backup_gate import ProductionBackupGateWorkerRequest
 from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateResult
 from control_plane.contracts.product_profile_record import ReleaseOnAcceptance
-from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, ReleaseStart
+from control_plane.contracts.release_review import (
+    ReleaseReviewDecisionRecord,
+    ReleaseStart,
+    SharedSourceReview,
+)
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyResult,
@@ -70,6 +74,7 @@ from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
     DurableOperationAuthorizationGuard,
 )
+from control_plane.merge_train_release_hold import MergeTrainReleaseHold, merge_train_release_hold
 from control_plane.release_review import build_release_review
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
@@ -1145,6 +1150,69 @@ class ClientReleaseTests(unittest.TestCase):
             "pending",
         )
         self.assertEqual(self.advance(), ())
+
+    def test_an_accepted_release_holds_the_merge_train_of_its_sources_until_it_finishes(
+        self,
+    ) -> None:
+        self.switch("promote")
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+        accepted = decision(self.store).model_copy(update={"release_start": "promote"})
+        accepted = accepted.model_copy(
+            update={
+                "checklist": accepted.checklist.model_copy(
+                    update={
+                        "shared_sources": (
+                            SharedSourceReview(
+                                repository="example/shared-addons",
+                                production_commit=BASE,
+                                candidate_commit=HEAD,
+                                items=(),
+                            ),
+                        )
+                    }
+                )
+            }
+        )
+        self.store.write_release_review_decision_record(accepted)
+        held = MergeTrainReleaseHold(product=PRODUCT)
+
+        self.assertEqual(merge_train_release_hold(self.store, "Example/Site"), held)
+        self.assertEqual(merge_train_release_hold(self.store, "example/shared-addons"), held)
+        self.assertIsNone(merge_train_release_hold(self.store, "example/launchplane"))
+        (backup_id,) = self.advance()
+        self.assertEqual(merge_train_release_hold(self.store, "example/site"), held)
+        self.finish(backup_id)
+        (promotion_id,) = self.advance()
+        self.finish(promotion_id)
+        self.set_prod("artifact-testing")
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+
+    def test_a_release_that_cannot_run_holds_no_merge_train(self) -> None:
+        self.switch("held")
+        self.accept()
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+
+        self.switch("promote")
+        self.accept(date="2026-09-23T02:00:00Z")
+        (backup_id,) = self.advance()
+        self.finish(backup_id, "fail")
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+
+        self.accept(date="2026-09-23T03:00:00Z")
+        self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
+        # Testing moved off the accepted candidate, so this release can never start.
+        self.store.write_release_tuple_record(
+            ReleaseTupleRecord(
+                tuple_id="tuple-testing-moved",
+                context=CONTEXT,
+                channel="testing",
+                artifact_id="artifact-prod",
+                repo_shas={"example/site": BASE},
+                provenance="ship",
+                minted_at="2026-09-23T04:00:00Z",
+            )
+        )
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
 
 
 class AcceptedArtifactAdmissionTests(unittest.TestCase):
