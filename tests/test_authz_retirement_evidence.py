@@ -164,6 +164,20 @@ class RetirementEvidenceTests(unittest.TestCase):
             (_authz_rule_sha256(record.policy.github_actions[0]),),
         )
 
+    def test_case_only_repository_or_path_difference_cannot_prove_absence(self) -> None:
+        for repository, selector in (
+            ("Example/product", "Example/product/.github/workflows/obsolete.yml@*"),
+            ("example/product", "example/product/.github/workflows/Obsolete.yml@*"),
+        ):
+            with self.subTest(repository=repository, selector=selector):
+                record = _record(policy=_workflow_policy(selector, repository=repository))
+                result = build_retirement_evidence(
+                    active=record, records=(record,), request=_request(record), trace_id="trace"
+                )
+                evidence = result.unmanaged_workflows[0]
+                self.assertEqual(evidence.state, "unknown")
+                self.assertIn("workflow_candidate_case_ambiguous", evidence.reason_codes)
+
     def test_unknown_selector_coverage_preserves_confirmed_match_hashes(self) -> None:
         record = _record(
             policy=_workflow_policy("*", "example/product/.github/workflows/obsolete.yml@*")

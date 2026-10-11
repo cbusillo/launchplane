@@ -88,8 +88,13 @@ def _unmanaged_workflow(
 ) -> AuthzUnmanagedWorkflowEvidence:
     matched: list[str] = []
     incomplete = False
+    case_ambiguous = False
     for rule in policy.github_actions:
-        if rule.managed_set_id or rule.repository != candidate.repository:
+        if rule.managed_set_id:
+            continue
+        if rule.repository != candidate.repository:
+            if rule.repository.casefold() == candidate.repository.casefold():
+                case_ambiguous = True
             continue
         selectors = (
             rule.workflow_refs if candidate.binding == "workflow_ref" else rule.job_workflow_refs
@@ -104,6 +109,8 @@ def _unmanaged_workflow(
             elif fnmatchcase(candidate.workflow_path, path):
                 matched.append(_authz_rule_sha256(rule))
                 break
+            elif fnmatchcase(candidate.workflow_path.casefold(), path.casefold()):
+                case_ambiguous = True
             elif any(character in path for character in "*?[]"):
                 # A glob can consume the @ separator and part of a git ref.
                 # A path-only mismatch cannot prove the full selector disjoint.
@@ -111,12 +118,15 @@ def _unmanaged_workflow(
     return AuthzUnmanagedWorkflowEvidence(
         index=index,
         state="unknown"
-        if incomplete
+        if incomplete or case_ambiguous
         else "potential_dependency"
         if matched
         else "no_matching_rule",
         rule_sha256s=tuple(sorted(set(matched))),
-        reason_codes=("workflow_selector_not_classifiable",) if incomplete else (),
+        reason_codes=(
+            *(("workflow_selector_not_classifiable",) if incomplete else ()),
+            *(("workflow_candidate_case_ambiguous",) if case_ambiguous else ()),
+        ),
     )
 
 
