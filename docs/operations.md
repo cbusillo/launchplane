@@ -1550,6 +1550,21 @@ records show alert and recovery delivery.
 Watchdog reporting has its own renewed lease and DB-backed per-slot receipts,
 so replicas and restarts share miss/recovery delivery state.
 
+Read persisted clock evidence with `GET /v1/service/health-monitor/status`
+under the [existing service-read authority](service-boundary.md). `slots` selects one to
+48 UTC half-hour slots (six by default), newest first; pass the returned
+`next_end_slot` as `end_slot` to read an earlier window across service restarts.
+Paging stops at the persisted activation slot; when activation is unavailable,
+no automatic continuation is offered. Explicit historical windows can still be
+requested, and missing activation is not proof the scheduler is disabled.
+The database-backed response includes activation, scheduled starts, completion
+deadlines, completion times and record IDs, on-time completion, and separate
+missed/healthy watchdog report receipts. A missing receipt is `null`, never
+proof of completion or delivery. This GET starts no monitor or watchdog pass
+and changes no record. Other idempotency scopes, leases, keys and payloads are
+not exposed. A watchdog receipt proves its reporting callback completed; verify
+the incident and notification records separately for actual alert delivery.
+
 If the entire service is down, it cannot send a notification until it restarts;
 an external availability monitor is needed for alerts during a total outage.
 This scheduler does not create an external monitoring account or credential.
