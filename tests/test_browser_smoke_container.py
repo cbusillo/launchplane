@@ -6,7 +6,8 @@ import unittest
 
 
 class BrowserSmokeContainerTests(unittest.TestCase):
-    def run_smoke(self, smoke_exit: int, create_exit: int = 0) -> tuple[int, str]:
+    @staticmethod
+    def run_smoke(smoke_exit: int, create_exit: int = 0) -> tuple[int, str]:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             for name, body in {

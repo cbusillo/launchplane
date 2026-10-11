@@ -128,6 +128,7 @@ class CIRunnerPoolTests(unittest.TestCase):
                     env=os.environ
                     | {
                         "RUNNER_POOL_RESULT": "success",
+                        "CANDIDATE_CI_RESULT": "success",
                         "AUDIT_POLICY_RESULT": "success",
                         "REPOSITORY_PINS_RESULT": "success",
                         "VERIFIED_TREE": "false",

@@ -136,11 +136,13 @@ controller's narrow single-entry exception is defined in
 Main retains its existing PR-tree reuse, tightened to require that the base is
 an ancestor of the PR head as well as matching trees and a successful gate.
 The workflow does not extend that shortcut: a historical PR gate alone cannot
-identify the merge-ref tree tested before a retarget. PR events, unrelated
+identify the merge-ref tree tested before a retarget. Ordinary PR events, unrelated
 branches, and missing API evidence run the full suite. Construction branches
 must remain outside required workflow triggers. Concurrency and required checks
 are unchanged, and every published final candidate SHA still receives its own
-gate.
+gate. Generated same-repository train PRs delegate to that exact candidate's
+push CI rather than running a second suite; the evidence and failure contract
+is owned by [candidate validation](../merge-train-policy.md#candidate-validation).
 
 The `ci-gate` job reports the run's wall time against a 10-minute pull-request
 budget in the job summary and raises a warning annotation when a run exceeds

@@ -12,7 +12,7 @@ cleanup() {
     docker rm --force "$container_id" >/dev/null 2>&1 || true
   fi
 }
-trap cleanup EXIT
+trap 'cleanup' EXIT
 trap 'exit 130' INT TERM
 
 # Use this job's actual identity so the next non-container job can clean its
@@ -41,4 +41,7 @@ container_id="$(docker create --init --shm-size=1g \
     exec corepack pnpm test:browser
   ')"
 docker start --attach "$container_id"
-exit "$(docker inspect --format '{{.State.ExitCode}}' "$container_id")"
+smoke_exit="$(docker inspect --format '{{.State.ExitCode}}' "$container_id")"
+cleanup
+container_id=""
+exit "$smoke_exit"

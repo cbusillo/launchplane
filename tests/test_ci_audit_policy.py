@@ -148,6 +148,7 @@ class AuditPolicyWorkflowTests(unittest.TestCase):
             env=os.environ
             | {
                 "RUNNER_POOL_RESULT": "success",
+                "CANDIDATE_CI_RESULT": "success",
                 "AUDIT_POLICY_RESULT": "failure",
                 "VERIFIED_TREE": "true",
             },
@@ -168,6 +169,7 @@ class AuditPolicyWorkflowTests(unittest.TestCase):
                     env=os.environ
                     | {
                         "RUNNER_POOL_RESULT": "success",
+                        "CANDIDATE_CI_RESULT": "success",
                         "AUDIT_POLICY_RESULT": "success",
                         "VERIFIED_TREE": "true",
                         "REPOSITORY_PINS_RESULT": pins,
