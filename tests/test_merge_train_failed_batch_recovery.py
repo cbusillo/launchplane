@@ -15,6 +15,10 @@ from control_plane.merge_train_batch_pull_request import (
     batch_pull_request_body,
     changed_closed_batch_body,
 )
+from control_plane.merge_train_candidate_failures import (
+    CandidateCheckFailure,
+    CandidateCheckFailures,
+)
 from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_controller_run_once import try_reflow_failed_merge_train_candidate
 from control_plane.merge_train_github import GitHubMergeTrainClient
@@ -65,6 +69,9 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         client = Mock(wraps=self.client)
         client.read_merge_train_snapshot.return_value = self.snapshot
         client.probe_batch_entry_conflicts.return_value = conflicts
+        client.read_candidate_check_failures.return_value = CandidateCheckFailures(
+            checks=(CandidateCheckFailure(name="ci-gate", conclusion="failure", url=""),)
+        )
         self.reflow_client = client
         result = try_reflow_failed_merge_train_candidate(
             candidate_store=store,
@@ -122,13 +129,11 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             failed_retry = built.model_copy(
                 update={"status": "failed", "required_checks_status": "fail"}
             )
-            stopped = self._reflow(restarted, failed_retry)
-            self.assertEqual(stopped["controller_action"], "candidate_failed")
-            self.assertEqual(stopped["reason_code"], "batch_body_retry_already_used")
-            # Older failed evidence cannot reset the budget either.
-            self.assertEqual(
-                self._reflow(restarted, self.candidate)["reason_code"],
-                "batch_body_retry_already_used",
+            # The spent body retry hands the failure to isolation instead of a second retry.
+            isolated = self._reflow(restarted, failed_retry)
+            self.assertEqual(isolated["reason_code"], "failure_isolation")
+            self.assertFalse(
+                MergeTrainBatchCandidate.model_validate(isolated["candidate"]).batch_body_retry_of
             )
 
     def test_conflict_probe_cannot_reset_used_unchanged_queue_budget(self) -> None:
@@ -196,16 +201,15 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             )
             later = self._reflow(restarted, persisted)
             self.reflow_client.probe_batch_entry_conflicts.assert_not_called()
-            self.assertEqual(later["reason_code"], "batch_body_retry_already_used")
-            self.assertFalse(
-                [
-                    payload
-                    for payload in build_feedback_payloads(
-                        response={"result": later, "records": {}}
-                    )
-                    if payload["pull_request_number"] == 3
-                ]
-            )
+            self.assertEqual(later["reason_code"], "failure_isolation")
+            # The conflict hold carries into the isolation retest with its own reason.
+            later_messages = [
+                cast(str, payload["message"])
+                for payload in build_feedback_payloads(response={"result": later, "records": {}})
+                if payload["pull_request_number"] == 3
+            ]
+            self.assertTrue(later_messages)
+            self.assertTrue(all("conflicts with #1, #2" in message for message in later_messages))
 
     def test_active_batch_reports_later_review_wait_even_when_that_pr_is_behind(self) -> None:
         from control_plane.merge_train_controller_run_once import (
@@ -393,14 +397,10 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             ),
         ):
             result = self._reflow(FilesystemRecordStore(state_dir=Path(directory)), self.candidate)
-        self.assertEqual(result["controller_action"], "candidate_failed")
-        self.assertEqual(result["reason_code"], "closed_batch_body_unchanged_or_unavailable")
-
-    def test_unchanged_body_keeps_the_failure_stopped(self) -> None:
-        with TemporaryDirectory() as directory:
-            result = self._reflow(FilesystemRecordStore(state_dir=Path(directory)), self.candidate)
-        self.assertEqual(result["controller_action"], "candidate_failed")
-        self.assertEqual(result["reason_code"], "closed_batch_body_unchanged_or_unavailable")
+        self.assertEqual(result["reason_code"], "failure_isolation")
+        self.assertFalse(
+            MergeTrainBatchCandidate.model_validate(result["candidate"]).batch_body_retry_of
+        )
 
     def test_only_bound_closed_unmerged_batch_is_recovery_evidence(self) -> None:
         for state in ("open", "merged", "missing", "wrong_binding"):
