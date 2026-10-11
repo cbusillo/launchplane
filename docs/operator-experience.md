@@ -758,8 +758,8 @@ or release readiness. Setup does not release or activate the product.
 These endpoints use the existing authenticated browser mutation boundary,
 including same-origin and single-use CSRF checks and current action authority.
 Read-only users and Clients do not receive these setup controls. Existing agent
-policy checks and the Live-product local-operator expected-config refusal remain in force; this
-UI adds no grant or credential authority.
+policy checks and the Live-product `LocalOperatorIdentity` expected-config
+refusal remain in force; this UI adds no grant or credential authority.
 Database-backed declaration apply also refuses a concurrent product-profile
 change rather than overwriting it with an earlier profile snapshot.
 Existing workflow callers receive the same concurrent-change refusal; review
