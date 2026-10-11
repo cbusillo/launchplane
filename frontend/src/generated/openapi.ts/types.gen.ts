@@ -154,6 +154,7 @@ export type ArtifactPythonPackageSource = {
 export type ArtifactReleaseCompatibility = {
     complete: boolean;
     database_update_modules: Array<string> | null;
+    examined_baseline_inputs_sha256: string;
     examined_inputs_sha256: string;
     modules: Array<ReleaseModuleDeclaration>;
     read_write_compatible: boolean;
@@ -855,6 +856,8 @@ export type IntegrationKeyReadbackFinding = {
     code: string;
 };
 
+export type JsonValue = unknown;
+
 export type LaunchplaneAuthzPolicyOutput = {
     [key: string]: unknown;
 };
@@ -917,6 +920,7 @@ export type LaunchplaneProductProfileRecord = {
     product: string;
     production_use: 'unknown' | 'prelaunch' | 'live';
     promotion_workflow: ProductPromotionWorkflowProfile;
+    public_website?: 'required' | 'none';
     release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing';
     repository: string;
     repository_id: string;
@@ -1404,7 +1408,7 @@ export type MergeTrainHeldOutSummary = {
     conflicts_with: Array<number>;
     head_sha: string;
     pull_request_number: number;
-    reason: 'entry_conflict' | 'failure_isolation';
+    reason: 'entry_conflict' | 'failure_isolation' | 'dependency_not_ready';
 };
 
 export type MergeTrainIdentity = {
@@ -1479,6 +1483,7 @@ export type MergeTrainRepositoryPolicyOutput = {
     enqueue_label: string;
     failure_policy: 'pause_train' | 'continue_after_blocking_pr';
     github_token: MergeTrainGitHubTokenSource;
+    max_batch_size?: number | null;
     merge_identity: MergeTrainIdentity;
     merge_method: 'merge' | 'squash' | 'rebase';
     provider_delivery_protection_expectation?: ProviderDeliveryProtectionExpectationV1 | null;
@@ -2322,6 +2327,13 @@ export type PreviewGenerationRecord = {
     verify_status: 'pending' | 'pass' | 'fail' | 'skipped';
 };
 
+export type PreviewHistoryResponse = {
+    generations: Array<PreviewGenerationRecord>;
+    preview: PreviewRecord;
+    status: 'ok';
+    trace_id: string;
+};
+
 export type PreviewPullRequestSummary = {
     head_sha: string;
     pr_number: number;
@@ -2825,6 +2837,7 @@ export type ProductDesiredTopology = {
     domains: Array<ProductTopologyDomain>;
     health_url: string;
     provenance: DataProvenance;
+    public_website: 'required' | 'none';
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
 
@@ -3176,6 +3189,7 @@ export type ProductObservedIngress = {
     monitoring_intent: 'public' | 'private' | 'prelaunch';
     observed_at: string;
     observed_runtime_identity: RuntimeIdentity | null;
+    probe_effective: boolean;
     provenance: DataProvenance;
     record_id: string;
     runtime_identity_detail: string;
@@ -3388,12 +3402,23 @@ export type ProductPreviewProfile = {
     template_instance: string;
 };
 
+export type ProductPreviewReference = {
+    change_number: number;
+    change_url: string;
+    preview_id: string;
+    recorded_state: 'pending' | 'active' | 'failed' | 'paused' | 'teardown_pending' | 'destroyed';
+    updated_at: string;
+};
+
 export type ProductPreviewSummary = {
     active_count: number;
     context: string;
     enabled: boolean;
     latest_preview_id: string;
     provenance: DataProvenance;
+    records: Array<ProductPreviewReference>;
+    records_status: 'available' | 'authorization_denied' | 'unsupported';
+    records_truncated: boolean;
     slug_template: string;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
@@ -3638,9 +3663,33 @@ export type ProductPublicIngressSummary = {
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
 
+export type ProductReconcileRequestView = {
+    attempt: number;
+    last_delivery_id: string;
+    last_error: string;
+    last_plan: {
+        [key: string]: JsonValue;
+    };
+    pull_request_number: number | null;
+    request_count: number;
+    requested_at: string;
+    state: 'pending' | 'running' | 'done' | 'failed';
+    target_key: string;
+    target_kind: 'testing' | 'preview';
+    updated_at: string;
+};
+
+export type ProductReconcileRequestsResponse = {
+    product: string;
+    requests: Array<ProductReconcileRequestView>;
+    status: 'ok';
+    trace_id: string;
+};
+
 export type ProductReviewCarry = {
+    comparison_base_sha: string;
     head_sha: string;
-    reason: 'merge_train_base_refresh';
+    reason: 'merge_train_base_refresh' | 'unchanged_patch_base_update';
     record_id: string;
     refresh_record_ids: Array<string>;
 };
@@ -3814,11 +3863,11 @@ export type ProductTopologyTlsOwnership = {
 };
 
 export type ProductTopologyWarning = {
-    code: 'missing_route_authority' | 'route_authority_disabled' | 'stale_route_authority' | 'desired_domain_unknown' | 'domain_divergence' | 'provider_placement_missing' | 'placement_divergence' | 'external_ingress_internals_unsupported' | 'ingress_ownership_unknown' | 'ingress_divergence' | 'tls_ownership_unknown' | 'tls_ownership_divergence' | 'tls_observation_missing' | 'stale_tls_observation' | 'tls_mismatch' | 'tls_expiring' | 'tls_expired' | 'tls_untrusted' | 'tls_unavailable' | 'tls_unsupported' | 'public_ingress_observation_missing' | 'stale_public_ingress_observation' | 'public_runtime_identity_unverified' | 'public_ingress_failure';
+    code: 'missing_route_authority' | 'public_website_not_applicable' | 'public_website_check_missing' | 'route_authority_disabled' | 'stale_route_authority' | 'desired_domain_unknown' | 'domain_divergence' | 'provider_placement_missing' | 'placement_divergence' | 'external_ingress_internals_unsupported' | 'ingress_ownership_unknown' | 'ingress_divergence' | 'tls_ownership_unknown' | 'tls_ownership_divergence' | 'tls_observation_missing' | 'stale_tls_observation' | 'tls_mismatch' | 'tls_expiring' | 'tls_expired' | 'tls_untrusted' | 'tls_unavailable' | 'tls_unsupported' | 'public_ingress_observation_missing' | 'stale_public_ingress_observation' | 'public_runtime_identity_unverified' | 'public_ingress_failure';
     detail: string;
     domain_name: string;
     scope: 'authority' | 'placement' | 'domains' | 'ingress' | 'tls' | 'observation';
-    severity: 'warning' | 'error';
+    severity: 'info' | 'warning' | 'error';
 };
 
 export type ProductionBackupAuthorityStatus = {
@@ -3979,7 +4028,7 @@ export type ReleaseModuleDeclaration = {
 
 export type ReleaseReviewDecisionEnvelope = {
     checklist_digest: string;
-    decision: 'accepted' | 'changes_requested' | 'overridden';
+    decision: 'accepted' | 'changes_requested' | 'overridden' | 'temporary_hotfix';
     product: string;
     reason?: string;
 };
@@ -3991,16 +4040,17 @@ export type ReleaseReviewDecisionRecord = {
     checklist: ReleaseChecklist;
     checklist_digest: string;
     decided_at: string;
-    decision: 'accepted' | 'changes_requested' | 'overridden';
+    decision: 'accepted' | 'changes_requested' | 'overridden' | 'temporary_hotfix';
     product: string;
     reason: string;
     record_id: string;
     release_issue_url: string;
-    release_start: '' | 'promote' | 'promote_with_rollback_drill';
+    release_start: '' | 'promote' | 'promote_with_rollback_drill' | 'rollback';
 };
 
 export type ReleaseReviewItem = {
     already_reviewed: boolean;
+    client_test_notes_error?: string;
     head_sha: string;
     merge_commit: string;
     owner_test_notes: string;
@@ -4012,6 +4062,7 @@ export type ReleaseReviewItem = {
 
 export type ReleaseReviewResponse = {
     can_override: boolean;
+    can_start_temporary_hotfix: boolean;
     display_name: string;
     live_site_url: string;
     owner_github_login: string;
@@ -4019,6 +4070,7 @@ export type ReleaseReviewResponse = {
     release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing';
     release_run: ClientReleaseRunView | null;
     review: ReleaseReviewStatus;
+    reviewing_temporary_hotfix: boolean;
     trace_id: string;
     viewer_is_owner: boolean;
 };
@@ -4882,6 +4934,36 @@ export type ReadPreviewReadinessResponses = {
 
 export type ReadPreviewReadinessResponse = ReadPreviewReadinessResponses[keyof ReadPreviewReadinessResponses];
 
+export type ReadPreviewHistoryData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        preview_id: string;
+    };
+    query?: never;
+    url: '/v1/previews/{preview_id}/history';
+};
+
+export type ReadPreviewHistoryErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadPreviewHistoryError = ReadPreviewHistoryErrors[keyof ReadPreviewHistoryErrors];
+
+export type ReadPreviewHistoryResponses = {
+    200: PreviewHistoryResponse;
+};
+
+export type ReadPreviewHistoryResponse = ReadPreviewHistoryResponses[keyof ReadPreviewHistoryResponses];
+
 export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsData = {
     body?: never;
     headers?: {
@@ -5129,6 +5211,35 @@ export type ReadProductProfileMutationReceiptResponses = {
 };
 
 export type ReadProductProfileMutationReceiptResponse = ReadProductProfileMutationReceiptResponses[keyof ReadProductProfileMutationReceiptResponses];
+
+export type ReadProductReconcileRequestsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/product-profiles/{product}/reconcile-requests';
+};
+
+export type ReadProductReconcileRequestsErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadProductReconcileRequestsError = ReadProductReconcileRequestsErrors[keyof ReadProductReconcileRequestsErrors];
+
+export type ReadProductReconcileRequestsResponses = {
+    200: ProductReconcileRequestsResponse;
+};
+
+export type ReadProductReconcileRequestsResponse = ReadProductReconcileRequestsResponses[keyof ReadProductReconcileRequestsResponses];
 
 export type ReadProductReviewData = {
     body?: never;

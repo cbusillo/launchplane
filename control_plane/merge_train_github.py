@@ -51,6 +51,13 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralEntryBinding,
     MergeTrainStructuralProvenance,
 )
+from control_plane.client_test_notes import ClientTestNotes, change_client_review
+from control_plane.release_review_shared import repository_key
+from control_plane.client_release_repositories import (
+    ClientReleaseRepositoryStore,
+    client_release_profiles,
+    recorded_train_candidate,
+)
 from control_plane.github_payload import json_object
 from control_plane.github_payload import required_positive_int
 from control_plane.github_payload import required_string_text
@@ -62,7 +69,10 @@ from control_plane.github_read_cache import GitHubReadCache, MERGE_TRAIN_READ_CA
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.merge_train_candidate_failures import CandidateCheckFailures
 from control_plane.merge_train_candidate_failures import classify_candidate_check_failures
-from control_plane.merge_train_codeowners import individual_landing_snapshots
+from control_plane.merge_train_codeowners import (
+    individual_landing_snapshots,
+    carried_change_requires_individual_landing,
+)
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
 from control_plane.source_control_change import change_fingerprint
@@ -948,6 +958,51 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             status=candidate_status,
         )
 
+    def read_base_check_status(
+        self, *, candidate: MergeTrainBatchCandidate, failed_check_names: tuple[str, ...]
+    ) -> MergeTrainCheckStatus:
+        """Verify required base checks and checks implicated by the failed candidate."""
+        repository_path = _repository_path(candidate.repository)
+        required_checks = _required_branch_checks(
+            transport=self.transport,
+            repository_path=repository_path,
+            base_branch=candidate.base_branch,
+        )
+        encoded_sha = quote(
+            _required_value(candidate.base_sha, "Merge train candidate base SHA is required."),
+            safe="",
+        )
+        statuses = _list_commit_statuses(
+            transport=self.transport, repository_path=repository_path, encoded_head_sha=encoded_sha
+        )
+        check_runs = _list_check_runs(
+            transport=self.transport, repository_path=repository_path, encoded_head_sha=encoded_sha
+        )
+        required_status, missing = _required_check_evidence_status(
+            required_checks=required_checks, status_payload=statuses, check_runs_payload=check_runs
+        )
+        implicated = {name.casefold() for name in failed_check_names}
+        matching_statuses: dict[str, object] = {
+            "statuses": [
+                item
+                for item in cast(list[dict[str, object]], statuses["statuses"])
+                if cast(str, item["context"]).casefold() in implicated
+            ]
+        }
+        matching_runs: dict[str, object] = {
+            "check_runs": [
+                item
+                for item in cast(list[dict[str, object]], check_runs["check_runs"])
+                if cast(str, item["name"]).casefold() in implicated
+            ]
+        }
+        status = _combine_check_statuses(
+            required_status,
+            _combined_status_state(matching_statuses),
+            _check_runs_status(matching_runs),
+        )
+        return "unknown" if missing and status != "fail" else status
+
     def read_candidate_check_failures(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> CandidateCheckFailures:
@@ -1240,7 +1295,12 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
 
     def verify_unlanded_batch(
-        self, *, landing_plan: MergeTrainBatchLandingPlan, allow_changed_base: bool = False
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        allow_changed_base: bool = False,
+        allow_moved_heads: bool = False,
+        observed_pr_heads: dict[int, tuple[str, str]] | None = None,
     ) -> tuple[str, str]:
         """Prove that a changed-policy plan can be retired without losing a landing."""
         if any(entry.status not in {"planned", "merging"} for entry in landing_plan.entries):
@@ -1266,6 +1326,19 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             raise MergeTrainGitHubStaleHeadError(
                 "Policy-change recovery cannot prove the base is unchanged.", status_code=409
             )
+        if allow_moved_heads:
+            if any(
+                entry.status != "planned" for entry in landing_plan.entries
+            ) or self.branch_contains_commit(
+                repository=landing_plan.repository,
+                branch_ref=observed_base[0],
+                commit_sha=landing_plan.candidate_sha,
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "Retirement cannot discard completed or uncertain candidate effects.",
+                    status_code=409,
+                )
+        observed_heads: dict[int, str] = {}
         for entry in landing_plan.entries:
             head_sha, head_tree_sha = _git_commit_identity(
                 transport=self.transport,
@@ -1276,13 +1349,21 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 raise MergeTrainGitHubStaleHeadError(
                     "Policy-change recovery cannot prove the recorded head tree.", status_code=409
                 )
-            self._validate_open_landing_pull_request(
-                repository_path=repository_path,
-                entry=entry,
-                expected_base_ref=landing_plan.base_branch,
-                expected_base_sha=observed_base[0],
-                expected_base_tree_sha=observed_base[1],
-            )
+            if allow_moved_heads:
+                observed_heads[entry.pull_request_number] = self._open_head_for_retirement(
+                    repository=landing_plan.repository,
+                    pull_request_number=entry.pull_request_number,
+                    base_ref=landing_plan.base_branch,
+                    base_sha=observed_base[0],
+                )
+            else:
+                self._validate_open_landing_pull_request(
+                    repository_path=repository_path,
+                    entry=entry,
+                    expected_base_ref=landing_plan.base_branch,
+                    expected_base_sha=observed_base[0],
+                    expected_base_tree_sha=observed_base[1],
+                )
         if (
             _base_branch_identity(
                 transport=self.transport,
@@ -1294,7 +1375,64 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             raise MergeTrainGitHubStaleHeadError(
                 "Base branch moved during policy-change recovery.", status_code=409
             )
+        for number, head in observed_heads.items():
+            if (
+                self._open_head_for_retirement(
+                    repository=landing_plan.repository,
+                    pull_request_number=number,
+                    base_ref=landing_plan.base_branch,
+                    base_sha=observed_base[0],
+                )
+                != head
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "Pull request moved during no-effect retirement proof.", status_code=409
+                )
+        if observed_pr_heads is not None:
+            for number, head in observed_heads.items():
+                observed_pr_heads[number] = _git_commit_identity(
+                    transport=self.transport, repository_path=repository_path, commit_sha=head
+                )
         return observed_base
+
+    def _open_head_for_retirement(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        base_ref: str,
+        base_sha: str,
+    ) -> str:
+        detail = self._pull_request_detail(
+            repository=repository, pull_request_number=pull_request_number
+        )
+        if (
+            _required_text(detail.get("state"), "Retirement requires PR state.") != "open"
+            or detail.get("merged") is not False
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Retirement requires a confirmed open, unmerged PR.", status_code=409
+            )
+        base = _json_object(detail.get("base"), "Retirement PR base")
+        if base.get("ref") != base_ref:
+            raise MergeTrainGitHubStaleHeadError(
+                "Retirement requires the current protected base binding.", status_code=409
+            )
+        projected_sha = _required_text(base.get("sha"), "Retirement requires base projection SHA.")
+        if (
+            projected_sha != base_sha
+            and _base_branch_sha(
+                transport=self.transport,
+                repository_path=_repository_path(repository),
+                base_branch=base_ref,
+            )
+            != base_sha
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Protected base moved during retirement.", status_code=409
+            )
+        head = _json_object(detail.get("head"), "Retirement PR head")
+        return _required_text(head.get("sha"), "Retirement requires current PR head.")
 
     def land_batch_candidate(
         self,
@@ -2062,9 +2200,18 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         review_reader = GitHubMergeTrainSnapshotReader(
             transport=self.transport, branch_refresh_store=self._branch_refresh_store
         )
-        if require_client_review and review_reader.client_review_required(
-            labels=_labels(pull_request.get("labels")), repository=repository_path
-        ):
+        intent = (
+            review_reader.client_review_intent(
+                labels=_labels(pull_request.get("labels")),
+                repository=repository_path,
+                body=str(pull_request.get("body") or ""),
+            )
+            if require_client_review
+            else ClientTestNotes(False)
+        )
+        if intent.error:
+            raise MergeAdmissionDeniedError(intent.error, reason_code="client_test_notes_required")
+        if require_client_review and intent.review_required:
             review_status = _owner_review_status(
                 _list_check_runs(
                     transport=self.transport,
@@ -2241,9 +2388,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         review_reader = GitHubMergeTrainSnapshotReader(
             transport=self.transport, branch_refresh_store=self._branch_refresh_store
         )
-        if not review_reader.client_review_required(
-            labels=_labels(pull_request.get("labels")), repository=repository_path
-        ):
+        intent = review_reader.client_review_intent(
+            labels=_labels(pull_request.get("labels")),
+            repository=repository_path,
+            body=str(pull_request.get("body") or ""),
+        )
+        if intent.error:
+            raise MergeTrainGitHubStaleHeadError(intent.error, status_code=409)
+        if not intent.review_required:
             return
         review_status = _owner_review_status(
             _list_check_runs(
@@ -2259,6 +2411,22 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 f"Pull request #{pull_request_number} no longer has current-head Client review.",
                 status_code=409,
             )
+
+    def carried_change_requires_individual_landing(
+        self,
+        *,
+        repository: str,
+        base_sha: str,
+        parent_head_sha: str,
+        child_head_sha: str,
+    ) -> bool:
+        return carried_change_requires_individual_landing(
+            transport=self.transport,
+            repository_path=_repository_path(repository),
+            base_sha=base_sha,
+            parent_head_sha=parent_head_sha,
+            child_head_sha=child_head_sha,
+        )
 
     def merge_pull_request(
         self,
@@ -2892,11 +3060,20 @@ class GitHubMergeTrainSnapshotReader:
             )
             else None
         )
-        owner_review_required = self.client_review_required(
-            labels=labels, repository=base_repository
+        review_intent = self.client_review_intent(
+            labels=labels, repository=base_repository, body=str(source.get("body") or "")
         )
+        if not review_intent.explicit_override and recorded_train_candidate(
+            store=self._branch_refresh_store,
+            repository=base_repository,
+            head=head,
+            base_branch=str(base.get("ref") or ""),
+        ):
+            review_intent = ClientTestNotes(False)
+        owner_review_required = review_intent.review_required
         return MergeTrainPullRequestSnapshot(
             owner_review_required=owner_review_required,
+            client_test_notes_error=review_intent.error,
             number=pull_request_number,
             url=str(source.get("html_url") or "").strip(),
             title=str(source.get("title") or "").strip(),
@@ -2916,7 +3093,9 @@ class GitHubMergeTrainSnapshotReader:
             base_ref=_required_text(base.get("ref"), "GitHub pull request base requires ref."),
             base_repository=base_repository,
             mergeable=_mergeable_state(source) if enrich else "unknown",
-            required_checks_status=self._required_checks_status(
+            required_checks_status="fail"
+            if review_intent.error
+            else self._required_checks_status(
                 repository_path=repository_path,
                 head_sha=head_sha,
                 owner_review_required=owner_review_required,
@@ -3199,16 +3378,48 @@ class GitHubMergeTrainSnapshotReader:
             raise
         return "repo_admin" if str(payload.get("permission") or "") == "admin" else "unknown"
 
-    def client_review_required(self, *, labels: tuple[str, ...], repository: str) -> bool:
-        review_labels: set[str] = set()
-        list_profiles = getattr(self._branch_refresh_store, "list_product_profile_records", None)
-        if callable(list_profiles):
-            review_labels.update(
-                profile.owner.review_label.strip().casefold()
-                for profile in list_profiles()
-                if profile.is_active and profile.repository.casefold() == repository.casefold()
-            )
-        return bool(review_labels.intersection(label.casefold() for label in labels))
+    def client_review_intent(
+        self, *, labels: tuple[str, ...], repository: str, body: str
+    ) -> ClientTestNotes:
+        if not callable(getattr(self._branch_refresh_store, "list_product_profile_records", None)):
+            return ClientTestNotes(False)
+        profiles = client_release_profiles(
+            store=cast(ClientReleaseRepositoryStore, self._branch_refresh_store),
+            repository=repository,
+        )
+        # Preserve the explicit override even before a product has a Client:
+        # a missing Client cannot make a marked change engineering-only.
+        profiles += tuple(
+            profile
+            for profile in cast(
+                ClientReleaseRepositoryStore, self._branch_refresh_store
+            ).list_product_profile_records()
+            if profile.is_active
+            and not profile.owner.is_set
+            and repository_key(profile.repository) == repository_key(repository)
+            and profile.owner.review_label.strip().casefold()
+            in {label.casefold() for label in labels}
+        )
+        intents = tuple(
+            change_client_review(body=body, labels=labels, review_label=profile.owner.review_label)
+            for profile in profiles
+        )
+        return ClientTestNotes(
+            any(
+                intent.review_required
+                for profile, intent in zip(profiles, intents, strict=True)
+                if repository_key(profile.repository) == repository_key(repository)
+            ),
+            next((intent.error for intent in intents if intent.error), ""),
+            any(intent.explicit_override for intent in intents),
+        )
+
+    def client_review_required(
+        self, *, labels: tuple[str, ...], repository: str, body: str = ""
+    ) -> bool:
+        return self.client_review_intent(
+            labels=labels, repository=repository, body=body
+        ).review_required
 
     def _required_checks_status(
         self, *, repository_path: str, head_sha: str, owner_review_required: bool = False

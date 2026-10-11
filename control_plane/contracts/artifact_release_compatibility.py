@@ -83,8 +83,11 @@ class ArtifactReleaseCompatibility(BaseModel):
     read_write_compatible: bool
     sources: tuple[ReleaseSourceInventory, ...]
     modules: tuple[ReleaseModuleDeclaration, ...]
-    # None is unexamined; an explicit empty tuple asserts no module DB work.
+    # A plan describes the baseline-to-candidate transition, not just this build.
+    # Legacy declarations without a baseline binding remain unexamined.
     examined_inputs_sha256: str = Field(default="", pattern=r"^(|[0-9a-f]{64})$")
+    examined_baseline_inputs_sha256: str = Field(default="", pattern=r"^(|[0-9a-f]{64})$")
+    # None is unexamined; an explicit empty tuple asserts no module DB work.
     database_update_modules: tuple[str, ...] | None = None
 
     @model_validator(mode="after")

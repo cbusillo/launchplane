@@ -41,7 +41,11 @@ from control_plane.contracts.production_backup_authority import ProductionBackup
 from control_plane.contracts.production_backup_gate import ProductionBackupGateWorkerRequest
 from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateResult
 from control_plane.contracts.product_profile_record import ReleaseOnAcceptance
-from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, ReleaseStart
+from control_plane.contracts.release_review import (
+    ReleaseReviewDecisionRecord,
+    ReleaseStart,
+)
+from control_plane.contracts.artifact_identity import ArtifactAddonSource
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyResult,
@@ -70,6 +74,7 @@ from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
     DurableOperationAuthorizationGuard,
 )
+from control_plane.merge_train_release_hold import MergeTrainReleaseHold, merge_train_release_hold
 from control_plane.release_review import build_release_review
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
@@ -804,6 +809,13 @@ class ClientReleaseTests(unittest.TestCase):
                 )
                 self.assertEqual(odoo_release_recovery_source(recovery), source.operation_id)
                 self.assertTrue(odoo_release_recovery_allows(self.store, recovery))
+                # Automatic recovery is still changing production, even after a
+                # newer decision.
+                self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
+                self.store.write_release_review_decision_record(
+                    decision(self.store, outcome="changes_requested", date="2026-09-23T05:00:00Z")
+                )
+                self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
                 self.assertEqual(self.advance(), ())
                 self.store.write_deployment_record(
                     _deployment("newer-passing-deployment", "artifact-other")
@@ -1120,6 +1132,8 @@ class ClientReleaseTests(unittest.TestCase):
         assert run is not None
         self.assertEqual(run.state, "waiting")
         self.assertTrue(run.blocked_reason)
+        # A release waiting on an admin never holds its merge train.
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
 
     def test_connection_reset_inside_real_rollback_holds_the_recovery_lane(self) -> None:
         _, source = self.queued_promotion()
@@ -1145,6 +1159,92 @@ class ClientReleaseTests(unittest.TestCase):
             "pending",
         )
         self.assertEqual(self.advance(), ())
+
+    def test_an_accepted_release_holds_the_merge_train_of_its_sources_until_it_finishes(
+        self,
+    ) -> None:
+        self.switch("promote")
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+        # An unchanged shared source is absent from the checklist but still feeds
+        # the candidate, so its train is held too.
+        for artifact_id in ("artifact-prod", "artifact-testing"):
+            manifest = self.store.read_artifact_manifest(artifact_id)
+            self.store.write_artifact_manifest(
+                manifest.model_copy(
+                    update={
+                        "addon_sources": (
+                            ArtifactAddonSource(
+                                repository="https://github.com/example/shared-addons.git",
+                                ref=BASE,
+                            ),
+                        )
+                    }
+                )
+            )
+        accepted = self.accept()
+        self.assertEqual(accepted.checklist.shared_sources, ())
+        held = MergeTrainReleaseHold(product=PRODUCT)
+
+        self.assertEqual(merge_train_release_hold(self.store, "Example/Site"), held)
+        self.assertEqual(merge_train_release_hold(self.store, "example/shared-addons"), held)
+        self.assertIsNone(merge_train_release_hold(self.store, "example/launchplane"))
+        (backup_id,) = self.advance()
+        self.assertEqual(merge_train_release_hold(self.store, "example/site"), held)
+        self.finish(backup_id)
+        self.assertEqual(merge_train_release_hold(self.store, "example/site"), held)
+        (promotion_id,) = self.advance()
+        self.finish(promotion_id)
+        self.set_prod("artifact-testing")
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+
+    def test_a_release_that_cannot_run_holds_no_merge_train(self) -> None:
+        self.switch("held")
+        self.accept()
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+
+        self.switch("promote")
+        self.accept(date="2026-09-23T02:00:00Z")
+        (backup_id,) = self.advance()
+        self.finish(backup_id, "fail")
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+
+        self.accept(date="2026-09-23T03:00:00Z")
+        self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
+        # A hotfix moved production off the reviewed version before any step.
+        hotfix = self.store.read_artifact_manifest("artifact-prod")
+        self.store.write_artifact_manifest(
+            hotfix.model_copy(update={"artifact_id": "artifact-hotfix"})
+        )
+        self.set_prod("artifact-hotfix")
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+        self.set_prod("artifact-prod")
+        self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
+        # An admin promotion between the backup and the promotion step leaves the
+        # release unable to promote.
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
+        self.set_prod("artifact-testing")
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+        self.set_prod("artifact-prod")
+        # An admin holding the product's releases after acceptance stops the start.
+        self.switch("held")
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+        self.switch("promote")
+        self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
+        # Testing moved off the accepted candidate, so this release can never start.
+        self.store.write_release_tuple_record(
+            ReleaseTupleRecord(
+                tuple_id="tuple-testing-moved",
+                context=CONTEXT,
+                channel="testing",
+                artifact_id="artifact-prod",
+                repo_shas={"example/site": BASE},
+                provenance="ship",
+                minted_at="2026-09-23T04:00:00Z",
+            )
+        )
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
 
 
 class AcceptedArtifactAdmissionTests(unittest.TestCase):
