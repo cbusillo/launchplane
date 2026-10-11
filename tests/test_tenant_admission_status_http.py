@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+import threading
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -21,7 +24,7 @@ from control_plane.tenant_admission_controller import (
     TenantAdmissionPullRequestFacts,
 )
 from control_plane.tenant_admission_projection import TenantAdmissionProjectionError
-from tests.http_app_test_support import _asgi_get, _asgi_request
+from tests.http_app_test_support import _AsgiResponse, _asgi_get, _asgi_request
 from tests.support.auth import _StubVerifier, _identity
 from tests.test_tenant_admission_http import (
     CONTEXT,
@@ -340,6 +343,104 @@ class TenantAdmissionStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             response.json()["error"]["code"],
             "tenant_admission_projection_unavailable",
         )
+
+    async def test_slow_provider_keeps_event_loop_free_and_revokes_after_cancellation(
+        self,
+    ) -> None:
+        loop_thread = threading.get_ident()
+        cases: tuple[tuple[str, str, dict[str, object]], ...] = (
+            (
+                "tenant_admission.controller.run_once",
+                "/v1/work-graph/tenant-admission/controller/run-once",
+                _controller_payload(),
+            ),
+            (
+                "tenant_admission.reconcile",
+                "/v1/tenant-admission/status/reconcile",
+                {"schema_version": 1, "candidate": _candidate_payload()},
+            ),
+        )
+        for action, path, payload in cases:
+            with self.subTest(path=path), TemporaryDirectory() as temporary_directory_name:
+                store = _postgres_store(Path(temporary_directory_name), actions=(action,))
+                store.write_tenant_repository_classification_record(_classification())
+                started = threading.Event()
+                release = threading.Event()
+                revoked = threading.Event()
+                revocations: list[tuple[str, int]] = []
+
+                def wait_for_release() -> None:
+                    started.set()
+                    if not release.wait(5):
+                        raise ValueError("fixture timed out")
+
+                def github_api(**kwargs: object) -> object:
+                    if kwargs.get("path") == "/installation/token":
+                        revocations.append((str(kwargs["token"]), threading.get_ident()))
+                        revoked.set()
+                        return None
+                    wait_for_release()
+                    return _pull_request_payload(head_sha="b" * 40)
+
+                def run_once(**_: object) -> TenantAdmissionControllerRunOnceResult:
+                    wait_for_release()
+                    return _controller_result()
+
+                with (
+                    patch(
+                        "control_plane.http_app.resolve_launchplane_github_token",
+                        return_value="managed-token",
+                    ),
+                    patch("control_plane.http_app.github_api_request", side_effect=github_api),
+                    patch(
+                        "control_plane.http_routes.tenant_admission."
+                        "execute_tenant_admission_controller_run_once",
+                        side_effect=run_once,
+                    ),
+                ):
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(_identity()),
+                        authz_policy=_authz_policy(actions=(action,)),
+                        record_store_factory=lambda: store,
+                    )
+                    await _assert_slow_provider_leaves_loop_free(
+                        self,
+                        call=lambda: _asgi_request(
+                            app,
+                            "POST",
+                            path,
+                            headers={"Authorization": "Bearer valid-token"},
+                            payload=payload,
+                        ),
+                        health=lambda: _asgi_get(app, "/v1/health"),
+                        started=started,
+                        release=release,
+                    )
+                    self.assertTrue(await asyncio.to_thread(revoked.wait, 5))
+
+                self.assertEqual([token for token, _ in revocations], ["managed-token"])
+                self.assertNotEqual(revocations[0][1], loop_thread)
+
+
+async def _assert_slow_provider_leaves_loop_free(
+    test: unittest.IsolatedAsyncioTestCase,
+    *,
+    call: Callable[[], Awaitable[_AsgiResponse]],
+    health: Callable[[], Awaitable[_AsgiResponse]],
+    started: threading.Event,
+    release: threading.Event,
+) -> None:
+    task = asyncio.ensure_future(call())
+    try:
+        test.assertTrue(await asyncio.to_thread(started.wait, 3))
+        healthy = await asyncio.wait_for(health(), 2)
+        test.assertEqual(healthy.status_code, 200)
+        test.assertFalse(task.done(), "the event loop waited for the blocked provider")
+        task.cancel()
+        with test.assertRaises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
 
 
 def _classification(

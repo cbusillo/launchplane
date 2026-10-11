@@ -972,8 +972,7 @@ def _odoo_preview_service_environment(
     preview_profile = profile.preview
     template_instance = preview_profile.template_instance.strip()
     # The preview runs unmerged code, so it gets only the template lane's site
-    # environment: no global values, Launchplane's own context credentials (such as
-    # the preview PR-comment token) withheld, other platform credentials refused.
+    # environment: no global values, and platform credentials refused.
     template_values = dict(
         control_plane_runtime_environments.resolve_site_runtime_environment(
             control_plane_root=control_plane_root_path,

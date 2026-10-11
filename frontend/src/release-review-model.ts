@@ -23,7 +23,7 @@ export function groupReleaseItems(items: readonly ReleaseReviewItem[]): GroupedR
   const nothingToTest: ReleaseReviewItem[] = [];
   for (const item of items) {
     const notes = item.owner_test_notes.trim();
-    if (nothingToTestMarker(notes)) {
+    if (!item.client_test_notes_error && nothingToTestMarker(notes)) {
       nothingToTest.push(item);
       continue;
     }

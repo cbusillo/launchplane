@@ -9,8 +9,10 @@ export default defineConfig({
   testDir: "./tests/browser",
   testMatch: "**/*.spec.ts",
   outputDir: resolve(artifactRoot, "test-results"),
-  fullyParallel: false,
-  workers: 1,
+  // Each test mocks its own API reads in a fresh browser context, so tests
+  // share no state; CI runs one worker per runner core.
+  fullyParallel: true,
+  workers: process.env.CI ? "100%" : undefined,
   retries: 0,
   forbidOnly: Boolean(process.env.CI),
   reporter: "line",
@@ -37,6 +39,7 @@ export default defineConfig({
     },
     {
       name: "narrow",
+      grep: /@(?:layout|responsive)\b/,
       use: {
         ...devices["Desktop Chrome"],
         isMobile: false,

@@ -164,7 +164,10 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecordChanged,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
+from control_plane.contracts.durable_operation_authorization import (
+    RELEASE_DECISION_GRANTS,
+    DurableOperationAuthorization,
+)
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
@@ -11041,7 +11044,7 @@ class PostgresRecordStore(HumanSessionStore):
         recovery = build_odoo_release_recovery(self, record)
         if (
             record.status == "fail"
-            and record.authorization.grant == "client_release_acceptance"
+            and record.authorization.grant in RELEASE_DECISION_GRANTS
             and odoo_release_wrote_production(record)
             and recovery is None
         ):
@@ -20227,16 +20230,21 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
-    def notify_merge_train(self) -> None:
-        """Publish a wake hint through the existing pool, separate from record writes."""
+    def notify_merge_train(self, target_keys: tuple[str, ...] = ()) -> None:
+        """Publish a wake hint through the existing pool, separate from record writes.
+
+        Each payload names one train's controller key; an empty payload wakes them all.
+        """
         from control_plane.merge_train_events import MERGE_TRAIN_EVENT_CHANNEL
 
         if self.database_dialect_name != "postgresql":
             raise ValueError("Merge train notifications require PostgreSQL.")
         with self._engine.begin() as connection:
-            connection.execute(
-                text("SELECT pg_notify(:channel, '')"), {"channel": MERGE_TRAIN_EVENT_CHANNEL}
-            )
+            for target_key in target_keys or ("",):
+                connection.execute(
+                    text("SELECT pg_notify(:channel, :payload)"),
+                    {"channel": MERGE_TRAIN_EVENT_CHANNEL, "payload": target_key},
+                )
 
     def record_github_app_webhook_delivery(
         self,

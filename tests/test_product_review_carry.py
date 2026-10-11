@@ -2,19 +2,22 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch as mock_patch
+from urllib.parse import quote
 
 from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
     build_merge_train_branch_refresh_record,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.product_review import ProductReviewCarry, ProductReviewDecisionRecord
 from control_plane.merge_train_branch_refresh import merge_train_branch_refresh_recorder
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     RecordingMergeTrainGitHubTransport,
 )
 from control_plane.product_review import require_product_review_store
+from control_plane.product_review_carry import carry_owner_acceptance
 from control_plane.product_review_status import OwnerReviewStatusPublisher
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -54,6 +57,18 @@ class _GitHub:
     def __init__(self) -> None:
         self.head_sha = _REFRESHED_HEAD
         self.base_branch = "main"
+        self.base_sha = _BASE_COMMIT
+        self.file_modes = {
+            head: {"website/views/home.xml": "100644"}
+            for head in (_ACCEPTED_HEAD, _REFRESHED_HEAD, _OTHER_MERGE_HEAD, _SECOND_REFRESH_HEAD)
+        }
+        self.tree_truncated = False
+        self.tree_reads: list[str] = []
+        self.merge_bases = {
+            head: _BASE_COMMIT
+            for head in (_ACCEPTED_HEAD, _REFRESHED_HEAD, _OTHER_MERGE_HEAD, _SECOND_REFRESH_HEAD)
+        }
+        self.base_changes: dict[tuple[str, str], list[dict[str, object]]] = {}
         # Commits on the base branch, and each head's change against a base commit.
         self.on_base = {_BASE_COMMIT, _NEWER_BASE_COMMIT}
         self.changes: dict[tuple[str, str], list[dict[str, object]]] = {
@@ -72,8 +87,21 @@ class _GitHub:
         body: dict[str, object] | None = None,
     ) -> object:
         repository_path = f"/repos/{_REPOSITORY}"
+        if path == f"{repository_path}/branches/{quote(self.base_branch, safe='')}":
+            return {"commit": {"sha": self.base_sha}} if self.base_sha in self.on_base else {}
+        if path.startswith(f"{repository_path}/git/trees/"):
+            self.tree_reads.append(path)
+            head = path.rsplit("/", 1)[1].split("?")[0]
+            return {
+                "truncated": self.tree_truncated,
+                "tree": [
+                    {"path": filename, "mode": mode, "type": "blob"}
+                    for filename, mode in self.file_modes[head].items()
+                ],
+            }
         if path == f"{repository_path}/pulls/{_PULL_REQUEST}":
             return {
+                "body": "## Client test notes\nTry the changed page.",
                 "head": {"sha": self.head_sha},
                 "labels": [{"name": "owner-review"}],
                 "base": {"ref": self.base_branch, "repo": {"id": 5150}},
@@ -102,7 +130,13 @@ class _GitHub:
             base, head = path.rsplit("/", 1)[1].split("...")
             if head == self.base_branch:
                 return {"status": "ahead" if base in self.on_base else "diverged"}
-            return {"status": "diverged", "files": self.changes[(base, head)]}
+            if head in self.on_base:
+                return {"status": "ahead", "files": self.base_changes.get((base, head), [])}
+            return {
+                "status": "diverged",
+                "merge_base_commit": {"sha": self.merge_bases[head]},
+                "files": self.changes[(base, head)],
+            }
         raise AssertionError(f"Unexpected GitHub request: {method} {path}")
 
     def _record_check(self, run: dict[str, object]) -> None:
@@ -240,16 +274,282 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         assert carried.carried_from is not None
         self.assertEqual(carried.carried_from.refresh_record_ids, (first, second))
 
-    def test_any_head_but_the_trains_own_merge_needs_a_new_decision(self) -> None:
-        # The train refreshed from the accepted head, but the pull request's head is
-        # another merge of the same parents with the same change, or a new commit.
-        self._train_refreshed()
-        for head in (_OTHER_MERGE_HEAD, _SECOND_REFRESH_HEAD):
-            with self.subTest(head=head):
-                self.github.head_sha = head
-                self.github.changes[(_BASE_COMMIT, head)] = _change()
+    def test_acceptance_carries_across_an_update_outside_the_train(self) -> None:
+        self.github.head_sha = _OTHER_MERGE_HEAD
 
+        self.assertEqual(self._publish()["state"], "success")
+        carried, accepted = self._decisions()
+        self.assertEqual(accepted, self.accepted)
+        assert carried.carried_from is not None
+        self.assertEqual(carried.carried_from.record_id, accepted.record_id)
+        self.assertEqual(carried.carried_from.head_sha, accepted.head_sha)
+        self.assertEqual(carried.carried_from.reason, "unchanged_patch_base_update")
+        self.assertEqual(carried.carried_from.comparison_base_sha, self.github.base_sha)
+        self.assertEqual(carried.carried_from.refresh_record_ids, ())
+        self._publish()
+        self.assertEqual(len(self._decisions()), 2)
+
+    def test_rebase_does_not_require_ancestry_or_a_refresh_store(self) -> None:
+        # Comparisons may be diverged: a rebase no longer contains the accepted head.
+        self.github.head_sha = _SECOND_REFRESH_HEAD
+        self.github.base_sha = _NEWER_BASE_COMMIT
+        self.github.changes = {
+            (_NEWER_BASE_COMMIT, _ACCEPTED_HEAD): _change(),
+            (_NEWER_BASE_COMMIT, _SECOND_REFRESH_HEAD): _change(blob="b" * 40),
+        }
+        with mock_patch(
+            "control_plane.product_review_carry.optional_merge_train_branch_refresh_read_store",
+            return_value=None,
+        ):
+            self.assertEqual(self._publish()["state"], "success")
+
+    def test_changed_patch_outside_the_train_needs_a_new_decision(self) -> None:
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change(
+            patch=_PATCH + "\n+Conflict resolution"
+        )
+
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_nontrain_update_moving_the_change_to_another_function_needs_acceptance(self) -> None:
+        accepted_patch = (
+            "@@ -10,2 +10,3 @@ def delete_user():\n request = parse_request()\n"
+            "+ require_admin(request)\n remove_user(request)"
+        )
+        moved_patch = (
+            "@@ -40,2 +40,3 @@ def list_users():\n request = parse_request()\n"
+            "+ require_admin(request)\n return users"
+        )
+        self.github.changes[(_BASE_COMMIT, _ACCEPTED_HEAD)] = _change(patch=accepted_patch)
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change(patch=moved_patch)
+
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_nontrain_update_can_shift_hunk_positions_without_changing_context(self) -> None:
+        self.github.base_sha = _NEWER_BASE_COMMIT
+        self.github.merge_bases[_REFRESHED_HEAD] = _NEWER_BASE_COMMIT
+        self.github.changes[(_NEWER_BASE_COMMIT, _ACCEPTED_HEAD)] = _change()
+        self.github.changes[(_NEWER_BASE_COMMIT, _REFRESHED_HEAD)] = _change(
+            patch=_PATCH.replace("@@ -1 +1 @@", "@@ -120 +120 @@"), blob="b" * 40
+        )
+        self.github.base_changes[(_BASE_COMMIT, _NEWER_BASE_COMMIT)] = _change(
+            patch="@@ -0,0 +1,119 @@\n" + "\n".join(["+Unrelated base line"] * 119)
+        )
+
+        self.assertEqual(self._publish()["state"], "success")
+
+    def test_relocated_identical_hunk_without_a_base_line_shift_needs_acceptance(self) -> None:
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change(
+            patch=_PATCH.replace("@@ -1 +1 @@", "@@ -20 +20 @@")
+        )
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_diff_content_line_separators_do_not_change_hunk_line_counts(self) -> None:
+        content = "Unicode\u2028separator\r\f\x1c\x85end"
+        self.github.base_sha = _NEWER_BASE_COMMIT
+        self.github.merge_bases[_REFRESHED_HEAD] = _NEWER_BASE_COMMIT
+        feature_patch = "@@ -5 +5 @@\n-Old " + content + "\n+New " + content + "\n"
+        self.github.changes[(_NEWER_BASE_COMMIT, _ACCEPTED_HEAD)] = _change(patch=feature_patch)
+        self.github.changes[(_NEWER_BASE_COMMIT, _REFRESHED_HEAD)] = _change(
+            patch=feature_patch.replace("@@ -5 +5 @@", "@@ -6 +6 @@")
+        )
+        self.github.base_changes[(_BASE_COMMIT, _NEWER_BASE_COMMIT)] = _change(
+            patch="@@ -0,0 +1 @@\n+" + content + "\n"
+        )
+        self.assertEqual(self._publish()["state"], "success")
+
+    def test_missing_or_partial_position_evidence_needs_acceptance(self) -> None:
+        self.github.merge_bases[_REFRESHED_HEAD] = ""
+        self.assert_waits_for_the_client(self._publish())
+        self.github.merge_bases[_REFRESHED_HEAD] = _BASE_COMMIT
+        self.github.changes[(_BASE_COMMIT, _ACCEPTED_HEAD)] = _change(
+            patch="@@ -1 +1 @@\n-Old headline"
+        )
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = self.github.changes[
+            (_BASE_COMMIT, _ACCEPTED_HEAD)
+        ]
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_changed_text_does_not_fetch_head_trees(self) -> None:
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change(patch=_PATCH + "\n+Extra")
+        self.assert_waits_for_the_client(self._publish())
+        self.assertEqual(self.github.tree_reads, [])
+
+    def test_overlapping_base_edits_do_not_supply_a_position_proof(self) -> None:
+        self.github.base_sha = _NEWER_BASE_COMMIT
+        self.github.merge_bases[_REFRESHED_HEAD] = _NEWER_BASE_COMMIT
+        self.github.changes[(_NEWER_BASE_COMMIT, _ACCEPTED_HEAD)] = _change()
+        self.github.changes[(_NEWER_BASE_COMMIT, _REFRESHED_HEAD)] = _change()
+        self.github.base_changes[(_BASE_COMMIT, _NEWER_BASE_COMMIT)] = _change()
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_nearby_base_edit_context_does_not_count_as_an_overlapping_edit(self) -> None:
+        self.github.base_sha = _NEWER_BASE_COMMIT
+        self.github.merge_bases[_REFRESHED_HEAD] = _NEWER_BASE_COMMIT
+        feature = _change(
+            patch="@@ -5,3 +5,3 @@\n Context A\n-Old headline\n+New headline\n Context B"
+        )
+        self.github.changes[(_NEWER_BASE_COMMIT, _ACCEPTED_HEAD)] = feature
+        self.github.changes[(_NEWER_BASE_COMMIT, _REFRESHED_HEAD)] = feature
+        self.github.base_changes[(_BASE_COMMIT, _NEWER_BASE_COMMIT)] = _change(
+            patch="@@ -7,4 +7,4 @@\n Context B\n Unchanged\n-Other old\n+Other new\n Footer"
+        )
+        self.assertEqual(self._publish()["state"], "success")
+
+    def test_file_mode_changes_and_incomplete_mode_evidence_do_not_carry(self) -> None:
+        for mode in ("100755", "120000", ""):
+            with self.subTest(mode=mode):
+                self.github.file_modes[_REFRESHED_HEAD]["website/views/home.xml"] = mode
                 self.assert_waits_for_the_client(self._publish())
+        self.github.file_modes[_REFRESHED_HEAD]["website/views/home.xml"] = "100644"
+        self.github.tree_truncated = True
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_changed_filename_whitespace_is_a_different_feature_patch(self) -> None:
+        original = "website/views/home.xml"
+        moved = " " + original
+        added = {**_change()[0], "status": "added", "patch": "@@ -0,0 +1 @@\n+New headline"}
+        self.github.changes[(_BASE_COMMIT, _ACCEPTED_HEAD)] = [added]
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = [{**added, "filename": moved}]
+        self.github.file_modes[_REFRESHED_HEAD] = {moved: "100644"}
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_a_rebase_after_a_train_refresh_uses_the_strict_nontrain_proof(self) -> None:
+        self._train_refreshed()
+        self.github.head_sha = _OTHER_MERGE_HEAD
+        self.assertEqual(self._publish()["state"], "success")
+        carry = self._decisions()[0].carried_from
+        assert carry is not None
+        self.assertEqual(carry.reason, "unchanged_patch_base_update")
+        self.assertEqual(carry.refresh_record_ids, ())
+
+    def test_nontrain_carry_on_a_base_branch_containing_a_slash(self) -> None:
+        self.github.base_branch = "release/1.0"
+        self.store.write_product_review_decision_record(
+            self.accepted.model_copy(update={"base_branch": self.github.base_branch})
+        )
+        self.assertEqual(self._publish()["state"], "success")
+        self.assertEqual(self._decisions()[0].base_branch, self.github.base_branch)
+
+    def test_base_moving_between_reads_does_not_change_the_comparison_base(self) -> None:
+        comparisons: list[str] = []
+
+        def moving_base(path: str) -> object:
+            result = self.github(path=path, token="fixture-token")
+            if "/compare/" in path:
+                comparisons.append(path)
+                self.github.base_sha = _NEWER_BASE_COMMIT
+            return result
+
+        carried = carry_owner_acceptance(
+            store=require_product_review_store(self.store),
+            profile=self.profile,
+            pull_request_number=_PULL_REQUEST,
+            head_sha=_REFRESHED_HEAD,
+            base_branch="main",
+            read=moving_base,
+        )
+        self.assertIsNotNone(carried)
+        self.assertEqual(
+            comparisons,
+            [
+                f"/repos/{_REPOSITORY}/compare/{_BASE_COMMIT}...{_ACCEPTED_HEAD}",
+                f"/repos/{_REPOSITORY}/compare/{_BASE_COMMIT}...{_REFRESHED_HEAD}",
+            ],
+        )
+
+    def test_unreadable_or_truncated_comparisons_do_not_carry(self) -> None:
+        changes: tuple[list[dict[str, object]], ...] = (
+            [],
+            [{"filename": "logo.png", "status": "modified"}],
+            _change() * 300,
+        )
+        for change in changes:
+            with self.subTest(change_count=len(change)):
+                self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = change
+                self.assert_waits_for_the_client(self._publish())
+
+    def test_missing_or_invalid_base_revision_does_not_carry(self) -> None:
+        for base in ("", "main", "a" * 39, "g" * 40):
+            with self.subTest(base=base):
+                self.github.base_sha = base
+                self.github.on_base.add(base)
+                self.assert_waits_for_the_client(self._publish())
+
+    def test_new_client_and_undelivered_acceptance_do_not_carry(self) -> None:
+        for update in ({"owner_github_id": "9002"}, {"feedback_url": ""}):
+            with self.subTest(update=update):
+                self.store.write_product_review_decision_record(
+                    self.accepted.model_copy(update=update)
+                )
+                self.assertEqual(self._publish()["state"], "pending")
+                self.assertEqual(len(self._decisions()), 1)
+
+    def test_newer_client_rejection_during_comparison_is_not_overridden(self) -> None:
+        def reject_during_read(path: str) -> object:
+            result = self.github(path=path, token="fixture-token")
+            if path.endswith(f"...{_REFRESHED_HEAD}"):
+                self.store.write_product_review_decision_record(
+                    self.accepted.model_copy(
+                        update={
+                            "record_id": "concurrent-rejection",
+                            "head_sha": _REFRESHED_HEAD,
+                            "decision": "changes_requested",
+                            "reason": "Please revise this feature.",
+                            "decided_at": "2026-10-02T22:30:00.000Z",
+                        }
+                    )
+                )
+            return result
+
+        self.assertIsNone(
+            carry_owner_acceptance(
+                store=require_product_review_store(self.store),
+                profile=self.profile,
+                pull_request_number=_PULL_REQUEST,
+                head_sha=_REFRESHED_HEAD,
+                base_branch="main",
+                read=reject_during_read,
+            )
+        )
+        self.assertEqual(self._publish()["state"], "failure")
+        self.assertEqual(len(self._decisions()), 2)
+
+    def test_carry_provenance_round_trips_through_database_storage(self) -> None:
+        with TemporaryDirectory() as directory:
+            database = PostgresRecordStore(
+                database_url=sqlite_database_url(Path(directory) / "records.sqlite")
+            )
+            self.addCleanup(database.close)
+            database.ensure_schema()
+            database.write_product_review_decision_record(self.accepted)
+            carried = carry_owner_acceptance(
+                store=require_product_review_store(database),
+                profile=self.profile,
+                pull_request_number=_PULL_REQUEST,
+                head_sha=_REFRESHED_HEAD,
+                base_branch="main",
+                read=lambda path: self.github(path=path, token="fixture-token"),
+            )
+            self.assertIsNotNone(carried)
+            self.assertEqual(
+                database.list_product_review_decision_records(
+                    repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                )[0],
+                carried,
+            )
+
+    def test_carry_contract_requires_evidence_but_reads_legacy_train_carries(self) -> None:
+        legacy = {"record_id": self.accepted.record_id, "head_sha": _ACCEPTED_HEAD}
+        train = ProductReviewCarry.model_validate({**legacy, "refresh_record_ids": ["refresh-1"]})
+        self.assertEqual(train.reason, "merge_train_base_refresh")
+        self.assertEqual(train.comparison_base_sha, "")
+        for evidence in (
+            legacy,
+            {**legacy, "reason": "unchanged_patch_base_update"},
+            {**legacy, "reason": "unchanged_patch_base_update", "comparison_base_sha": "main"},
+        ):
+            with self.subTest(evidence=evidence), self.assertRaises(ValueError):
+                ProductReviewCarry.model_validate(evidence)
 
     def test_acceptance_carries_when_base_edits_only_move_or_surround_the_change(
         self,

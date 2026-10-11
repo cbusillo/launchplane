@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 from urllib.parse import quote
 
+from control_plane.service_human_auth import launchplane_public_origin_from_env
+
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.release_review import ReleaseReviewStore
@@ -25,8 +27,27 @@ def release_decision_marker(record_id: str) -> str:
     return f"<!-- launchplane:release-decision:{record_id} -->"
 
 
-def release_decision_issue_body(decision: ReleaseReviewDecisionRecord) -> str:
+def _temporary_hotfix_notice(*, client_login: str, review_url: str) -> list[str]:
+    """The Client's notice: plain words, the reason, and where to accept or reject."""
+
+    mention = f"@{client_login}" if client_login else "The Client"
+    return [
+        f"{mention}, the Director is putting an urgent temporary fix live now, before your review, "
+        "because of breakage on the live site. The reason is below.",
+        "Once it is live, please review it like any release. **Accept** keeps it as your "
+        "accepted release. **Request changes** rolls the site back to your last accepted release.",
+        f"Review it here: {review_url}"
+        if review_url
+        else "Review it on the Launchplane release page.",
+        "Editing this issue does not change the decision.",
+    ]
+
+
+def release_decision_issue_body(
+    decision: ReleaseReviewDecisionRecord, *, client_login: str = "", review_url: str = ""
+) -> str:
     checklist = decision.checklist
+    hotfix = decision.decision == "temporary_hotfix"
     lines = [
         release_decision_marker(decision.record_id),
         "# Release decision",
@@ -37,7 +58,15 @@ def release_decision_issue_body(decision: ReleaseReviewDecisionRecord) -> str:
         if decision.acceptance_source == "director_standing"
         else "Decision source: signed-in human session.",
         "",
-        "This records a decision in Launchplane. It does not publish the site, and editing this issue does not change approval.",
+        *(
+            _temporary_hotfix_notice(client_login=client_login, review_url=review_url)
+            if hotfix
+            else (
+                "The Client requested changes to a live temporary hotfix. Launchplane rolls the site back to their last accepted release."
+                if decision.release_start == "rollback"
+                else "This records a decision in Launchplane. It does not publish the site, and editing this issue does not change approval.",
+            )
+        ),
         "",
         "## Release",
         _literal(
@@ -144,7 +173,14 @@ def _publish_release_decision_issue(
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
 ) -> str:
-    body = release_decision_issue_body(decision)
+    origin = launchplane_public_origin_from_env()
+    body = release_decision_issue_body(
+        decision,
+        client_login=profile.owner.github_login,
+        review_url=f"{origin}/ui/owner-review?product={quote(profile.product, safe='')}"
+        if origin
+        else "",
+    )
     marker = release_decision_marker(decision.record_id)
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
     with launchplane_github_token(
@@ -203,7 +239,12 @@ def _publish_release_decision_issue(
                 token=token,
                 method="POST",
                 body={
-                    "title": f"Release {decision.checklist.candidate.source_commit[:7]}: {decision.decision.replace('_', ' ')}",
+                    "title": f"Release {decision.checklist.candidate.source_commit[:7]}: "
+                    + (
+                        "urgent temporary fix going live, your review needed"
+                        if decision.decision == "temporary_hotfix"
+                        else decision.decision.replace("_", " ")
+                    ),
                     "body": body,
                 },
             )
