@@ -1230,10 +1230,18 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
                 summary_text = summary.read_text()
-                rendered_response, _ = json.JSONDecoder().raw_decode(
-                    summary_text, summary_text.index("{")
+                summary_objects = []
+                for position, character in enumerate(summary_text):
+                    if character != "{":
+                        continue
+                    try:
+                        rendered, _ = json.JSONDecoder().raw_decode(summary_text, position)
+                    except json.JSONDecodeError:
+                        continue
+                    summary_objects.append(rendered)
+                self.assertIn(
+                    {"error": response.json()["error"], "records": repair_inputs}, summary_objects
                 )
-                self.assertEqual(rendered_response["records"], repair_inputs)
                 result = workflow._run_step(
                     "deploy",
                     "Resolve deploy inputs",
@@ -1278,6 +1286,10 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    prepared["self_deploy_idempotency_key"],
+                    repair_inputs["self_deploy_idempotency_key"],
+                )
                 repair: dict[str, Any] = json.loads(
                     (root / "launchplane-self-deploy-payload.json").read_text()
                 )
@@ -1285,7 +1297,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(repair["deploy"]["target_type"], forward_deploy["target_type"])
                 for _ in range(2):
                     response = await _post_launchplane_self_deploy(
-                        app, repair, idempotency_key=repair_inputs["self_deploy_idempotency_key"]
+                        app, repair, idempotency_key=prepared["self_deploy_idempotency_key"]
                     )
                     self.assertEqual(response.status_code, 202, response.text)
                 self.assertEqual(dispatch.call_count, effects_before_conflict[1] + 1)
