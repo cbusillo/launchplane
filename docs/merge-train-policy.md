@@ -615,6 +615,20 @@ candidate as same-repository work when no pull
 request payload exists. Otherwise the candidate has no exact-SHA check evidence
 and remains fail-closed in `ready_for_checks`.
 
+Launchplane's own CI runs its full validation on that candidate push once. A
+same-repository PR headed by `launchplane/train/**` runs a lightweight `ci-gate`
+that waits for the push run instead of repeating the validation jobs. Ordinary
+PRs, including forks using the same branch spelling, keep their full CI path.
+The delegated gate reads the current workflow's push runs for the exact head SHA
+and branch, selects the latest run and its current attempt, and requires both a
+successful completed run and its successful completed `ci-gate` job. It reports
+the source run URL. Missing or still-running evidence waits up to 25 minutes;
+failed, cancelled, skipped, malformed or unreadable evidence cannot pass the
+gate. A new candidate SHA requires its own push validation. The push gate
+remains authoritative for candidate observation; this changes neither Security
+and CodeQL nor the required-check policy. Actions still records two workflow
+events for a batch candidate, but only the push executes the full CI suite.
+
 Candidate observation reads the target branch's live required-status-check
 policy and requires every named check, including any pinned GitHub App id, to be
 present and successful on the candidate SHA. Partial workflow evidence cannot
