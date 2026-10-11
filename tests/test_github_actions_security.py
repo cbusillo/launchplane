@@ -595,7 +595,7 @@ class GitHubActionsSecurityTests(TestCase):
         # An expression in a run script is pasted into the shell before it runs,
         # so a crafted input or event field becomes code. Pass it through env.
         violations = [
-            f"{path}:{step}: {match.group(0)}"
+            f"{path}:{step}: {match.group()}"
             for path, step, script in _run_scripts()
             for match in UNTRUSTED_RUN_EXPRESSION_PATTERN.finditer(script)
         ]
