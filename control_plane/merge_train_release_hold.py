@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from control_plane.client_release import read_client_release_run
+from control_plane.client_release import accepted_release_can_start, read_client_release_run
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.storage.postgres import PostgresRecordStore
@@ -89,8 +89,10 @@ def _release_in_flight(
         return False
     if run.state == "running":
         return True
-    # A waiting release continues only while testing still holds the accepted
-    # candidate; once it moved, that release can no longer run.
+    # A waiting release continues only while its decision still starts a release
+    # and testing still holds the accepted candidate; otherwise it can never run.
+    if not accepted_release_can_start(store, decision):
+        return False
     try:
         candidate = release_version(store=store, profile=profile, instance="testing")
     except ReleaseEvidenceUnavailable:

@@ -335,6 +335,15 @@ def _covering_decision(
     return profile, decision
 
 
+def accepted_release_can_start(store: object, decision: ReleaseReviewDecisionRecord) -> bool:
+    """Whether this decision is still the product's newest one that starts a release."""
+
+    return (
+        _covering_decision(store, decision.product, decision_record_id=decision.record_id)
+        is not None
+    )
+
+
 def client_release_grant_allows(
     store: object, authorization: DurableOperationAuthorization
 ) -> bool:

@@ -1200,6 +1200,11 @@ class ClientReleaseTests(unittest.TestCase):
 
         self.accept(date="2026-09-23T03:00:00Z")
         self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
+        # An admin holding the product's releases after acceptance stops the start.
+        self.switch("held")
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+        self.switch("promote")
+        self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
         # Testing moved off the accepted candidate, so this release can never start.
         self.store.write_release_tuple_record(
             ReleaseTupleRecord(
