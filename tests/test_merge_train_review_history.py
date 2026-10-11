@@ -8,6 +8,9 @@ from control_plane.contracts.merge_train_stack_collapse import (
     build_merge_train_stack_collapse_plan_record,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
+from control_plane.merge_train_github import MergeTrainGitHubError
+from control_plane.merge_train_original_review import original_review_recovery_records
 from control_plane.merge_train_review_history import read_original_review_history
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -159,3 +162,70 @@ class ReviewHistoryTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Authorization": "Bearer valid-token"},
             )
         self.assertEqual(response.status_code, 403, response.text)
+
+    def test_original_review_evidence_handles_squash_ownership_and_scoped_read_errors(self) -> None:
+        mutation = self.original.plan.mutations[0]
+        parent = MergeTrainPullRequestSnapshot(
+            number=mutation.parent_pull_request_number,
+            created_at=self.original.updated_at,
+            head_sha="carried-parent",
+            head_ref=mutation.parent_head_ref,
+            base_ref=self.base,
+            requires_individual_landing=True,
+        )
+        snapshot = MergeTrainDryRunSnapshot(
+            repository=self.repository,
+            base_branch=self.base,
+            base_sha="current-base",
+            pull_requests=(parent,),
+        )
+
+        class Reader:
+            ownership = True
+            merged = ""
+            error_status = 0
+
+            def branch_contains_commit(
+                self, *, repository: str, branch_ref: str, commit_sha: str
+            ) -> bool:
+                if self.error_status:
+                    raise MergeTrainGitHubError(
+                        "Provider evidence unavailable", status_code=self.error_status
+                    )
+                return (
+                    branch_ref == parent.head_sha and commit_sha == mutation.child_head_sha
+                ) or (branch_ref == snapshot.base_sha and commit_sha == "squash-merge")
+
+            def carried_change_requires_individual_landing(self, **_: object) -> bool:
+                return self.ownership
+
+            def pull_request_is_merged(
+                self, *, repository: str, pull_request_number: int, expected_head_sha: str
+            ) -> str:
+                self_test.assertEqual(pull_request_number, mutation.child_pull_request_number)
+                self_test.assertEqual(expected_head_sha, mutation.child_head_sha)
+                return self.merged
+
+        self_test = self
+        reader = Reader()
+
+        def check() -> tuple[object, ...]:
+            return original_review_recovery_records(
+                records=(self.original,), snapshot=snapshot, ancestry=reader
+            )
+
+        self.assertEqual(check(), (self.original,))
+        reader.ownership = False
+        self.assertEqual(check(), ())
+        reader.ownership = True
+        reader.merged = "squash-merge"
+        self.assertEqual(check(), ())
+        reader.merged = "merge-outside-base"
+        self.assertEqual(check(), (self.original,))
+        for status in (404, 503):
+            reader.error_status = status
+            self.assertEqual(check(), (self.original,))
+        for status in (401, 403):
+            reader.error_status = status
+            with self.assertRaises(MergeTrainGitHubError):
+                check()

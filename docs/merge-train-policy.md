@@ -1760,21 +1760,35 @@ the controller lease.
 ## Original review recovery
 
 A historical carry is branch history, not approval on its child's original PR.
-Before selecting work, reflowing a candidate, or merging a saved landing, the
-controller checks each collapse's latest progress across active and retired
+The service-owned legacy controller checks each collapse's latest progress across active and retired
 history. A stack is held when a current parent requiring individual landing
 contains a recorded child's exact head, the current base does not contain that
 head, and the recorded child diff requires individual landing under the base's
 current CODEOWNERS. This also detects a successful branch merge whose progress
 write was interrupted. A new parent commit or changed policy cannot release
 this hold. A child already contained in the current base is not an unlanded
-carried change.
+carried change. An exact original child PR merged by squash or rebase also
+qualifies when its provider-reported merge commit is contained in that base.
+Three-dot comparison can conservatively include base updates made by a child;
+this may require original-PR recovery even if those owned paths are already in
+the base. It never supplies native approval.
+
+This qualification does not cover ordinary-agent delegated delivery, which
+[DIRECTION.md](../DIRECTION.md#retired) retires and #2437 owns. This change adds
+no history grant or ancestry capability to that retired path.
 
 Run-once reports `merge_train_original_review_recovery_required` with original
 PR numbers and heads. Selection excludes the affected stack and dependent base
-refs while unrelated eligible PRs continue. A saved landing containing an
-affected entry remains reconciliation-required; no entry is merged and no
-existing admin reconciliation fence is cleared. Dry runs leave collapse history unchanged.
+refs while unrelated eligible PRs continue. A saved landing with all entries
+still planned, no provider-dispatch checkpoint and fresh no-effect proof is
+retired through the existing retirement/resumption path, retaining its history
+and permitting fresh selection. Partial landings, an in-flight dispatch or
+unavailable no-effect proof retain reconciliation. No affected entry is merged
+and no existing admin reconciliation fence is cleared. Dry runs leave collapse history unchanged.
+Missing or stale commit/comparison evidence holds its stack; authentication
+failures and shared provider cooldowns retain their normal failure handling.
+When policy and original-review holds coexist, `details.policy_changed` retains
+the separate obsolete-policy inventory.
 GitHub still decides current-head approvals and protected merge admission.
 Incomplete provider evidence cannot justify carrying approval to another PR;
 comparison file lists at GitHub's [300-file limit](https://docs.github.com/en/enterprise-cloud%40latest/rest/commits/commits#compare-two-commits)
@@ -1789,6 +1803,7 @@ through the original PRs:
    changing branch history. Missing historical inventory means unknown.
 2. Restore the parent's own changes without the unlanded child carry, using
    the recorded original parent head as the reconstruction starting point.
+   Restore every carrying parent in a deeper stack before landing any member.
    Preserve subsequent parent work and the child's original head. Use an exact
    expected-current-head lease for any necessary task-branch rewrite, so a
    concurrent writer is not overwritten. A merge revert leaves child ancestry

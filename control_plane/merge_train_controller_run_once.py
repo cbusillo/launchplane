@@ -1154,6 +1154,30 @@ def _advance_active_landing_record(
             entry.pull_request_number in affected
             for entry in active_landing_record.landing_plan.entries
         ):
+            if (
+                active_landing_record.ordinary_job_binding is None
+                and all(
+                    entry.status == "planned"
+                    for entry in active_landing_record.landing_plan.entries
+                )
+                and lease.record.active_phase in {"select_next_action", "persist_landing_plan"}
+            ):
+                retired = _retire_changed_policy_landing(
+                    request=request,
+                    trace_id=trace_id,
+                    recorded_at=recorded_at,
+                    github_client=github_client,
+                    candidate_store=candidate_store,
+                    landing_store=landing_store,
+                    stack_collapse_store=stack_collapse_store,
+                    admission_store=admission_store,
+                    admission_evaluator=admission_evaluator,
+                    landing_record=active_landing_record,
+                    lease=lease,
+                    retirement_source="original-review-recovery",
+                )
+                retired["details"] = original_review_recovery_details(review_recovery)
+                return retired
             return {
                 "repository": request.repository,
                 "base_branch": request.base_branch,
@@ -1503,6 +1527,7 @@ _LINEAGE_RETIREMENT_SOURCE_PREFIX = "service:controller:lineage-changed-landing:
 _RETIRED_LANDING_SOURCE_PREFIXES = (
     "service:controller:policy-changed-landing:",
     _LINEAGE_RETIREMENT_SOURCE_PREFIX,
+    "service:controller:original-review-recovery:",
 )
 
 
@@ -1531,6 +1556,7 @@ def _retire_changed_policy_landing(
             policy_sha256=plan.policy_sha256,
         )
         is not None
+        and retirement_source != "original-review-recovery"
     ):
         raise MergeTrainControllerRequestError(
             "Policy-change recovery of a collapsed stack requires explicit reconciliation."
@@ -1676,6 +1702,7 @@ def _resume_unrecorded_landing_retirement(
     if not isinstance(retirement_source, str) or retirement_source not in {
         "policy-changed-landing",
         "lineage-changed-landing",
+        "original-review-recovery",
     }:
         return None
     candidate_record = _candidate_record_for_landing_plan(
@@ -3165,6 +3192,7 @@ def _advance_without_candidate_record(
         repository_policy=repository_policy,
         policy_sha256=policy_sha256,
     )
+    policy_obsolete_records = obsolete_records
     review_recovery = original_review_recovery_records(
         records=waiting_records + retired_records,
         snapshot=snapshot,
@@ -3191,10 +3219,10 @@ def _advance_without_candidate_record(
         )
 
     def report_obsolete(result: dict[str, object]) -> dict[str, object]:
-        if obsolete_records:
+        if policy_obsolete_records:
             result["details"] = {
-                "code": block_code,
-                "record_id": obsolete_records[0].record_id,
+                "code": "merge_train_stack_collapse_policy_changed",
+                "record_id": policy_obsolete_records[0].record_id,
                 "entries": [
                     {
                         "record_id": record.record_id,
@@ -3204,11 +3232,16 @@ def _advance_without_candidate_record(
                             mutation.child_pull_request_number for mutation in record.plan.mutations
                         ],
                     }
-                    for record in sorted(obsolete_records, key=lambda record: record.record_id)
+                    for record in sorted(
+                        policy_obsolete_records, key=lambda record: record.record_id
+                    )
                 ],
             }
         if review_recovery:
-            result["details"] = original_review_recovery_details(review_recovery)
+            details = original_review_recovery_details(review_recovery)
+            if policy_obsolete_records:
+                details["policy_changed"] = result["details"]
+            result["details"] = details
         return result
 
     latest_records = tuple(record for record in latest_records if independent(record))

@@ -4,6 +4,7 @@ from typing import Protocol
 
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapsePlanRecord
 from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.workflows.merge_train_controller import (
     latest_merge_train_stack_collapse_progress_record,
 )
@@ -18,6 +19,10 @@ class CommitAncestryReader(Protocol):
         parent_head_sha: str,
         child_head_sha: str,
     ) -> bool: ...
+
+    def pull_request_is_merged(
+        self, *, repository: str, pull_request_number: int, expected_head_sha: str
+    ) -> str: ...
 
     def branch_contains_commit(
         self, *, repository: str, branch_ref: str, commit_sha: str
@@ -61,19 +66,36 @@ def original_review_recovery_records(
         for mutation in record.plan.mutations:
             parent = owned.get(mutation.parent_pull_request_number)
             child = mutation.child_head_sha
-            if (
-                parent is not None
-                and contains(parent.head_sha, child)
-                and not contains(snapshot.base_sha, child)
-                and ancestry.carried_change_requires_individual_landing(
+            if parent is None:
+                continue
+            try:
+                if contains(snapshot.base_sha, child) or not contains(parent.head_sha, child):
+                    continue
+                if not ancestry.carried_change_requires_individual_landing(
                     repository=snapshot.repository,
                     base_sha=snapshot.base_sha,
                     parent_head_sha=mutation.expected_parent_head_sha,
                     child_head_sha=child,
+                ):
+                    continue
+                merged_sha = ancestry.pull_request_is_merged(
+                    repository=snapshot.repository,
+                    pull_request_number=mutation.child_pull_request_number,
+                    expected_head_sha=child,
                 )
-            ):
-                blocked.append(record)
-                break
+                if merged_sha and contains(snapshot.base_sha, merged_sha):
+                    continue
+            except MergeTrainGitHubError as error:
+                # Authentication and shared provider cooldowns remain global;
+                # missing/stale commit or transient comparison evidence holds
+                # this stack without admitting it or wedging unrelated work.
+                if error.status_code in {401, 403} or error.rate_limited:
+                    raise
+            except ValueError:
+                # Legacy rows without exact SHA evidence cannot justify landing.
+                pass
+            blocked.append(record)
+            break
     return tuple(blocked)
 
 
