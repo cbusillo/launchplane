@@ -314,6 +314,8 @@ INVARIANTS = {
         "github_projection_role": "routing_and_status_only",
         "engineering_review_advisory": True,
         "authorization_admission_and_landing_are_independent": True,
+        # Only the Director's signed-in session starts one; never an agent or a Client.
+        "temporary_hotfix_start": "director_human_session_only",
     },
     "protected_workflow_policy": {
         "dispatch_and_watch_helper": "github_workflow_babysit.py",

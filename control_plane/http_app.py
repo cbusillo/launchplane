@@ -21,6 +21,8 @@ import fastapi.exceptions as fastapi_exceptions
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.datastructures import DefaultPlaceholder
 from fastapi.concurrency import run_in_threadpool
+from control_plane.http_route_preparation import PreparedAPIRoute
+from control_plane.http_routes.support import run_in_worker_thread
 from fastapi.exceptions import RequestValidationError
 from control_plane.github_request_timing import github_request_tally
 from control_plane.http_routes.owner_secret_inputs import (
@@ -136,6 +138,11 @@ from control_plane.contracts.authz_access_read import (
     EffectiveAccessEvaluateRequest,
     EffectiveAccessEvaluateResponse,
     EffectiveAccessRequestSummary,
+)
+from control_plane.authz_retirement_evidence import build_retirement_evidence
+from control_plane.contracts.authz_retirement_evidence import (
+    AuthzRetirementEvidenceRequest,
+    AuthzRetirementEvidenceResponse,
 )
 from control_plane.contracts.solo_administration_confirmation import (
     SoloAdministrationConfirmationConflictError,
@@ -395,6 +402,7 @@ from control_plane.merge_train_pr_feedback import (
     write_merge_train_pr_feedback_record,
     require_merge_train_pr_feedback_record_store,
 )
+from control_plane.merge_train_release_hold import merge_train_release_hold_reader
 from control_plane.merge_train_run_once import (
     MergeTrainRunOnceEnvelope,
     MergeTrainRunOnceResult,
@@ -434,6 +442,7 @@ from control_plane.service_github_delivery_controls import (
     read_service_github_delivery,
 )
 from control_plane.launchplane_github_delivery import delivery_github_credentials_ready
+from control_plane.client_test_notes import ClientTestNotesRequired
 from control_plane.product_review_status import (
     OwnerReviewStatusPublisher,
     owner_review_reference_url,
@@ -703,6 +712,7 @@ from control_plane.contracts.product_environment_read_model import (
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    ProductProfileChangedError,
     ProductExpectedConfigProfile,
     ProductLaneProfile,
     ProductRuntimeConfigRequirement,
@@ -885,7 +895,7 @@ from control_plane.workflows.preview_pr_feedback import (
     EveryCodeWorkRequestReadStore,
     PreviewPrFeedbackPreviewReadStore,
     build_preview_pr_feedback_record,
-    pull_request_has_label,
+    pull_request_client_review,
 )
 from control_plane.preview_pr_feedback_remediation import (
     PreviewPrFeedbackRemediationStore,
@@ -1206,6 +1216,7 @@ _MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
 _AUTHZ_POLICY_ACTIVE_ROUTE = "/v1/authz-policies/active"
 _AUTHZ_POLICY_ADMINISTRATION_ROUTE = "/v1/authz-policies/administration"
 _AUTHZ_POLICY_REVISION_HISTORY_ROUTE = "/v1/authz-policies/revisions"
+_AUTHZ_RETIREMENT_EVIDENCE_ROUTE = "/v1/authz-policies/retirement-evidence"
 _AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE = "/v1/authz-diagnostics/github-actions/evaluate"
 _AUTHZ_EFFECTIVE_ACCESS_EVALUATE_ROUTE = "/v1/authz-diagnostics/effective-access/evaluate"
 _AUTHZ_POLICY_HEALTH_ROUTE = "/v1/authz-diagnostics/active-policy/health"
@@ -1224,6 +1235,7 @@ _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES = frozenset(
     {
         _AUTHZ_POLICY_ADMINISTRATION_ROUTE,
         _AUTHZ_POLICY_REVISION_HISTORY_ROUTE,
+        _AUTHZ_RETIREMENT_EVIDENCE_ROUTE,
     }
 )
 _AUTHZ_NO_STORE_ROUTES = frozenset(
@@ -3822,6 +3834,7 @@ class _LaunchplaneFastAPI(FastAPI):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._launchplane_error_response_model_registered = False
         super().__init__(*args, **kwargs)
+        self.router.route_class = PreparedAPIRoute
 
     def add_api_route(
         self,
@@ -6346,6 +6359,7 @@ def create_launchplane_fastapi_app(
                 admission_evaluator=admission_evaluator,
                 before_release=store_controller_idempotency_before_release,
                 branch_refresh_store=optional_merge_train_branch_refresh_store(record_store),
+                release_hold_reader=merge_train_release_hold_reader(record_store),
             )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
@@ -12559,22 +12573,112 @@ def create_launchplane_fastapi_app(
             updated_at=utc_now_timestamp(),
             secret_bindings=secret_bindings,
         )
-        if expected_config_request.mode == "apply" and result["changed"]:
-            try:
-                profile_write_store = require_product_profile_write_store(record_store)
-            except TypeError as error:
-                raise _launchplane_http_error(
-                    status_code=503,
-                    trace_id=trace_id,
-                    code="database_storage_required",
-                    message=str(error),
-                ) from error
-            profile_write_store.write_product_profile_record(merged_profile)
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={"product_profile": expected_config_request.product},
             result=result,
         )
+        if expected_config_request.mode == "apply" and result["changed"]:
+            compare_and_write = getattr(
+                record_store, "compare_and_write_product_profile_record", None
+            )
+            if not callable(compare_and_write):
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="database_storage_required",
+                    message=(
+                        "Launchplane record store does not support product profile writes: "
+                        "compare_and_write_product_profile_record"
+                    ),
+                )
+            # Publish only over the exact profile that passed the live guard and built the
+            # merge, so a concurrent profile change is never overwritten with stale fields.
+            # With a key, the database stores the replay result in the same transaction.
+            mutation = (
+                DbOnlyMutationRequest(
+                    scope=idempotency_scope(identity),
+                    route_path=_PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint=payload_fingerprint,
+                    lease_owner=trace_id,
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    response_payload=response.model_dump(mode="json", exclude_none=True),
+                    lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+                )
+                if normalized_idempotency_key and isinstance(record_store, PostgresRecordStore)
+                else None
+            )
+            stale_error: Exception | None = None
+            try:
+                write_result = compare_and_write(
+                    expected_record=profile,
+                    replacement_record=merged_profile,
+                    **({"mutation": mutation} if mutation is not None else {}),
+                )
+                write_status = getattr(write_result, "status", "written")
+            except ProductProfileChangedError as error:
+                write_status, stale_error = "changed", error
+            except FileNotFoundError as error:
+                write_status, stale_error = "missing", error
+            if write_status == "replayed":
+                stored_record = getattr(write_result, "idempotency_record", None)
+                if stored_record is None:
+                    raise RuntimeError("Replayed product profile write requires evidence.")
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=stored_record,
+                    route_path=_PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE,
+                )
+            if write_status == "idempotency_conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if write_status == "reservation_in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product expected config change is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if write_status == "reconciliation_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The product expected config change requires reconciliation before retry."
+                    ),
+                )
+            if write_status == "missing":
+                raise _launchplane_http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="not_found",
+                    message="Product profile disappeared before the expected config was applied.",
+                ) from stale_error
+            if write_status != "written":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="stale",
+                    message=(
+                        "Product profile changed while applying expected config; "
+                        "nothing was written. Retry to apply it to the current profile."
+                    ),
+                ) from stale_error
+            if mutation is not None:
+                return response
         store_apply_idempotency(
             record_store=record_store,
             identity=identity,
@@ -12762,6 +12866,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="invalid_health_monitoring_target",
                 message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_product_profile",
+                message="Updated product profile failed validation.",
             ) from error
         if (
             health_monitoring_request.mode == "apply"
@@ -15157,11 +15268,33 @@ def create_launchplane_fastapi_app(
         request_payload: dict[str, object] | None = None,
         idempotency_scope_override: str = "",
     ) -> tuple[str, str, AcceptedEvidenceResponse | None]:
-        normalized_idempotency_key = idempotency_key.strip()
         raw_payload = request_payload if request_payload is not None else await request.json()
+        return replay_apply_idempotency_payload(
+            record_store=record_store,
+            identity=identity,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=check_replay,
+            request_payload=raw_payload,
+            idempotency_scope_override=idempotency_scope_override,
+        )
+
+    def replay_apply_idempotency_payload(
+        *,
+        record_store: object,
+        identity: LaunchplaneIdentity,
+        route_path: str,
+        idempotency_key: str,
+        trace_id: str,
+        check_replay: bool,
+        request_payload: dict[str, object],
+        idempotency_scope_override: str = "",
+    ) -> tuple[str, str, AcceptedEvidenceResponse | None]:
+        normalized_idempotency_key = idempotency_key.strip()
         payload_fingerprint = idempotency_request_fingerprint(
             route_path=route_path,
-            payload=raw_payload,
+            payload=request_payload,
         )
         if normalized_idempotency_key and check_replay:
             replay_response = replay_stored_apply_idempotency(
@@ -18863,6 +18996,51 @@ def create_launchplane_fastapi_app(
             ),
         )
 
+    def read_authz_retirement_evidence(
+        payload: AuthzRetirementEvidenceRequest,
+        response: Response,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_nonpersisting_sensitive_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AuthzRetirementEvidenceResponse:
+        trace_id = next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        database_store, active_record = require_authz_policy_administration_read(
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        expected = (payload.policy_record_id, payload.policy_revision, payload.policy_sha256)
+        actual = (active_record.record_id, active_record.revision, active_record.policy_sha256)
+        if expected != actual:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_evidence_policy_changed",
+                message="Refresh the active policy binding before requesting retirement evidence.",
+            )
+        records = database_store.list_authz_policy_records(
+            limit=AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT + 1
+        )
+        result = build_retirement_evidence(
+            active=active_record,
+            records=records,
+            request=payload,
+            trace_id=trace_id,
+        )
+        _, final_record = require_authz_policy_administration_read(
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        if final_record != active_record:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_evidence_policy_changed",
+                message="Active policy changed while reading retirement evidence; refresh and retry.",
+            )
+        return result
+
     async def read_authz_policy_health(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
@@ -22483,6 +22661,8 @@ def create_launchplane_fastapi_app(
                 message=safe_message,
             ) from error
 
+    remediation_applies_in_flight: set[tuple[str, str]] = set()
+
     async def remediate_preview_pr_feedback(
         request: Request,
         remediation_request: PreviewPrFeedbackRemediationRequest,
@@ -22490,143 +22670,169 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
-        with ExitStack() as credentials:
-            trace_id = next_trace_id()
-            if not isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity):
-                raise _launchplane_http_error(
-                    status_code=403,
-                    trace_id=trace_id,
-                    code="authorization_denied",
-                    message="Preview PR feedback remediation requires a local operator identity.",
-                )
-            action = (
-                "preview_pr_feedback_remediation.plan"
-                if remediation_request.mode == "dry-run"
-                else "preview_pr_feedback_remediation.apply"
-            )
-            if not resolved_authz_policy_runtime.policy.allows(
-                identity=identity,
-                action=action,
-                product=remediation_request.product,
-                context=remediation_request.context,
-            ):
-                raise _launchplane_http_error(
-                    status_code=403,
-                    trace_id=trace_id,
-                    code="authorization_denied",
-                    message="Identity is not authorized for preview PR feedback remediation.",
-                )
-            if not idempotency_key.strip():
-                raise _launchplane_http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="idempotency_key_required",
-                    message="Preview PR feedback remediation requires Idempotency-Key.",
-                )
-            try:
-                remediation_store = require_preview_pr_feedback_remediation_write_store(
-                    record_store
-                )
-                target = bind_preview_pr_feedback_target(
-                    record_store=remediation_store,
-                    request=remediation_request,
-                )
-                token = credentials.enter_context(
-                    resolve_remediation_token(
-                        control_plane_root=resolved_control_plane_root,
-                        context=remediation_request.context,
-                        repository=target.profile.repository,
+        request_payload: dict[str, object] = await request.json()
+
+        def execute() -> AcceptedEvidenceResponse:
+            with ExitStack() as credentials:
+                trace_id = next_trace_id()
+                if not isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity):
+                    raise _launchplane_http_error(
+                        status_code=403,
+                        trace_id=trace_id,
+                        code="authorization_denied",
+                        message="Preview PR feedback remediation requires a local operator identity.",
                     )
+                action = (
+                    "preview_pr_feedback_remediation.plan"
+                    if remediation_request.mode == "dry-run"
+                    else "preview_pr_feedback_remediation.apply"
                 )
-                observation = observe_managed_preview_pr_feedback(
-                    target=target,
-                    token=token,
-                )
-            except FileNotFoundError as error:
-                raise _launchplane_http_error(
-                    status_code=404,
-                    trace_id=trace_id,
-                    code="product_profile_not_found",
-                    message=str(error),
-                ) from error
-            except (TypeError, ValueError, click.ClickException) as error:
-                raise _launchplane_http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="preview_pr_feedback_remediation_observation_failed",
-                    message=str(error),
-                ) from error
+                if not resolved_authz_policy_runtime.policy.allows(
+                    identity=identity,
+                    action=action,
+                    product=remediation_request.product,
+                    context=remediation_request.context,
+                ):
+                    raise _launchplane_http_error(
+                        status_code=403,
+                        trace_id=trace_id,
+                        code="authorization_denied",
+                        message="Identity is not authorized for preview PR feedback remediation.",
+                    )
+                if not idempotency_key.strip():
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code="idempotency_key_required",
+                        message="Preview PR feedback remediation requires Idempotency-Key.",
+                    )
+                try:
+                    remediation_store = require_preview_pr_feedback_remediation_write_store(
+                        record_store
+                    )
+                    target = bind_preview_pr_feedback_target(
+                        record_store=remediation_store,
+                        request=remediation_request,
+                    )
+                    token = credentials.enter_context(
+                        resolve_remediation_token(
+                            control_plane_root=resolved_control_plane_root,
+                            context=remediation_request.context,
+                            repository=target.profile.repository,
+                        )
+                    )
+                    observation = observe_managed_preview_pr_feedback(
+                        target=target,
+                        token=token,
+                    )
+                except FileNotFoundError as error:
+                    raise _launchplane_http_error(
+                        status_code=404,
+                        trace_id=trace_id,
+                        code="product_profile_not_found",
+                        message=str(error),
+                    ) from error
+                except (TypeError, ValueError, click.ClickException) as error:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="preview_pr_feedback_remediation_observation_failed",
+                        message=str(error),
+                    ) from error
 
-            actor = launchplane_identity_actor(identity)
-            requested_at = utc_now_timestamp()
-            if remediation_request.mode == "dry-run":
-                remediation_record = build_remediation_record(
-                    request=remediation_request,
-                    target=target,
+                actor = launchplane_identity_actor(identity)
+                requested_at = utc_now_timestamp()
+                if remediation_request.mode == "dry-run":
+                    remediation_record = build_remediation_record(
+                        request=remediation_request,
+                        target=target,
+                        actor=actor,
+                        trace_id=trace_id,
+                        idempotency_key=idempotency_key.strip(),
+                        requested_at=requested_at,
+                        observation=observation,
+                    )
+                    remediation_store.write_preview_pr_feedback_remediation_record(
+                        remediation_record
+                    )
+                    return accepted_evidence_response(
+                        trace_id=trace_id,
+                        records={
+                            "preview_pr_feedback_remediation_id": remediation_record.remediation_id
+                        },
+                        result=remediation_record.model_dump(mode="json"),
+                    )
+
+                (
+                    normalized_key,
+                    payload_fingerprint,
+                    replayed_response,
+                ) = replay_apply_idempotency_payload(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
+                    idempotency_key=idempotency_key,
+                    trace_id=trace_id,
+                    check_replay=True,
+                    request_payload=request_payload,
+                )
+                if replayed_response is not None:
+                    return replayed_response
+                dry_run_record = matching_dry_run(
+                    record_store=remediation_store,
                     actor=actor,
-                    trace_id=trace_id,
-                    idempotency_key=idempotency_key.strip(),
-                    requested_at=requested_at,
-                    observation=observation,
+                    idempotency_key=normalized_key,
+                    continuity_sha256=remediation_request.continuity_sha256,
                 )
-                remediation_store.write_preview_pr_feedback_remediation_record(remediation_record)
-                return accepted_evidence_response(
-                    trace_id=trace_id,
-                    records={
-                        "preview_pr_feedback_remediation_id": remediation_record.remediation_id
-                    },
-                    result=remediation_record.model_dump(mode="json"),
-                )
-
-            (
-                normalized_key,
-                payload_fingerprint,
-                replayed_response,
-            ) = await replay_apply_idempotency(
-                request=request,
-                record_store=record_store,
-                identity=identity,
-                route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
-                idempotency_key=idempotency_key,
-                trace_id=trace_id,
-                check_replay=True,
-            )
-            if replayed_response is not None:
-                return replayed_response
-            dry_run_record = matching_dry_run(
-                record_store=remediation_store,
-                actor=actor,
-                idempotency_key=normalized_key,
-                continuity_sha256=remediation_request.continuity_sha256,
-            )
-            if dry_run_record is None:
-                raise _launchplane_http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="matching_dry_run_required",
-                    message="Preview PR feedback remediation apply requires a prior matching dry-run.",
-                )
-            if (dry_run_record.observation.state == "absent" and observation.state != "absent") or (
-                dry_run_record.observation.state == "present"
-                and observation.state == "present"
-                and dry_run_record.observation.digest_sha256 != observation.digest_sha256
-            ):
-                raise _launchplane_http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="preview_pr_feedback_remediation_observation_changed",
-                    message="Managed preview feedback changed after the reviewed dry-run.",
-                )
-            try:
-                outcome, mutation_evidence, feedback_record = apply_remediation(
-                    request=remediation_request,
-                    target=target,
-                    token=token,
-                    observation=observation,
-                    requested_at=requested_at,
-                )
-            except PreviewPrFeedbackRemediationApplyError as error:
-                failed_record = build_remediation_record(
+                if dry_run_record is None:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="matching_dry_run_required",
+                        message="Preview PR feedback remediation apply requires a prior matching dry-run.",
+                    )
+                if (
+                    dry_run_record.observation.state == "absent" and observation.state != "absent"
+                ) or (
+                    dry_run_record.observation.state == "present"
+                    and observation.state == "present"
+                    and dry_run_record.observation.digest_sha256 != observation.digest_sha256
+                ):
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="preview_pr_feedback_remediation_observation_changed",
+                        message="Managed preview feedback changed after the reviewed dry-run.",
+                    )
+                try:
+                    outcome, mutation_evidence, feedback_record = apply_remediation(
+                        request=remediation_request,
+                        target=target,
+                        token=token,
+                        observation=observation,
+                        requested_at=requested_at,
+                    )
+                except PreviewPrFeedbackRemediationApplyError as error:
+                    failed_record = build_remediation_record(
+                        request=remediation_request,
+                        target=target,
+                        actor=actor,
+                        trace_id=trace_id,
+                        idempotency_key=normalized_key,
+                        requested_at=requested_at,
+                        observation=observation,
+                        outcome="failed",
+                        mutation_evidence=error.mutation_evidence,
+                    )
+                    failed_record.mutation_evidence.error_message = str(error)
+                    remediation_store.write_preview_pr_feedback_remediation_record(failed_record)
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="preview_pr_feedback_remediation_apply_failed",
+                        message=str(error),
+                    ) from error
+                remediation_record = build_remediation_record(
                     request=remediation_request,
                     target=target,
                     actor=actor,
@@ -22634,54 +22840,56 @@ def create_launchplane_fastapi_app(
                     idempotency_key=normalized_key,
                     requested_at=requested_at,
                     observation=observation,
-                    outcome="failed",
-                    mutation_evidence=error.mutation_evidence,
+                    outcome=outcome,
+                    mutation_evidence=mutation_evidence,
+                    companion_feedback_id=feedback_record.feedback_id,
                 )
-                failed_record.mutation_evidence.error_message = str(error)
-                remediation_store.write_preview_pr_feedback_remediation_record(failed_record)
-                raise _launchplane_http_error(
-                    status_code=409,
+                response = accepted_evidence_response(
                     trace_id=trace_id,
-                    code="preview_pr_feedback_remediation_apply_failed",
-                    message=str(error),
-                ) from error
-            remediation_record = build_remediation_record(
-                request=remediation_request,
-                target=target,
-                actor=actor,
-                trace_id=trace_id,
-                idempotency_key=normalized_key,
-                requested_at=requested_at,
-                observation=observation,
-                outcome=outcome,
-                mutation_evidence=mutation_evidence,
-                companion_feedback_id=feedback_record.feedback_id,
+                    records={
+                        "preview_pr_feedback_remediation_id": remediation_record.remediation_id,
+                        "preview_pr_feedback_id": feedback_record.feedback_id,
+                    },
+                    result=remediation_record.model_dump(mode="json"),
+                )
+                idempotency_record = LaunchplaneIdempotencyRecord(
+                    record_id=build_launchplane_idempotency_record_id(response_trace_id=trace_id),
+                    scope=idempotency_scope(identity),
+                    route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
+                    idempotency_key=normalized_key,
+                    request_fingerprint=payload_fingerprint,
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    recorded_at=requested_at,
+                    response_payload=response.model_dump(mode="json", exclude_none=True),
+                )
+                remediation_store.write_preview_pr_feedback_remediation_bundle(
+                    remediation_record=remediation_record,
+                    feedback_record=feedback_record,
+                    idempotency_record=idempotency_record,
+                )
+                return response
+
+        apply_key = (idempotency_scope(identity), idempotency_key.strip())
+        if remediation_request.mode == "dry-run" or not apply_key[1]:
+            return await run_in_worker_thread(execute)
+        # The replay check and the provider mutation are not one atomic step, so the same
+        # key must not apply twice at once, including after its first client disconnects.
+        if apply_key in remediation_applies_in_flight:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=next_trace_id(),
+                code="mutation_in_progress",
+                message=(
+                    "A matching preview PR feedback remediation is already running. "
+                    "Retry with the same Idempotency-Key."
+                ),
             )
-            response = accepted_evidence_response(
-                trace_id=trace_id,
-                records={
-                    "preview_pr_feedback_remediation_id": remediation_record.remediation_id,
-                    "preview_pr_feedback_id": feedback_record.feedback_id,
-                },
-                result=remediation_record.model_dump(mode="json"),
-            )
-            idempotency_record = LaunchplaneIdempotencyRecord(
-                record_id=build_launchplane_idempotency_record_id(response_trace_id=trace_id),
-                scope=idempotency_scope(identity),
-                route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
-                idempotency_key=normalized_key,
-                request_fingerprint=payload_fingerprint,
-                response_status_code=202,
-                response_trace_id=trace_id,
-                recorded_at=requested_at,
-                response_payload=response.model_dump(mode="json", exclude_none=True),
-            )
-            remediation_store.write_preview_pr_feedback_remediation_bundle(
-                remediation_record=remediation_record,
-                feedback_record=feedback_record,
-                idempotency_record=idempotency_record,
-            )
-            return response
+        remediation_applies_in_flight.add(apply_key)
+        return await run_in_worker_thread(
+            execute,
+            on_finished=lambda: remediation_applies_in_flight.discard(apply_key),
+        )
 
     async def apply_preview_pr_feedback(
         request: Request,
@@ -22776,8 +22984,7 @@ def create_launchplane_fastapi_app(
             if supports_every_code_work_requests(record_store)
             else None
         )
-        # The agent that opened the pull request marks it for the Owner with a label;
-        # Launchplane does not try to detect Owner impact.
+        # Explicit test notes request Client review; the label remains an override.
         owner_review_requested = False
         owner_login = ""
         owner_review_url = ""
@@ -22788,11 +22995,13 @@ def create_launchplane_fastapi_app(
                     ProductProfileWriteStore, record_store
                 ).read_product_profile_record(feedback_request.product)
                 owner_review_requested = await run_in_threadpool(
-                    pull_request_has_label,
+                    pull_request_client_review,
                     control_plane_root=resolved_control_plane_root,
                     context=effective_context,
                     anchor_pr_url=feedback_request.anchor_pr_url,
                     label=owner_profile.owner.review_label,
+                    record_store=record_store,
+                    client_set=owner_profile.owner.is_set,
                 )
                 if owner_review_requested and owner_profile.owner.is_set:
                     owner_login = owner_profile.owner.github_login
@@ -22802,9 +23011,50 @@ def create_launchplane_fastapi_app(
                             repository=feedback_request.repository,
                             pull_request_number=feedback_request.anchor_pr_number,
                         )
-            except (FileNotFoundError, OSError, RequestException, RuntimeError, ValueError):
-                _LOGGER.exception("Owner review mark could not be read during preview feedback.")
-                owner_review_requested = False
+            except ClientTestNotesRequired as error:
+                # Retry already-requested feedback even while the new notes
+                # are refused, matching the preview reconciliation path.
+                try:
+                    product_review_store = require_product_review_store(record_store)
+                    if owner_profile is not None:
+                        await run_in_threadpool(
+                            resolved_owner_review_status_publisher.publish,
+                            store=product_review_store,
+                            profile=owner_profile,
+                            pull_request_number=feedback_request.anchor_pr_number,
+                            context=effective_context,
+                            retire_leftovers=True,
+                        )
+                except Exception:
+                    _LOGGER.warning("Saved Client feedback remains pending during a notes refusal.")
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="client_test_notes_required",
+                    message=str(error),
+                ) from error
+            except (
+                FileNotFoundError,
+                OSError,
+                RequestException,
+                RuntimeError,
+                ValueError,
+                click.ClickException,
+            ) as error:
+                if owner_profile is not None and not owner_profile.owner.is_set:
+                    # Keep the existing best-effort metadata path for products
+                    # outside Client release review. The train still holds explicit overrides.
+                    _LOGGER.warning(
+                        "Preview Client mark could not be read for a product without a Client."
+                    )
+                    owner_review_requested = False
+                else:
+                    raise _launchplane_http_error(
+                        status_code=503,
+                        trace_id=trace_id,
+                        code="client_review_evidence_unavailable",
+                        message="Client review notes could not be read. Retry after source-control access is restored.",
+                    ) from error
         try:
             feedback_record = build_preview_pr_feedback_record(
                 control_plane_root=resolved_control_plane_root,
@@ -27997,6 +28247,17 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="read_authz_policy_revision_history",
         summary="Read redacted authorization policy revision history",
+        responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
+        _AUTHZ_RETIREMENT_EVIDENCE_ROUTE,
+        read_authz_retirement_evidence,
+        methods=["POST"],
+        response_model=AuthzRetirementEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="read_authz_retirement_evidence",
+        summary="Read scoped policy-bound retirement evidence without selectors or mutations",
         responses=authz_policy_route_responses,
     )
 

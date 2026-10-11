@@ -2293,7 +2293,17 @@ class LaunchplaneServiceTests(unittest.TestCase):
         def github_api(*, path: str, **_kwargs: object) -> object:
             if path.endswith("/labels"):
                 return pull_request_labels
-            return {"user": {"login": "author"}, "head": {"ref": "pr-42"}}
+            return {
+                "user": {"login": "author"},
+                "head": {"ref": "pr-42"},
+                "labels": pull_request_labels,
+                "body": "## Client test notes\n"
+                + (
+                    "Try the changed page."
+                    if any(label["name"] == "owner-review" for label in pull_request_labels)
+                    else "Nothing for the Client to test: CI only."
+                ),
+            }
 
         def ready_feedback(app: object, idempotency_key: str) -> tuple[int, dict[str, Any]]:
             return _invoke_app(

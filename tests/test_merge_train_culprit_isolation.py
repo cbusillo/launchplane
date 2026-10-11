@@ -139,10 +139,14 @@ class _TrainSimulation:
         *,
         culprits: set[int],
         infrastructure_failure: Any = lambda: None,
+        base_status: Any = "pass",
+        base_reader: GitHubMergeTrainClient | None = None,
+        mutate: bool = True,
         max_passes: int = 20,
         settle: bool = True,
     ) -> None:
-        record: MergeTrainBatchCandidateRecord | None = None
+        active = self.store.list_merge_train_batch_candidate_records(status="active")
+        record: MergeTrainBatchCandidateRecord | None = active[0] if active else None
         for _ in range(max_passes):
             if record is None:
                 if not self._eligible():
@@ -167,10 +171,17 @@ class _TrainSimulation:
                 candidate=failed, source="test", updated_at="2026-10-10T12:00:00Z"
             )
             self.store.write_merge_train_batch_candidate_record(failed_record)
+            records_before_recovery = self.store.list_merge_train_batch_candidate_records()
             client = Mock()
             client.read_merge_train_snapshot.return_value = self.snapshot
             client.observe_batch_candidate_checks.return_value = failed
             client.read_candidate_check_failures.return_value = failure
+            if base_reader is not None:
+                client.read_base_check_status.side_effect = base_reader.read_base_check_status
+            elif isinstance(base_status, Exception):
+                client.read_base_check_status.side_effect = base_status
+            else:
+                client.read_base_check_status.return_value = base_status
             with patch(
                 "control_plane.merge_train_controller_run_once.changed_closed_batch_body",
                 return_value=False,
@@ -188,10 +199,15 @@ class _TrainSimulation:
                     merge_method="merge",
                     recorded_at="2026-10-10T12:01:00Z",
                     trace_id="isolation",
-                    mutate=True,
+                    mutate=mutate,
                     lease=Mock(),
                 )
             assert result is not None
+            if not mutate:
+                client.add_pull_request_label.assert_not_called()
+                self.test.assertEqual(
+                    self.store.list_merge_train_batch_candidate_records(), records_before_recovery
+                )
             self.reason_codes.append(cast(str, result.get("reason_code")))
             if result["controller_action"] == "block":
                 labelled = [
@@ -219,6 +235,95 @@ class _TrainSimulation:
 
 
 class CulpritIsolationTests(unittest.TestCase):
+    def test_shared_base_failure_is_not_blamed_when_display_name_is_sanitized(self) -> None:
+        for name in ("test_shard  (0)", "QA & integration"):
+            with self.subTest(name=name), TemporaryDirectory() as directory:
+                failures = classify_candidate_check_failures(
+                    check_runs=[_check_run(2, name, "failure")],
+                    commit_statuses=[],
+                    read_annotations=lambda _: [],
+                )
+                client = GitHubMergeTrainClient(
+                    transport=RecordingMergeTrainGitHubTransport(
+                        responses=(
+                            {
+                                "protected": True,
+                                "protection": {
+                                    "required_status_checks": {
+                                        "enforcement_level": "everyone",
+                                        "contexts": ["ci-gate"],
+                                    }
+                                },
+                            },
+                            {"statuses": []},
+                            {
+                                "check_runs": [
+                                    _check_run(1, "ci-gate", "success"),
+                                    _check_run(2, name, "failure"),
+                                ]
+                            },
+                        )
+                    )
+                )
+                train = _TrainSimulation(self, FilesystemRecordStore(state_dir=Path(directory)), 1)
+                train.run(culprits={1}, infrastructure_failure=lambda: failures, base_reader=client)
+                self.assertEqual(train.blocked, [])
+                assert train.stopped is not None
+                self.assertEqual(train.stopped["reason_code"], "base_checks_not_green")
+
+    def test_red_base_dry_run_stops_without_writing(self) -> None:
+        with TemporaryDirectory() as directory:
+            train = _TrainSimulation(self, FilesystemRecordStore(state_dir=Path(directory)), 4)
+            train.run(culprits={1, 2, 3, 4}, base_status="fail", mutate=False)
+        self.assertEqual(train.blocked, [])
+        assert train.stopped is not None
+        self.assertEqual(train.stopped["reason_code"], "base_checks_not_green")
+
+    def test_red_base_stops_without_blocking_any_queued_pull_request(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            train = _TrainSimulation(self, store, 4)
+            train.run(culprits={1, 2, 3, 4}, base_status="fail")
+            active = store.list_merge_train_batch_candidate_records(status="active")
+        self.assertEqual(train.blocked, [])
+        self.assertEqual(train.landed, [])
+        self.assertEqual(train.candidates, [(1, 2, 3, 4)])
+        self.assertTrue(active)
+        self.assertTrue(
+            all(record.candidate.entries == active[0].candidate.entries for record in active)
+        )
+        assert train.stopped is not None
+        self.assertEqual(train.stopped["reason_code"], "base_checks_not_green")
+        self.assertIn("base branch main", train.stopped["blocking_reason"]["message"])
+        self.assertEqual(train.stopped["details"]["base_sha"], train.snapshot.base_sha)
+        feedback = build_feedback_payloads(response={"result": train.stopped})
+        self.assertEqual({payload["pull_request_number"] for payload in feedback}, {1, 2, 3, 4})
+        self.assertTrue(all(payload["event"] == "blocked" for payload in feedback))
+        self.assertTrue(
+            all("base branch main" in cast(str, payload["message"]) for payload in feedback)
+        )
+
+    def test_lone_member_is_not_blamed_until_base_checks_pass(self) -> None:
+        from control_plane.merge_train_github import MergeTrainGitHubError
+
+        for status in ("fail", "pending", "unknown", MergeTrainGitHubError("unavailable")):
+            with self.subTest(status=status), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(state_dir=Path(directory))
+                train = _TrainSimulation(self, store, 1)
+                train.run(culprits={1}, base_status=status)
+                self.assertEqual(train.blocked, [])
+                self.assertEqual(train.landed, [])
+                assert train.stopped is not None
+                self.assertEqual(train.stopped["reason_code"], "base_checks_not_green")
+                feedback = build_feedback_payloads(response={"result": train.stopped})
+                self.assertEqual(
+                    feedback[0]["event"], "waiting" if status == "pending" else "blocked"
+                )
+                self.assertIn("base branch main", cast(str, feedback[0]["message"]))
+                # Reobserve a rerun passing on the same base, without changing the queue.
+                train.run(culprits={1})
+                self.assertEqual(train.blocked, [1])
+
     def test_single_culprit_is_blocked_and_the_rest_land(self) -> None:
         with TemporaryDirectory() as directory:
             train = _TrainSimulation(self, FilesystemRecordStore(state_dir=Path(directory)), 4)
@@ -339,6 +444,8 @@ class CulpritIsolationTests(unittest.TestCase):
             client = Mock()
             client.read_merge_train_snapshot.return_value = train.snapshot
             client.read_candidate_check_failures.return_value = TEST_FAILURE
+            client.observe_batch_candidate_checks.return_value = failed_record.candidate
+            client.read_base_check_status.return_value = "pass"
             with patch(
                 "control_plane.merge_train_controller_run_once.changed_closed_batch_body",
                 return_value=False,
@@ -406,6 +513,7 @@ class CulpritIsolationTests(unittest.TestCase):
                 client.read_candidate_check_failures.side_effect = evidence
             else:
                 client.read_candidate_check_failures.return_value = evidence
+            client.observe_batch_candidate_checks.return_value = failed_record.candidate
             with patch(
                 "control_plane.merge_train_controller_run_once.changed_closed_batch_body",
                 return_value=False,

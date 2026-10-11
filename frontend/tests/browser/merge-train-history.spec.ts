@@ -5,7 +5,7 @@ import type {
   MergeTrainPolicyTargetsResponse,
 } from "../../src/generated/openapi.ts";
 
-test("policy history stays visible without blocking current controller status", async ({ page }, testInfo) => {
+test("policy history stays visible without blocking current controller status", { tag: "@layout" }, async ({ page }, testInfo) => {
   await page.goto("/ui/engineering/merge-train?fixture=products");
   await expect(page.getByRole("heading", { name: "Merge train", exact: true })).toBeVisible();
   // Reuse the browser-owned fixtures in their browser context; they read window.

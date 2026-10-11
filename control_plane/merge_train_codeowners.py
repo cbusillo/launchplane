@@ -56,16 +56,59 @@ def individual_landing_snapshots(
                 raise _IncompleteCodeOwnerEvidence(
                     "Code-owner routing head changed during file reads."
                 )
-            individual = any(
-                path in _CODEOWNERS_PATHS or any(_may_match(path, pattern) for pattern in patterns)
-                for path in paths
-            )
+            individual = _paths_require_individual_landing(paths, patterns)
         except _IncompleteCodeOwnerEvidence:
             # Incomplete evidence can never justify transferring this PR's
             # approval to a batch. Other PRs may still proceed.
             individual = True
         result.append(pr.model_copy(update={"requires_individual_landing": individual}))
     return tuple(result)
+
+
+def carried_change_requires_individual_landing(
+    *,
+    transport: "MergeTrainGitHubTransport",
+    repository_path: str,
+    base_sha: str,
+    parent_head_sha: str,
+    child_head_sha: str,
+) -> bool:
+    """Classify the recorded child diff, rather than the parent's combined diff."""
+    patterns = _read_patterns(transport, repository_path, base_sha)
+    if not patterns:
+        return False
+    comparison = transport.request(
+        method="GET",
+        path=f"/repos/{repository_path}/compare/{quote(parent_head_sha, safe='')}...{quote(child_head_sha, safe='')}",
+    )
+    if not isinstance(comparison, dict):
+        return True
+    files = comparison.get("files")
+    # GitHub only exposes up to 300 changed files in a comparison.
+    if not isinstance(files, list) or len(files) >= 300:
+        return True
+    paths: list[str] = []
+    for file in files:
+        if (
+            not isinstance(file, dict)
+            or not isinstance(file.get("filename"), str)
+            or not file["filename"]
+        ):
+            return True
+        paths.append(file["filename"])
+        if file.get("status") == "renamed":
+            previous = file.get("previous_filename")
+            if not isinstance(previous, str) or not previous:
+                return True
+            paths.append(previous)
+    return _paths_require_individual_landing(tuple(paths), patterns)
+
+
+def _paths_require_individual_landing(paths: tuple[str, ...], patterns: tuple[str, ...]) -> bool:
+    return any(
+        path in _CODEOWNERS_PATHS or any(_may_match(path, pattern) for pattern in patterns)
+        for path in paths
+    )
 
 
 def _changed_paths(

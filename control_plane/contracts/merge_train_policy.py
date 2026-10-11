@@ -325,6 +325,13 @@ class MergeTrainRepositoryPolicy(BaseModel):
     blocked_label: str
     stack_child_disposition_label: str = ""
     merge_method: MergeTrainMergeMethod
+    # Caps how many pull requests a new batch candidate takes; the rest wait for
+    # the next candidate. Unset leaves batches unbounded.
+    max_batch_size: PositiveInt | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     # Required survives only as immutable policy history, never merge authority.
     engineering_review_mode: Literal["advisory", "required"] = "advisory"
     failure_policy: MergeTrainFailurePolicy

@@ -47,6 +47,9 @@ but those jobs must have separate navigation:
   testing site for the Client's product. It allows only accept or request
   changes with feedback; it exposes no source,
   configuration, deploy, merge, secret, or access-administration action.
+  The Director alone also sees **Temporary hotfix** there, to put a fix for
+  live breakage on the gated path before the Client accepts it; see
+  [Temporary hotfix](release-review.md#temporary-hotfix).
 
 Product Ops is the default surface. Delivery Governance may reuse the same
 session, theme, and API transport, but it must not become a general issue
@@ -85,6 +88,18 @@ Reviewed Odoo preview plans are service-issued, short-lived, and bound to their
 artifact and provider-routing evidence. If that evidence changes or the plan
 expires, the UI must present a stale-plan result and obtain a new plan rather
 than offering a force-apply control.
+
+The workspace's read-only recorded-preview list exposes bounded identity
+references only under the existing `preview.read` grant. Selecting a change
+reads the canonical preview history and redacted product reconciliation route,
+each under its own existing authorization. Latest and serving generation
+references stay separate; missing reference evidence is not replaced by a
+different historical generation. Generation health and runtime identity
+declarations are recorded evidence, not current provider/runtime verification.
+Held or failed cleanup remains visible beside an explicit unknown provider
+state. Activity supplies the next supported inspection; this view enables no
+refresh/destroy/reconciliation mutation. Deployed acceptance still requires
+the actual product records and authenticated consumer, not development fixtures.
 
 ### Promote A Verified Release
 

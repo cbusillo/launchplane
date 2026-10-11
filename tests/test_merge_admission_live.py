@@ -573,59 +573,31 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
         self.assertEqual(blocked.exception.reason_code, "pull_request_conversations_unresolved")
         self.assertIn("PR #2022", str(blocked.exception))
 
-    def test_a_pull_request_queued_behind_the_plan_does_not_block_landing(self) -> None:
-        # A newer PR labeled while the batch lands waits for the next candidate (#2637).
-        with TemporaryDirectory() as directory:
-            store = FilesystemRecordStore(state_dir=Path(directory))
-            evidence = _repository_evidence()
-            result = _evaluate_live(
-                store=store,
-                provider=_EvidenceProvider(evidence),
-                evidence=evidence,
-                extra_pull_requests=(
-                    _queued_pull_request(
-                        number=2030, head_sha="e" * 40, created_at="2026-08-11T03:00:30Z"
-                    ),
-                ),
-            )
-        self.assertEqual(result.readiness.state, "ready")
-
-    def test_held_out_pull_request_ahead_of_the_plan_is_excluded_only_at_its_recorded_head(
-        self,
-    ) -> None:
-        held_out = MergeTrainBatchHeldOutEntry(pull_request_number=2021, head_sha="d" * 40)
+    def test_a_pull_request_that_joined_the_queue_does_not_block_landing(self) -> None:
+        # A PR labeled while the batch lands waits for the next candidate,
+        # wherever it sorts (#2637, #3327); so does a conflict hold-out.
         cases = (
-            ("unchanged", held_out.pull_request_number, held_out.head_sha, True),
-            ("head_changed", held_out.pull_request_number, "e" * 40, False),
-            ("different_pr_same_head", 2020, held_out.head_sha, False),
+            ("behind", 2030, "e" * 40, "2026-08-11T03:00:30Z"),
+            ("ahead", 2020, "e" * 40, "2026-08-11T02:59:00Z"),
+            ("held_out_changed_head", 2021, "e" * 40, "2026-08-11T02:59:00Z"),
         )
-        for case, number, head_sha, admitted in cases:
+        held_out = MergeTrainBatchHeldOutEntry(pull_request_number=2021, head_sha="d" * 40)
+        for case, number, head_sha, created_at in cases:
             with self.subTest(case=case), TemporaryDirectory() as directory:
                 store = FilesystemRecordStore(state_dir=Path(directory))
                 evidence = _repository_evidence()
-
-                def evaluate() -> MergeAdmissionEvaluation:
-                    return _evaluate_live(
-                        store=store,
-                        provider=_EvidenceProvider(evidence),
-                        evidence=evidence,
-                        extra_pull_requests=(
-                            _queued_pull_request(
-                                number=number,
-                                head_sha=head_sha,
-                                created_at="2026-08-11T02:59:00Z",
-                            ),
+                result = _evaluate_live(
+                    store=store,
+                    provider=_EvidenceProvider(evidence),
+                    evidence=evidence,
+                    extra_pull_requests=(
+                        _queued_pull_request(
+                            number=number, head_sha=head_sha, created_at=created_at
                         ),
-                        held_out=(held_out,),
-                    )
-
-                if admitted:
-                    result = evaluate()
-                    self.assertEqual(result.readiness.state, "ready")
-                else:
-                    with self.assertRaises(MergeAdmissionDeniedError) as denied:
-                        evaluate()
-                    self.assertEqual(denied.exception.reason_code, "landing_lineage_changed")
+                    ),
+                    held_out=(held_out,),
+                )
+                self.assertEqual(result.readiness.state, "ready")
 
 
 class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
@@ -774,7 +746,7 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
             )
         self.assertEqual(denied.exception.reason_code, "landing_lineage_changed")
 
-    def test_live_queue_is_rediscovered_and_inserted_pr_refuses_admission(self) -> None:
+    def test_live_queue_is_rediscovered_and_a_moved_planned_head_refuses_admission(self) -> None:
         candidate_record, landing_record, controller_state, _ = _guard_records()
         snapshot_reader = _StaticSnapshotReader(
             MergeTrainDryRunSnapshot(
@@ -783,13 +755,8 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                 base_sha=BASE_SHA,
                 pull_requests=(
                     _queued_pull_request(
-                        number=2082,
-                        head_sha="d" * 40,
-                        created_at="2026-08-11T02:59:00Z",
-                    ),
-                    _queued_pull_request(
                         number=2083,
-                        head_sha=HEAD_SHA,
+                        head_sha="d" * 40,
                         created_at="2026-08-11T03:00:00Z",
                     ),
                 ),

@@ -41,12 +41,11 @@ endpoint retain their existing read behavior. This reduces one repeated read per
 unchanged member without treating prior admission or provider refusal as reusable
 authority.
 
-Before building that live queue, admission excludes the candidate's conflict
-hold-outs only while both the PR number and head match the recorded hold-out,
-as planning does. An unchanged held-out PR that sorts ahead of a planned entry
-does not invalidate the landing. A changed head returns to the queue and is
-subject to the existing lineage check; new or changed entries ahead of the plan
-still refuse admission with `landing_lineage_changed`.
+That live queue is built from the plan's unlanded entries alone, under every
+batch rule. Conflict hold-outs and pull requests that joined the queue after
+planning, wherever they sort, wait for the next candidate and do not invalidate
+the landing. A planned entry whose head moved, that left the queue, or that no
+longer fits the batch refuses admission with `landing_lineage_changed`.
 
 Only `ready` Level 2 evidence plus `exact` or `recorded_rolling` structural
 evidence may produce an admission. The guarded caller binds the expected lease
