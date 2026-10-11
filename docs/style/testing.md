@@ -176,8 +176,8 @@ self-hosted lane rather than silently consuming paid hosted minutes. Candidate
 jobs still run every existing gate; routing does not reuse or suppress checks.
 Hosted account concurrency and cold caches can still delay candidates, and
 candidate jobs can delay other repositories' hosted jobs and ordinary PR gate
-jobs. Heavy PR jobs on the shared self-hosted host no longer occupy the candidate
-runner pool. CodeQL
+jobs. Train candidate jobs use a separate pool from heavy same-repository PR
+jobs. CodeQL
 and browser smoke already use hosted runners. Existing PR-number concurrency
 cancels superseded PR runs; candidate creation and reset pushes retain the
 SHA-isolated concurrency documented in
