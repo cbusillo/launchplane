@@ -184,7 +184,7 @@ def open_updater_proposal(
                 payload = api_request(
                     path=prefix
                     + "/pulls?state=open&base="
-                    + quote(default_branch, safe="")
+                    + quote(default_branch, safe="/")
                     + "&per_page=100&page="
                     + str(page),
                     token=issued.token,
@@ -199,6 +199,18 @@ def open_updater_proposal(
                     )
                     ref = head.get("ref")
                     if isinstance(ref, str) and ref.startswith(workflow_prefix):
+                        head_repo = head.get("repo")
+                        author = item.get("user")
+                        if not isinstance(head_repo, dict) or head_repo.get("id") != int(
+                            identity.repository_id
+                        ):
+                            continue
+                        if not isinstance(author, dict) or author.get("id") != app_user_id:
+                            if ref == branch:
+                                raise UpdaterProposalConflict(
+                                    "Existing updater proposal has a different author."
+                                )
+                            continue
                         matches.append(item)
                 if matches:
                     exact = next(
@@ -219,6 +231,33 @@ def open_updater_proposal(
                     return None
             raise ValueError("Open proposal inventory is incomplete.")
 
+        def closed_proposal() -> UpdaterProposalResponse | None:
+            history = api_request(
+                path=prefix
+                + "/pulls?state=closed&head="
+                + quote(identity.repository.split("/", 1)[0] + ":" + branch, safe="")
+                + "&per_page=100",
+                token=issued.token,
+            )
+            if not isinstance(history, list):
+                raise ValueError("Proposal history unavailable.")
+            for item in history:
+                item = json_object(item, "Closed proposal", error_type=ValueError)
+                head = json_object(item.get("head"), "Closed head", error_type=ValueError)
+                if head.get("ref") != branch:
+                    continue
+                head_repo = head.get("repo")
+                author = item.get("user")
+                if (
+                    not isinstance(head_repo, dict)
+                    or head_repo.get("id") != int(identity.repository_id)
+                    or not isinstance(author, dict)
+                    or author.get("id") != app_user_id
+                ):
+                    continue
+                return observed_proposal(item, "replayed")
+            return None
+
         repository = call("")
         owner = json_object(repository.get("owner"), "Repository owner", error_type=ValueError)
         if (
@@ -237,7 +276,10 @@ def open_updater_proposal(
         pending = pending_proposal()
         if pending is not None:
             return pending
-        base = call("/git/ref/heads/" + quote(default_branch, safe=""))
+        closed = closed_proposal()
+        if closed is not None:
+            return closed
+        base = call("/git/ref/heads/" + quote(default_branch, safe="/"))
         base_object = json_object(base.get("object"), "Base ref", error_type=ValueError)
         commit = call("/git/commits/" + request.base_sha)
         base_tree = json_object(commit.get("tree"), "Base tree", error_type=ValueError)
@@ -310,7 +352,7 @@ def open_updater_proposal(
 
         def read_existing_ref() -> dict[str, object] | None:
             try:
-                return call("/git/ref/heads/" + quote(branch, safe=""))
+                return call("/git/ref/heads/" + quote(branch, safe="/"))
             except Exception as error:
                 if _provider_status(error) == 404:
                     return None
@@ -365,6 +407,9 @@ def open_updater_proposal(
         pending = pending_proposal()
         if pending is not None:
             return pending
+        closed = closed_proposal()
+        if closed is not None:
+            return closed
         try:
             pull_request = call(
                 "/pulls",

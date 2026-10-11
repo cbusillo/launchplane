@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from typing import Any
 from urllib.error import HTTPError
 from email.message import Message
-from urllib.parse import unquote
 from unittest.mock import Mock, patch
 
 import jwt
@@ -21,6 +20,7 @@ from control_plane.contracts.updater_proposal import (
     UPDATER_PROPOSAL_MAX_FILES,
     UPDATER_PROPOSAL_ROUTE,
     UpdaterProposalRequest,
+    UpdaterProposalResponse,
 )
 from control_plane.github_app_identity import GitHubAppIdentity
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -197,6 +197,7 @@ class FakeGitHub:
         self.truncated = False
         self.created_refs: set[str] = set()
         self.prs: list[dict[str, Any]] = []
+        self.closed_prs: list[dict[str, Any]] = []
         self.base_mode = "100644"
         self.lose_pr_response = False
         self.lose_ref_response = False
@@ -230,6 +231,8 @@ class FakeGitHub:
             return {"id": 5001}
         if "/pulls?state=open" in path:
             return self.prs
+        if "/pulls?state=closed" in path:
+            return self.closed_prs
         if path == "/installation/token":
             return None
         if path == "/repos/" + REPOSITORY:
@@ -240,7 +243,7 @@ class FakeGitHub:
                 "default_branch": self.default_branch,
             }
         if "/git/ref/heads/" in path:
-            branch = unquote(path.split("/git/ref/heads/", 1)[1])
+            branch = path.split("/git/ref/heads/", 1)[1]
             if branch == "main":
                 return {"object": {"sha": self.base_sha}}
             if "refs/heads/" + branch in self.created_refs:
@@ -356,6 +359,26 @@ class UpdaterProviderTests(unittest.TestCase):
         self.assertEqual(api.created_refs, {"refs/heads/" + first.branch})
         self.assertEqual(sum(call["path"].endswith("/pulls") for call in api.calls), 1)
         self.assertEqual(api.calls[-1]["method"], "DELETE")
+
+    def test_foreign_prefix_prs_are_ignored_and_closed_identical_proposals_are_not_reopened(
+        self,
+    ) -> None:
+        api = FakeGitHub()
+        api.tree_sha = "d" * 40
+        first = self.invoke(api)
+        real = api.prs[0]
+        api.prs.insert(
+            0, {**real, "head": {**real["head"], "repo": {"id": 9999}}, "user": {"id": 5002}}
+        )
+        api.prs.insert(0, {**real, "head": {**real["head"], "repo": None}, "user": {"id": 5002}})
+        replay = self.invoke(api)
+        self.assertEqual(replay.pull_request_number, first.pull_request_number)
+        self.assertEqual(replay.disposition, "replayed")
+        api.prs = []
+        api.closed_prs = [{**real, "head": {**real["head"], "ref": "unrelated"}}, real]
+        closed = self.invoke(api)
+        self.assertEqual(closed.pull_request_number, first.pull_request_number)
+        self.assertEqual(sum(call["path"].endswith("/pulls") for call in api.calls), 1)
 
     def test_pending_proposal_survives_a_moved_default_branch_without_duplication(self) -> None:
         api = FakeGitHub()
@@ -501,6 +524,28 @@ class UpdaterHttpTests(unittest.IsolatedAsyncioTestCase):
             authz_policy=policy or updater_policy(),
             record_store_factory=lambda: object(),
         )
+
+    async def test_authorized_caller_receives_the_typed_created_response(self) -> None:
+        result = UpdaterProposalResponse(
+            repository=REPOSITORY,
+            branch="launchplane/updater/test",
+            head_sha=HEAD_SHA,
+            pull_request_number=17,
+            pull_request_url="https://github.com/" + REPOSITORY + "/pull/17",
+        )
+        with patch(
+            "control_plane.http_routes.updater_proposal.open_updater_proposal", return_value=result
+        ) as provider:
+            response = await http_request(
+                self.app(_StubVerifier(updater_identity())),
+                "POST",
+                UPDATER_PROPOSAL_ROUTE,
+                headers={"Authorization": "Bearer valid-token"},
+                payload=proposal_payload(),
+            )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json(), result.model_dump(mode="json"))
+        provider.assert_called_once()
 
     async def test_unlisted_callers_never_invoke_provider(self) -> None:
         for identity in (

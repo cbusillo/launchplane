@@ -4452,7 +4452,7 @@ admission still apply.
 
 The response's `disposition` is `created`, `replayed`, or `pending`. The service
 reads existing open PRs and verifies their repository, base and immutable App
-bot author ID. An exact request returns its existing PR; another request from
+bot author ID. An exact request returns its existing PR, including a closed proposal; another request from
 the same workflow returns the pending PR for ordinary review, including when
 main has moved. It does not apply or replace the new request's files in that
 case. Once the pending PR closes, a fresh updater run can create a new proposal.
@@ -4461,7 +4461,9 @@ optional existing policy `job_workflow_refs` selectors still apply.
 
 Identical retries reuse the same branch name. An existing branch is verified
 against the intended tree and parent, then its missing PR can be created. A
-lost PR response is reconciled through a read. Neither recovery path updates a
+lost PR response is reconciled through a read. An identical request never reopens
+a closed proposal; after closure, only a fresh update from a new base or changed
+content creates another proposal. Neither recovery path updates a
 ref or edits a PR. Provider errors with no confirmed result return a redacted
 503; retry the original request to reconcile it. A disconnected request
 finishes its worker and revocation attempt. The three updater workflow cutovers
