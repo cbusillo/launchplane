@@ -27,6 +27,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [prepared-public-serving.md](prepared-public-serving.md) — isolated prepared
   public pages/assets, writer fence/drain and measured pause capability for
   database-changing releases; production integration remains separately tracked.
+- [odoo-two-slot-releases.md](odoo-two-slot-releases.md) — exact-artifact Odoo
+  cutover, private readiness, atomic traffic authority and restart records.
 - [new-product-repo.md](new-product-repo.md) — checklist for building a new
   website or service repo operated by Launchplane.
 - [product-repo-contract.md](product-repo-contract.md) — thin product repo
@@ -97,6 +99,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [change-impact-policy.md](change-impact-policy.md) — retired classifier history and the
   independent repository-evidence boundary.
 - [operations.md](operations.md) — admin workflows and runtime boundary rules.
+- [lane-service-restart.md](lane-service-restart.md) — restart one Odoo lane
+  service on its current artifact through Product Ops or the bounded helper.
 - [production-backup-provider.md](production-backup-provider.md) — typed
   Proxmox/PBS capture, host boundary, evidence and rollout prerequisites.
 - [odoo-online-backups.md](odoo-online-backups.md) — coherent online logical

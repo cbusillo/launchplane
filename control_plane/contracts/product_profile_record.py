@@ -3,6 +3,8 @@ import hashlib
 import json
 from typing import Literal
 
+from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.product_health_monitoring_migration import (
@@ -267,6 +269,11 @@ class ProductLaneProfile(BaseModel):
     instance: str
     context: str
     base_url: str = ""
+    odoo_cutover: OdooCutoverLane | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     health_url: str = ""
     odoo_stable_bootstrap: ProductOdooStableBootstrapPolicy = Field(
         default_factory=ProductOdooStableBootstrapPolicy

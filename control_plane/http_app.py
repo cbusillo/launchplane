@@ -38,6 +38,8 @@ from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from requests.exceptions import RequestException
 from sqlalchemy.exc import SQLAlchemyError
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane import authz_grant_service as control_plane_authz_grant_service
 from control_plane import authz_activation_preflight as control_plane_authz_activation_preflight
 from control_plane import authz_policy_activation as control_plane_authz_policy_activation
@@ -103,6 +105,10 @@ from control_plane import (
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
 from control_plane import live_target_runtime as control_plane_live_target_runtime
+from control_plane.http_routes.lane_service_restart import (
+    ServiceRestartDependencies,
+    register_service_restart_route,
+)
 from control_plane.repository_evidence import (
     GitHubRepositoryEvidenceProvider,
 )
@@ -4048,7 +4054,20 @@ def resolve_launchplane_authz_policy(
 ) -> ResolvedLaunchplaneAuthzPolicy:
     list_records = optional_callable_attribute(record_store, "list_authz_policy_records")
     if list_records is not None:
-        records = list_records(status="active", limit=1)
+        try:
+            records = list_records(status="active", limit=1)
+        except ValidationError as error:
+            logging.error(
+                "Launchplane stored authorization policy validation failed (%s errors); "
+                "authorization is unavailable. No bootstrap fallback or policy write occurred.",
+                error.error_count(),
+            )
+            closed_policy = LaunchplaneAuthzPolicy()
+            return ResolvedLaunchplaneAuthzPolicy(
+                policy=closed_policy,
+                policy_sha256=authz_policy_sha256(closed_policy),
+                source="db-invalid",
+            )
         if records:
             record = records[0]
             return ResolvedLaunchplaneAuthzPolicy(
@@ -4126,6 +4145,7 @@ def create_launchplane_fastapi_app(
     engineering_review_target_resolver: EngineeringReviewTargetResolver | None = None,
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
     health_monitor_scheduler: HealthMonitorScheduler | None = None,
+    odoo_cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
         control_plane_root_path or FilePath(__file__).resolve().parent.parent
@@ -4248,8 +4268,14 @@ def create_launchplane_fastapi_app(
             trace_id = next_trace_id()
             try:
                 refresh_result = await run_in_threadpool(read_active_authz_policy_records)
-            except (OSError, RuntimeError, SQLAlchemyError, TypeError, ValueError):
-                logging.exception("Failed to refresh the active Launchplane authz policy.")
+            except (OSError, RuntimeError, SQLAlchemyError, TypeError, ValueError) as error:
+                if isinstance(error, ValidationError):
+                    logging.error(
+                        "Active Launchplane authz policy validation failed (%s errors).",
+                        error.error_count(),
+                    )
+                else:
+                    logging.exception("Failed to refresh the active Launchplane authz policy.")
                 return JSONResponse(
                     status_code=503,
                     content=LaunchplaneErrorResponse(
@@ -4260,12 +4286,12 @@ def create_launchplane_fastapi_app(
                         ),
                     ).model_dump(mode="json"),
                 )
-            if refresh_result is None:
+            if refresh_result is None and resolved_authz_policy_runtime.source != "db-invalid":
                 request.state.launchplane_authz_policy_provenance = (
                     resolved_authz_policy_runtime.provenance()
                 )
                 return cast(Response, await call_next(request))
-            active_records = refresh_result
+            active_records = refresh_result or ()
             if not active_records:
                 return JSONResponse(
                     status_code=503,
@@ -10080,6 +10106,7 @@ def create_launchplane_fastapi_app(
                     control_plane_root=resolved_control_plane_root,
                     record_store=record_store,
                     request=rollback_request,
+                    cutover_provider_factory=odoo_cutover_provider_factory,
                 )
         except OdooProdRollbackTargetMissingError as error:
             raise _launchplane_http_error(
@@ -10234,6 +10261,7 @@ def create_launchplane_fastapi_app(
                     database_url=getattr(record_store, "database_url", database_url),
                     record_store=record_store,
                     request=promotion_request,
+                    cutover_provider_factory=odoo_cutover_provider_factory,
                 )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
@@ -10520,6 +10548,7 @@ def create_launchplane_fastapi_app(
                     database_url=getattr(record_store, "database_url", database_url),
                     record_store=record_store,
                     request=run_request,
+                    cutover_provider_factory=odoo_cutover_provider_factory,
                 )
         except OdooProdPromotionRouteDependencyError:
             return driver_route_dependency_not_found_response(
@@ -28671,6 +28700,18 @@ def create_launchplane_fastapi_app(
         },
     )
 
+    register_service_restart_route(
+        app,
+        dependencies=ServiceRestartDependencies(
+            read_identity=read_operator_mutation_identity,
+            get_record_store=get_record_store,
+            next_trace_id=next_trace_id,
+            authorization_allows=resolved_authz_policy_runtime.allows,
+            http_error=_launchplane_http_error,
+            control_plane_root=resolved_control_plane_root,
+            error_response_model=LaunchplaneErrorResponse,
+        ),
+    )
     register_managed_secret_read_routes(app, dependencies=read_route_dependencies)
 
     app.add_api_route(

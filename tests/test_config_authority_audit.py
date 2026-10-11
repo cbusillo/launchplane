@@ -437,6 +437,55 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 self.assertTrue(_findings(payload), payload)
                 self.assertEqual(gate["status"], expected_status, gate)
 
+    def test_security_policy_and_license_are_documentation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            (root / "SECURITY.md").write_text(
+                "Report vulnerabilities privately at "
+                "https://github.com/example/example-app/security/advisories/new\n",
+                encoding="utf-8",
+            )
+            (root / "LICENSE").write_text(
+                "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+            payload = build_config_authority_audit(control_plane_root=root)
+            gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+        self.assertEqual(
+            {finding["path"] for finding in _findings(payload)}, {"SECURITY.md", "LICENSE"}
+        )
+        self.assertTrue(
+            all(finding["allow_reason"] == "docs_example" for finding in _findings(payload))
+        )
+        self.assertEqual(gate["status"], "pass", gate)
+
+    def test_security_and_license_names_do_not_allow_runtime_authority(self) -> None:
+        for path in (
+            "config/SECURITY.md",
+            "config/LICENSE",
+            "SECURITY.env",
+            "LICENSE.env",
+            ".github/workflows/SECURITY.yml",
+            ".github/workflows/LICENSE.yml",
+        ):
+            with self.subTest(path=path), TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                _init_repo(root)
+                source = root / path
+                source.parent.mkdir(parents=True, exist_ok=True)
+                content = "PRODUCT_DOMAIN=https://runtime.example.test\n"
+                if source.suffix == ".yml":
+                    content = "env:\n  PRODUCT_DOMAIN: https://runtime.example.test\n"
+                source.write_text(content, encoding="utf-8")
+                _commit_all(root)
+                payload = build_config_authority_audit(control_plane_root=root)
+                gate = evaluate_config_authority_gate(payload, profile="product-repo")
+                self.assertTrue(_findings(payload), payload)
+                self.assertEqual(gate["status"], "fail", gate)
+
     def test_import_material_is_not_allowed_runtime_authority(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
