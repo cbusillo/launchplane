@@ -270,13 +270,13 @@ def batch_pull_request_body(
     )
 
 
-def changed_closed_batch_body(
+def bound_closed_batch_pull_request(
     *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
-) -> bool:
-    """Require exact closed, unmerged batch binding before comparing generated input."""
+) -> dict[str, object] | None:
+    """Read an exactly bound batch with a confirmed absent provider effect."""
     payload = _find_batch_pull_request(client=client, candidate=candidate)
     if payload is None:
-        return False
+        return None
     bound = _bound_batch_pull_request(payload, candidate)
     number = bound["number"]
     assert isinstance(number, int)
@@ -285,6 +285,16 @@ def changed_closed_batch_body(
     )
     closed = _bound_batch_pull_request(detail, candidate)
     if closed.get("state") != "closed" or closed.get("merged") is not False:
+        return None
+    return closed
+
+
+def changed_closed_batch_body(
+    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
+) -> bool:
+    """Require exact closed, unmerged batch binding before comparing generated input."""
+    closed = bound_closed_batch_pull_request(client=client, candidate=candidate)
+    if closed is None:
         return False
     return closed["body"] != batch_pull_request_body(client=client, candidate=candidate)
 
@@ -545,50 +555,55 @@ def land_protected_batch(
                 reason_code="batch_pull_request_conversations_unresolved",
             )
         try:
-            # Evaluate the whole batch before appending its first admission.
-            # Admission repeats the fresh evaluation before each persisted write.
-            for entry in plan.entries:
-                if checkpoint is not None:
-                    checkpoint(plan, entry, "merge_entry")
-                admission_guard.build_proposal(
-                    entry=entry,
-                    observed_base_sha=base_sha,
-                    observed_base_tree_sha=base_tree_sha,
-                    observed_head_sha=entry.expected_head_sha,
-                    observed_head_tree_sha=entry.expected_head_tree_sha,
-                )
-            for entry in plan.entries:
-                head_sha, head_tree_sha = _git_commit_identity(
-                    transport=client.transport,
-                    repository_path=repository_path,
-                    commit_sha=entry.expected_head_sha,
-                )
-                if (head_sha, head_tree_sha) != (
-                    entry.expected_head_sha,
-                    entry.expected_head_tree_sha,
-                ):
-                    raise MergeTrainGitHubStaleHeadError(
-                        "Batch constituent head tree changed.", status_code=409
-                    )
-                client._validate_open_landing_pull_request(
-                    repository_path=repository_path,
-                    entry=entry,
-                    expected_base_ref=plan.base_branch,
-                    expected_base_sha=base_sha,
-                    expected_base_tree_sha=base_tree_sha,
-                    require_client_review=True,
-                )
-                if checkpoint is not None:
-                    checkpoint(plan, entry, "merge_entry")
-                admissions.append(
-                    admission_guard.admit(
+            # One queue snapshot and member read serve every evaluation in this
+            # pass except the last: the final admission reads all evidence fresh
+            # immediately before the dispatch rechecks below (#3069).
+            with admission_guard.reuse_batch_evidence() as refresh_evidence:
+                # Evaluate the whole batch before appending its first admission.
+                for entry in plan.entries:
+                    if checkpoint is not None:
+                        checkpoint(plan, entry, "merge_entry")
+                    admission_guard.build_proposal(
                         entry=entry,
                         observed_base_sha=base_sha,
                         observed_base_tree_sha=base_tree_sha,
-                        observed_head_sha=head_sha,
-                        observed_head_tree_sha=head_tree_sha,
+                        observed_head_sha=entry.expected_head_sha,
+                        observed_head_tree_sha=entry.expected_head_tree_sha,
                     )
-                )
+                for index, entry in enumerate(plan.entries, start=1):
+                    head_sha, head_tree_sha = _git_commit_identity(
+                        transport=client.transport,
+                        repository_path=repository_path,
+                        commit_sha=entry.expected_head_sha,
+                    )
+                    if (head_sha, head_tree_sha) != (
+                        entry.expected_head_sha,
+                        entry.expected_head_tree_sha,
+                    ):
+                        raise MergeTrainGitHubStaleHeadError(
+                            "Batch constituent head tree changed.", status_code=409
+                        )
+                    client._validate_open_landing_pull_request(
+                        repository_path=repository_path,
+                        entry=entry,
+                        expected_base_ref=plan.base_branch,
+                        expected_base_sha=base_sha,
+                        expected_base_tree_sha=base_tree_sha,
+                        require_client_review=True,
+                    )
+                    if checkpoint is not None:
+                        checkpoint(plan, entry, "merge_entry")
+                    if index == len(plan.entries):
+                        refresh_evidence()
+                    admissions.append(
+                        admission_guard.admit(
+                            entry=entry,
+                            observed_base_sha=base_sha,
+                            observed_base_tree_sha=base_tree_sha,
+                            observed_head_sha=head_sha,
+                            observed_head_tree_sha=head_tree_sha,
+                        )
+                    )
             # Recheck every immutable member after the final admission, before
             # the single shared provider effect. Later pushes are never reported
             # as the pushed head having landed.

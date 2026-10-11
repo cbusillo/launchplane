@@ -283,3 +283,42 @@ class CodeOwnerLandingTests(unittest.TestCase):
                     base_sha="base",
                     pull_requests=(_pr(1),),
                 )
+
+
+class CarriedChangeOwnershipTests(unittest.TestCase):
+    def test_recorded_child_diff_uses_current_ownership_including_rename_sources(self) -> None:
+        from control_plane.merge_train_codeowners import carried_change_requires_individual_landing
+
+        for files, expected in (
+            ([{"filename": "app.py"}], False),
+            ([{"filename": "DIRECTION.md"}], True),
+            (
+                [
+                    {
+                        "filename": "notes.md",
+                        "status": "renamed",
+                        "previous_filename": "DIRECTION.md",
+                    }
+                ],
+                True,
+            ),
+            ([{"filename": "notes.md", "status": "renamed"}], True),
+            (None, True),
+            ([{"filename": f"app-{number}.py"} for number in range(300)], True),
+        ):
+            with self.subTest(files=files):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(_owners("/DIRECTION.md @owner"), {"files": files})
+                )
+                result = carried_change_requires_individual_landing(
+                    transport=transport,
+                    repository_path="example/repo",
+                    base_sha="current-base",
+                    parent_head_sha="original-parent",
+                    child_head_sha="original-child",
+                )
+                self.assertEqual(result, expected)
+                self.assertEqual(
+                    transport.requests[-1].path,
+                    "/repos/example/repo/compare/original-parent...original-child",
+                )

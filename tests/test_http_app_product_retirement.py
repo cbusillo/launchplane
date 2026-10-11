@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextvars import ContextVar
 from threading import Event, Lock
 from datetime import datetime, timedelta
 import unittest
@@ -126,6 +127,14 @@ def _apply_payload(plan_response: dict[str, object]) -> dict[str, object]:
 
 
 class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self._apps: dict[tuple[str, ...], tuple[FastAPI, ContextVar[object]]] = {}
+
+    def tearDown(self) -> None:
+        self._apps.clear()
+        super().tearDown()
+
     def _no_target_store(
         self, root: Path, *, database_url: str = "", previews: bool = True
     ) -> PostgresRecordStore:
@@ -693,7 +702,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         return store
 
-    def _app(self, store: object, *, actions: tuple[str, ...]) -> FastAPI:
+    def _app(self, store: object, *, actions: tuple[str, ...], fresh: bool = False) -> FastAPI:
         policy = LaunchplaneAuthzPolicy(
             schema_version=2,
             local_operators=(
@@ -716,13 +725,29 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     policy=policy,
                 )
             )
-        return create_launchplane_fastapi_app(
+        # PostgreSQL integration also calls this fixture directly, without
+        # unittest setup. Keep that fresh-app path independent of this cache.
+        apps = self._apps if not fresh and hasattr(self, "_apps") else None
+        if apps is not None and actions in apps:
+            app, active_store = apps[actions]
+            active_store.set(store)
+            return app
+        active_store = ContextVar[object]("retirement_test_store")
+        active_store.set(store)
+        app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
             authz_policy=policy,
             bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
             control_plane_root_path=Path("."),
-            record_store_factory=lambda: store,
+            record_store_factory=active_store.get,
         )
+        if apps is not None:
+            # Context follows lifespan tasks and worker threads. Each scenario
+            # still supplies its own store; only routes and policy are reused.
+            # Earlier references follow this binding: use fresh for restart
+            # proof or when retaining apps for multiple simultaneous stores.
+            apps[actions] = (app, active_store)
+        return app
 
     @property
     def headers(self) -> dict[str, str]:
@@ -1118,7 +1143,9 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     database_url=f"sqlite+pysqlite:///{Path(directory) / 'launchplane.sqlite3'}"
                 )
                 app = self._app(
-                    store, actions=("product_retirement.plan", "product_retirement.apply")
+                    store,
+                    actions=("product_retirement.plan", "product_retirement.apply"),
+                    fresh=True,
                 )
                 headers = self.headers
                 if change == "key":

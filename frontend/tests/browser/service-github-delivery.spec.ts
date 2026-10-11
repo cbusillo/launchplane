@@ -70,7 +70,7 @@ async function reviewRetirement(page: Page) {
   return panel;
 }
 
-test("Director selection and individually confirmed retirement read back at desktop and narrow widths", async ({ page }, testInfo) => {
+test("Director selection and individually confirmed retirement read back at desktop and narrow widths", { tag: "@responsive" }, async ({ page }, testInfo) => {
   const { current, requests, errors } = await setup(page);
   await page.goto("/ui/engineering/github-delivery");
   await expect(page.getByRole("heading", { name: "GitHub delivery", level: 1 })).toBeFocused();

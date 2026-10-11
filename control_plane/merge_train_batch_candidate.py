@@ -79,6 +79,18 @@ class MergeTrainBatchCandidateRecordStore(Protocol):
     ) -> tuple[MergeTrainBatchCandidateRecord, ...]: ...
 
 
+class MergeTrainBatchCandidateBaseHistoryReadStore(Protocol):
+    def list_merge_train_batch_candidate_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        base_sha: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainBatchCandidateRecord, ...]: ...
+
+
 class MergeTrainStackCollapsePlanRecordStore(Protocol):
     def write_merge_train_stack_collapse_plan_record(
         self, record: MergeTrainStackCollapsePlanRecord

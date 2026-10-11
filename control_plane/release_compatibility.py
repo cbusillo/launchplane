@@ -181,7 +181,7 @@ def classify_release_database_compatibility(
             new = candidate.release_compatibility
             assert old is not None and new is not None
             examined_database_plan = (
-                old.examined_inputs_sha256 == release_examined_inputs_sha256(production)
+                new.examined_baseline_inputs_sha256 == release_examined_inputs_sha256(production)
                 and new.examined_inputs_sha256 == release_examined_inputs_sha256(candidate)
                 and new.database_update_modules is not None
             )

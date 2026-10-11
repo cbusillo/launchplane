@@ -289,10 +289,8 @@ records a decision:
   @client") or `failure` ("Changes requested by @client");
 - a decision recorded for an older head does not count, because the Client
   reviews what is actually previewed, so the check returns to `in_progress`;
-  the one exception is an acceptance carried across a base-only refresh made by
-  the merge train, which is saved as its own decision for the new head and shown
-  as `success` ("Accepted by @client (carried from `<short head>` after a
-  base-only refresh)"); see
+  a carried acceptance is saved as its own decision for the new head and shown
+  as `success` with its source acceptance. The carry rules are owned by
   [carried acceptance](owner-acceptance.md#carried-acceptance);
 - marked with no Client: `in_progress`, `No Client set for this product`;
 - unmarked: no check is written.
@@ -373,6 +371,15 @@ derives the live URL from the preview context's runtime environment records, and
 rejects a supplied slug when it conflicts with the derived value. `context`,
 `preview_slug`, and `preview_url` remain compatibility fields for older
 adapters, not product-repo authority.
+
+Generic-web lifecycle cleanup uses the repository-name anchor from that same
+profile for stored-preview lookup and terminal evidence; the product key need
+not equal the repository name. Historical callers without a profile retain
+their product-shaped anchor, with no fallback to unrelated records.
+Provider application lookup validates the complete project/environment/application
+inventory before proving absence or reusing a match. Missing or malformed nested
+relations fail cleanup without deleting provider state or marking a preview
+destroyed; a fully enumerated empty inventory remains valid absence.
 
 Launchplane also owns the reusable request-shape builders for Odoo tenant
 preview workflows. Tenant repos may keep thin adapter jobs for checkout, image
