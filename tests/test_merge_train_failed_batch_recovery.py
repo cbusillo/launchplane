@@ -28,6 +28,7 @@ from control_plane.merge_train_controller_run_once import (
 from control_plane.merge_train_github import GitHubMergeTrainClient
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.merge_train_controller_state import MergeTrainControllerLeaseLostError
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
 from tests.test_merge_train_batch_pull_request import _BatchProvider
@@ -382,6 +383,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         base_status: str = "pass",
         failure_evidence: CandidateCheckFailures | None = None,
         observe_checks: bool = False,
+        conflicts: tuple[MergeTrainBatchHeldOutEntry, ...] = (),
+        lease: Any = None,
     ) -> dict[str, object]:
         client = Mock(wraps=self.client)
         if not observe_checks:
@@ -393,7 +396,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             )
         )
         client.read_base_check_status.return_value = base_status
-        client.probe_batch_entry_conflicts.return_value = ()
+        client.probe_batch_entry_conflicts.return_value = conflicts
         self.reflow_client = client
         return _advance_from_live_snapshot(
             request=MergeTrainControllerRunOnceEnvelope(
@@ -407,9 +410,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             stack_collapse_store=store,
             trace_id="fresh-plan",
             recorded_at="2026-10-03T12:02:00Z",
-            lease=Mock(
-                owner="test", acquisition_token="test", record=Mock(ordinary_job_binding=None)
-            ),
+            lease=lease
+            or Mock(owner="test", acquisition_token="test", record=Mock(ordinary_job_binding=None)),
             snapshot=self.snapshot,
         )
 
@@ -458,6 +460,138 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 self.assertEqual(result["controller_action"], "plan_candidate")
                 self.assertNotIn("reason_code", result)
                 self.reflow_client.read_candidate_check_failures.assert_not_called()
+
+    def test_interrupted_retry_resumes_its_recorded_ref_and_budget(self) -> None:
+        original_snapshot = self.snapshot
+        third = self.snapshot.pull_requests[1].model_copy(
+            update={
+                "number": 3,
+                "head_sha": "third-head",
+                "head_ref": "third-branch",
+                "created_at": "2026-10-03T12:30:00Z",
+            }
+        )
+        hold = MergeTrainBatchHeldOutEntry(
+            pull_request_number=3,
+            head_sha=third.head_sha,
+            conflicts_with=(1, 2),
+            probe_base_sha=self.snapshot.base_sha,
+            conflicts_with_head_shas=tuple(pr.head_sha for pr in self.snapshot.pull_requests),
+        )
+        for retry_field in ("check_retry_of", "infrastructure_retry_of", "batch_body_retry_of"):
+            for status in ("planned", "ready_for_checks", "failed"):
+                with (
+                    self.subTest(retry=retry_field, status=status),
+                    TemporaryDirectory() as directory,
+                ):
+                    store = FilesystemRecordStore(state_dir=Path(directory))
+                    failure = build_merge_train_batch_candidate_record(
+                        candidate=self.candidate, source="test", updated_at="2026-10-03T12:00:00Z"
+                    ).model_copy(update={"status": "superseded"})
+                    store.write_merge_train_batch_candidate_record(failure)
+                    retry = self.candidate.model_copy(
+                        update={
+                            "batch_id": self.candidate.batch_id + "-retry",
+                            "candidate_ref": self.candidate.candidate_ref + "-retry",
+                            "status": status,
+                            "required_checks_status": "unknown",
+                            "candidate_sha": "" if status == "planned" else "interrupted-sha",
+                            retry_field: failure.record_id,
+                        }
+                    )
+                    store.write_merge_train_batch_candidate_record(
+                        build_merge_train_batch_candidate_record(
+                            candidate=retry, source="test", updated_at="2026-10-03T12:01:00Z"
+                        ).model_copy(update={"status": "superseded"})
+                    )
+                    self.provider.checks_failed = False
+                    before = store.list_merge_train_batch_candidate_records()
+                    dry = self._fresh_plan(store, mutate=False, observe_checks=True)
+                    self.assertEqual(dry["reason_code"], "candidate_retry_resumed")
+                    self.assertEqual(store.list_merge_train_batch_candidate_records(), before)
+                    self.snapshot = original_snapshot.model_copy(
+                        update={"pull_requests": (*original_snapshot.pull_requests, third)}
+                    )
+                    result = self._fresh_plan(
+                        store, mutate=True, observe_checks=True, conflicts=(hold,)
+                    )
+                    resumed = MergeTrainBatchCandidate.model_validate(result["candidate"])
+                    self.assertEqual(resumed.candidate_ref, retry.candidate_ref)
+                    self.assertEqual(getattr(resumed, retry_field), failure.record_id)
+                    self.assertEqual(resumed.status, "planned")
+                    self.assertFalse(resumed.candidate_sha)
+                    self.assertEqual(resumed.held_out, (hold,))
+                    self.reflow_client.add_pull_request_label.assert_not_called()
+                    self.snapshot = original_snapshot
+                    if retry_field == "batch_body_retry_of":
+                        # A legacy body retry is not evidence that a real failure was flaky.
+                        self.provider.checks_failed = True
+                        active = store.list_merge_train_batch_candidate_records(status="active")[0]
+                        store.write_merge_train_batch_candidate_record(
+                            active.model_copy(update={"status": "superseded"})
+                        )
+                        refused = self._fresh_plan(store, mutate=False, observe_checks=True)
+                        self.assertEqual(refused["reason_code"], "failure_isolation")
+
+    def test_reobserved_singleton_is_fenced_before_persistence(self) -> None:
+        self.snapshot = self.snapshot.model_copy(
+            update={"pull_requests": self.snapshot.pull_requests[:1]}
+        )
+        self.candidate = self.candidate.model_copy(update={"entries": self.candidate.entries[:1]})
+        self.provider.checks_failed = False
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            store.write_merge_train_batch_candidate_record(
+                build_merge_train_batch_candidate_record(
+                    candidate=self.candidate, source="test", updated_at="2026-10-03T12:00:00Z"
+                ).model_copy(update={"status": "superseded"})
+            )
+            before = store.list_merge_train_batch_candidate_records()
+            lease = Mock(record=Mock(ordinary_job_binding=None))
+            lease.checkpoint.side_effect = MergeTrainControllerLeaseLostError("expired")
+            with self.assertRaises(MergeTrainControllerLeaseLostError):
+                self._fresh_plan(store, mutate=True, observe_checks=True, lease=lease)
+            self.assertEqual(store.list_merge_train_batch_candidate_records(), before)
+
+    def test_reobserved_singleton_retains_new_conflict_holds(self) -> None:
+        self.snapshot = self.snapshot.model_copy(
+            update={"pull_requests": self.snapshot.pull_requests[:1]}
+        )
+        self.candidate = self.candidate.model_copy(update={"entries": self.candidate.entries[:1]})
+        third = self.snapshot.pull_requests[0].model_copy(
+            update={
+                "number": 3,
+                "head_sha": "third-head",
+                "head_ref": "third-branch",
+                "created_at": "2026-10-03T12:30:00Z",
+            }
+        )
+        self.snapshot = self.snapshot.model_copy(
+            update={"pull_requests": (*self.snapshot.pull_requests, third)}
+        )
+        hold = MergeTrainBatchHeldOutEntry(
+            pull_request_number=3,
+            head_sha=third.head_sha,
+            conflicts_with=(1,),
+            probe_base_sha=self.snapshot.base_sha,
+            conflicts_with_head_shas=(self.candidate.entries[0].head_sha,),
+        )
+        self.provider.checks_failed = False
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            store.write_merge_train_batch_candidate_record(
+                build_merge_train_batch_candidate_record(
+                    candidate=self.candidate, source="test", updated_at="2026-10-03T12:00:00Z"
+                ).model_copy(update={"status": "superseded"})
+            )
+            result = self._fresh_plan(store, mutate=True, observe_checks=True, conflicts=(hold,))
+            self.assertEqual(result["controller_action"], "observe_candidate")
+            self.assertEqual(
+                store.list_merge_train_batch_candidate_records(status="active")[
+                    0
+                ].candidate.held_out,
+                (hold,),
+            )
 
     def test_historical_failure_does_not_apply_to_changed_inputs(self) -> None:
         for changed in ("base", "head", "policy", "order"):
@@ -518,7 +652,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                     {
                         "flaky": "candidate_checks_recovered",
                         "red_base": "base_checks_not_green",
-                        "missing_failure": "known_failed_batch_evidence_unavailable",
+                        "missing_failure": "failed_candidate_recovery_unavailable",
                     }[case],
                 )
                 active = store.list_merge_train_batch_candidate_records(status="active")
@@ -836,9 +970,10 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                         created_at="2026-10-03T12:00:00Z",
                     )
 
-    def test_unavailable_body_evidence_reports_failure_without_retry(self) -> None:
+    def test_unavailable_body_evidence_cannot_spend_a_body_retry(self) -> None:
         from control_plane.merge_train_github import MergeTrainGitHubError
 
+        self.provider.checks_failed = False
         with (
             TemporaryDirectory() as directory,
             patch(
@@ -846,11 +981,16 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 side_effect=MergeTrainGitHubError("provider unavailable", status_code=503),
             ),
         ):
-            result = self._reflow(FilesystemRecordStore(state_dir=Path(directory)), self.candidate)
-        self.assertEqual(result["reason_code"], "failure_isolation")
+            result = self._reflow(
+                FilesystemRecordStore(state_dir=Path(directory)),
+                self.candidate.model_copy(update={"check_retry_of": "earlier-failure"}),
+                observe_checks=True,
+            )
+        self.assertEqual(result["reason_code"], "candidate_check_retry_used")
         self.assertFalse(
             MergeTrainBatchCandidate.model_validate(result["candidate"]).batch_body_retry_of
         )
+        self.reflow_client.add_pull_request_label.assert_not_called()
 
     def test_only_bound_closed_unmerged_batch_is_recovery_evidence(self) -> None:
         for state in ("open", "merged", "missing", "wrong_binding"):

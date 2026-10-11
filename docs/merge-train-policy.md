@@ -845,6 +845,14 @@ Stopped recovery persists those holds and reports their conflicts too, so later
 passes do not repeat the probe. A newer passing observation of the same inputs
 supersedes an older failure; it permits fresh planning with new checks rather
 than authorizing a landing from historical evidence.
+An existing check, infrastructure or body retry that was retired before its
+checks completed resumes on its recorded retry ref and budget lineage; it is
+not mistaken for an exhausted failed retry. Construction/observation state is
+cleared for fresh validation and new conflict holds are retained. Legacy body
+retries still require fresh passing evidence on their original SHA before they
+can resume. Reobserving a singleton renews the controller lease before any
+record write and preserves the current holds. Retry-budget reads use the same
+current-base database scope as failure discovery.
 Changed base, policy, order or member heads permit fresh validation. Unreadable
 failure evidence stays stopped without assigning blame or rebuilding; the
 existing same-SHA passing-check and infrastructure recovery budgets still apply.

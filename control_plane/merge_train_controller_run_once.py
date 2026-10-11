@@ -4315,7 +4315,7 @@ def try_reflow_failed_merge_train_candidate(
                 "controller_action": "candidate_failed",
                 "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
                 "candidate": failed.model_dump(mode="json"),
-                "reason_code": "known_failed_batch_evidence_unavailable",
+                "reason_code": "failed_candidate_recovery_unavailable",
             }
         else:
             reobserved = _reobserve_failed_merge_train_candidate(
@@ -4328,6 +4328,8 @@ def try_reflow_failed_merge_train_candidate(
                 recorded_at=recorded_at,
                 trace_id=trace_id,
                 mutate=mutate,
+                lease=lease,
+                held_out=held_out,
             )
             if reobserved is not None:
                 return reobserved
@@ -4419,6 +4421,12 @@ def try_reflow_failed_merge_train_candidate(
                 replacement_id = recovery.get("merge_train_batch_candidate_record_id")
                 if recovery["controller_action"] == "block":
                     replacement_id = None
+                details = recovery.get("details")
+                recovery_source_id = recovery.get(
+                    "superseded_merge_train_batch_candidate_record_id"
+                ) or (
+                    details.get("recovery_source_record_id") if isinstance(details, dict) else None
+                )
                 lease.checkpoint(
                     active_action="reflow_candidate",
                     active_phase="retire_reflowed_failed_lineage",
@@ -4426,9 +4434,7 @@ def try_reflow_failed_merge_train_candidate(
                     active_pull_request_number=None,
                     step_payload={
                         "retired_candidate_record_id": active_candidate_record.record_id,
-                        "recovery_source_record_id": recovery.get(
-                            "superseded_merge_train_batch_candidate_record_id"
-                        ),
+                        "recovery_source_record_id": recovery_source_id,
                         "replacement_record_id": replacement_id,
                     },
                 )
@@ -4441,7 +4447,6 @@ def try_reflow_failed_merge_train_candidate(
                         replacement_id if isinstance(replacement_id, str) else None
                     ),
                 )
-                details = recovery.get("details")
                 recovery["details"] = {
                     **(details if isinstance(details, dict) else {}),
                     "retired_candidate_record_id": active_candidate_record.record_id,
@@ -4502,6 +4507,20 @@ def try_reflow_failed_merge_train_candidate(
     return result
 
 
+def _candidate_history_on_base(
+    *,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    repository: str,
+    base_branch: str,
+    base_sha: str,
+) -> tuple[MergeTrainBatchCandidateRecord, ...]:
+    return cast(
+        MergeTrainBatchCandidateBaseHistoryReadStore, candidate_store
+    ).list_merge_train_batch_candidate_records(
+        repository=repository, base_branch=base_branch, base_sha=base_sha
+    )
+
+
 def _resume_known_failed_batch(
     *,
     candidate_store: MergeTrainBatchCandidateRecordStore,
@@ -4519,30 +4538,106 @@ def _resume_known_failed_batch(
     conflict_probe: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
     """Resume recorded failure isolation rather than rebuild identical failed inputs."""
+    matching_records = tuple(
+        record
+        for record in _candidate_history_on_base(
+            candidate_store=candidate_store,
+            repository=snapshot.repository,
+            base_branch=snapshot.base_branch,
+            base_sha=snapshot.base_sha,
+        )
+        if record.ordinary_job_binding is None
+        and record.candidate.policy_key == dry_run_result.policy_key
+        and record.candidate.policy_sha256 == policy_sha256
+        and _merge_train_candidate_matches_dry_run_queue(
+            candidate=record.candidate,
+            dry_run_result=dry_run_result,
+            base_sha=snapshot.base_sha,
+        )
+    )
+    if matching_records:
+        latest = matching_records[0]
+        retry = latest.candidate
+        parent = next(
+            (
+                record
+                for record in matching_records
+                if record.record_id
+                in {retry.check_retry_of, retry.infrastructure_retry_of, retry.batch_body_retry_of}
+                and record.candidate.required_checks_status == "fail"
+            ),
+            None,
+        )
+        unfinished_retry = (
+            parent is not None
+            and latest.status == "superseded"
+            and (
+                retry.status in {"planned", "building", "ready_for_checks"}
+                or retry.status == "failed"
+                and retry.required_checks_status not in {"pass", "fail"}
+            )
+        )
+        if unfinished_retry and retry.batch_body_retry_of and parent is not None:
+            # Legacy body retries did not require passing evidence. Keep the
+            # current no-rebuild rule when resuming one of those records too.
+            try:
+                unfinished_retry = (
+                    github_client.observe_batch_candidate_checks(
+                        candidate=parent.candidate
+                    ).required_checks_status
+                    == "pass"
+                )
+            except MergeTrainGitHubError:
+                unfinished_retry = False
+        if unfinished_retry:
+            candidate = build_merge_train_batch_candidate(
+                dry_run_result=dry_run_result,
+                base_sha=snapshot.base_sha,
+                policy_sha256=policy_sha256,
+                created_at=recorded_at,
+                held_out=held_out,
+            ).model_copy(
+                update={
+                    "batch_id": retry.batch_id,
+                    "candidate_ref": retry.candidate_ref,
+                    "check_retry_of": retry.check_retry_of,
+                    "check_retry_evidence": retry.check_retry_evidence,
+                    "infrastructure_retry_of": retry.infrastructure_retry_of,
+                    "batch_body_retry_of": retry.batch_body_retry_of,
+                }
+            )
+            result: dict[str, object] = {
+                "repository": snapshot.repository,
+                "base_branch": snapshot.base_branch,
+                "mode": "plan_candidate" if mutate else "dry-run",
+                "controller_action": "plan_candidate",
+                "reason_code": "candidate_retry_resumed",
+                "superseded_merge_train_batch_candidate_record_id": latest.record_id,
+                "candidate": candidate.model_dump(mode="json"),
+                "dry_run_result": dry_run_result.model_dump(mode="json"),
+            }
+            if mutate:
+                result["merge_train_batch_candidate_record_id"] = _persist_replacement_candidate(
+                    candidate_store=candidate_store,
+                    active_candidate_record=latest,
+                    candidate=candidate,
+                    repository=snapshot.repository,
+                    base_branch=snapshot.base_branch,
+                    recorded_at=recorded_at,
+                    trace_id=trace_id,
+                    lease=lease,
+                )
+            return result
     failed_record = next(
         (
             record
-            for record in cast(
-                MergeTrainBatchCandidateBaseHistoryReadStore, candidate_store
-            ).list_merge_train_batch_candidate_records(
-                repository=snapshot.repository,
-                base_branch=snapshot.base_branch,
-                base_sha=snapshot.base_sha,
-            )
-            if record.ordinary_job_binding is None
+            for record in matching_records
+            if record.candidate.candidate_sha
             and (
                 record.candidate.status == "failed"
                 and record.candidate.required_checks_status == "fail"
                 or record.candidate.status == "passed"
                 and record.candidate.required_checks_status == "pass"
-            )
-            and record.candidate.candidate_sha
-            and record.candidate.policy_key == dry_run_result.policy_key
-            and record.candidate.policy_sha256 == policy_sha256
-            and _merge_train_candidate_matches_dry_run_queue(
-                candidate=record.candidate,
-                dry_run_result=dry_run_result,
-                base_sha=snapshot.base_sha,
             )
         ),
         None,
@@ -4577,6 +4672,8 @@ def _resume_known_failed_batch(
             recorded_at=recorded_at,
             trace_id=trace_id,
             mutate=mutate,
+            lease=lease,
+            held_out=held_out,
         )
     recovery = recovered or _recover_failed_merge_train_candidate(
         candidate_store=candidate_store,
@@ -4601,7 +4698,7 @@ def _resume_known_failed_batch(
         "controller_action": "candidate_failed",
         "merge_train_batch_candidate_record_id": failed_record.record_id,
         "candidate": failed_record.candidate.model_dump(mode="json"),
-        "reason_code": "known_failed_batch_evidence_unavailable",
+        "reason_code": "failed_candidate_recovery_unavailable",
     }
     if stopped["controller_action"] != "candidate_failed":
         return stopped
@@ -4706,8 +4803,11 @@ def _retry_closed_candidate_after_passing_checks(
         and _merge_train_candidate_matches_dry_run_queue(
             candidate=record.candidate, dry_run_result=dry_run_result, base_sha=snapshot.base_sha
         )
-        for record in candidate_store.list_merge_train_batch_candidate_records(
-            repository=repository, base_branch=base_branch
+        for record in _candidate_history_on_base(
+            candidate_store=candidate_store,
+            repository=repository,
+            base_branch=base_branch,
+            base_sha=snapshot.base_sha,
         )
     )
     if retry_used:
@@ -4719,8 +4819,11 @@ def _retry_closed_candidate_after_passing_checks(
                 dry_run_result=dry_run_result,
                 base_sha=snapshot.base_sha,
             )
-            for record in candidate_store.list_merge_train_batch_candidate_records(
-                repository=repository, base_branch=base_branch
+            for record in _candidate_history_on_base(
+                candidate_store=candidate_store,
+                repository=repository,
+                base_branch=base_branch,
+                base_sha=snapshot.base_sha,
             )
         )
         try:
@@ -4942,8 +5045,11 @@ def _infrastructure_retry_used(
         and _merge_train_candidate_matches_dry_run_queue(
             candidate=record.candidate, dry_run_result=dry_run_result, base_sha=base_sha
         )
-        for record in candidate_store.list_merge_train_batch_candidate_records(
-            repository=failed.repository, base_branch=failed.base_branch
+        for record in _candidate_history_on_base(
+            candidate_store=candidate_store,
+            repository=failed.repository,
+            base_branch=failed.base_branch,
+            base_sha=base_sha,
         )
     )
 
@@ -5130,6 +5236,8 @@ def _reobserve_failed_merge_train_candidate(
     recorded_at: str,
     trace_id: str,
     mutate: bool,
+    lease: MergeTrainControllerLeaseContext,
+    held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
 ) -> dict[str, object] | None:
     """Let an unchanged candidate recover when its failed checks pass on a re-run.
 
@@ -5152,6 +5260,7 @@ def _reobserve_failed_merge_train_candidate(
         return None
     if observed_candidate.required_checks_status == "fail":
         return None
+    observed_candidate = observed_candidate.model_copy(update={"held_out": held_out})
     result: dict[str, object] = {
         "repository": repository,
         "base_branch": base_branch,
@@ -5161,6 +5270,13 @@ def _reobserve_failed_merge_train_candidate(
         "candidate": observed_candidate.model_dump(mode="json"),
     }
     if mutate:
+        lease.checkpoint(
+            active_action="reflow_candidate",
+            active_phase="persist_reobserved_candidate",
+            active_record_id=active_candidate_record.record_id,
+            active_pull_request_number=None,
+            step_payload={"candidate_record_id": active_candidate_record.record_id},
+        )
         candidate_record = build_merge_train_batch_candidate_record(
             ordinary_job_binding=active_candidate_record.ordinary_job_binding,
             candidate=observed_candidate,
@@ -5448,6 +5564,7 @@ def _stop_failed_batch_after_conflict_probe(
     """
     failed = active_candidate_record.candidate
     record_id = active_candidate_record.record_id
+    superseded_record_id: str | None = None
     if mutate and (probe.held_out != failed.held_out or active_candidate_record.status != "active"):
         lease.checkpoint(
             active_action="reflow_candidate",
@@ -5465,6 +5582,15 @@ def _stop_failed_batch_after_conflict_probe(
         )
         candidate_store.write_merge_train_batch_candidate_record(updated_record)
         record_id = updated_record.record_id
+        _supersede_active_merge_train_batch_candidate_records(
+            record_store=candidate_store,
+            repository=repository,
+            base_branch=base_branch,
+            batch_id=failed.batch_id,
+            replacement_record_id=record_id,
+        )
+        if active_candidate_record.status == "active":
+            superseded_record_id = active_candidate_record.record_id
     result: dict[str, object] = {
         "repository": repository,
         "base_branch": base_branch,
@@ -5473,8 +5599,16 @@ def _stop_failed_batch_after_conflict_probe(
         "reason_code": "unchanged_batch_after_conflict_probe",
         **(stopped_result or {}),
         "merge_train_batch_candidate_record_id": record_id,
-        "superseded_merge_train_batch_candidate_record_id": active_candidate_record.record_id,
         "candidate": failed.model_dump(mode="json"),
+    }
+    if superseded_record_id is not None:
+        result["superseded_merge_train_batch_candidate_record_id"] = superseded_record_id
+    else:
+        result.pop("superseded_merge_train_batch_candidate_record_id", None)
+    details = result.get("details")
+    result["details"] = {
+        **(details if isinstance(details, dict) else {}),
+        "recovery_source_record_id": active_candidate_record.record_id,
     }
     if probe.report is not None:
         result["conflict_probe"] = probe.report
