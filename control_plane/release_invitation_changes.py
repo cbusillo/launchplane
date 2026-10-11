@@ -12,6 +12,7 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.release_review import ReleaseChecklist, ReleaseReviewItem
 from control_plane.product_review import source_control_pull_request_url
 from control_plane.release_review import ReleaseReviewStore
+from control_plane.release_review_github import _markdown_lines
 
 
 class InvitationEvidenceStore(ReleaseReviewStore, Protocol):
@@ -38,6 +39,7 @@ class ReleaseInvitationNotesUnavailable(ValueError):
 class InvitationChange:
     item: ReleaseReviewItem
     legacy_url: str
+    feature_name: str = ""
 
 
 def _release_items(
@@ -67,10 +69,26 @@ def _release_items(
                 continue
             # The train's batch notes have one generated ### #number section per
             # constituent. Classification still comes from that PR's records.
-            sections = re.split(r"(?m)^### #([0-9]+)[^\n]*\n", item.owner_test_notes)
-            notes = dict(zip(sections[1::2], sections[2::2]))
+            sections: dict[int, tuple[str, list[str]]] = {}
+            member: int | None = None
+            for line, heading, _fence in _markdown_lines(item.owner_test_notes):
+                if heading and len(heading[1]) == 3:
+                    # These headings are generated, with literal PR titles.
+                    # CommonMark's optional closing hashes are title bytes here.
+                    match = re.fullmatch(r" {0,3}###\s+#([0-9]+)(?:[ \t]+(.*?))?[ \t]*", line)
+                    if match:
+                        member = int(match[1])
+                        if member in sections:
+                            raise ReleaseInvitationNotesUnavailable(
+                                f"Release invitation batch notes repeat {repository}#{member}."
+                            )
+                        sections[member] = ((match[2] or "").strip(), [])
+                        continue
+                if member is not None:
+                    sections[member][1].append(line)
             for entry in batch.entries:
-                note = notes.get(str(entry.pull_request_number), "").strip()
+                title, lines = sections.get(entry.pull_request_number, ("", []))
+                note = "\n".join(lines).strip()
                 result.append(
                     (
                         repository,
@@ -83,10 +101,12 @@ def _release_items(
                                         pull_request_number=entry.pull_request_number,
                                     ),
                                     "head_sha": entry.expected_head_sha,
+                                    "title": title,
                                     "owner_test_notes": note,
                                 }
                             ),
                             item.url,
+                            title,
                         ),
                     )
                 )
