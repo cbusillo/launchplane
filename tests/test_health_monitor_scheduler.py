@@ -36,9 +36,8 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.store = PostgresRecordStore(
-            database_url=_sqlite_database_url(Path(self.directory.name) / "records.sqlite3")
-        )
+        self.database_url = _sqlite_database_url(Path(self.directory.name) / "records.sqlite3")
+        self.store = PostgresRecordStore(database_url=self.database_url)
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
         self.now = float(int(datetime.now(timezone.utc).timestamp() / MONITOR_INTERVAL_SECONDS))
@@ -71,13 +70,15 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
         self.now += 1
         self.scheduler.run_once()
         self.scheduler.watch_once()
+        reader = PostgresRecordStore(database_url=self.database_url)
+        self.addCleanup(reader.close)
         with (
-            patch.object(self.store, "reserve_mutation", side_effect=AssertionError("read wrote")),
+            patch.object(reader, "reserve_mutation", side_effect=AssertionError("read wrote")),
             patch.object(
-                self.store, "write_idempotency_record", side_effect=AssertionError("read wrote")
+                reader, "write_idempotency_record", side_effect=AssertionError("read wrote")
             ),
         ):
-            evidence = read_health_monitor_status(self.store, now=self.now, slots=2)
+            evidence = read_health_monitor_status(reader, now=self.now, slots=2)
         current, prior = evidence.slots
         self.assertIsNotNone(current.completion)
         self.assertFalse(current.completed_on_time)

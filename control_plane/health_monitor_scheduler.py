@@ -30,6 +30,7 @@ from control_plane.workflows.public_ingress_monitor import (
 MONITOR_INTERVAL_SECONDS = PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS
 MONITOR_COMPLETION_GRACE_SECONDS = 5 * 60
 MONITOR_POLL_SECONDS = 30
+# Persisted contract, including the one-time activation record; keep it stable.
 MONITOR_RECEIPT_FINGERPRINT = "health-monitor-scheduler-v1"
 _SCOPE = "launchplane:health-monitor-scheduler"
 _ROUTE = "service:health-monitor-scheduler"

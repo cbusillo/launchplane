@@ -1548,7 +1548,7 @@ Watchdog reporting has its own renewed lease and DB-backed per-slot receipts,
 so replicas and restarts share miss/recovery delivery state.
 
 Read persisted clock evidence with `GET /v1/service/health-monitor/status`
-under the existing `launchplane_service.read` authority. `slots` selects one to
+under the [existing service-read authority](service-boundary.md). `slots` selects one to
 48 UTC half-hour slots (six by default), newest first; pass the returned
 `next_end_slot` as `end_slot` to read an earlier window across service restarts.
 The database-backed response includes activation, scheduled starts, completion

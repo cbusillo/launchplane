@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from control_plane.health_monitor_scheduler import HealthMonitorScheduler
+from control_plane.health_monitor_scheduler import HealthMonitorScheduler, monitor_slot
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import (
@@ -52,6 +52,10 @@ class HealthMonitorStatusHttpTests(unittest.IsolatedAsyncioTestCase):
                     "/v1/service/health-monitor/status?slots=49",
                     headers={"Authorization": "Bearer local-operator-token"},
                 )
+                future = await client.get(
+                    f"/v1/service/health-monitor/status?end_slot={monitor_slot(now) + 100}",
+                    headers={"Authorization": "Bearer local-operator-token"},
+                )
             self.assertEqual(response.status_code, 200)
             monitor = response.json()["monitor"]
             self.assertEqual(len(monitor["slots"]), 1)
@@ -60,6 +64,8 @@ class HealthMonitorStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("fixture-private-lease", response.text)
             self.assertNotIn("idempotency_key", response.text)
             self.assertEqual(oversized.status_code, 400)
+            self.assertEqual(future.status_code, 400)
+            self.assertEqual(future.json()["error"]["code"], "invalid_slot_range")
 
     async def test_requires_authentication_service_read_and_database_storage(self) -> None:
         for authorized, token, expected in (

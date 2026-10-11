@@ -841,6 +841,7 @@ from control_plane.storage.product_authority_bundle import (
 )
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.health_monitor_status import (
+    HealthMonitorSlotRangeError,
     HealthMonitorStatusResponse,
     read_health_monitor_status,
 )
@@ -5292,12 +5293,19 @@ def create_launchplane_fastapi_app(
                 slots=slots,
                 end_slot=end_slot,
             )
+        except HealthMonitorSlotRangeError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_slot_range",
+                message="Read at most 48 current or historical scheduler slots.",
+            ) from error
         except ValueError as error:
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="scheduler_evidence_conflict",
-                message="Scheduler receipt evidence or the requested slot range is invalid.",
+                message="Stored scheduler receipt evidence is invalid.",
             ) from error
         return HealthMonitorStatusResponse(trace_id=trace_id, monitor=monitor)
 

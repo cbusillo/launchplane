@@ -45,6 +45,10 @@ class HealthMonitorStatusResponse(BaseModel):
     monitor: HealthMonitorStatus
 
 
+class HealthMonitorSlotRangeError(ValueError):
+    """The caller requested an out-of-bounds or future slot window."""
+
+
 def _timestamp(seconds: float) -> str:
     return datetime.fromtimestamp(seconds, timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -66,7 +70,7 @@ def read_health_monitor_status(
     current_slot = monitor_slot(now)
     last_slot = current_slot if end_slot is None else end_slot
     if not 1 <= slots <= 48 or not 0 <= last_slot <= current_slot:
-        raise ValueError("Read at most 48 current or historical scheduler slots")
+        raise HealthMonitorSlotRangeError("Read at most 48 current or historical scheduler slots")
 
     def read(key: str) -> MonitorCompletionReceipt | None:
         return _receipt(
