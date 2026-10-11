@@ -164,42 +164,42 @@ def _bindings_in(value: Any) -> list[_Binding]:
     return result
 
 
-def _schema_memo(value: Any) -> dict[int, Any]:
-    """Share compiled schemas, but copy the mutable route and field metadata."""
+def _schema_memo(state: dict[str, Any]) -> dict[int, Any]:
+    """Copy route fields while sharing their already-compiled validators."""
     from fastapi.dependencies.models import Dependant
-    from fastapi._compat import ModelField
 
-    result: dict[int, Any] = {id(_Unset): _Unset}
-    if isinstance(value, ModelField):
-        cloned = copy(value)
-        info = copy(value.field_info)
-        field_memo: dict[int, Any] = {id(_Unset): _Unset}
-        # FieldInfo's copy preserves immutable annotations and copies its
-        # attribute map. Isolate mutable defaults, constraints and schema hints
-        # without walking the compiled schema or the full annotation graph.
-        for name, attribute in value.field_info.asdict()["attributes"].items():
-            if isinstance(attribute, (dict, list, set)):
-                setattr(info, name, deepcopy(attribute, field_memo))
-        info.metadata = deepcopy(value.field_info.metadata, field_memo)
-        if hasattr(value.field_info, "__dict__"):
-            info.__dict__.update(deepcopy(vars(value.field_info), field_memo))
-        cloned.field_info = info
-        cloned.config = deepcopy(value.config, field_memo)
-        result[id(value)] = cloned
-    elif isinstance(value, dict):
-        for item in value.values():
-            result.update(_schema_memo(item))
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            result.update(_schema_memo(item))
-    elif isinstance(value, Dependant):
+    fields = [state.get(name) for name in ("body_field", "response_field", "stream_item_field")]
+    fields.extend(state.get("response_fields", {}).values())
+
+    def dependency_fields(dependant: Dependant) -> None:
         for name in (
             "path_params",
             "query_params",
             "header_params",
             "cookie_params",
             "body_params",
-            "dependencies",
         ):
-            result.update(_schema_memo(getattr(value, name)))
+            fields.extend(getattr(dependant, name))
+        for dependency in dependant.dependencies:
+            dependency_fields(dependency)
+
+    dependency_fields(state["dependant"])
+    result: dict[int, Any] = {id(_Unset): _Unset}
+    for field in fields:
+        if field is None or id(field) in result:
+            continue
+        cloned = copy(field)
+        info = copy(field.field_info)
+        field_memo: dict[int, Any] = {id(_Unset): _Unset}
+        # Preserve immutable annotations; isolate public mutable defaults,
+        # constraints and schema hints without walking the compiled schema.
+        for name, attribute in field.field_info.asdict()["attributes"].items():
+            if isinstance(attribute, (dict, list, set)):
+                setattr(info, name, deepcopy(attribute, field_memo))
+        info.metadata = deepcopy(field.field_info.metadata, field_memo)
+        if hasattr(field.field_info, "__dict__"):
+            info.__dict__.update(deepcopy(vars(field.field_info), field_memo))
+        cloned.field_info = info
+        cloned.config = deepcopy(field.config, field_memo)
+        result[id(field)] = cloned
     return result

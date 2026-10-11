@@ -27,7 +27,7 @@ def _app(
         return allowed
 
     async def read(
-        request: Request,
+        http_request: Request,
         value: Annotated[int, Query(ge=minimum)],
         records: Annotated[dict[str, str], Depends(current_store)],
         policy: Annotated[bool, Depends(current_policy)],
@@ -36,7 +36,7 @@ def _app(
             "record": records["record"],
             "allowed": policy,
             "value": value,
-            "state": getattr(request.app.state, "marker", None),
+            "state": getattr(http_request.app.state, "marker", None),
         }
 
     app.add_api_route("/example", read, methods=["GET"], tags=["example"])
@@ -70,7 +70,7 @@ class PreparedRouteIsolationTests(unittest.IsolatedAsyncioTestCase):
 
         def prepare(route: APIRoute, path: str, *args: Any, **kwargs: Any) -> None:
             prepared_paths.append(path)
-            original(route, path, *args, **kwargs)
+            original.__get__(route)(path, *args, **kwargs)
 
         with patch.object(APIRoute, "__init__", prepare):
             app = build()
@@ -130,8 +130,8 @@ class PreparedRouteIsolationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_callable_instance_dependencies_keep_their_own_behavior(self) -> None:
         class StoreReader:
-            def __init__(self, value: str) -> None:
-                self.value = value
+            def __init__(self, record: str) -> None:
+                self.value = record
 
             def __call__(self) -> str:
                 return self.value
