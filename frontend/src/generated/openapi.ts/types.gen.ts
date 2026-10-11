@@ -4440,20 +4440,20 @@ export type RuntimeEnvironmentRecord = {
 export type RuntimeIdentity = {
     artifact_id: string;
     context: string;
-    database_uuid: string;
+    database_uuid?: string;
     deployed_at: string;
     deployment_record_id: string;
     environment_kind: string;
-    image_digest: string;
+    image_digest?: string;
     image_reference: string;
     instance: string;
     preview_generation_id: string;
     preview_id: string;
     product: string;
-    release_id: string;
+    release_id?: string;
     release_tuple_id: string;
     schema_version: number;
-    slot: string;
+    slot?: string;
     source_git_ref: string;
 };
 

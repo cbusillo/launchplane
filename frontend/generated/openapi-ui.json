@@ -34188,7 +34188,8 @@
           "database_uuid": {
             "default": "",
             "title": "Database Uuid",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "deployed_at": {
             "default": "",
@@ -34208,7 +34209,8 @@
             "default": "",
             "pattern": "^(|sha256:[0-9a-f]{64})$",
             "title": "Image Digest",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "image_reference": {
             "default": "",
@@ -34237,7 +34239,8 @@
           "release_id": {
             "default": "",
             "title": "Release Id",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "release_tuple_id": {
             "default": "",
@@ -34253,7 +34256,8 @@
           "slot": {
             "default": "",
             "title": "Slot",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "source_git_ref": {
             "title": "Source Git Ref",
@@ -34263,20 +34267,16 @@
         "required": [
           "artifact_id",
           "context",
-          "database_uuid",
           "deployed_at",
           "deployment_record_id",
           "environment_kind",
-          "image_digest",
           "image_reference",
           "instance",
           "preview_generation_id",
           "preview_id",
           "product",
-          "release_id",
           "release_tuple_id",
           "schema_version",
-          "slot",
           "source_git_ref"
         ],
         "title": "RuntimeIdentity",

@@ -30,6 +30,10 @@ port or Docker router. Both web slots have cron threads disabled. A web guard
 waits for its exact slot/module-plan receipt marker before starting any registry.
 Existing serving Compose configuration and routes must remain unchanged.
 
+Runtime identity omits unset slot, release, image-digest and database-UUID fields
+so legacy container identities keep their reviewed service-restart digests.
+Populated two-slot identity fields remain serialized and bound to verification.
+
 `slot_maintenance.py` supplies the normalized candidate/production manifests,
 resolved compatibility record and selected database to devkit's full
 `--post-deploy-maintenance` entrypoint. It verifies the immutable runner image,

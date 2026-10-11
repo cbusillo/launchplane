@@ -33,10 +33,27 @@ class RuntimeIdentity(BaseModel):
     preview_id: str = ""
     preview_generation_id: str = ""
     deployed_at: str = ""
-    slot: str = ""
-    release_id: str = ""
-    image_digest: str = Field(default="", pattern=r"^(|sha256:[0-9a-f]{64})$")
-    database_uuid: str = ""
+    slot: str = Field(
+        default="",
+        exclude_if=lambda value: value == "",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    release_id: str = Field(
+        default="",
+        exclude_if=lambda value: value == "",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    image_digest: str = Field(
+        default="",
+        pattern=r"^(|sha256:[0-9a-f]{64})$",
+        exclude_if=lambda value: value == "",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    database_uuid: str = Field(
+        default="",
+        exclude_if=lambda value: value == "",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="before")
     @classmethod

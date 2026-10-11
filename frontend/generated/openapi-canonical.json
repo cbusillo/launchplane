@@ -43390,7 +43390,8 @@
           "database_uuid": {
             "default": "",
             "title": "Database Uuid",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "deployed_at": {
             "default": "",
@@ -43410,7 +43411,8 @@
             "default": "",
             "pattern": "^(|sha256:[0-9a-f]{64})$",
             "title": "Image Digest",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "image_reference": {
             "default": "",
@@ -43439,7 +43441,8 @@
           "release_id": {
             "default": "",
             "title": "Release Id",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "release_tuple_id": {
             "default": "",
@@ -43455,7 +43458,8 @@
           "slot": {
             "default": "",
             "title": "Slot",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "source_git_ref": {
             "title": "Source Git Ref",
