@@ -4436,6 +4436,12 @@ export type TerminalEnrollmentCapabilityReadiness = {
     state: 'configured_identity_absent' | 'ready' | 'missing' | 'unmanaged' | 'mismatched' | 'ambiguous' | 'unavailable';
 };
 
+export type UrgentReleaseReviewEnvelope = {
+    checklist_digest: string;
+    product: string;
+    reason: string;
+};
+
 export type WorkGraphIssueInboxResponse = {
     configured: boolean;
     inbox: GitHubIssueInboxReadModel;
@@ -6530,6 +6536,32 @@ export type WriteReleaseReviewDecisionResponses = {
 };
 
 export type WriteReleaseReviewDecisionResponse = WriteReleaseReviewDecisionResponses[keyof WriteReleaseReviewDecisionResponses];
+
+export type OpenUrgentReleaseReviewData = {
+    body: UrgentReleaseReviewEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/release-review/urgent-openings';
+};
+
+export type OpenUrgentReleaseReviewErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type OpenUrgentReleaseReviewError = OpenUrgentReleaseReviewErrors[keyof OpenUrgentReleaseReviewErrors];
+
+export type OpenUrgentReleaseReviewResponses = {
+    200: ReleaseReviewResponse;
+};
+
+export type OpenUrgentReleaseReviewResponse = OpenUrgentReleaseReviewResponses[keyof OpenUrgentReleaseReviewResponses];
 
 export type ConfigureLaunchplaneGithubDeliveryData = {
     body: DeliveryGitHubAppConfigurationRequest;

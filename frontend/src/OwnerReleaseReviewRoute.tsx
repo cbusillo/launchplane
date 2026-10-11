@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { readReleaseReview, writeReleaseReviewDecision } from "./api";
+import { openUrgentReleaseReview, readReleaseReview, writeReleaseReviewDecision } from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import type { ClientReleaseRunView, ReleaseReviewDecisionEnvelope, ReleaseReviewResponse, ReleaseReviewItem } from "./generated/openapi.ts";
 import { groupReleaseItems, untestedReason } from "./release-review-model";
@@ -79,6 +79,8 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const [reason, setReason] = useState("");
   const [overrideReason, setOverrideReason] = useState("");
   const [hotfixReason, setHotfixReason] = useState("");
+  const [urgentReason, setUrgentReason] = useState("");
+  const [urgentSent, setUrgentSent] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [recorded, setRecorded] = useState(false);
@@ -90,6 +92,8 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     setReason("");
     setOverrideReason("");
     setHotfixReason("");
+    setUrgentReason("");
+    setUrgentSent(false);
     setRecorded(false);
     const request = fixtureMode
       ? loadDevFixtures().then(fixtures => fixtures.releaseReviewForFixture(fixtureMode))
@@ -122,6 +126,23 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     }
   }
 
+  async function askClientNow() {
+    if (!response?.review.checklist || busy) return;
+    setBusy(true);
+    setError("");
+    setUrgentSent(false);
+    try {
+      if (!fixtureMode) {
+        setResponse(await openUrgentReleaseReview({ product, checklist_digest: response.review.checklist_digest, reason: urgentReason }));
+      }
+      setUrgentSent(true);
+    } catch {
+      setError("The Client was not asked. The release may have changed or may not be ready; reload this page and try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const checklist = response?.review.checklist;
   const latestDecision = response?.review.latest_decision;
   const testingUrl = checklist ? safeExternalUrl(checklist.testing_url) : null;
@@ -132,6 +153,15 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const reviewingHotfix = !!response?.reviewing_temporary_hotfix;
   const incomplete = !checklist || !(reviewingHotfix || testingUrl) || response?.review.checklist_complete !== true;
   const hasChanges = !!checklist && checklist.production.source_commit !== checklist.candidate.source_commit;
+  const client = response?.owner_github_login ?? "";
+  // A viewer who is not the Client learns first who the Client is and that their
+  // own decision cannot start the release.
+  const clientRule = client ? `${client} is the Client, and only ${client}'s Accept ${releaseStarts ? "starts" : "approves"} this release.` : "";
+  const viewerRole = response?.viewer_is_owner
+    ? "Reviewing as the Client"
+    : response?.can_override
+      ? client ? `You are not the Client. ${clientRule} A decision you record here is an admin override and does not start the release.` : "Reviewing as an admin"
+      : `Viewing this release · read only${client ? `. ${clientRule}` : ""}`;
   return <section className="owner-review-page">
     <div className="owner-review-intro">
       <p className="eyebrow">Release decision</p>
@@ -142,7 +172,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     {!response && !error ? <p role="status">Loading the release checklist…</p> : null}
     {response ? <article className="owner-review-card">
       <h2>{response.display_name}</h2>
-      <p className="owner-review-state">{response.viewer_is_owner ? "Reviewing as the Client" : response.can_override ? "Reviewing as an admin" : "Viewing this release · read only"}</p>
+      <p className="owner-review-state">{viewerRole}</p>
       {!response.owner_github_login ? <p role="alert">No Client set for this product. Ask an admin to name one.</p> : null}
       {response.reviewing_temporary_hotfix
         // The urgent fix runs on the live site; testing may already carry newer work.
@@ -182,6 +212,15 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
           <button className="button button-primary" type="button" disabled={busy || incomplete} onClick={() => void decide("accepted", reason)}>Accept release</button>
           <button className="button" type="button" disabled={busy || !reason.trim()} onClick={() => void decide("changes_requested", reason)}>Request changes</button>
         </div>
+      </section> : null}
+      {checklist && response.can_override && client && !latestDecision ? <section className="owner-review-action" aria-label="Ask the Client now">
+        <h3>Ask {client} to review this release now</h3>
+        <p>A release with only engineering changes waits for the next release that has something for {client} to check. If this one must go live sooner, such as a security or reliability fix, say why in plain words. Launchplane sends {client} a release review with your reason; nothing goes live until {client} accepts it. If {client} was already asked about this release, nothing new is sent.</p>
+        <label><span>Why this release cannot wait</span><textarea value={urgentReason} maxLength={1000} disabled={busy} onChange={event => setUrgentReason(event.target.value)} /></label>
+        <div className="owner-review-action-buttons">
+          <button className="button" type="button" disabled={busy || incomplete || !urgentReason.trim()} onClick={() => void askClientNow()}>Ask {client} to review now</button>
+        </div>
+        {urgentSent ? <p role="status" className="owner-review-success">{client} has been asked to review this release. Nothing has been deployed.</p> : null}
       </section> : null}
       {checklist && response.can_override ? <section className="owner-review-action release-review-override" aria-label="Admin Approval Override">
         <h3>Admin Approval Override</h3>

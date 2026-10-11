@@ -140,6 +140,16 @@ test("Operator records a separate reasoned override without Owner controls", asy
   await page.goto("/ui/owner-review?product=example-site&fixture=operator");
   await expect(page.getByRole("button", { name: "Accept release" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Request changes" })).toHaveCount(0);
+  // The first line tells a non-Client who the Client is and what their decision does.
+  const role = page.locator(".owner-review-card > .owner-review-state").first();
+  await expect(role).toContainText("You are not the Client. site-owner is the Client");
+  await expect(role).toContainText("admin override and does not start the release");
+  const askNow = page.getByRole("region", { name: "Ask the Client now", exact: true });
+  const ask = askNow.getByRole("button", { name: "Ask site-owner to review now" });
+  await expect(ask).toBeDisabled();
+  await askNow.getByRole("textbox").fill("Fixes a login security problem.");
+  await ask.click();
+  await expect(askNow.getByRole("status")).toContainText("Nothing has been deployed.");
   const override = page.getByRole("region", { name: "Admin Approval Override", exact: true });
   const record = override.getByRole("button");
   await expect(record).toBeDisabled();
@@ -150,6 +160,7 @@ test("Operator records a separate reasoned override without Owner controls", asy
   const latest = page.getByRole("region", { name: "Latest release decision" });
   await expect(latest).toContainText("site-operator");
   await expect(latest.getByRole("blockquote")).toHaveText("Reviewed the missing instructions with the Client.");
+  await expect(askNow).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("operator-recorded.png"), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(mutations).toEqual([]);
