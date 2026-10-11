@@ -21,6 +21,7 @@ import fastapi.exceptions as fastapi_exceptions
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.datastructures import DefaultPlaceholder
 from fastapi.concurrency import run_in_threadpool
+from control_plane.http_route_preparation import PreparedAPIRoute
 from control_plane.http_routes.support import run_in_worker_thread
 from fastapi.exceptions import RequestValidationError
 from control_plane.github_request_timing import github_request_tally
@@ -3831,6 +3832,7 @@ class _LaunchplaneFastAPI(FastAPI):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._launchplane_error_response_model_registered = False
         super().__init__(*args, **kwargs)
+        self.router.route_class = PreparedAPIRoute
 
     def add_api_route(
         self,
