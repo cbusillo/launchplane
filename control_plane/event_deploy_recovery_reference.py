@@ -119,5 +119,5 @@ def resolve_event_deploy_recovery_coordinates(
             "No saved original event deploy request matches the held reservation."
         )
     if len(matches) != 1:
-        raise ValueError("Original event deploy evidence is absent or ambiguous.")
+        raise ValueError("Original event deploy evidence is ambiguous.")
     return EventDeployRecoveryCoordinates(reservation, next(iter(matches.values())), context)
