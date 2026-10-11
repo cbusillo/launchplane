@@ -296,3 +296,27 @@ test("another scope's own operation never removes a pre-upgrade record", async (
   assert.notEqual(storage.getItem(legacyKey), null);
   assert.deepEqual(recoverBrowserOperationState(ownerScope, storage).identity, legacy.identity);
 });
+
+test("a retry waiting to dispatch keeps the original key after reload", async () => {
+  const storage = memoryStorage();
+  const legacyKey = "launchplane.browser-operation.example-site-testing-runtime-settings-apply";
+  for (const [scope, seed] of [
+    ["example-site:testing:runtime-settings:apply", null],
+    ["example-site:testing:runtime-settings:apply", legacyKey],
+  ]) {
+    const original = await dispatchedOperation(scope, { product: "example-site" });
+    const uncertain = cancelBrowserOperation(original);
+    if (seed) storage.setItem(seed, JSON.stringify(uncertain));
+    else persistBrowserOperationState(scope, uncertain, storage);
+
+    for (const retry of [retryBrowserOperation(uncertain), beginBrowserOperation(retryBrowserOperation(uncertain))]) {
+      persistBrowserOperationState(scope, retry, storage);
+      const recovered = recoverBrowserOperationState(scope, storage);
+      assert.equal(recovered.phase, "uncertain");
+      assert.equal(recovered.requiresIdempotencyContinuity, true);
+      assert.deepEqual(recovered.identity, original.identity);
+    }
+    persistBrowserOperationState(scope, createBrowserOperationState(), storage);
+    storage.removeItem(legacyKey);
+  }
+});

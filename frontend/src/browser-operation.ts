@@ -108,7 +108,12 @@ export function recoverBrowserOperationState(
       storage.removeItem(key);
       return createBrowserOperationState();
     }
-    if (candidate.phase !== "submitting" && candidate.phase !== "uncertain") {
+    // A retry still waiting to dispatch keeps the original key's guard as well.
+    if (
+      candidate.phase !== "submitting" &&
+      candidate.phase !== "uncertain" &&
+      candidate.requiresIdempotencyContinuity !== true
+    ) {
       storage.removeItem(key);
       return createBrowserOperationState();
     }
