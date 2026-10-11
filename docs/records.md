@@ -3243,3 +3243,13 @@ field and cannot itself be evaluated as authorization.
 
 **Preserved history:** references to Phase 1 planning records describe the
 pre-worker lifecycle and do not constrain the current Phase 2 statuses.
+
+### TLS observation reader compatibility
+
+TLS observation readers also accept `route_binding_status: missing` with
+`source_kind: profile_intent`. These fields identify a public HTTPS name from
+a product profile without claiming route-management authority. Incident readers
+preserve the same missing authority. This additive reader stage does not change
+monitor discovery or produce that metadata. Deploy and retain this reader as the
+rollback version before enabling a writer that emits the new values; an older
+reader cannot parse them.

@@ -592,6 +592,68 @@ class PublicIngressMonitorCliTests(unittest.TestCase):
 
 
 class PublicIngressMonitorTests(unittest.TestCase):
+    def test_persisted_tls_readers_preserve_bound_and_profile_intent_evidence(self) -> None:
+        for binding_status in ("active", "disabled", "missing"):
+            with self.subTest(binding_status=binding_status):
+                fixture_store = _Store((_profile(),))
+                fixture_store.route_bindings.append(_route_binding())
+                target = next(
+                    target
+                    for target in discover_public_ingress_monitor_targets(fixture_store)
+                    if target.check_kind == "tls"
+                )
+                observation = check_public_ingress_target(
+                    target=target,
+                    checked_at="2026-07-14T12:30:00Z",
+                    timeout_seconds=10,
+                    http_get=lambda *_args: self.fail("TLS probe must not fetch HTTP"),
+                    tls_get=_constant_tls_probe(
+                        PublicTlsProbeResult(
+                            status="expired",
+                            failure_code="tls_expired",
+                            summary="certificate expired",
+                            certificate=_tls_certificate(days_remaining=-1),
+                        )
+                    ),
+                )
+                payload = observation.model_dump(mode="json")
+                recorded = payload["targets"][0]["tls"]["recorded"]
+                recorded["route_binding_status"] = binding_status
+                if binding_status == "missing":
+                    recorded.update(
+                        owner="none",
+                        ingress_provider="",
+                        termination_kind="none",
+                        source_kind="profile_intent",
+                        source_label="product-profile HTTPS intent",
+                        source_record_ids=[fixture_store._profiles[0].product],
+                        freshness_status="missing",
+                        stale_after="",
+                        provider_evidence={},
+                    )
+                observation = PublicIngressObservationRecord.model_validate(payload)
+                incident = reconcile_public_ingress_incident(
+                    record_store=fixture_store, record=observation, write_records=False
+                )[0]
+                with TemporaryDirectory() as directory:
+                    store = PostgresRecordStore(
+                        database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+                    )
+                    try:
+                        store.ensure_schema()
+                        store.write_public_ingress_observation_record(observation)
+                        store.write_public_ingress_incident_record(incident)
+                        self.assertEqual(
+                            store.list_public_ingress_observation_records(), (observation,)
+                        )
+                        self.assertEqual(
+                            store.read_public_ingress_incident_record(incident.incident_id),
+                            incident,
+                        )
+                        self.assertEqual(store.list_public_ingress_incident_records(), (incident,))
+                    finally:
+                        store.close()
+
     def test_each_monitor_run_refreshes_public_and_private_lane_verification(self) -> None:
         identity = _identity()
         for private in (False, True):
