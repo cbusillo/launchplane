@@ -433,11 +433,10 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator sees silenced incident state at narrow width", { tag: "@responsive" }, async ({
+  test("operator sees silenced incident state at both widths", { tag: "@responsive" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
-    await page.setViewportSize({ width: 390, height: 844 });
 
     await page.goto(
       "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=silenced",

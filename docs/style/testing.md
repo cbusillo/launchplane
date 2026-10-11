@@ -236,8 +236,8 @@ product workspace, recent activity, environment diagnostics, blocked and
 dry-run action boundaries, plus mixed, ready, unsupported, denied, failed,
 empty, and loading operational-readiness states. Desktop runs every test; narrow
 width runs only tests explicitly tagged `@layout` or `@responsive`. Mark tests
-that exercise layout, overflow, touch-target spacing, or responsive behavior
-using Playwright test details, for example:
+whose purpose includes layout, overflow, touch-target spacing, or responsive
+behavior using Playwright test details, for example:
 
 ```typescript
 test("readiness controls fit the viewport", { tag: "@layout" }, async ({ page }) => {
@@ -245,15 +245,17 @@ test("readiness controls fit the viewport", { tag: "@layout" }, async ({ page })
 });
 ```
 
-Use `@responsive` for behavior that changes with viewport size. A screenshot
-alone does not make a functional journey a layout test. The core screenshot
-journeys are tagged because they also assert horizontal overflow. Unmarked
-journeys retain desktop coverage; narrow-width defects in those journeys are
-an accepted coverage tradeoff (Q175, #3384). Check actual selection with
+Use `@responsive` for behavior that changes with viewport size. Tagging is an
+explicit coverage choice: a screenshot or an incidental overflow guard alone
+does not require tagging every functional journey. The screenshot journeys
+required by `frontend/scripts/assert-browser-smoke-artifacts.mjs` are retained
+as representative layout tests, alongside focused responsive and spacing cases.
+Unmarked journeys retain desktop coverage; narrow-width defects in those
+journeys are an accepted coverage tradeoff (Q175, #3384). Check actual selection with
 `pnpm --dir frontend exec playwright test --list --project=desktop` and
 `pnpm --dir frontend exec playwright test --list --project=narrow`.
 
-The core operator journeys check route-heading and keyboard focus behavior, reject
+The core admin journeys check route-heading and keyboard focus behavior, reject
 duplicate document IDs and horizontal overflow, and fail on unexpected
 mutation requests, console errors, uncaught page errors, failed requests, or
 HTTP error responses.
