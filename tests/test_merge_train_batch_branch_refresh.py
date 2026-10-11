@@ -29,6 +29,7 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
         multiple: bool,
         failed_candidate: bool = False,
         conflict: Literal["none", "leaves_batch", "leaves_single"] = "none",
+        accepted_features: bool = False,
     ) -> None:
         snapshot = _FakeExpandedMergeTrainSnapshotReader(
             transport=object()
@@ -69,6 +70,26 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                 )
             }
         )
+        if accepted_features:
+            ready = tuple(
+                pr.model_copy(update={"owner_review_required": True})
+                for pr in behind_snapshot.pull_requests
+            )
+            waiting = tuple(
+                ready[0].model_copy(
+                    update={
+                        "number": number,
+                        "head_sha": f"head-{number}",
+                        "head_ref": f"feature/{number}",
+                        "required_checks_status": status,
+                        "created_at": "2026-05-08T09:00:00Z",
+                    }
+                )
+                for number, status in ((3, "pending"), (4, "fail"), (5, "unknown"))
+            )
+            behind_snapshot = behind_snapshot.model_copy(
+                update={"pull_requests": (*waiting, *ready)}
+            )
         if failed_candidate:
             # Base movement makes the failed candidate eligible for replanning.
             snapshot = snapshot.model_copy(update={"base_sha": "previous-base"})
@@ -147,6 +168,7 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                 entry
                 for entry in behind_snapshot.pull_requests
                 if entry.number not in {held.pull_request_number for held in conflicts}
+                and (not accepted_features or entry.required_checks_status == "pass")
             )
             if conflict != "none":
                 probe.assert_called_once()
@@ -186,6 +208,9 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_behind_entries_plan_a_batch_without_refreshing_heads(self) -> None:
         await self._check_planning(multiple=True)
+
+    async def test_accepted_features_land_together_while_other_features_wait(self) -> None:
+        await self._check_planning(multiple=True, accepted_features=True)
 
     async def test_single_entry_still_refreshes(self) -> None:
         await self._check_planning(multiple=False)
