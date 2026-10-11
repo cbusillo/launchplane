@@ -20,6 +20,7 @@ import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
+import { PreviewInventory } from "./PreviewInventory";
 import { environmentEvidenceDeadlines, environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
@@ -266,6 +267,7 @@ export function ProductWorkspaceRoute({
   return (
     <ProductWorkspace
       fixtureMode={fixtureMode}
+      refreshToken={refreshToken}
       product={expireProductEvidence(resource.data)}
       refreshError={resource.status === "error" ? resource.error : ""}
       route={{ kind: "product-workspace", product: productKey }}
@@ -363,6 +365,7 @@ function DirectoryLane({
 
 function ProductWorkspace({
   fixtureMode,
+  refreshToken,
   product,
   refreshError,
   route,
@@ -370,6 +373,7 @@ function ProductWorkspace({
   updating,
 }: {
   fixtureMode: DevFixtureMode;
+  refreshToken: number;
   product: ProductSiteOverview;
   refreshError: string;
   route: AppRoute;
@@ -539,6 +543,8 @@ function ProductWorkspace({
         <PreviewSummary product={product} />
         <WarningSummary product={product} warnings={warnings} />
       </div>
+
+      <PreviewInventory key={product.product} product={product} refreshToken={refreshToken} />
 
       <ProductOwnerPanel fixtureMode={fixtureMode} product={product.product} />
 
