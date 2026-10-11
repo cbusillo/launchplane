@@ -207,9 +207,11 @@ It proves Compose convergence, not the deployed provider invocation or worker
 authorization. Run it locally only with an available test Docker engine and an
 already-built image.
 
-CI image builds may import an existing build cache, but do not export one.
-Uploading an optional cache must not hold up the required Compose qualification
-and vulnerability scan after the image is already built and loaded.
+CI image builds use the job-specific Buildx builder without importing or
+exporting shared build caches. `scripts/build-ci-runtime-image.sh` retries once
+without build cache only when cache-key computation reports the missing-layer
+`httpReadSeeker` error; unrelated failures and a failed retry remain blocking.
+The loaded image still runs every Compose qualification and vulnerability scan.
 
 The CI container-scan jobs pin the setup action and request Docker Compose
 v5.3.1 before that qualification. Local reproduction requires a compatible
