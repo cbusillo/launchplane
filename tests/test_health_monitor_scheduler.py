@@ -11,7 +11,9 @@ from control_plane.health_monitor_scheduler import (
     HealthMonitorScheduler,
     MONITOR_COMPLETION_GRACE_SECONDS,
     MONITOR_INTERVAL_SECONDS,
+    monitor_slot,
 )
+from control_plane.health_monitor_status import read_health_monitor_status
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.provider_operations import _ReservationHeartbeat, DurableProviderOperationStore
 from control_plane.contracts.public_ingress_monitoring import (
@@ -34,9 +36,8 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.store = PostgresRecordStore(
-            database_url=_sqlite_database_url(Path(self.directory.name) / "records.sqlite3")
-        )
+        self.database_url = _sqlite_database_url(Path(self.directory.name) / "records.sqlite3")
+        self.store = PostgresRecordStore(database_url=self.database_url)
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
         self.now = float(int(datetime.now(timezone.utc).timestamp() / MONITOR_INTERVAL_SECONDS))
@@ -62,6 +63,73 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
         self.now += 1
         self.assertTrue(self.scheduler.run_once())
         self.assertEqual(self.probe.call_count, 2)
+
+    def test_receipts_survive_restart_and_distinguish_miss_from_recovery(self) -> None:
+        self.now += MONITOR_INTERVAL_SECONDS + MONITOR_COMPLETION_GRACE_SECONDS
+        self.scheduler.watch_once()
+        self.now += 1
+        self.scheduler.run_once()
+        self.scheduler.watch_once()
+        reader = PostgresRecordStore(database_url=self.database_url)
+        self.addCleanup(reader.close)
+        with (
+            patch.object(reader, "reserve_mutation", side_effect=AssertionError("read wrote")),
+            patch.object(
+                reader, "write_idempotency_record", side_effect=AssertionError("read wrote")
+            ),
+        ):
+            evidence = read_health_monitor_status(reader, now=self.now, slots=2)
+        current, prior = evidence.slots
+        self.assertIsNotNone(current.completion)
+        self.assertFalse(current.completed_on_time)
+        self.assertIsNotNone(current.missed_report)
+        self.assertIsNotNone(current.healthy_report)
+        self.assertIsNone(prior.completion)
+        self.assertIsNone(prior.completed_on_time)
+        self.assertIsNone(prior.missed_report)
+        self.assertIsNotNone(evidence.activation)
+        self.probe.assert_called_once()
+
+    def test_historical_windows_preserve_slots_without_inventing_completion(self) -> None:
+        self.scheduler.run_once()
+        completed_slot = int(self.now // MONITOR_INTERVAL_SECONDS)
+        self.now += 3 * MONITOR_INTERVAL_SECONDS
+        recent = read_health_monitor_status(self.store, now=self.now, slots=3)
+        self.assertTrue(all(slot.completion is None for slot in recent.slots))
+        older = read_health_monitor_status(
+            self.store, now=self.now, slots=1, end_slot=recent.next_end_slot
+        )
+        self.assertEqual(older.slots[0].slot, completed_slot)
+        self.assertTrue(older.slots[0].completed_on_time)
+
+    def test_paging_stops_at_activation_or_when_activation_is_unknown(self) -> None:
+        activated_slot = monitor_slot(self.now)
+        status = read_health_monitor_status(self.store, now=self.now, slots=48)
+        self.assertEqual([slot.slot for slot in status.slots], [activated_slot])
+        self.assertIsNone(status.next_end_slot)
+        before_activation = read_health_monitor_status(
+            self.store, now=self.now, end_slot=activated_slot - 1
+        )
+        self.assertEqual(before_activation.slots, [])
+        self.assertIsNone(before_activation.next_end_slot)
+        with patch.object(self.store, "read_idempotency_record", return_value=None):
+            unknown = read_health_monitor_status(self.store, now=self.now)
+        self.assertIsNone(unknown.activation)
+        self.assertIsNone(unknown.next_end_slot)
+        self.assertTrue(all(slot.completion is None for slot in unknown.slots))
+
+    def test_receipt_read_refuses_invalid_ranges_and_unrelated_fingerprint(self) -> None:
+        for slots, end_slot in ((0, None), (49, None), (1, -1), (1, monitor_slot(self.now) + 1)):
+            with self.subTest(slots=slots, end_slot=end_slot), self.assertRaises(ValueError):
+                read_health_monitor_status(self.store, now=self.now, slots=slots, end_slot=end_slot)
+        self.scheduler.run_once()
+        record = self.scheduler._read(str(monitor_slot(self.now)))
+        assert record is not None
+        self.store.write_idempotency_record(
+            record.model_copy(update={"request_fingerprint": "unrelated"})
+        )
+        with self.assertRaises(ValueError):
+            read_health_monitor_status(self.store, now=self.now)
 
     def test_missed_run_alerts_then_recovers_only_after_completion(self) -> None:
         self.now += MONITOR_COMPLETION_GRACE_SECONDS - 1
