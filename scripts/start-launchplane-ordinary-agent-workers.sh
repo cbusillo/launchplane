@@ -28,7 +28,7 @@ timeout --kill-after=5s "${startup_probe_timeout_seconds}s" env -i \
 	"HOME=${HOME:-/tmp}" \
 	"LANG=${LANG:-C.UTF-8}" \
 	"LAUNCHPLANE_DATABASE_URL=$launchplane_database_url" \
-	uv run python -m control_plane.storage.ordinary_agent_worker_probe >/dev/null 2>&1
+	python -m control_plane.storage.ordinary_agent_worker_probe >/dev/null 2>&1
 startup_probe_status=$?
 set -e
 if [ "$startup_probe_status" -ne 0 ]; then
