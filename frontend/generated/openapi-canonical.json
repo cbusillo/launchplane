@@ -915,6 +915,12 @@
             ],
             "title": "Database Update Modules"
           },
+          "examined_baseline_inputs_sha256": {
+            "default": "",
+            "pattern": "^(|[0-9a-f]{64})$",
+            "title": "Examined Baseline Inputs Sha256",
+            "type": "string"
+          },
           "examined_inputs_sha256": {
             "default": "",
             "pattern": "^(|[0-9a-f]{64})$",
@@ -56711,6 +56717,12 @@
                         ],
                         "title": "Database Update Modules"
                       },
+                      "examined_baseline_inputs_sha256": {
+                        "default": "",
+                        "pattern": "^(|[0-9a-f]{64})$",
+                        "title": "Examined Baseline Inputs Sha256",
+                        "type": "string"
+                      },
                       "examined_inputs_sha256": {
                         "default": "",
                         "pattern": "^(|[0-9a-f]{64})$",
@@ -58184,6 +58196,12 @@
                         ],
                         "title": "Database Update Modules"
                       },
+                      "examined_baseline_inputs_sha256": {
+                        "default": "",
+                        "pattern": "^(|[0-9a-f]{64})$",
+                        "title": "Examined Baseline Inputs Sha256",
+                        "type": "string"
+                      },
                       "examined_inputs_sha256": {
                         "default": "",
                         "pattern": "^(|[0-9a-f]{64})$",
@@ -59376,6 +59394,12 @@
                           }
                         ],
                         "title": "Database Update Modules"
+                      },
+                      "examined_baseline_inputs_sha256": {
+                        "default": "",
+                        "pattern": "^(|[0-9a-f]{64})$",
+                        "title": "Examined Baseline Inputs Sha256",
+                        "type": "string"
                       },
                       "examined_inputs_sha256": {
                         "default": "",
