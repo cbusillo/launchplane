@@ -23228,6 +23228,169 @@
         "title": "OrdinaryAgentTarget",
         "type": "object"
       },
+      "OriginalReviewHistoryChange": {
+        "properties": {
+          "child_head_sha": {
+            "title": "Child Head Sha",
+            "type": "string"
+          },
+          "child_pull_request_number": {
+            "title": "Child Pull Request Number",
+            "type": "integer"
+          },
+          "merge_commit_sha": {
+            "title": "Merge Commit Sha",
+            "type": "string"
+          },
+          "parent_head_ref": {
+            "title": "Parent Head Ref",
+            "type": "string"
+          },
+          "parent_initial_head_sha": {
+            "title": "Parent Initial Head Sha",
+            "type": "string"
+          },
+          "parent_pull_request_number": {
+            "title": "Parent Pull Request Number",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "planned",
+              "mutated",
+              "blocked",
+              "stale"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "parent_pull_request_number",
+          "parent_head_ref",
+          "parent_initial_head_sha",
+          "child_pull_request_number",
+          "child_head_sha",
+          "merge_commit_sha",
+          "status"
+        ],
+        "title": "OriginalReviewHistoryChange",
+        "type": "object"
+      },
+      "OriginalReviewHistoryEntry": {
+        "properties": {
+          "collapse_id": {
+            "title": "Collapse Id",
+            "type": "string"
+          },
+          "original_changes": {
+            "items": {
+              "$ref": "#/components/schemas/OriginalReviewHistoryChange"
+            },
+            "title": "Original Changes",
+            "type": "array"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "root_head_ref": {
+            "title": "Root Head Ref",
+            "type": "string"
+          },
+          "root_initial_head_sha": {
+            "title": "Root Initial Head Sha",
+            "type": "string"
+          },
+          "root_pull_request_number": {
+            "title": "Root Pull Request Number",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "collapse_id",
+          "status",
+          "updated_at",
+          "root_pull_request_number",
+          "root_head_ref",
+          "root_initial_head_sha",
+          "original_changes"
+        ],
+        "title": "OriginalReviewHistoryEntry",
+        "type": "object"
+      },
+      "OriginalReviewHistoryResponse": {
+        "properties": {
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/OriginalReviewHistoryEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "history_digest": {
+            "title": "History Digest",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "trace_id",
+          "repository",
+          "base_branch",
+          "history_digest",
+          "entries",
+          "next_cursor",
+          "truncated"
+        ],
+        "title": "OriginalReviewHistoryResponse",
+        "type": "object"
+      },
       "OutgoingEmailQuery": {
         "additionalProperties": false,
         "properties": {
@@ -88926,6 +89089,139 @@
           }
         },
         "summary": "Disable individually selected obsolete service GITHUB_TOKEN records"
+      }
+    },
+    "/v1/service/merge-train/review-history": {
+      "get": {
+        "operationId": "read_merge_train_original_review_history",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repository",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Repository",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "base_branch",
+            "required": false,
+            "schema": {
+              "default": "main",
+              "title": "Base Branch",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 1000,
+              "title": "Cursor",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OriginalReviewHistoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read scoped active and retired stack review recovery evidence"
       }
     },
     "/v1/service/odoo-workers/reconcile": {
