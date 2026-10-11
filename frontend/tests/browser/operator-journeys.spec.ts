@@ -461,7 +461,7 @@ test.describe("operator journeys", () => {
     await captureScreenshot(
       page,
       testInfo,
-      "environment-incident-silenced-narrow",
+      "environment-incident-silenced",
     );
     diagnostics.assertClean();
   });
