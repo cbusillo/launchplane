@@ -1,0 +1,26 @@
+"""Check committed visibility before any credential-capable fixture hook."""
+import os
+import psycopg2
+from odoo import models
+
+
+class CutoverGuard(models.AbstractModel):
+    _name = "cutover.fixture.guard"
+    _description = "Isolated cutover credential guard"
+
+    def _register_hook(self):
+        super()._register_hook()
+        if not os.environ.get("CUTOVER_GUARD_REQUIRED"):
+            return
+        # A separate connection proves the boundary committed, rather than
+        # observing uncommitted writes through the loading registry's cursor.
+        with psycopg2.connect(host="database", user="odoo", dbname=self.env.cr.dbname) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT key,value FROM ir_config_parameter WHERE key IN ('odoo_devkit.credential_boundary_commit','printnode.api_key')")
+                values = dict(cursor.fetchall())
+                safe = values.get("odoo_devkit.credential_boundary_commit") and values.get("printnode.api_key") == "inert-lane-sentinel"
+        if not safe:
+            raise RuntimeError("Uncommitted credential boundary reached a blocked fixture sink")
+        with psycopg2.connect(host="database", user="odoo", dbname="postgres") as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("INSERT INTO cutover_hook_events(database_name,event) VALUES (%s,%s)", (self.env.cr.dbname, "committed-before-hook"))

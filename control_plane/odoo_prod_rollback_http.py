@@ -1,3 +1,6 @@
+from collections.abc import Callable
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from pathlib import Path
 from typing import cast
 
@@ -66,12 +69,14 @@ def execute_odoo_prod_rollback_result(
     control_plane_root: Path,
     record_store: object,
     request: OdooProdRollbackEnvelope,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     driver_result = execute_odoo_prod_rollback(
         control_plane_root=control_plane_root,
         record_store=cast(OdooProdRollbackStore, record_store),
         product=request.product,
         request=request.rollback,
+        cutover_provider_factory=cutover_provider_factory,
     )
     records: dict[str, object] = {
         "artifact_id": driver_result.artifact_id,

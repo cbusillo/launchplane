@@ -10625,13 +10625,18 @@ class PostgresRecordStore(HumanSessionStore):
         lease_owner: str,
         lease_expires_at: str,
         claimed_at: str,
+        cutover_reconciliation: bool = False,
+        max_attempts: int = 5,
     ) -> Any:
         normalized_lease_owner = lease_owner.strip()
         if not normalized_lease_owner or not lease_expires_at.strip() or not claimed_at.strip():
             raise ValueError("Odoo release operation claim requires lease evidence.")
         statement = (
             select(row_type)
-            .where(row_type.status == "pending")
+            .where(
+                row_type.status
+                == ("reconciliation_required" if cutover_reconciliation else "pending")
+            )
             .order_by(row_type.created_at.asc(), row_type.operation_id.asc())
         )
         if not self.database_url.startswith("sqlite"):
@@ -10647,6 +10652,34 @@ class PostgresRecordStore(HumanSessionStore):
                 return None
             for row in cast(list[Any], session.scalars(statement).all()):
                 record = self._read_payload(model_type=model_type, payload=row.payload)
+                if cutover_reconciliation:
+                    from control_plane.odoo_cutover_plan import cutover_identity
+
+                    if (
+                        model_type is not OdooProdPromotionOperationRecord
+                        or record.attempt >= max_attempts
+                    ):
+                        continue
+                    cutover_id = cutover_identity(
+                        record.product, record.context, record.instance, record.request.request_id
+                    )
+                    deployment_row = session.get(
+                        LaunchplaneDeploymentRow, "deployment-cutover-" + cutover_id
+                    )
+                    if deployment_row is None:
+                        continue
+                    deployment = self._read_payload(
+                        model_type=DeploymentRecord, payload=deployment_row.payload
+                    )
+                    cutover = deployment.odoo_cutover
+                    if (
+                        cutover is None
+                        or cutover.error != "TimeoutError"
+                        or cutover.step not in {"pausing", "switching", "resuming", "draining"}
+                        or cutover.plan.new.binding.product_id != record.product
+                        or cutover.plan.new.binding.environment_id != record.instance
+                    ):
+                        continue
                 if not source_read_retry_ready(record, claimed_at):
                     continue
                 if not self.database_url.startswith("sqlite"):
@@ -10994,6 +11027,26 @@ class PostgresRecordStore(HumanSessionStore):
                 lease_owner=lease_owner,
                 lease_expires_at=lease_expires_at,
                 claimed_at=claimed_at,
+            ),
+        )
+
+    def claim_odoo_cutover_reconciliation_record(
+        self, *, lease_owner: str, lease_expires_at: str, claimed_at: str, max_attempts: int
+    ) -> OdooProdPromotionOperationRecord | None:
+        # Use the same serialized service/lane admission and lease CAS. Only a
+        # persisted idempotent cutover timeout can resume; legacy unknown effects
+        # and missing/failed maintenance receipts keep their intervention hold.
+        return cast(
+            OdooProdPromotionOperationRecord | None,
+            self._claim_next_release_operation(
+                row_type=LaunchplaneOdooProdPromotionOperationRow,
+                model_type=OdooProdPromotionOperationRecord,
+                operation_kind="prod_promotion",
+                lease_owner=lease_owner,
+                lease_expires_at=lease_expires_at,
+                claimed_at=claimed_at,
+                cutover_reconciliation=True,
+                max_attempts=max_attempts,
             ),
         )
 
