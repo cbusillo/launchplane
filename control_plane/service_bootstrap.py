@@ -150,6 +150,8 @@ def create_launchplane_service_application(
         resolved_fastapi_policy.policy,
         policy_sha256=resolved_fastapi_policy.policy_sha256,
         source=resolved_fastapi_policy.source,
+        record_id=resolved_fastapi_policy.record_id,
+        revision=resolved_fastapi_policy.revision,
     )
     work_graph_project_config = load_github_project_planning_facts_config_from_env(dict(os.environ))
     work_graph_planning_facts_provider = (
