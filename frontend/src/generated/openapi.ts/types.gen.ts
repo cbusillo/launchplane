@@ -4196,6 +4196,19 @@ export type SecretSharingReason = {
     recorded_by: string;
 };
 
+export type ServiceDeliveryApplyReceiptRequest = {
+    idempotency_key: string;
+    original_request: DeliveryGitHubAppConfigurationRequest | ServiceTokenRetirementRequest;
+};
+
+export type ServiceDeliveryApplyReceiptResponse = {
+    idempotency_key: string;
+    operation: 'delivery-selection' | 'service-token-retirement';
+    original_trace_id: string | null;
+    state: 'completed' | 'unknown';
+    trace_id: string;
+};
+
 export type ServiceGitHubDeliveryStatus = {
     advisory_app_id: string;
     app_id: string;
@@ -6419,6 +6432,32 @@ export type WriteReleaseReviewDecisionResponses = {
 };
 
 export type WriteReleaseReviewDecisionResponse = WriteReleaseReviewDecisionResponses[keyof WriteReleaseReviewDecisionResponses];
+
+export type ReadServiceDeliveryApplyReceiptData = {
+    body: ServiceDeliveryApplyReceiptRequest;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/service/delivery/apply-receipt';
+};
+
+export type ReadServiceDeliveryApplyReceiptErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadServiceDeliveryApplyReceiptError = ReadServiceDeliveryApplyReceiptErrors[keyof ReadServiceDeliveryApplyReceiptErrors];
+
+export type ReadServiceDeliveryApplyReceiptResponses = {
+    200: ServiceDeliveryApplyReceiptResponse;
+};
+
+export type ReadServiceDeliveryApplyReceiptResponse = ReadServiceDeliveryApplyReceiptResponses[keyof ReadServiceDeliveryApplyReceiptResponses];
 
 export type ConfigureLaunchplaneGithubDeliveryData = {
     body: DeliveryGitHubAppConfigurationRequest;

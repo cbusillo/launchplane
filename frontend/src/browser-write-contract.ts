@@ -1,4 +1,5 @@
 import type {
+  ReadServiceDeliveryApplyReceiptData,
   ApplyProductEnvironmentConfigData,
   ApplyProductImageRepositoryData,
   ApplyProductProductionUseData,
@@ -28,6 +29,7 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  serviceDeliveryReceiptRead: "/v1/service/delivery/apply-receipt" satisfies ReadServiceDeliveryApplyReceiptData["url"],
   serviceGitHubDeliveryConfigure: "/v1/service/github-delivery/configuration" satisfies ConfigureLaunchplaneGithubDeliveryData["url"],
   serviceGitHubTokenRetire: "/v1/service/github-delivery/token-retirement" satisfies RetireServiceGithubTokensData["url"],
   ownerSecretSubmit: "/v1/owner-secret-inputs/submit" satisfies SubmitOwnerSecretInputData["url"],

@@ -418,6 +418,12 @@ from control_plane.generic_web_promotion_http import (
     execute_generic_web_prod_promotion_result,
 )
 from control_plane.product_review import require_product_review_store
+from control_plane.service_delivery_recovery import (
+    SERVICE_DELIVERY_APPLY_RECEIPT_ROUTE,
+    ServiceDeliveryApplyReceiptRequest,
+    ServiceDeliveryApplyReceiptResponse,
+    read_service_delivery_apply_receipt,
+)
 from control_plane.github_delivery_configuration import (
     DeliveryGitHubAppConfigurationRequest,
     DeliveryGitHubAppConfigurationResponse,
@@ -1224,6 +1230,7 @@ _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES = frozenset(
     {
         _AUTHZ_POLICY_ADMINISTRATION_ROUTE,
         _AUTHZ_POLICY_REVISION_HISTORY_ROUTE,
+        SERVICE_DELIVERY_APPLY_RECEIPT_ROUTE,
     }
 )
 _AUTHZ_NO_STORE_ROUTES = frozenset(
@@ -24959,6 +24966,46 @@ def create_launchplane_fastapi_app(
             store=service_delivery_store(record_store, trace_id),
             trace_id=trace_id,
         )
+
+    async def read_delivery_receipt(
+        recovery: ServiceDeliveryApplyReceiptRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_nonpersisting_sensitive_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> ServiceDeliveryApplyReceiptResponse:
+        trace_id = next_trace_id()
+        admin = require_service_delivery_admin(
+            identity, action="product_config.apply", trace_id=trace_id
+        )
+        try:
+            return await run_in_threadpool(
+                read_service_delivery_apply_receipt,
+                store=service_delivery_store(record_store, trace_id),
+                request=recovery,
+                actor=f"github:{admin.github_id}",
+                trace_id=trace_id,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="service_delivery_receipt_conflict",
+                message="No matching completed receipt proves the original Apply. Retain its request and key.",
+            ) from error
+
+    app.add_api_route(
+        SERVICE_DELIVERY_APPLY_RECEIPT_ROUTE,
+        read_delivery_receipt,
+        methods=["POST"],
+        response_model=ServiceDeliveryApplyReceiptResponse,
+        operation_id="read_service_delivery_apply_receipt",
+        summary="Read the caller's exact original service delivery Apply receipt",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
 
     async def retire_service_github_tokens(
         retirement: ServiceTokenRetirementRequest,

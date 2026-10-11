@@ -4152,6 +4152,15 @@ is read, created or copied. This control neither revokes a GitHub PAT nor retire
 a product. A previously prepared re-encryption cannot re-enable a disabled
 record's metadata. A conflict or scope refusal is reported rather than bypassed.
 
+If an Apply loses its response and a retry conflicts, keep the retained request
+and operation key. **Check original Apply** reads its caller-bound completed DB
+receipt without applying again. A matching completed receipt unlocks the form;
+a missing or conflicting receipt leaves it locked, including after reload.
+Current selector/token metadata alone never settles the uncertain Apply.
+Concurrent identical Applies recover the same completed receipt after a stale
+plan or atomic-write conflict; they do not write a second change.
+
+
 The operation requests only its needed permissions:
 
 | Operation | Token permissions beyond Metadata read |

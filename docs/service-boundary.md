@@ -4334,3 +4334,16 @@ Responses and stored records follow the redaction contract in
 
 **Preserved history:** the Phase 1 planning-only API description predates the
 supervised Phase 2 worker and is not current operating guidance.
+
+
+### Original service delivery Apply receipt
+
+`POST /v1/service/delivery/apply-receipt` is an inert DB read carrying the original
+validated selection or token-retirement Apply request and its idempotency key.
+It requires a signed-in administrator with the existing `product_config.apply`
+authority for Launchplane, same-origin browser headers and CSRF. It does not
+renew sessions, persist denial records, write configuration, or read secret values.
+The service fixes scope and operation route from the caller and request type;
+only a matching successful completed receipt returns its original trace.
+Absent receipts return `unknown`; mismatched or invalid completions return 409.
+Both results preserve uncertainty. The response exposes no stored response payload.

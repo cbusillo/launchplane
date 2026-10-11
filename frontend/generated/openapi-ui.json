@@ -7152,6 +7152,96 @@
         ]
       }
     },
+    "/v1/service/delivery/apply-receipt": {
+      "post": {
+        "operationId": "read_service_delivery_apply_receipt",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceDeliveryApplyReceiptRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceDeliveryApplyReceiptResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read the caller's exact original service delivery Apply receipt"
+      }
+    },
     "/v1/service/github-delivery/configuration": {
       "post": {
         "operationId": "configure_launchplane_github_delivery",
@@ -32412,6 +32502,82 @@
           "recorded_by"
         ],
         "title": "SecretSharingReason",
+        "type": "object"
+      },
+      "ServiceDeliveryApplyReceiptRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "original_request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryGitHubAppConfigurationRequest"
+              },
+              {
+                "$ref": "#/components/schemas/ServiceTokenRetirementRequest"
+              }
+            ],
+            "title": "Original Request"
+          }
+        },
+        "required": [
+          "original_request",
+          "idempotency_key"
+        ],
+        "title": "ServiceDeliveryApplyReceiptRequest",
+        "type": "object"
+      },
+      "ServiceDeliveryApplyReceiptResponse": {
+        "properties": {
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "delivery-selection",
+              "service-token-retirement"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id"
+          },
+          "state": {
+            "enum": [
+              "completed",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "operation",
+          "original_trace_id",
+          "state",
+          "trace_id"
+        ],
+        "title": "ServiceDeliveryApplyReceiptResponse",
         "type": "object"
       },
       "ServiceGitHubDeliveryStatus": {

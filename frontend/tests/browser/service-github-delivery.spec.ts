@@ -188,3 +188,75 @@ test("unavailable metadata and absent key leave controls unavailable", async ({ 
   await expect(page.getByText("Missing standing service read authority.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Apply", exact: true })).toHaveCount(0);
 });
+
+for (const operation of ["selection", "retirement"] as const) {
+  test(`${operation} receipt recovery keeps the original request through conflict and reload`, async ({ page }, testInfo) => {
+    const fixture = await setup(page, operation === "selection" ? "uncertain-stale" : "retirement-uncertain");
+    if (operation === "retirement") { fixture.current.app_id = "76"; fixture.current.integration = "existing-delivery"; }
+    let completed = false;
+    const checks: any[] = [];
+    await page.route("**/v1/service/delivery/apply-receipt", async route => {
+      const body = route.request().postDataJSON(); checks.push(body);
+      expect(route.request().headers()["x-csrf-token"]).toBe("csrf-fixture");
+      await route.fulfill({ json: { state: completed ? "completed" : "unknown", operation: operation === "selection" ? "delivery-selection" : "service-token-retirement",
+        idempotency_key: body.idempotency_key, trace_id: "receipt-read", original_trace_id: completed ? "original-completion" : null } });
+    });
+    await page.goto("/ui/engineering/github-delivery");
+    const panel = operation === "selection" ? await selectDelivery(page) : await reviewRetirement(page);
+    if (operation === "retirement") await panel.getByLabel(/^I am the Director\. I verified Advisory/).check();
+    await panel.getByRole("button", { name: "Apply", exact: true }).click();
+    await expect(panel.getByRole("button", { name: "Check original Apply", exact: true })).toBeVisible();
+    if (operation === "selection") {
+      await panel.getByRole("button", { name: "Retry Apply", exact: true }).click();
+      await expect(panel.getByText("The result is uncertain.", { exact: false })).toBeVisible();
+    }
+    const original = fixture.requests[0];
+    await page.reload();
+    await panel.getByRole("button", { name: "Check original Apply", exact: true }).click();
+    await expect(panel.getByText("No matching completed receipt was found.", { exact: false })).toBeVisible();
+    await expect(panel.getByRole("button", { name: "Dry run", exact: true })).toBeDisabled();
+    expect(checks[0]).toEqual({ original_request: original.body, idempotency_key: original.key });
+    const mutations = fixture.requests.length;
+    await panel.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath(`${operation}-receipt-unknown.png`) });
+    completed = true;
+    await panel.getByRole("button", { name: "Check original Apply", exact: true }).click();
+    await expect(panel.getByText("Original Apply completed. Trace original-completion")).toBeVisible();
+    expect(checks[1]).toEqual(checks[0]);
+    expect(fixture.requests).toHaveLength(mutations);
+    await expect(panel.getByRole("button", { name: "Check original Apply", exact: true })).toHaveCount(0);
+    const field = operation === "selection" ? panel.getByLabel("Selection reason") : panel.getByLabel("Retirement reason");
+    await expect(field).toBeEnabled();
+    expect(fixture.errors).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath(`${operation}-receipt-completed.png`) });
+  });
+}
+
+for (const mismatch of ["receipt-key", "saved-request"] as const) {
+  test(`receipt recovery refuses ${mismatch} without unlocking or applying`, async ({ page }) => {
+    const fixture = await setup(page, "uncertain");
+    let checks = 0;
+    await page.route("**/v1/service/delivery/apply-receipt", async route => {
+      checks++;
+      await route.fulfill({ json: { state: "completed", operation: "delivery-selection", idempotency_key: "different-key", trace_id: "read", original_trace_id: "original" } });
+    });
+    await page.goto("/ui/engineering/github-delivery");
+    const panel = await selectDelivery(page);
+    await panel.getByRole("button", { name: "Apply", exact: true }).click();
+    await expect(panel.getByRole("button", { name: "Check original Apply", exact: true })).toBeVisible();
+    if (mismatch === "saved-request") {
+      await page.evaluate(() => {
+        const key = "launchplane:service-delivery-draft:github:42:delivery-selection";
+        const saved = JSON.parse(sessionStorage.getItem(key)!);
+        saved.reason = "Changed after the original Apply";
+        sessionStorage.setItem(key, JSON.stringify(saved));
+      });
+      await page.reload();
+    }
+    await panel.getByRole("button", { name: "Check original Apply", exact: true }).click();
+    await expect(panel.getByText(mismatch === "receipt-key" ? "No matching completed receipt was found." : "The exact original request is unavailable.", { exact: false })).toBeVisible();
+    await expect(panel.getByRole("button", { name: "Dry run", exact: true })).toBeDisabled();
+    expect(fixture.requests).toHaveLength(1);
+    expect(checks).toBe(mismatch === "saved-request" ? 0 : 1);
+  });
+}
