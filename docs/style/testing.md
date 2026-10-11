@@ -246,9 +246,16 @@ type, OpenAPI, and production-build gate:
 ```bash
 pnpm --dir frontend exec playwright install chromium
 pnpm --dir frontend test:browser
+pnpm --dir frontend exec node --test tests/browser-support/server-isolation.test.mjs
 ```
 
-The Playwright suite starts the Vite development server and uses only repo-local
+The Playwright suite starts its own Vite development server on an OS-assigned
+loopback port. Playwright captures the listener URL from Vite's startup output
+and passes it to workers; overlapping runner jobs never reuse another job's
+server. The isolation test holds two actual smoke runs open together and checks
+that their browser origins differ. It writes only task-local test artifacts.
+
+The suite uses only repo-local
 development fixtures. Product-detail journeys use `?fixture=products`; product
 inventory boundaries use `?fixture=empty` and `?fixture=error`. Anonymous
 authentication is simulated by intercepting only `/v1/auth/session`; no product
@@ -263,7 +270,7 @@ mutation requests, console errors, uncaught page errors, failed requests, or
 HTTP error responses.
 
 Screenshots, traces, and failure evidence are written under
-`tmp/browser-smoke/`. CI uploads that directory from the dedicated hosted browser
+`tmp/browser-smoke/`. CI uploads that directory from the dedicated browser
 job. Every run clears prior evidence first and verifies the complete desktop and
 narrow screenshot set before passing. These screenshots are review evidence
 rather than pixel-diff baselines, so intentional visual changes do not require

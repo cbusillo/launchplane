@@ -20,7 +20,7 @@ export default defineConfig({
     timeout: 10_000,
   },
   use: {
-    baseURL: "http://127.0.0.1:4173",
+    baseURL: process.env.BROWSER_SMOKE_URL,
     colorScheme: "dark",
     locale: "en-US",
     reducedMotion: "reduce",
@@ -47,8 +47,11 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm exec vite --host 127.0.0.1 --port 4173 --strictPort",
-    url: "http://127.0.0.1:4173/ui/",
+    command: "pnpm exec vite --host 127.0.0.1 --port 0 --strictPort",
+    env: { FORCE_COLOR: "0" },
+    // Each runner owns its OS-assigned listener; Playwright passes the captured
+    // origin to worker processes before they load this configuration.
+    wait: { stdout: /Local:\s+(?<browser_smoke_url>http:\/\/127\.0\.0\.1:\d+)\/ui\// },
     reuseExistingServer: false,
     timeout: 120_000,
   },
