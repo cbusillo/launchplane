@@ -320,12 +320,14 @@ class _BatchLandingWithoutLandingPlanStore:
         *,
         repository: str = "",
         base_branch: str = "",
+        base_sha: str = "",
         status: str = "",
         limit: int | None = None,
     ) -> tuple[Any, ...]:
         return self.delegate.list_merge_train_batch_candidate_records(
             repository=repository,
             base_branch=base_branch,
+            base_sha=base_sha,
             status=status,
             limit=limit,
         )

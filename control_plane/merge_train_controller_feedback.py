@@ -72,7 +72,7 @@ def build_feedback_payloads(
         }
         for pull_request_number in pull_request_numbers
     ]
-    if controller_action in {"plan_candidate", "candidate_failed"}:
+    if controller_action in {"plan_candidate", "candidate_failed", "block"}:
         payloads.extend(
             {
                 "schema_version": 1,

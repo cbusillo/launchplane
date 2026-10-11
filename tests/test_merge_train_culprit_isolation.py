@@ -1,4 +1,5 @@
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -144,6 +145,7 @@ class _TrainSimulation:
         mutate: bool = True,
         max_passes: int = 20,
         settle: bool = True,
+        fails_together: Callable[[set[int]], bool] | None = None,
     ) -> None:
         active = self.store.list_merge_train_batch_candidate_records(status="active")
         record: MergeTrainBatchCandidateRecord | None = active[0] if active else None
@@ -155,7 +157,12 @@ class _TrainSimulation:
             candidate = record.candidate
             self.candidates.append(tuple(entry.pull_request_number for entry in candidate.entries))
             members = {entry.pull_request_number for entry in candidate.entries}
-            failure = infrastructure_failure() or (TEST_FAILURE if culprits & members else None)
+            combined = members | set(self.landed)
+            failure = infrastructure_failure() or (
+                TEST_FAILURE
+                if culprits & members or (fails_together is not None and fails_together(combined))
+                else None
+            )
             if failure is None:
                 self._land(record)
                 record = None
@@ -338,6 +345,15 @@ class CulpritIsolationTests(unittest.TestCase):
             train.run(culprits={2, 5})
         self.assertEqual(sorted(train.blocked), [2, 5])
         self.assertEqual(sorted(train.landed), [1, 3, 4, 6])
+
+    def test_pair_that_fails_only_together_lands_one_and_blocks_the_other(self) -> None:
+        with TemporaryDirectory() as directory:
+            train = _TrainSimulation(self, FilesystemRecordStore(state_dir=Path(directory)), 4)
+            train.run(culprits=set(), fails_together=lambda members: {1, 3} <= members)
+        self.assertEqual(train.blocked, [3])
+        self.assertEqual(sorted(train.landed), [1, 2, 4])
+        self.assertEqual(train.candidates[:2], [(1, 2, 3, 4), (1, 2)])
+        self.assertIsNone(train.stopped)
 
     def test_infrastructure_failure_is_retried_without_blame(self) -> None:
         outcomes = iter((RUNNER_LOSS, None))

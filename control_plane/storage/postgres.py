@@ -18993,6 +18993,7 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         repository: str = "",
         base_branch: str = "",
+        base_sha: str = "",
         status: str = "",
         batch_id: str = "",
         limit: int | None = None,
@@ -19003,6 +19004,11 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplaneMergeTrainBatchCandidateRow.repository == repository.lower())
         if base_branch:
             filters.append(LaunchplaneMergeTrainBatchCandidateRow.base_branch == base_branch)
+        if base_sha:
+            filters.append(
+                LaunchplaneMergeTrainBatchCandidateRow.payload["candidate"]["base_sha"].as_string()
+                == base_sha
+            )
         if status:
             filters.append(LaunchplaneMergeTrainBatchCandidateRow.status == status)
         if batch_id:
