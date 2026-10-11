@@ -14,6 +14,7 @@ from typing import Protocol
 from control_plane.client_release import accepted_release_can_start, read_client_release_run
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
+from control_plane.service_deploy_drain import read_status
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.release_review_shared import repository_key
 from control_plane.release_review import (
@@ -102,15 +103,27 @@ def _release_in_flight(
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
 ) -> bool:
+    """Whether the release worker is running this release or will start its next step.
+
+    This mirrors the worker's own checks, so a release it would refuse to
+    continue never holds the train.
+    """
+
     run = read_client_release_run(store=store, profile=profile, decision=decision)
-    if run is None or run.state in {"passed", "stopped"}:
+    if run is None:
         return False
-    if run.state == "running":
+    # A step or its automatic recovery is changing production now.
+    if any(step.status in {"pending", "running"} for step in run.steps):
         return True
-    # A waiting release continues only while its decision still starts a release
-    # and the lanes still carry it: testing the accepted candidate, and production
-    # the checklist's version before any step, or either version between steps.
+    if run.state != "waiting":
+        return False
+    # A drain only delays the next step; any other blocker waits on an admin.
+    if run.blocked_reason and not read_status(store).get("admission_paused"):
+        return False
     if not accepted_release_can_start(store, decision):
+        return False
+    next_step = next((step for step in run.steps if step.status == "not_started"), None)
+    if next_step is None:
         return False
     checklist = decision.checklist
     try:
@@ -118,8 +131,9 @@ def _release_in_flight(
         production = release_version(store=store, profile=profile, instance="prod")
     except ReleaseEvidenceUnavailable:
         return False
-    started = any(step.status == "pass" for step in run.steps)
-    allowed_production = (
-        (checklist.production, checklist.candidate) if started else (checklist.production,)
+    # A rollback starts from the promoted candidate; a backup or promotion needs
+    # production on the reviewed version, and both need testing on the candidate.
+    expected_production = (
+        checklist.candidate if next_step.kind == "rollback" else checklist.production
     )
-    return candidate == checklist.candidate and production in allowed_production
+    return candidate == checklist.candidate and production == expected_production

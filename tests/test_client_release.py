@@ -809,6 +809,8 @@ class ClientReleaseTests(unittest.TestCase):
                 )
                 self.assertEqual(odoo_release_recovery_source(recovery), source.operation_id)
                 self.assertTrue(odoo_release_recovery_allows(self.store, recovery))
+                # Automatic recovery is still changing production.
+                self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
                 self.assertEqual(self.advance(), ())
                 self.store.write_deployment_record(
                     _deployment("newer-passing-deployment", "artifact-other")
@@ -1125,6 +1127,8 @@ class ClientReleaseTests(unittest.TestCase):
         assert run is not None
         self.assertEqual(run.state, "waiting")
         self.assertTrue(run.blocked_reason)
+        # A release waiting on an admin never holds its merge train.
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
 
     def test_connection_reset_inside_real_rollback_holds_the_recovery_lane(self) -> None:
         _, source = self.queued_promotion()
@@ -1210,6 +1214,14 @@ class ClientReleaseTests(unittest.TestCase):
         self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
         self.set_prod("artifact-prod")
         self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
+        # An admin promotion between the backup and the promotion step leaves the
+        # release unable to promote.
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
+        self.set_prod("artifact-testing")
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+        self.set_prod("artifact-prod")
         # An admin holding the product's releases after acceptance stops the start.
         self.switch("held")
         self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
