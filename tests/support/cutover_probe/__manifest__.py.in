@@ -1,0 +1,7 @@
+{
+    "name": "Isolated cutover website",
+    "version": "19.0.1.0.0",
+    "depends": ["website"],
+    "data": ["probe.xml"],
+    "license": "LGPL-3",
+}

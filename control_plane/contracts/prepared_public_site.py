@@ -141,6 +141,7 @@ class PublicPauseRecord(FrozenRecord):
     ended_at: datetime | None = None
     duration_seconds: float | None = None
     state: Literal["fencing", "drained", "resuming", "complete"] = "fencing"
+    drained_at: datetime | None = None
     served_mode: Literal["unverified", "prepared-public"] = "unverified"
     reduced_service: Literal[True] = True
     writers: tuple[WriterObservation, ...] = ()

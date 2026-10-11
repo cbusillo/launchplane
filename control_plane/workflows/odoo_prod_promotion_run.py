@@ -25,6 +25,10 @@ from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateRequest,
     execute_odoo_prod_backup_gate,
 )
+from control_plane.workflows.odoo_cutover import OdooCutoverProvider
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan, persisted_cutover
+
 from control_plane.workflows.odoo_prod_promotion import (
     OdooProdPromotionResult,
     OdooProdPromotionStore,
@@ -98,6 +102,26 @@ def admit_odoo_prod_promotion_run(
             artifact_id=inputs_result.artifact_id,
             source_commit=inputs_result.source_git_ref,
         )
+        admitted_plan = resolve_profile_cutover_plan(
+            record_store,
+            product=request.product,
+            context=request.context,
+            instance=request.to_instance,
+            artifact_id=inputs_result.artifact_id,
+            release_id=request.request_id,
+        )
+        recovery = persisted_cutover(record_store, admitted_plan)
+        if admitted_plan is not None and any(
+            item.odoo_cutover is not None
+            and item.odoo_cutover.step not in {"complete", "rolled_back"}
+            and item.odoo_cutover.plan != admitted_plan
+            for item in record_store.list_deployment_records(
+                context_name=request.context, instance_name=request.to_instance
+            )
+        ):
+            raise click.ClickException(
+                "Another unfinished cutover must be recovered before this release."
+            )
         require_production_promotion_backup(
             record_store=record_store,
             product=request.product,
@@ -105,6 +129,7 @@ def admit_odoo_prod_promotion_run(
             instance=request.to_instance,
             promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
             backup_record_id=request.infrastructure_backup_record_id,
+            cutover_recovery=recovery,
         )
     except (AttributeError, FileNotFoundError, ValueError, click.ClickException) as error:
         return OdooProdPromotionRunAdmission(
@@ -124,6 +149,7 @@ def execute_odoo_prod_promotion_run(
     phase_checkpoint: Callable[[OdooProdPromotionOperationPhase], None] | None = None,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     hold_uncertain_effects: bool = False,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> OdooProdPromotionRunResult:
     """Run one promotion; the durable worker passes checkpoints, the sync route does not.
 
@@ -143,26 +169,94 @@ def execute_odoo_prod_promotion_run(
     )
     inputs_result = admission.inputs_result
     if admission.blocked_reason:
+        from control_plane.odoo_cutover_plan import cutover_identity
+
+        try:
+            prior = record_store.read_deployment_record(
+                "deployment-cutover-"
+                + cutover_identity(
+                    request.product, request.context, request.to_instance, request.request_id
+                )
+            )
+        except FileNotFoundError:
+            prior = None
+        from control_plane.contracts.deployment_record import DeploymentRecord
+
+        if (
+            isinstance(prior, DeploymentRecord)
+            and prior.odoo_cutover is not None
+            and prior.odoo_cutover.step not in {"complete", "rolled_back"}
+        ):
+            raise RuntimeError("Cutover remains unfinished; retain its recovery hold.")
         return _result_from_inputs(
             request=request,
             inputs_result=inputs_result,
             run_status="blocked",
             error_message=admission.blocked_reason,
         )
+    cutover_provider = None
+    cutover_plan = resolve_profile_cutover_plan(
+        record_store,
+        product=request.product,
+        context=request.context,
+        instance=request.to_instance,
+        artifact_id=inputs_result.artifact_id,
+        release_id=request.request_id,
+    )
+    if cutover_plan is not None:
+        if cutover_provider_factory is None:
+            return _result_from_inputs(
+                request=request,
+                inputs_result=inputs_result,
+                run_status="blocked",
+                error_message="Two-slot release requires an activated lane-bound provider; in-place fallback is refused.",
+            )
+        cutover_provider = cutover_provider_factory(cutover_plan)
     record_phase("validated")
     if provider_effect_checkpoint is not None:
         provider_effect_checkpoint(ODOO_LOGICAL_BACKUP_EFFECT)
     record_phase("logical_backup_started")
-    backup_result = execute_odoo_prod_backup_gate(
-        control_plane_root=control_plane_root,
-        record_store=record_store,
-        request=OdooProdBackupGateRequest(
+    original_backup = None
+    if cutover_plan is not None:
+        from control_plane.odoo_cutover_plan import cutover_record_id
+
+        try:
+            previous = record_store.read_deployment_record(
+                "deployment-cutover-" + cutover_record_id(cutover_plan)
+            )
+            if previous.odoo_cutover is not None:
+                original_backup = record_store.read_backup_gate_record(
+                    inputs_result.backup_record_id
+                )
+        except FileNotFoundError:
+            pass
+    if original_backup is not None:
+        from control_plane.workflows.odoo_prod_backup_gate import BACKUP_GATE_SOURCE
+
+        if (
+            original_backup.status != "pass"
+            or original_backup.source != BACKUP_GATE_SOURCE
+            or original_backup.context != request.context
+            or original_backup.instance != request.to_instance
+        ):
+            raise ValueError("cutover resume has no original passing logical backup gate")
+        backup_result = OdooProdBackupGateResult(
             context=request.context,
             instance=request.to_instance,
-            backup_record_id=inputs_result.backup_record_id,
-            timeout_seconds=request.backup_timeout_seconds,
-        ),
-    )
+            backup_record_id=original_backup.record_id,
+            backup_status="pass",
+        )
+    else:
+        backup_result = execute_odoo_prod_backup_gate(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=OdooProdBackupGateRequest(
+                context=request.context,
+                instance=request.to_instance,
+                backup_record_id=inputs_result.backup_record_id,
+                timeout_seconds=request.backup_timeout_seconds,
+            ),
+        )
     if backup_result.backup_status != "pass":
         return _result_from_inputs(
             request=request,
@@ -198,6 +292,8 @@ def execute_odoo_prod_promotion_run(
         ),
         provider_effect_checkpoint=provider_effect_checkpoint,
         hold_uncertain_effects=hold_uncertain_effects,
+        cutover_provider=cutover_provider,
+        cutover_plan=cutover_plan,
     )
     run_status: Literal["pass", "fail"] = (
         "pass"

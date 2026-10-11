@@ -184,6 +184,114 @@ def _replacement_result(
 
 
 class OdooProdRollbackWorkflowTests(unittest.TestCase):
+    def test_configured_slot_lane_after_switch_back_never_uses_in_place_rollback(self) -> None:
+        from tempfile import TemporaryDirectory
+        from tests.test_odoo_cutover import IsolatedCutoverProvider
+        from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane, OdooSlotCoordinates
+        from control_plane.contracts.product_profile_record import ProductLaneProfile
+
+        with TemporaryDirectory() as temporary:
+            provider = IsolatedCutoverProvider(Path(temporary))
+            self.addCleanup(provider.engine.dispose)
+            plan = provider.cutover
+            records = self._record_store()
+            profile = records.read_product_profile_record.return_value
+            profile.lanes = (
+                ProductLaneProfile(
+                    context="opw",
+                    instance="prod",
+                    base_url="http://fixture.invalid",
+                    health_url="http://fixture.invalid/launchplane/health",
+                    odoo_cutover=OdooCutoverLane(
+                        route_id=plan.route_id,
+                        host=plan.host,
+                        database=plan.old.binding.database,
+                        database_uuid=plan.old.runtime_identity.database_uuid,
+                        prepared_origin="http://prepared:8080",
+                        slots=(
+                            OdooSlotCoordinates(
+                                **plan.old.model_dump(
+                                    include={"slot_id", "compose_id", "private_url"}
+                                )
+                            ),
+                            OdooSlotCoordinates(
+                                **plan.new.model_dump(
+                                    include={"slot_id", "compose_id", "private_url"}
+                                )
+                            ),
+                        ),
+                        writers=plan.writers,
+                    ),
+                ),
+            )
+            with patch(
+                "control_plane.workflows.odoo_prod_rollback.execute_odoo_stable_target_replacement_apply"
+            ) as legacy:
+                result = execute_odoo_prod_rollback(
+                    control_plane_root=Path(temporary),
+                    record_store=records,
+                    product="odoo-tenant-opw",
+                    request=OdooProdRollbackRequest(context="opw"),
+                )
+            self.assertEqual(result.rollback_status, "fail")
+            self.assertIn("in-place rollback is refused", result.error_message)
+            legacy.assert_not_called()
+
+    def test_recorded_database_cutover_cannot_redeploy_only_an_image(self) -> None:
+        from tempfile import TemporaryDirectory
+        from tests.test_odoo_cutover import IsolatedCutoverProvider, cutover_store
+        from control_plane.workflows.odoo_cutover import execute_odoo_cutover
+
+        with TemporaryDirectory() as directory:
+            provider = IsolatedCutoverProvider(Path(directory), database_changing=True)
+            self.addCleanup(provider.engine.dispose)
+            cutover = execute_odoo_cutover(
+                provider.cutover, cutover_store(Path(directory)), provider, record_id="c" * 32
+            )
+            records = self._record_store()
+            records.read_deployment_record.return_value = _deployment_record().model_copy(
+                update={"odoo_cutover": cutover}
+            )
+            with patch(
+                "control_plane.workflows.odoo_prod_rollback.execute_odoo_stable_target_replacement_apply"
+            ) as legacy:
+                result = execute_odoo_prod_rollback(
+                    control_plane_root=Path(directory),
+                    record_store=records,
+                    product="fixture",
+                    request=OdooProdRollbackRequest(context="opw"),
+                )
+            self.assertEqual(result.rollback_status, "fail")
+            self.assertIn("image-only rollback is refused", result.error_message)
+            legacy.assert_not_called()
+
+            # A failed readiness check after updating the database can leave
+            # inventory pointing at the old deployment. History, rather than
+            # that stale pointer, must prevent the image-only fallback.
+            failed = _deployment_record().model_copy(
+                update={
+                    "odoo_cutover": cutover.model_copy(
+                        update={"step": "ready", "error": "ValueError"}
+                    )
+                }
+            )
+            records.list_deployment_records.return_value = (failed,)
+            records.read_deployment_record.return_value = _deployment_record()
+            with patch(
+                "control_plane.workflows.odoo_prod_rollback.execute_odoo_stable_target_replacement_apply"
+            ) as legacy:
+                result = execute_odoo_prod_rollback(
+                    control_plane_root=Path(directory),
+                    record_store=records,
+                    product="fixture",
+                    request=OdooProdRollbackRequest(
+                        context="opw", artifact_id=provider.cutover.production.artifact_id
+                    ),
+                )
+            self.assertEqual(result.rollback_status, "fail")
+            self.assertIn("image-only rollback is refused", result.error_message)
+            legacy.assert_not_called()
+
     def test_rollback_request_accepts_profile_owned_context(self) -> None:
         request = OdooProdRollbackRequest(context=" New-Site ")
 
@@ -199,6 +307,14 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
 
     def _record_store(self) -> Mock:
         record_store = Mock()
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from tests.support.profiles import _odoo_preview_profile_payload
+
+        record_store.read_product_profile_record.return_value = (
+            LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload("odoo-tenant-opw")
+            )
+        )
         record_store.list_deployment_records.return_value = (
             _prod_deployment("deployment-opw-prod-current", "artifact-opw-current"),
             _prod_deployment("deployment-opw-prod-current-earlier", "artifact-opw-current"),
@@ -249,9 +365,7 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(inventory.promotion_record_id, _promotion_record().record_id)
         self.assertEqual(inventory.promoted_from_instance, "previous-deployment")
         self.assertEqual(result.source_channel, "previous-deployment")
-        record_store.list_deployment_records.assert_called_once_with(
-            context_name="opw", instance_name="prod"
-        )
+
         record_store.read_artifact_manifest.assert_called_once_with("artifact-opw-847c71c1db61785c")
         final_promotion = record_store.write_promotion_record.call_args_list[-1].args[0]
         self.assertEqual(final_promotion.rollback.status, "pass")
@@ -306,7 +420,6 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(result.rollback_status, "pass")
         self.assertEqual(result.source_channel, "artifact")
         self.assertEqual(result.artifact_id, "artifact-opw-previous-prod")
-        record_store.list_deployment_records.assert_not_called()
         replacement_request = replacement_apply.call_args.kwargs["request"]
         self.assertEqual(replacement_request.artifact_id, "artifact-opw-previous-prod")
         self.assertEqual(
@@ -334,7 +447,6 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
                 ),
             )
 
-        record_store.list_deployment_records.assert_not_called()
         record_store.write_promotion_record.assert_not_called()
 
     def test_rollback_without_an_earlier_passing_deployment_is_refused(self) -> None:

@@ -2726,6 +2726,7 @@ def _build_dokploy_odoo_backup_gate_script(
     filestore_path: str,
     backup_root: str,
     backup_record_id: str,
+    expected_web_state: Literal["running", "exited"] = "running",
 ) -> str:
     return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -2736,6 +2737,7 @@ filestore_root={shlex.quote(filestore_path.strip() or "/volumes/data/filestore")
 backup_root={shlex.quote(backup_root.strip() or DEFAULT_ODOO_BACKUP_ROOT)}
 backup_record_id={shlex.quote(backup_record_id)}
 backup_nonce={shlex.quote(backup_nonce)}
+expected_web_state={shlex.quote(expected_web_state)}
 
 resolve_running_container() {{
     local service_name="$1"
@@ -2751,7 +2753,16 @@ resolve_running_container() {{
 }}
 
 script_runner_container_id=$(resolve_running_container "script-runner")
-web_container_id=$(resolve_running_container "web")
+web_container_ids=$(docker ps -aq \\
+    --filter "label=com.docker.compose.project=${{compose_project}}" \\
+    --filter "label=com.docker.compose.service=web")
+if [ -z "${{web_container_ids}}" ] || [[ "${{web_container_ids}}" == *$'\\n'* ]]; then
+    echo "Backup requires exactly one retained web container." >&2; exit 1
+fi
+web_container_id="${{web_container_ids}}"
+if [ "$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")" != "${{expected_web_state}}" ]; then
+    echo "Backup web state differs from the explicitly expected state." >&2; exit 1
+fi
 image_id=$(docker inspect -f '{{{{.Image}}}}' "${{web_container_id}}")
 if [ "${{image_id}}" != "$(docker inspect -f '{{{{.Image}}}}' "${{script_runner_container_id}}")" ]; then
     echo "Backup web and script-runner image identities must agree." >&2
@@ -2784,9 +2795,9 @@ docker exec -i \\
 {ONLINE_ODOO_BACKUP_PROGRAM}
 PY
 
-if [ "$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")" != "running" ] || \\
+if [ "$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")" != "${{expected_web_state}}" ] || \\
     [ "$(docker inspect -f '{{{{.Image}}}}' "${{web_container_id}}")" != "${{image_id}}" ]; then
-    echo "Serving image changed or web stopped during backup." >&2
+    echo "Retained image or expected web state changed during backup." >&2
     exit 1
 fi
 """

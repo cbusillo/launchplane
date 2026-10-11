@@ -4467,6 +4467,16 @@
             "title": "No Cache",
             "type": "boolean"
           },
+          "odoo_cutover": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooCutoverRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "post_deploy_update": {
             "$ref": "#/components/schemas/PostDeployUpdateEvidence"
           },
@@ -4601,6 +4611,16 @@
             "default": false,
             "title": "No Cache",
             "type": "boolean"
+          },
+          "odoo_cutover": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooCutoverRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "post_deploy_update": {
             "$ref": "#/components/schemas/PostDeployUpdateEvidence"
@@ -19775,6 +19795,271 @@
         "title": "OdooConfigParameterOverride",
         "type": "object"
       },
+      "OdooCutoverLane": {
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "minLength": 1,
+            "title": "Database",
+            "type": "string"
+          },
+          "database_uuid": {
+            "minLength": 1,
+            "title": "Database Uuid",
+            "type": "string"
+          },
+          "host": {
+            "pattern": "^[a-zA-Z0-9.-]+$",
+            "title": "Host",
+            "type": "string"
+          },
+          "prepared_origin": {
+            "minLength": 1,
+            "title": "Prepared Origin",
+            "type": "string"
+          },
+          "route_id": {
+            "pattern": "^[a-zA-Z0-9_-]+$",
+            "title": "Route Id",
+            "type": "string"
+          },
+          "slots": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/OdooSlotCoordinates"
+              },
+              {
+                "$ref": "#/components/schemas/OdooSlotCoordinates"
+              }
+            ],
+            "title": "Slots",
+            "type": "array"
+          },
+          "writers": {
+            "items": {
+              "$ref": "#/components/schemas/WriterTarget"
+            },
+            "title": "Writers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "route_id",
+          "host",
+          "database",
+          "database_uuid",
+          "prepared_origin",
+          "slots",
+          "writers"
+        ],
+        "title": "OdooCutoverLane",
+        "type": "object"
+      },
+      "OdooCutoverPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/ArtifactIdentityManifest"
+          },
+          "compatibility": {
+            "$ref": "#/components/schemas/ReleaseDatabaseCompatibility"
+          },
+          "host": {
+            "pattern": "^[a-zA-Z0-9.-]+$",
+            "title": "Host",
+            "type": "string"
+          },
+          "new": {
+            "$ref": "#/components/schemas/OdooSlot"
+          },
+          "old": {
+            "$ref": "#/components/schemas/OdooSlot"
+          },
+          "production": {
+            "$ref": "#/components/schemas/ArtifactIdentityManifest"
+          },
+          "release_id": {
+            "minLength": 1,
+            "title": "Release Id",
+            "type": "string"
+          },
+          "route_id": {
+            "pattern": "^[a-zA-Z0-9_-]+$",
+            "title": "Route Id",
+            "type": "string"
+          },
+          "writers": {
+            "items": {
+              "$ref": "#/components/schemas/WriterTarget"
+            },
+            "title": "Writers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "release_id",
+          "route_id",
+          "host",
+          "production",
+          "candidate",
+          "compatibility",
+          "old",
+          "new",
+          "writers"
+        ],
+        "title": "OdooCutoverPlan",
+        "type": "object"
+      },
+      "OdooCutoverRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "backup": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooRecoveryTuple"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "began_at": {
+            "format": "date-time",
+            "title": "Began At",
+            "type": "string"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "error": {
+            "default": "",
+            "title": "Error",
+            "type": "string"
+          },
+          "maintenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooMaintenanceReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "old_connections_drained": {
+            "default": false,
+            "title": "Old Connections Drained",
+            "type": "boolean"
+          },
+          "pause": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublicPauseRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plan": {
+            "$ref": "#/components/schemas/OdooCutoverPlan"
+          },
+          "previous_slot_retained": {
+            "default": true,
+            "title": "Previous Slot Retained",
+            "type": "boolean"
+          },
+          "public_site": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PreparedPublicSite"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "readiness": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooSlotReadiness"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "rollback_started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollback Started At"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooRouteObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "step": {
+            "default": "preparing",
+            "enum": [
+              "preparing",
+              "prepared",
+              "pausing",
+              "backing_up",
+              "maintaining",
+              "ready",
+              "switching",
+              "resuming",
+              "draining",
+              "complete",
+              "rolling_back",
+              "rolled_back"
+            ],
+            "title": "Step",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "plan",
+          "began_at",
+          "updated_at"
+        ],
+        "title": "OdooCutoverRecord",
+        "type": "object"
+      },
       "OdooInstanceOverrideRecord": {
         "additionalProperties": false,
         "properties": {
@@ -19855,6 +20140,74 @@
           "updated_at"
         ],
         "title": "OdooInstanceOverrideRecord",
+        "type": "object"
+      },
+      "OdooMaintenanceReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/PublicSiteBinding"
+          },
+          "candidate_manifest_sha256": {
+            "title": "Candidate Manifest Sha256",
+            "type": "string"
+          },
+          "credential_commit_id": {
+            "minLength": 1,
+            "title": "Credential Commit Id",
+            "type": "string"
+          },
+          "credential_commit_verified_before_registry": {
+            "const": true,
+            "title": "Credential Commit Verified Before Registry",
+            "type": "boolean"
+          },
+          "evidence_id": {
+            "minLength": 1,
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "image": {
+            "title": "Image",
+            "type": "string"
+          },
+          "install_modules": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Install Modules",
+            "type": "array"
+          },
+          "module_readback": {
+            "const": true,
+            "title": "Module Readback",
+            "type": "boolean"
+          },
+          "release_id": {
+            "title": "Release Id",
+            "type": "string"
+          },
+          "update_modules": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Update Modules",
+            "type": "array"
+          }
+        },
+        "required": [
+          "release_id",
+          "binding",
+          "image",
+          "candidate_manifest_sha256",
+          "credential_commit_id",
+          "credential_commit_verified_before_registry",
+          "install_modules",
+          "update_modules",
+          "module_readback",
+          "evidence_id"
+        ],
+        "title": "OdooMaintenanceReceipt",
         "type": "object"
       },
       "OdooOutgoingEmailResponse": {
@@ -20787,6 +21140,133 @@
         "title": "OdooProdRollbackResult",
         "type": "object"
       },
+      "OdooRecoveryTuple": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/PublicSiteBinding"
+          },
+          "coherence_verified": {
+            "const": true,
+            "title": "Coherence Verified",
+            "type": "boolean"
+          },
+          "database_dump_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Database Dump Sha256",
+            "type": "string"
+          },
+          "filestore_archive_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Filestore Archive Sha256",
+            "type": "string"
+          },
+          "image": {
+            "title": "Image",
+            "type": "string"
+          },
+          "independent_backup_verified": {
+            "const": true,
+            "title": "Independent Backup Verified",
+            "type": "boolean"
+          },
+          "infrastructure_record_id": {
+            "minLength": 1,
+            "title": "Infrastructure Record Id",
+            "type": "string"
+          },
+          "logical_record_id": {
+            "minLength": 1,
+            "title": "Logical Record Id",
+            "type": "string"
+          },
+          "recovery_point_at": {
+            "format": "date-time",
+            "title": "Recovery Point At",
+            "type": "string"
+          },
+          "restore_verified": {
+            "const": true,
+            "title": "Restore Verified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "binding",
+          "image",
+          "logical_record_id",
+          "infrastructure_record_id",
+          "database_dump_sha256",
+          "filestore_archive_sha256",
+          "recovery_point_at",
+          "coherence_verified",
+          "restore_verified",
+          "independent_backup_verified"
+        ],
+        "title": "OdooRecoveryTuple",
+        "type": "object"
+      },
+      "OdooRouteObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "const": true,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "authoritative_router_count": {
+            "const": 1,
+            "title": "Authoritative Router Count",
+            "type": "integer"
+          },
+          "binding": {
+            "$ref": "#/components/schemas/PublicSiteBinding"
+          },
+          "evidence_id": {
+            "minLength": 1,
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "public_health": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HealthcheckEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "route_id": {
+            "title": "Route Id",
+            "type": "string"
+          },
+          "slot_id": {
+            "title": "Slot Id",
+            "type": "string"
+          },
+          "target_url": {
+            "title": "Target Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "route_id",
+          "host",
+          "target_url",
+          "slot_id",
+          "binding",
+          "evidence_id",
+          "applied",
+          "authoritative_router_count"
+        ],
+        "title": "OdooRouteObservation",
+        "type": "object"
+      },
       "OdooRuntimeEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -20870,6 +21350,160 @@
           "search"
         ],
         "title": "OdooRuntimeLogsResponse",
+        "type": "object"
+      },
+      "OdooSlot": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/PublicSiteBinding"
+          },
+          "compose_id": {
+            "minLength": 1,
+            "title": "Compose Id",
+            "type": "string"
+          },
+          "image": {
+            "pattern": "^.+@sha256:[0-9a-f]{64}$",
+            "title": "Image",
+            "type": "string"
+          },
+          "private_url": {
+            "minLength": 1,
+            "title": "Private Url",
+            "type": "string"
+          },
+          "runtime_identity": {
+            "$ref": "#/components/schemas/RuntimeIdentity"
+          },
+          "slot_id": {
+            "pattern": "^[a-zA-Z0-9_-]+$",
+            "title": "Slot Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot_id",
+          "compose_id",
+          "private_url",
+          "binding",
+          "image",
+          "runtime_identity"
+        ],
+        "title": "OdooSlot",
+        "type": "object"
+      },
+      "OdooSlotCoordinates": {
+        "additionalProperties": false,
+        "properties": {
+          "compose_id": {
+            "minLength": 1,
+            "title": "Compose Id",
+            "type": "string"
+          },
+          "private_url": {
+            "minLength": 1,
+            "title": "Private Url",
+            "type": "string"
+          },
+          "slot_id": {
+            "pattern": "^[a-zA-Z0-9_-]+$",
+            "title": "Slot Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot_id",
+          "compose_id",
+          "private_url"
+        ],
+        "title": "OdooSlotCoordinates",
+        "type": "object"
+      },
+      "OdooSlotReadiness": {
+        "additionalProperties": false,
+        "properties": {
+          "assets": {
+            "const": true,
+            "title": "Assets",
+            "type": "boolean"
+          },
+          "binding": {
+            "$ref": "#/components/schemas/PublicSiteBinding"
+          },
+          "browser": {
+            "const": true,
+            "title": "Browser",
+            "type": "boolean"
+          },
+          "evidence_id": {
+            "minLength": 1,
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "image": {
+            "title": "Image",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "pending_modules": {
+            "const": false,
+            "title": "Pending Modules",
+            "type": "boolean"
+          },
+          "registry": {
+            "const": true,
+            "title": "Registry",
+            "type": "boolean"
+          },
+          "render": {
+            "const": true,
+            "title": "Render",
+            "type": "boolean"
+          },
+          "retained_previous_assets": {
+            "const": true,
+            "title": "Retained Previous Assets",
+            "type": "boolean"
+          },
+          "runtime_identity": {
+            "$ref": "#/components/schemas/RuntimeIdentity"
+          },
+          "side_effects_fenced": {
+            "const": true,
+            "title": "Side Effects Fenced",
+            "type": "boolean"
+          },
+          "slot_id": {
+            "title": "Slot Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding",
+          "slot_id",
+          "image",
+          "host",
+          "observed_at",
+          "evidence_id",
+          "runtime_identity",
+          "registry",
+          "pending_modules",
+          "render",
+          "assets",
+          "browser",
+          "side_effects_fenced",
+          "retained_previous_assets"
+        ],
+        "title": "OdooSlotReadiness",
         "type": "object"
       },
       "OdooStableBootstrapOperationStatusResponse": {
@@ -25195,6 +25829,85 @@
           }
         },
         "title": "PostDeployUpdateEvidence",
+        "type": "object"
+      },
+      "PreparedPublicSite": {
+        "additionalProperties": false,
+        "properties": {
+          "content_digest": {
+            "title": "Content Digest",
+            "type": "string"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/PublicSitePlan"
+          },
+          "prepared_at": {
+            "format": "date-time",
+            "title": "Prepared At",
+            "type": "string"
+          },
+          "resources": {
+            "items": {
+              "$ref": "#/components/schemas/PreparedResource"
+            },
+            "title": "Resources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "plan",
+          "prepared_at",
+          "resources",
+          "content_digest"
+        ],
+        "title": "PreparedPublicSite",
+        "type": "object"
+      },
+      "PreparedResource": {
+        "additionalProperties": false,
+        "properties": {
+          "body_base64": {
+            "title": "Body Base64",
+            "type": "string"
+          },
+          "content_type": {
+            "title": "Content Type",
+            "type": "string"
+          },
+          "headers": {
+            "default": [],
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "type": "array"
+            },
+            "title": "Headers",
+            "type": "array"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "status",
+          "content_type",
+          "body_base64"
+        ],
+        "title": "PreparedResource",
         "type": "object"
       },
       "PreviewDesiredStateEnvelope": {
@@ -31699,6 +32412,17 @@
             "title": "Instance",
             "type": "string"
           },
+          "odoo_cutover": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooCutoverLane"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "odoo_data_policy": {
             "$ref": "#/components/schemas/ProductOdooLaneDataPolicy"
           },
@@ -38097,6 +38821,237 @@
         "title": "PublicIngressNotificationPolicyRecord",
         "type": "object"
       },
+      "PublicPauseRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "began_at": {
+            "format": "date-time",
+            "title": "Began At",
+            "type": "string"
+          },
+          "binding": {
+            "$ref": "#/components/schemas/PublicSiteBinding"
+          },
+          "content_digest": {
+            "title": "Content Digest",
+            "type": "string"
+          },
+          "drained_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drained At"
+          },
+          "duration_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Seconds"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "pause_id": {
+            "title": "Pause Id",
+            "type": "string"
+          },
+          "recovery_binding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublicSiteBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reduced_service": {
+            "const": true,
+            "default": true,
+            "title": "Reduced Service",
+            "type": "boolean"
+          },
+          "served_mode": {
+            "default": "unverified",
+            "enum": [
+              "unverified",
+              "prepared-public"
+            ],
+            "title": "Served Mode",
+            "type": "string"
+          },
+          "state": {
+            "default": "fencing",
+            "enum": [
+              "fencing",
+              "drained",
+              "resuming",
+              "complete"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "writers": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WriterObservation"
+            },
+            "title": "Writers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pause_id",
+          "binding",
+          "content_digest",
+          "began_at"
+        ],
+        "title": "PublicPauseRecord",
+        "type": "object"
+      },
+      "PublicSiteBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "minLength": 1,
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "database": {
+            "minLength": 1,
+            "title": "Database",
+            "type": "string"
+          },
+          "environment_id": {
+            "minLength": 1,
+            "title": "Environment Id",
+            "type": "string"
+          },
+          "image_digest": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Image Digest",
+            "type": "string"
+          },
+          "product_id": {
+            "minLength": 1,
+            "title": "Product Id",
+            "type": "string"
+          },
+          "release_id": {
+            "minLength": 1,
+            "title": "Release Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product_id",
+          "environment_id",
+          "release_id",
+          "artifact_id",
+          "image_digest",
+          "database"
+        ],
+        "title": "PublicSiteBinding",
+        "type": "object"
+      },
+      "PublicSitePlan": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/PublicSiteBinding"
+          },
+          "excluded_prefixes": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Excluded Prefixes",
+            "type": "array"
+          },
+          "max_resource_bytes": {
+            "default": 20000000,
+            "minimum": 1.0,
+            "title": "Max Resource Bytes",
+            "type": "integer"
+          },
+          "max_resources": {
+            "default": 2000,
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Max Resources",
+            "type": "integer"
+          },
+          "max_total_bytes": {
+            "default": 200000000,
+            "minimum": 1.0,
+            "title": "Max Total Bytes",
+            "type": "integer"
+          },
+          "notice": {
+            "minLength": 1,
+            "title": "Notice",
+            "type": "string"
+          },
+          "origin": {
+            "title": "Origin",
+            "type": "string"
+          },
+          "public_routes": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Public Routes",
+            "type": "array"
+          },
+          "retained_assets": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retained Assets",
+            "type": "array"
+          },
+          "writers": {
+            "items": {
+              "$ref": "#/components/schemas/WriterTarget"
+            },
+            "minItems": 1,
+            "title": "Writers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "binding",
+          "origin",
+          "public_routes",
+          "excluded_prefixes",
+          "writers",
+          "notice"
+        ],
+        "title": "PublicSitePlan",
+        "type": "object"
+      },
       "RecentOperationsResponse": {
         "additionalProperties": false,
         "properties": {
@@ -42432,6 +43387,12 @@
             "title": "Context",
             "type": "string"
           },
+          "database_uuid": {
+            "default": "",
+            "title": "Database Uuid",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "deployed_at": {
             "default": "",
             "title": "Deployed At",
@@ -42445,6 +43406,13 @@
             "default": "stable",
             "title": "Environment Kind",
             "type": "string"
+          },
+          "image_digest": {
+            "default": "",
+            "pattern": "^(|sha256:[0-9a-f]{64})$",
+            "title": "Image Digest",
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "image_reference": {
             "default": "",
@@ -42470,6 +43438,12 @@
             "title": "Product",
             "type": "string"
           },
+          "release_id": {
+            "default": "",
+            "title": "Release Id",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "release_tuple_id": {
             "default": "",
             "title": "Release Tuple Id",
@@ -42480,6 +43454,12 @@
             "minimum": 1.0,
             "title": "Schema Version",
             "type": "integer"
+          },
+          "slot": {
+            "default": "",
+            "title": "Slot",
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "source_git_ref": {
             "title": "Source Git Ref",
@@ -47651,6 +48631,73 @@
           "source"
         ],
         "title": "WorkGraphSnapshotResponse",
+        "type": "object"
+      },
+      "WriterObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "active_jobs": {
+            "minimum": 0.0,
+            "title": "Active Jobs",
+            "type": "integer"
+          },
+          "binding": {
+            "$ref": "#/components/schemas/PublicSiteBinding"
+          },
+          "evidence_id": {
+            "minLength": 1,
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "fenced": {
+            "title": "Fenced",
+            "type": "boolean"
+          },
+          "pause_id": {
+            "title": "Pause Id",
+            "type": "string"
+          },
+          "writer": {
+            "$ref": "#/components/schemas/WriterTarget"
+          }
+        },
+        "required": [
+          "binding",
+          "pause_id",
+          "writer",
+          "fenced",
+          "active_jobs",
+          "evidence_id"
+        ],
+        "title": "WriterObservation",
+        "type": "object"
+      },
+      "WriterTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "web",
+              "cron",
+              "queue",
+              "mail",
+              "integration",
+              "asset_gc"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "writer_id": {
+            "minLength": 1,
+            "title": "Writer Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "writer_id",
+          "kind"
+        ],
+        "title": "WriterTarget",
         "type": "object"
       }
     }

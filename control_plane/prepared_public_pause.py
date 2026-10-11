@@ -100,7 +100,9 @@ class PreparedPublicPause:
             )
         ):
             raise ValueError("every authoritative writer must be verifiably fenced and drained")
-        record = record.model_copy(update={"state": "drained", "writers": observations})
+        record = record.model_copy(
+            update={"state": "drained", "writers": observations, "drained_at": self.clock()}
+        )
         self.store.save(record)
         return record
 

@@ -3121,7 +3121,7 @@ def _allow_reason(
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if (
         normalized.startswith("docs/")
-        or normalized in {"README.md", "AGENTS.md", "handoff.md"}
+        or normalized in {"README.md", "AGENTS.md", "handoff.md", "SECURITY.md", "LICENSE"}
         or re.fullmatch(
             r"(?:\.github/)?pull_request_template(?:\.md|/[^/]+\.md)",
             normalized,

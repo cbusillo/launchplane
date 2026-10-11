@@ -1,0 +1,41 @@
+"""Disposable scheduled writer: real ORM cron, inert queue/outbound/GC ticks."""
+import hashlib
+import os
+import time
+
+import psycopg2
+
+writer, slot = os.environ['CUTOVER_WRITER'], os.environ['CUTOVER_SLOT']
+connection = psycopg2.connect(host=os.environ['ODOO_DB_HOST'], dbname=os.environ['ODOO_DB_NAME'],
+                             user=os.environ['ODOO_DB_USER'], password=os.environ['ODOO_DB_PASSWORD'],
+                             application_name=slot+':'+writer)
+connection.autocommit = True
+cursor = connection.cursor()
+cursor.execute("SELECT value FROM ir_config_parameter WHERE key='printnode.api_key'")
+if cursor.fetchone() != ('inert-lane-sentinel',):
+    raise RuntimeError('fixture worker refused an unstripped key before registry startup')
+lock = int.from_bytes(hashlib.sha256(writer.encode()).digest()[:8], 'big', signed=True)
+cursor.execute('SELECT pg_try_advisory_lock(%s)', (lock,))
+if cursor.fetchone() != (True,):
+    raise RuntimeError('another slot already owns this fixture writer')
+registry = None
+if os.environ['CUTOVER_WORKER_KIND'] == 'cron':
+    import sys
+    sys.path.insert(0, '/odoo')
+    import odoo
+    from odoo import api, SUPERUSER_ID
+    odoo.tools.config.parse_config(['--config','/dev/null','--db_host',os.environ['ODOO_DB_HOST'],
+        '--db_user',os.environ['ODOO_DB_USER'],'--addons-path',os.environ['ODOO_ADDONS_PATH'],
+        '--data-dir','/volumes/data','--max-cron-threads','0','--no-http'])
+    registry = odoo.modules.registry.Registry(os.environ['ODOO_DB_NAME'])
+while True:
+    if registry is not None:
+        with registry.cursor() as cr:
+            env = api.Environment(cr, SUPERUSER_ID, {})
+            parameters = env['ir.config_parameter'].sudo()
+            key = 'cutover.fixture.cron_ticks'
+            parameters.set_param(key, int(parameters.get_param(key, '0')) + 1)
+            cr.commit()
+    cursor.execute('INSERT INTO cutover_worker_ticks(writer,slot,process) VALUES (%s,%s,%s)',
+                   (writer, slot, os.getpid()))
+    time.sleep(.2)

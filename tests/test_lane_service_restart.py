@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from dataclasses import replace
 import json
+import hashlib
 import io
 from pathlib import Path
 import runpy
@@ -32,7 +33,11 @@ from control_plane.contracts.release_review import (
     ReleaseReviewDecisionRecord,
     ReleaseVersion,
 )
-from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+from control_plane.contracts.runtime_identity import (
+    RUNTIME_IDENTITY_ENV_KEY,
+    RuntimeIdentity,
+    runtime_identity_env,
+)
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanIdentity,
@@ -282,6 +287,34 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertEqual(status, 200, response)
         self.payload.update(mode="apply", reviewed_plan_sha256=response["result"]["plan_sha256"])
         return response
+
+    def test_legacy_container_identity_keeps_its_reviewed_restart_digest(self) -> None:
+        # A container deployed before the two-slot contract has no slot fields.
+        # Keep the historical wire shape independent of new model defaults.
+        legacy_identity = {
+            "schema_version": 1,
+            "product": self.expected.product,
+            "context": self.expected.context,
+            "instance": self.expected.instance,
+            "environment_kind": "stable",
+            "deployment_record_id": self.expected.deployment_record_id,
+            "artifact_id": self.expected.artifact_id,
+            "source_git_ref": self.expected.source_git_ref,
+            "image_reference": self.expected.image_reference,
+            "release_tuple_id": "",
+            "preview_id": "",
+            "preview_generation_id": "",
+            "deployed_at": "",
+        }
+        legacy_json = json.dumps(legacy_identity, sort_keys=True, separators=(",", ":"))
+        self.provider.config["Config"]["Env"] = [RUNTIME_IDENTITY_ENV_KEY + "=" + legacy_json]
+        reviewed = self.review()
+        self.assertEqual(
+            reviewed["result"]["plan"]["before"]["runtime_identity_sha256"],
+            hashlib.sha256(legacy_json.encode()).hexdigest(),
+        )
+        self.assertEqual(self.invoke(key="legacy-restart")[1]["result"]["status"], "pass")
+        self.assertEqual(len(self.provider.writes), 1)
 
     def test_restart_replays_and_activity_retains_actor_reason_and_identities(self) -> None:
         reviewed = self.review()

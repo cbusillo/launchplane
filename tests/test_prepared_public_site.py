@@ -152,17 +152,19 @@ class PreparedPublicSiteTests(unittest.IsolatedAsyncioTestCase):
         for writer in self.fixture.plan.writers:
             self.assertTrue(self.fixture.write(writer.writer_id))
         began = datetime.now(UTC)
-        clock_values = iter((began, began + timedelta(seconds=17)))
+        current_time = began
 
         def clock() -> datetime:
-            return next(clock_values)
+            return current_time
 
         pause = PreparedPublicPause(self.site, self.store, self.fixture, clock=clock)
         record = pause.begin()
+        self.assertEqual(record.drained_at, began)
         for writer in self.fixture.plan.writers:
             self.assertFalse(self.fixture.write(writer.writer_id))
         self.assertEqual(self.fixture.committed_write_count(), len(self.fixture.plan.writers))
         self.fixture.update_database()
+        current_time = began + timedelta(seconds=17)
         restarted = PreparedPublicPause(
             self.site, FilePublicPauseStore(self.root / "state"), self.fixture, clock=clock
         )
