@@ -4,7 +4,7 @@ import { RELEASE_PROGRESS_REFRESH_MS } from "../../src/OwnerReleaseReviewRoute";
 
 test("Preview-era note markers identify each PR only in the engineering view", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
-  await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
   const response = await page.evaluate(async () => {
     const fixtures = await import("/ui/src/dev-fixtures.ts");
     return fixtures.releaseReviewForFixture("products");
@@ -27,7 +27,7 @@ test("Preview-era note markers identify each PR only in the engineering view", a
 
 test("Failed releases distinguish automatic recovery from the rollback drill", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
-  await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
   const response = await page.evaluate(async () => {
     const modulePath = "/ui/src/dev-fixtures.ts";
     const fixtures = await import(modulePath);
@@ -83,7 +83,7 @@ test("Owner reviews the complete release and can request changes after accepting
   page.on("request", request => { if (request.method() !== "GET") mutations.push(request.url()); });
   page.on("pageerror", error => errors.push(error.message));
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
-  await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Open the testing site" })).toHaveAttribute("href", "https://testing.example.invalid/");
   const checks = page.locator(".release-review-checklist").first().locator(":scope > li");
   await expect(checks).toHaveCount(1);
@@ -141,6 +141,16 @@ test("Operator records a separate reasoned override without Owner controls", asy
   await page.goto("/ui/owner-review?product=example-site&fixture=operator");
   await expect(page.getByRole("button", { name: "Accept release" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Request changes" })).toHaveCount(0);
+  // The first line tells a non-Client who the Client is and what their decision does.
+  const role = page.locator(".owner-review-card > .owner-review-state").first();
+  await expect(role).toContainText("You are not the Client. site-owner is the Client");
+  await expect(role).toContainText("admin override and does not start the release");
+  const askNow = page.getByRole("region", { name: "Ask the Client now", exact: true });
+  const ask = askNow.getByRole("button", { name: "Ask site-owner to review now" });
+  await expect(ask).toBeDisabled();
+  await askNow.getByRole("textbox").fill("Fixes a login security problem.");
+  await ask.click();
+  await expect(askNow.getByRole("status")).toContainText("Nothing has been deployed.");
   const override = page.getByRole("region", { name: "Admin Approval Override", exact: true });
   const record = override.getByRole("button");
   await expect(record).toBeDisabled();
@@ -151,6 +161,7 @@ test("Operator records a separate reasoned override without Owner controls", asy
   const latest = page.getByRole("region", { name: "Latest release decision" });
   await expect(latest).toContainText("site-operator");
   await expect(latest.getByRole("blockquote")).toHaveText("Reviewed the missing instructions with the Client.");
+  await expect(askNow).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("operator-recorded.png"), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(mutations).toEqual([]);
@@ -303,4 +314,45 @@ test("A stopped release stops refreshing and a newer decision discards an older 
   const stoppedReads = reads;
   await page.clock.runFor(3 * RELEASE_PROGRESS_REFRESH_MS);
   expect(reads).toBe(stoppedReads);
+});
+
+test("Urgent invitation controls respect a live hotfix and an unchanged candidate", async ({ page }) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=operator");
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("operator");
+  });
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "engineer", github_id: 9002, role: "admin", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  response.live_site_url = "https://live.example.invalid/";
+  response.reviewing_temporary_hotfix = true;
+  for (const director of [false, true]) {
+    response.can_start_temporary_hotfix = director;
+    await page.goto("/ui/owner-review?product=example-site");
+    const role = page.locator(".owner-review-card > .owner-review-state").first();
+    await expect(role).toContainText("urgent fix is already live");
+    await expect(role).toContainText("Accept keeps it");
+    await expect(role).toContainText("override is unavailable");
+    await expect(page.getByRole("region", { name: "Admin Approval Override", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: director ? "Open the testing site" : "Open the live site", exact: true })).toBeVisible();
+    if (director) {
+      await page.getByText("Technical details", { exact: true }).click();
+      await expect(page.getByText("Proposed production version:", { exact: true })).toBeVisible();
+      await expect(page.getByText("Live urgent fix:", { exact: true })).toHaveCount(0);
+    }
+  }
+  response.reviewing_temporary_hotfix = false;
+  await page.reload();
+  await expect(page.locator(".owner-review-card > .owner-review-state").first()).toContainText("separate control below");
+  response.review.checklist!.candidate = { ...response.review.checklist!.production };
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toHaveCount(0);
+  response.review.checklist!.candidate.shared_addons_digest = "shared-security-fix";
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toBeVisible();
+  response.review.checklist!.candidate = { ...response.review.checklist!.production, artifact_id: "rebuilt-security-image" };
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toBeVisible();
 });

@@ -45406,6 +45406,36 @@
         "title": "TrustedMaintenancePolicyRecord",
         "type": "object"
       },
+      "UrgentReleaseReviewEnvelope": {
+        "additionalProperties": false,
+        "description": "An admin's request to ask the Client about an engineering-only release now.",
+        "properties": {
+          "checklist_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Checklist Digest",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "checklist_digest",
+          "reason"
+        ],
+        "title": "UrgentReleaseReviewEnvelope",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -87674,6 +87704,100 @@
         ]
       }
     },
+    "/v1/release-review/urgent-openings": {
+      "post": {
+        "description": "Ask the Client now; their acceptance is still what starts the release.",
+        "operationId": "open_urgent_release_review",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UrgentReleaseReviewEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseReviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Open Urgent Release Review",
+        "tags": [
+          "release-review"
+        ]
+      }
+    },
     "/v1/repo-product-mapping": {
       "get": {
         "operationId": "read_repo_product_mapping",
@@ -92797,6 +92921,7 @@
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": "dispatch_product_promotion_workflow",
     "/v1/release-review/decisions": "write_release_review_decision",
+    "/v1/release-review/urgent-openings": "open_urgent_release_review",
     "/v1/service/github-delivery/configuration": "configure_launchplane_github_delivery",
     "/v1/service/github-delivery/token-retirement": "retire_service_github_tokens",
     "/v1/work-graph/rank": "rank_work_graph_snapshot"

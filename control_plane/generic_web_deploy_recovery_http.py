@@ -25,6 +25,7 @@ from control_plane.contracts.idempotency_record import (
     parse_launchplane_mutation_timestamp,
 )
 from control_plane.event_deploy_recovery_reference import (
+    OriginalEventDeployEvidenceUnavailable,
     EventDeployRecoveryCoordinates,
     resolve_event_deploy_recovery_coordinates,
 )
@@ -1248,6 +1249,17 @@ def authorized_event_deploy_coordinates(
             trace_id=trace_id,
             code="reservation_not_found",
             message="No held event deploy was found.",
+        ) from error
+    except OriginalEventDeployEvidenceUnavailable as error:
+        raise dependencies.http_error(
+            status_code=409,
+            trace_id=trace_id,
+            code="recovery_original_evidence_unavailable",
+            message=(
+                "No saved original event deploy request matches the held reservation. "
+                "Keep the deploy held; the explicit recovery path requires independently "
+                "proven original coordinates."
+            ),
         ) from error
     except (ValueError, click.ClickException) as error:
         raise dependencies.http_error(

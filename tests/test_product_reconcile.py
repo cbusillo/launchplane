@@ -812,7 +812,9 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
 
         def unavailable(path: str) -> bytes:
             if "/artifacts/200/" in path:
-                raise BuildProvenanceError("Manifest temporarily unavailable")
+                raise BuildProvenanceError(
+                    "Manifest temporarily unavailable", code="github_read_failed"
+                )
             return download(path)
 
         self.request()
@@ -820,8 +822,47 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             plan = self.reconcile()
         self.assertEqual(plan["reason"], "ancestor_build")
         self.assertEqual(plan["action"], "none")
-        self.assertTrue(plan["rejected_builds"])
+        self.assertEqual(
+            plan["rejected_builds"],
+            [
+                {
+                    "commit": DEPLOYABLE,
+                    "run_id": 20,
+                    "code": "github_read_failed",
+                    "error": "Manifest temporarily unavailable",
+                }
+            ],
+        )
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
+
+    def test_rejected_newer_manifest_records_reason_and_run_before_falling_back(self) -> None:
+        self._running_release(20, DEPLOYABLE)
+        self.github.add_run(30, NEWEST)
+        self.github.add_run(40, NEWEST)
+        download = self.github.get_bytes
+
+        def wrong_commit(path: str) -> bytes:
+            if "/artifacts/400/" in path:
+                return download(path.replace("/artifacts/400/", "/artifacts/200/"))
+            return download(path)
+
+        self.request()
+        with patch.object(self.github, "get_bytes", wrong_commit):
+            plan = self.reconcile()
+        self.assertEqual((plan["action"], plan["reason"]), ("none", "already_deployed"))
+        self.assertEqual(
+            plan["rejected_builds"],
+            [
+                {
+                    "commit": NEWEST,
+                    "run_id": 40,
+                    "code": "manifest_commit_mismatch",
+                    "error": "The build manifest names a different source commit.",
+                }
+            ],
+        )
+        request = self.store.read_product_reconcile_request("site:testing")
+        self.assertEqual(request.last_plan["rejected_builds"], plan["rejected_builds"])
 
     def test_testing_deploy_queues_one_target_replacement_on_the_reconcile_grant(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
@@ -1526,11 +1567,23 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.github.add_run(20, DEPLOYABLE)
         self.request()
         with patch.object(
-            self.github, "get_bytes", side_effect=BuildProvenanceError("Manifest unavailable")
+            self.github,
+            "get_bytes",
+            side_effect=BuildProvenanceError("Manifest unavailable", code="github_read_failed"),
         ):
             plan = self.reconcile()
         self.assertEqual((plan["action"], plan["reason"]), ("none", "no_verified_build"))
-        self.assertTrue(plan["rejected_builds"])
+        self.assertEqual(
+            plan["rejected_builds"],
+            [
+                {
+                    "commit": DEPLOYABLE,
+                    "run_id": 20,
+                    "code": "github_read_failed",
+                    "error": "Manifest unavailable",
+                }
+            ],
+        )
         self.assertEqual(self.deploys.runtime_identities, [])
 
     def test_legacy_baseline_does_not_admit_older_source_or_builds(self) -> None:
@@ -2552,7 +2605,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.github.pull_request["state"] = "closed"
         with patch(
             "control_plane.product_reconcile._pull_request_moved",
-            side_effect=BuildProvenanceError("GitHub unavailable"),
+            side_effect=BuildProvenanceError("GitHub unavailable", code="github_read_failed"),
         ):
             for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
                 self.request("preview", 5)
