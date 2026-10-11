@@ -830,6 +830,19 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.publish()
         self.assertEqual(len(self.comments), 2)
 
+    def test_changed_checklist_that_cannot_be_requested_keeps_the_read_throttle(self) -> None:
+        self.store.create_release_review_decision_record_if_absent(decision(self.store))
+        self.review = self.review.model_copy(
+            update={"checklist_digest": "f" * 64, "blockers": ("Test notes are missing.",)}
+        )
+        backoff = ReleaseInvitationBackoff()
+        self.publish(backoff)
+        reads = self.read_count
+        self.publish(backoff)
+        self.publish(backoff)
+        self.assertEqual(self.read_count, reads)
+        self.assertEqual(self.posts, [])
+
     def test_large_repository_stops_after_finding_marked_issue(self) -> None:
         marker = release_request_issue_marker(self.profile.product)
         original = self.github

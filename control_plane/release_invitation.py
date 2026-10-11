@@ -344,6 +344,16 @@ def publish_release_invitation(
                 return
             receipt_due = True
             backoff.delivered.pop(receipt[:2])
+    # Do not compile a large checklist on every worker poll. This is a read
+    # throttle only; GitHub's candidate marker remains the durable receipt.
+    fingerprint = (
+        profile.model_dump_json() + production.model_dump_json() + candidate.model_dump_json()
+    )
+    if backoff is not None:
+        previous_fingerprint, next_read = backoff.next_reads.get(profile.product, ("", 0))
+        if not receipt_due and previous_fingerprint == fingerprint and monotonic() < next_read:
+            return
+        backoff.next_reads[profile.product] = (fingerprint, monotonic() + 300)
     # A person already decided about these versions. The decision still settles the
     # review only while it covers the current checklist; edited test notes change the
     # checklist without a new candidate, and the Client then needs a fresh request.
@@ -378,16 +388,6 @@ def publish_release_invitation(
                     monotonic() + SETTLED_DECISION_RECHECK_SECONDS,
                 )
             return
-    # Do not compile a large checklist on every worker poll. This is a read
-    # throttle only; GitHub's candidate marker remains the durable receipt.
-    fingerprint = (
-        profile.model_dump_json() + production.model_dump_json() + candidate.model_dump_json()
-    )
-    if backoff is not None:
-        previous_fingerprint, next_read = backoff.next_reads.get(profile.product, ("", 0))
-        if not receipt_due and previous_fingerprint == fingerprint and monotonic() < next_read:
-            return
-        backoff.next_reads[profile.product] = (fingerprint, monotonic() + 300)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,38}", profile.owner.github_login):
         raise ValueError("Release invitation requires a GitHub login.")
     # Product-wide serialization also prevents competing candidates creating
