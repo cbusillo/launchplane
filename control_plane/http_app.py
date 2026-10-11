@@ -4265,8 +4265,14 @@ def create_launchplane_fastapi_app(
             trace_id = next_trace_id()
             try:
                 refresh_result = await run_in_threadpool(read_active_authz_policy_records)
-            except (OSError, RuntimeError, SQLAlchemyError, TypeError, ValueError):
-                logging.exception("Failed to refresh the active Launchplane authz policy.")
+            except (OSError, RuntimeError, SQLAlchemyError, TypeError, ValueError) as error:
+                if isinstance(error, ValidationError):
+                    logging.error(
+                        "Active Launchplane authz policy validation failed (%s errors).",
+                        error.error_count(),
+                    )
+                else:
+                    logging.exception("Failed to refresh the active Launchplane authz policy.")
                 return JSONResponse(
                     status_code=503,
                     content=LaunchplaneErrorResponse(

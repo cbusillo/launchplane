@@ -71,7 +71,12 @@ class StoredAuthzPolicyStartupTests(unittest.TestCase):
                 self._exercise_startup(corruption=corruption)
 
     def test_request_refresh_recovers_only_after_a_valid_policy_is_read(self) -> None:
-        self._exercise_startup(corruption="digest", request_refresh=True)
+        with self.assertLogs(level="ERROR") as captured:
+            self._exercise_startup(corruption="digest", request_refresh=True)
+        for message in captured.output:
+            self.assertNotIn("stored-policy", message)
+            self.assertNotIn(_identity().repository, message)
+            self.assertNotIn("f" * 64, message)
 
     def _exercise_startup(self, *, corruption: str = "", request_refresh: bool = False) -> None:
         identity = _identity()
@@ -109,6 +114,15 @@ class StoredAuthzPolicyStartupTests(unittest.TestCase):
         valid_payload = deepcopy(payload)
         if corruption == "instance_rule":
             payload["policy"]["github_actions"][1]["instances"] = []
+            invalid_policy = historical_policy.model_copy(
+                update={
+                    "github_actions": (
+                        historical_policy.github_actions[0],
+                        historical_policy.github_actions[1].model_copy(update={"instances": ()}),
+                    )
+                }
+            )
+            payload["policy_sha256"] = authz_policy_sha256(invalid_policy)
         elif corruption == "digest":
             payload["policy_sha256"] = "f" * 64
         original_payload = deepcopy(payload)
