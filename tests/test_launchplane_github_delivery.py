@@ -16,6 +16,8 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.github_app_identity import (
     resolve_advisory_github_app_identity,
     ADVISORY_GITHUB_APP_ID_ENV_KEY,
+    ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY,
+    GitHubAppIdentityError,
 )
 from control_plane.merge_train_github import _owner_review_advisory_app_id
 from unittest.mock import patch
@@ -237,6 +239,29 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
                     identity = resolve_advisory_github_app_identity(control_plane_root=self.root)
                     self.assertEqual(identity.app_id, expected)
                     self.assertEqual(_owner_review_advisory_app_id(store), identity.app_id)
+
+    def test_advisory_private_key_never_comes_from_a_plain_record(self) -> None:
+        context = RuntimeEnvironmentRecord(
+            scope="context",
+            context="launchplane",
+            env={
+                ADVISORY_GITHUB_APP_ID_ENV_KEY: "77",
+                ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY: self.key,
+            },
+            updated_at="2026-10-10T00:00:00Z",
+        )
+        with (
+            patch(
+                "control_plane.github_app_identity.runtime_environments.load_runtime_environment_definition",
+                return_value=build_runtime_environment_definition_from_records((context,)),
+            ),
+            patch(
+                "control_plane.github_app_identity.control_plane_secrets.resolve_launchplane_service_secret",
+                return_value="",
+            ),
+            self.assertRaises(GitHubAppIdentityError),
+        ):
+            resolve_advisory_github_app_identity(control_plane_root=self.root)
 
     def test_missing_accepted_grant_cannot_mint_or_use_a_pat(self) -> None:
         self.installation_permissions["issues"] = "read"

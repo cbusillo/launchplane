@@ -277,6 +277,15 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 
 ## Implementation Posture
 
+HTTP app construction reuses bounded, process-local route preparation in
+`control_plane/http_route_preparation.py`. Cached templates contain validation
+schemas and route metadata with placeholders for application callables. Each
+app receives independent route/dependency metadata, its own endpoint bindings,
+dependency overrides, middleware, lifespan, policy, stores and state. Callable
+instances, decorated dependencies, callbacks and custom operation-ID generators
+use ordinary FastAPI preparation. The cache is an optimization, never runtime
+configuration or record authority.
+
 - Use Postgres-backed storage and managed secrets for shared-service production
   truth.
 - Do not add product capability to file-backed JSON, local CLI writers,

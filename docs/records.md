@@ -905,6 +905,34 @@ public checks so Launchplane can show readiness evidence before public
 availability is expected. Missing intent on a policy with checks, unknown
 values, and public/private intent without its required check fail validation.
 
+The product profile's `public_website` fact defaults to `required`. Only an
+explicit `none` declaration makes missing public route, ingress and TLS
+authority inapplicable. Private monitoring intent alone is not an exemption.
+Declare it through the existing `POST /v1/product-profiles` service write under
+`product_profile.write`, preserving the rest of the profile, then read it back.
+No new grant or checked-in product list is involved. Monitoring changes still
+use their own reviewed health-monitoring apply endpoint; its dry-run validates
+the same complete candidate profile as apply, including the website declaration.
+The declaration rejects public lane URLs, public monitoring intent and enabled
+public checks. It is persisted in the profile and projected in desired topology
+with profile provenance, and the environment overview shows the declaration.
+Provider placement, current health and runtime identity, open incidents and
+monitor cadence remain required. Missing placement or absent effective checks
+cannot become green. Existing products keep their public authority requirements.
+
+Topology records distinguish `info` from blocking `warning` and `error`.
+No-website applicability and external proxy-internals visibility remain visible
+as information. A disabled public check's failed observation remains history,
+with `probe_effective=false`, rather than a current topology error. Disabled
+public history does not age current placement evidence or imply a current
+public runtime-identity failure when its check is disabled. Projected negative
+TLS observations remain diagnostic errors even for a no-website declaration.
+Applicable missing/stale public authority, enabled-check failures and negative TLS still
+block green. Environment warning strings contain only blocking warnings;
+structured topology retains the informational evidence for review.
+Enabled public-check observations take precedence over disabled-check history.
+External ingress still requires effective public proof when a website is required.
+
 Each check has a stable name and kind. `public_http` checks use an explicit URL
 or the lane `health_url`, or derive one from lane `base_url` plus product
 `health_path`. `private_http` checks monitor internal service endpoints without
@@ -1024,7 +1052,11 @@ requirement is reported as `absent`, so dry-runs are honest and re-applies are
 idempotent. Removing a managed secret binding requirement never unbinds or
 deletes a stored secret; the response lists any configured binding that still
 holds a value under `still_bound`. It does not accept secret plaintext, runtime
-values, repositories, lanes, domains, or promotion settings. The admin
+values, repositories, lanes, domains, or promotion settings. Apply publishes
+with compare-and-write against the profile it read: if another writer changed
+the profile in between, the route writes nothing, answers `409 stale`, and
+stores no idempotency result, so a retry with the same key runs against the
+current profile and its current live status. The admin
 helper (`product-expected-config-dry-run`, then `product-expected-config-apply`
 with the reviewed dry-run evidence) is the supported path for additions and
 removals; real product, context, instance, and binding values come from the

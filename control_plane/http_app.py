@@ -21,6 +21,7 @@ import fastapi.exceptions as fastapi_exceptions
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.datastructures import DefaultPlaceholder
 from fastapi.concurrency import run_in_threadpool
+from control_plane.http_route_preparation import PreparedAPIRoute
 from control_plane.http_routes.support import run_in_worker_thread
 from fastapi.exceptions import RequestValidationError
 from control_plane.github_request_timing import github_request_tally
@@ -401,6 +402,7 @@ from control_plane.merge_train_pr_feedback import (
     write_merge_train_pr_feedback_record,
     require_merge_train_pr_feedback_record_store,
 )
+from control_plane.merge_train_release_hold import merge_train_release_hold_reader
 from control_plane.merge_train_run_once import (
     MergeTrainRunOnceEnvelope,
     MergeTrainRunOnceResult,
@@ -710,6 +712,7 @@ from control_plane.contracts.product_environment_read_model import (
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    ProductProfileChangedError,
     ProductExpectedConfigProfile,
     ProductLaneProfile,
     ProductRuntimeConfigRequirement,
@@ -3831,6 +3834,7 @@ class _LaunchplaneFastAPI(FastAPI):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._launchplane_error_response_model_registered = False
         super().__init__(*args, **kwargs)
+        self.router.route_class = PreparedAPIRoute
 
     def add_api_route(
         self,
@@ -6355,6 +6359,7 @@ def create_launchplane_fastapi_app(
                 admission_evaluator=admission_evaluator,
                 before_release=store_controller_idempotency_before_release,
                 branch_refresh_store=optional_merge_train_branch_refresh_store(record_store),
+                release_hold_reader=merge_train_release_hold_reader(record_store),
             )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)
@@ -12568,22 +12573,112 @@ def create_launchplane_fastapi_app(
             updated_at=utc_now_timestamp(),
             secret_bindings=secret_bindings,
         )
-        if expected_config_request.mode == "apply" and result["changed"]:
-            try:
-                profile_write_store = require_product_profile_write_store(record_store)
-            except TypeError as error:
-                raise _launchplane_http_error(
-                    status_code=503,
-                    trace_id=trace_id,
-                    code="database_storage_required",
-                    message=str(error),
-                ) from error
-            profile_write_store.write_product_profile_record(merged_profile)
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={"product_profile": expected_config_request.product},
             result=result,
         )
+        if expected_config_request.mode == "apply" and result["changed"]:
+            compare_and_write = getattr(
+                record_store, "compare_and_write_product_profile_record", None
+            )
+            if not callable(compare_and_write):
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="database_storage_required",
+                    message=(
+                        "Launchplane record store does not support product profile writes: "
+                        "compare_and_write_product_profile_record"
+                    ),
+                )
+            # Publish only over the exact profile that passed the live guard and built the
+            # merge, so a concurrent profile change is never overwritten with stale fields.
+            # With a key, the database stores the replay result in the same transaction.
+            mutation = (
+                DbOnlyMutationRequest(
+                    scope=idempotency_scope(identity),
+                    route_path=_PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint=payload_fingerprint,
+                    lease_owner=trace_id,
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    response_payload=response.model_dump(mode="json", exclude_none=True),
+                    lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+                )
+                if normalized_idempotency_key and isinstance(record_store, PostgresRecordStore)
+                else None
+            )
+            stale_error: Exception | None = None
+            try:
+                write_result = compare_and_write(
+                    expected_record=profile,
+                    replacement_record=merged_profile,
+                    **({"mutation": mutation} if mutation is not None else {}),
+                )
+                write_status = getattr(write_result, "status", "written")
+            except ProductProfileChangedError as error:
+                write_status, stale_error = "changed", error
+            except FileNotFoundError as error:
+                write_status, stale_error = "missing", error
+            if write_status == "replayed":
+                stored_record = getattr(write_result, "idempotency_record", None)
+                if stored_record is None:
+                    raise RuntimeError("Replayed product profile write requires evidence.")
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=stored_record,
+                    route_path=_PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE,
+                )
+            if write_status == "idempotency_conflict":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different "
+                        "Launchplane request payload on this route."
+                    ),
+                )
+            if write_status == "reservation_in_progress":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_in_progress",
+                    message=(
+                        "A matching product expected config change is already running. "
+                        "Retry with the same Idempotency-Key."
+                    ),
+                )
+            if write_status == "reconciliation_required":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="mutation_reconciliation_required",
+                    message=(
+                        "The product expected config change requires reconciliation before retry."
+                    ),
+                )
+            if write_status == "missing":
+                raise _launchplane_http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="not_found",
+                    message="Product profile disappeared before the expected config was applied.",
+                ) from stale_error
+            if write_status != "written":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="stale",
+                    message=(
+                        "Product profile changed while applying expected config; "
+                        "nothing was written. Retry to apply it to the current profile."
+                    ),
+                ) from stale_error
+            if mutation is not None:
+                return response
         store_apply_idempotency(
             record_store=record_store,
             identity=identity,
@@ -12771,6 +12866,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="invalid_health_monitoring_target",
                 message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_product_profile",
+                message="Updated product profile failed validation.",
             ) from error
         if (
             health_monitoring_request.mode == "apply"

@@ -360,6 +360,30 @@ class MergeTrainDryRunTests(unittest.TestCase):
         self.assertEqual(reasons[9], ("dependency update needs agent review",))
         self.assertIn("missing ready-to-merge label", reasons[10])
 
+    def test_max_batch_size_caps_a_new_batch_and_leaves_the_rest_queued(self) -> None:
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            pull_requests=tuple(
+                _pull_request(number, created_at=f"2026-05-08T10:0{number}:00Z")
+                for number in (1, 2, 3)
+            ),
+        )
+        policy = _policy_for(snapshot)
+        capped = policy.model_copy(
+            update={"policies": (policy.policies[0].model_copy(update={"max_batch_size": 2}),)}
+        )
+        for name, batch_policy, expected in (
+            ("unset", policy, (1, 2, 3)),
+            ("capped", capped, (1, 2)),
+        ):
+            with self.subTest(name):
+                result = build_merge_train_dry_run_result(
+                    policy=batch_policy, snapshot=snapshot, batch_landing=True
+                )
+                self.assertEqual(result.queue_order, expected)
+                self.assertTrue(all(entry.eligible for entry in result.queue))
+
     def test_service_dependency_hold_requalifies_current_head_without_clearing_labels(self) -> None:
         policy = _dependency_update_policy(49699333)
         repository_policy = policy.policies[0]
