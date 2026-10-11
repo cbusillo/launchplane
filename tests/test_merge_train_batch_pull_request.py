@@ -1,7 +1,8 @@
 import unittest
 import hashlib
 from unittest.mock import patch
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, cast
@@ -175,6 +176,9 @@ class _BatchProvider:
 
 class _BatchGuard:
     def __init__(self, candidate_record: Any, landing_record: Any) -> None:
+        from control_plane.merge_admission import _utc_now_timestamp
+
+        self.observation_time_provider = _utc_now_timestamp
         self.candidate_record = candidate_record
         self.landing_plan_record = landing_record
         self.admissions: dict[int, SimpleNamespace] = {}
@@ -185,6 +189,11 @@ class _BatchGuard:
         for number in self.admissions:
             if self.outcomes.get(number) != "landed":
                 self.outcomes[number] = "rejected"
+
+    @staticmethod
+    @contextmanager
+    def reuse_batch_evidence() -> Iterator[Callable[[], None]]:
+        yield lambda: None
 
     @staticmethod
     def build_proposal(**_kwargs: Any) -> None:

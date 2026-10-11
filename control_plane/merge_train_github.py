@@ -60,6 +60,8 @@ from control_plane.github_response_headers import normalized_github_quota_respon
 from control_plane.github_request_timing import timed_github_request, record_github_response
 from control_plane.github_read_cache import GitHubReadCache, MERGE_TRAIN_READ_CACHE
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
+from control_plane.merge_train_candidate_failures import CandidateCheckFailures
+from control_plane.merge_train_candidate_failures import classify_candidate_check_failures
 from control_plane.merge_train_codeowners import individual_landing_snapshots
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
@@ -946,6 +948,48 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             status=candidate_status,
         )
 
+    def read_candidate_check_failures(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> CandidateCheckFailures:
+        """Read which checks failed on the candidate commit and whether runners caused it."""
+        repository_path = _repository_path(candidate.repository)
+        encoded_sha = quote(
+            _required_value(
+                candidate.candidate_sha,
+                "Merge train batch candidate SHA is required before reading failures.",
+            ),
+            safe="",
+        )
+        check_runs = _list_check_runs(
+            transport=self.transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_sha,
+        )["check_runs"]
+        statuses = _list_commit_statuses(
+            transport=self.transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_sha,
+        )["statuses"]
+
+        def read_annotations(check_run_id: int) -> list[dict[str, object]]:
+            payload = self.transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/check-runs/{check_run_id}/annotations?per_page=50",
+            )
+            if not isinstance(payload, list):
+                raise MergeTrainGitHubError("GitHub check run annotations response must be a list.")
+            return [_json_object(item, "GitHub check run annotation") for item in payload]
+
+        return classify_candidate_check_failures(
+            check_runs=[
+                _json_object(item, "GitHub check run") for item in cast(list[object], check_runs)
+            ],
+            commit_statuses=[
+                _json_object(item, "GitHub commit status") for item in cast(list[object], statuses)
+            ],
+            read_annotations=read_annotations,
+        )
+
     def read_head_check_reuse(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainHeadCheckReuse | None:
@@ -1363,7 +1407,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     observed_base_sha=current_base_sha,
                     observed_base_tree_sha=current_base_tree_sha,
                     provider_effect_attempted=True,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 expected_base_sha = recovered_entry.merge_commit_sha
                 expected_base_tree_sha = recovered_entry.merge_commit_tree_sha
@@ -1405,7 +1449,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     observed_base_tree_sha=current_base_tree_sha,
                     base_contains_merge_commit=True,
                     provider_effect_attempted=False,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 landed_entries.append(skipped_entry)
                 progress_plan = _validated_model_update(
@@ -1441,7 +1485,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     observed_base_sha=current_base_sha,
                     observed_base_tree_sha=current_base_tree_sha,
                     provider_effect_attempted=True,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 expected_base_sha = already_merged_entry.merge_commit_sha
                 expected_base_tree_sha = already_merged_entry.merge_commit_tree_sha
@@ -1479,7 +1523,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 observed_head_sha=landed_head_sha,
                 observed_head_tree_sha=landed_head_tree_sha,
                 observed_pull_request_state="open",
-                observed_at=recorded_at,
+                observed_at=admission_guard.observation_time_provider(),
             )
             if head_behind_base:
                 raise MergeAdmissionDeniedError(
@@ -1530,7 +1574,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 admission_guard.record_provider_failure(
                     admission=admission,
                     error=error,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 raise
             try:
@@ -1552,7 +1596,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     admission=admission,
                     reason="landing_evidence_incomplete",
                     message=str(error).strip(),
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 raise
             base_contains_merge_commit = observed_base_sha == merge_commit_sha or (
@@ -1568,7 +1612,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     admission=admission,
                     reason="landing_evidence_contradicted",
                     message=message,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 raise MergeTrainGitHubStaleHeadError(message, status_code=409)
             merged_entry = _validated_model_update(
@@ -1589,7 +1633,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 observed_base_tree_sha=observed_base_tree_sha,
                 base_contains_merge_commit=base_contains_merge_commit,
                 provider_effect_attempted=True,
-                observed_at=recorded_at,
+                observed_at=admission_guard.observation_time_provider(),
             )
             expected_base_sha = merge_commit_sha
             expected_base_tree_sha = merge_commit_tree_sha

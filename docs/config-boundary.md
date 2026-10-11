@@ -327,7 +327,10 @@ the existing submodule boundary. Use regular committed files or in-repository
 links for verification, or full-audit for local analysis. Submodule contents are a reported coverage gap
 because they belong to another repository. Allowed docs, tests, schema examples, Launchplane self-bootstrap wiring,
 admin-supplied inputs, and thin connector mechanics keep explicit allow
-reasons and do not fail the default gate.
+reasons and do not fail the default gate. Markdown PR templates in the repository
+root or `.github/`, including named templates in `PULL_REQUEST_TEMPLATE/`, are
+documentation for this classification. That allowance does not cover executable
+workflows or non-Markdown runtime files in those directories.
 
 The `.github/github.json` catalog's Launchplane routing fields also retain
 `repo_metadata_ergonomics` evidence: capability booleans, service environment
