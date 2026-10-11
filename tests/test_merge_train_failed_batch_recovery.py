@@ -718,7 +718,12 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                     probe_base_sha=self.snapshot.base_sha,
                 )
                 client = Mock(wraps=self.client)
-                client.read_merge_train_snapshot.return_value = snapshot
+                # Existing members can leave and rejoin while a retirement runs.
+                # New arrivals alone wait for the next candidate on current main.
+                removed = self.snapshot.model_copy(
+                    update={"pull_requests": self.snapshot.pull_requests[:1]}
+                )
+                client.read_merge_train_snapshot.side_effect = (removed, snapshot)
                 client.probe_batch_entry_conflicts.return_value = (hold,)
                 lease = Mock(record=Mock(ordinary_job_binding=None))
 
@@ -750,6 +755,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                     client.close_batch_pull_request.side_effect = None
                     # The new PR can leave before the restart; the original
                     # retry is still active and the queue now matches it again.
+                    client.read_merge_train_snapshot.side_effect = None
                     client.read_merge_train_snapshot.return_value = self.snapshot
                 result = _reflow_stale_candidate_record(**kwargs)
                 assert result is not None
