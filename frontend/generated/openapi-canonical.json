@@ -2039,6 +2039,69 @@
         "title": "AuthzManagedSetCollectionSummary",
         "type": "object"
       },
+      "AuthzManagedSetEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "import_origin": {
+            "const": "unknown",
+            "default": "unknown",
+            "title": "Import Origin",
+            "type": "string"
+          },
+          "independent_maintenance": {
+            "const": "unknown",
+            "default": "unknown",
+            "title": "Independent Maintenance",
+            "type": "string"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "observations": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AuthzSetMaintenanceObservation"
+            },
+            "title": "Observations",
+            "type": "array"
+          },
+          "presence": {
+            "enum": [
+              "present",
+              "absent",
+              "unknown"
+            ],
+            "title": "Presence",
+            "type": "string"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "rule_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule Count"
+          }
+        },
+        "required": [
+          "index",
+          "presence",
+          "reason_codes"
+        ],
+        "title": "AuthzManagedSetEvidence",
+        "type": "object"
+      },
       "AuthzManagedSetSummary": {
         "additionalProperties": false,
         "properties": {
@@ -3294,6 +3357,247 @@
           "authorization_chain"
         ],
         "title": "AuthzRepositoryScopeSourceCounts",
+        "type": "object"
+      },
+      "AuthzRetirementEvidenceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_set_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 25,
+            "title": "Managed Set Ids",
+            "type": "array"
+          },
+          "policy_record_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Policy Record Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "minimum": 1.0,
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "policy_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "workflows": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AuthzWorkflowEvidenceCandidate"
+            },
+            "maxItems": 25,
+            "title": "Workflows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "policy_record_id",
+          "policy_revision",
+          "policy_sha256"
+        ],
+        "title": "AuthzRetirementEvidenceRequest",
+        "type": "object"
+      },
+      "AuthzRetirementEvidenceResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "history": {
+            "$ref": "#/components/schemas/AuthzRetirementHistoryCoverage"
+          },
+          "managed_sets": {
+            "items": {
+              "$ref": "#/components/schemas/AuthzManagedSetEvidence"
+            },
+            "title": "Managed Sets",
+            "type": "array"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/AuthzPolicyRecordSummary"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "unmanaged_workflows": {
+            "items": {
+              "$ref": "#/components/schemas/AuthzUnmanagedWorkflowEvidence"
+            },
+            "title": "Unmanaged Workflows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "trace_id",
+          "policy",
+          "history",
+          "managed_sets",
+          "unmanaged_workflows"
+        ],
+        "title": "AuthzRetirementEvidenceResponse",
+        "type": "object"
+      },
+      "AuthzRetirementHistoryCoverage": {
+        "additionalProperties": false,
+        "properties": {
+          "oldest_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Revision"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "returned_count": {
+            "title": "Returned Count",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "complete",
+              "partial"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "returned_count",
+          "state",
+          "reason_codes"
+        ],
+        "title": "AuthzRetirementHistoryCoverage",
+        "type": "object"
+      },
+      "AuthzSetMaintenanceObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "caller_type": {
+            "enum": [
+              "github_actions",
+              "github_human",
+              "terminal_agent",
+              "local_operator",
+              "local_admin",
+              "unknown"
+            ],
+            "title": "Caller Type",
+            "type": "string"
+          },
+          "introduced": {
+            "title": "Introduced",
+            "type": "boolean"
+          },
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "policy_sha256",
+          "caller_type",
+          "introduced"
+        ],
+        "title": "AuthzSetMaintenanceObservation",
+        "type": "object"
+      },
+      "AuthzUnmanagedWorkflowEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "reason_codes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "rule_sha256s": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Rule Sha256S",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "potential_dependency",
+              "no_matching_rule",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "state"
+        ],
+        "title": "AuthzUnmanagedWorkflowEvidence",
+        "type": "object"
+      },
+      "AuthzWorkflowEvidenceCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "default": "workflow_ref",
+            "enum": [
+              "workflow_ref",
+              "job_workflow_ref"
+            ],
+            "title": "Binding",
+            "type": "string"
+          },
+          "repository": {
+            "maxLength": 512,
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+            "title": "Repository",
+            "type": "string"
+          },
+          "workflow_path": {
+            "maxLength": 1024,
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$",
+            "title": "Workflow Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "workflow_path"
+        ],
+        "title": "AuthzWorkflowEvidenceCandidate",
         "type": "object"
       },
       "BackupGateEvidence": {
@@ -50316,6 +50620,106 @@
           }
         },
         "summary": "Reconcile managed authz policy rules"
+      }
+    },
+    "/v1/authz-policies/retirement-evidence": {
+      "post": {
+        "operationId": "read_authz_retirement_evidence",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthzRetirementEvidenceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthzRetirementEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read scoped policy-bound retirement evidence without selectors or mutations"
       }
     },
     "/v1/authz-policies/revisions": {

@@ -137,6 +137,11 @@ from control_plane.contracts.authz_access_read import (
     EffectiveAccessEvaluateResponse,
     EffectiveAccessRequestSummary,
 )
+from control_plane.authz_retirement_evidence import build_retirement_evidence
+from control_plane.contracts.authz_retirement_evidence import (
+    AuthzRetirementEvidenceRequest,
+    AuthzRetirementEvidenceResponse,
+)
 from control_plane.contracts.solo_administration_confirmation import (
     SoloAdministrationConfirmationConflictError,
     SoloAdministrationConfirmationConsumptionBinding,
@@ -1204,6 +1209,7 @@ _MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
 _AUTHZ_POLICY_ACTIVE_ROUTE = "/v1/authz-policies/active"
 _AUTHZ_POLICY_ADMINISTRATION_ROUTE = "/v1/authz-policies/administration"
 _AUTHZ_POLICY_REVISION_HISTORY_ROUTE = "/v1/authz-policies/revisions"
+_AUTHZ_RETIREMENT_EVIDENCE_ROUTE = "/v1/authz-policies/retirement-evidence"
 _AUTHZ_DIAGNOSTIC_EVALUATE_ROUTE = "/v1/authz-diagnostics/github-actions/evaluate"
 _AUTHZ_EFFECTIVE_ACCESS_EVALUATE_ROUTE = "/v1/authz-diagnostics/effective-access/evaluate"
 _AUTHZ_POLICY_HEALTH_ROUTE = "/v1/authz-diagnostics/active-policy/health"
@@ -1222,6 +1228,7 @@ _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES = frozenset(
     {
         _AUTHZ_POLICY_ADMINISTRATION_ROUTE,
         _AUTHZ_POLICY_REVISION_HISTORY_ROUTE,
+        _AUTHZ_RETIREMENT_EVIDENCE_ROUTE,
     }
 )
 _AUTHZ_NO_STORE_ROUTES = frozenset(
@@ -18822,6 +18829,51 @@ def create_launchplane_fastapi_app(
             ),
         )
 
+    async def read_authz_retirement_evidence(
+        payload: AuthzRetirementEvidenceRequest,
+        response: Response,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_nonpersisting_sensitive_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AuthzRetirementEvidenceResponse:
+        trace_id = next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        database_store, active_record = require_authz_policy_administration_read(
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        expected = (payload.policy_record_id, payload.policy_revision, payload.policy_sha256)
+        actual = (active_record.record_id, active_record.revision, active_record.policy_sha256)
+        if expected != actual:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_evidence_policy_changed",
+                message="Refresh the active policy binding before requesting retirement evidence.",
+            )
+        records = database_store.list_authz_policy_records(
+            limit=AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT + 1
+        )
+        result = build_retirement_evidence(
+            active=active_record,
+            records=records,
+            request=payload,
+            trace_id=trace_id,
+        )
+        _, final_record = require_authz_policy_administration_read(
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        if final_record != active_record:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="authz_evidence_policy_changed",
+                message="Active policy changed while reading retirement evidence; refresh and retry.",
+            )
+        return result
+
     async def read_authz_policy_health(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
@@ -27885,6 +27937,17 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="read_authz_policy_revision_history",
         summary="Read redacted authorization policy revision history",
+        responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
+        _AUTHZ_RETIREMENT_EVIDENCE_ROUTE,
+        read_authz_retirement_evidence,
+        methods=["POST"],
+        response_model=AuthzRetirementEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="read_authz_retirement_evidence",
+        summary="Read scoped policy-bound retirement evidence without selectors or mutations",
         responses=authz_policy_route_responses,
     )
 

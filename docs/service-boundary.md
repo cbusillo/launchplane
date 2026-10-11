@@ -405,6 +405,39 @@ governed expectation, custody and currentness contract.
     administration GETs above. It does not return raw rule selectors or secret
     values. Read grants do not authorize policy reconciliation, Client decisions,
     or provider changes.
+  - `POST /v1/authz-policies/retirement-evidence` is a scoped, inert read using
+    that same administration-read authority, nonrenewing identity resolution,
+    and fresh active-DB checks. Browser callers supply the POST Origin/CSRF proof.
+    Supply `policy_record_id`, `policy_revision`, `policy_sha256`, and up to 25
+    exact `managed_set_ids` and/or `workflows` comparison candidates. Each
+    workflow candidate names its exact caller `repository`, a full
+    `owner/repo/.github/workflows/file.yml` `workflow_path` without a ref, and
+    `binding` (`workflow_ref`, or `job_workflow_ref` for a reusable worker).
+    These are comparison inputs, never runtime authority. Empty, wildcard,
+    duplicate or malformed scope is refused. Policy-binding drift returns 409;
+    authority/storage gaps retain their existing explicit refusals. The route
+    is `no-store`, including errors, and writes no denial record or session.
+  - Results use input indexes, policy provenance, bounded history coverage,
+    exact-set presence and verified maintenance observations. Observations
+    require consecutive snapshots, a real set change, and an apply audit bound
+    to both records/digests and the exact set. Only the caller type is returned;
+    audit text, identities and selectors stay private. The latest 50 revisions
+    are examined; missing baseline, truncation, ambiguity, gaps or excessive
+    rule volume remain explicit. A bounded observation proves the recorded
+    transition only. The current audit schema attests neither secret input
+    origin nor maintenance independence, so both remain `unknown`, even for a
+    human/local caller or an absent set. No historical origin is invented.
+  - Unmanaged workflow results classify the active policy's exact repository
+    and selected workflow binding across refs. Matching path patterns and
+    unrestricted bindings return `potential_dependency` with opaque rule
+    hashes; unclassifiable selectors or the 2,000-rule evidence limit return
+    `unknown`. `no_matching_rule` means only that no unmanaged rule matches that
+    requested path/binding in this policy. Other bindings, repositories,
+    managed rules, secret existence and actual delivery use are separate facts.
+    This conservative structural evidence does not prove executable access or
+    authorize any grant, migration, revocation or deletion. It supports #2521's
+    disposition preparation; its retirement and live acceptance boundaries
+    remain on that issue.
 
 - Every Code local automation work-request routes (Every Code is retired; see
   `DIRECTION.md`. These routes and the Every Code sections below remain only
