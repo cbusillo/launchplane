@@ -3648,7 +3648,10 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             "provider_effect_attempted": True,
         }
 
-        result = self.reconcile_preview()
+        self.request("preview", 5)
+        completed = self.run_once()
+        self.assertEqual(completed.state, "failed")
+        result = completed.last_plan
 
         self.assertEqual(cast(dict[str, object], result["pr_feedback"])["status"], "failed")
         self.assertEqual(self.owner_review_status_calls, [("site", 5)])
