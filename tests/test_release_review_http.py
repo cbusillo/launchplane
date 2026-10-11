@@ -1,4 +1,6 @@
 import unittest
+
+import click
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -355,6 +357,10 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             invitation.return_value = False
             unopened = await self.open_urgent(reason="Fixes a login security problem.")
             self.assertEqual(unopened.status_code, 409, unopened.text)
+            invitation.side_effect = click.ClickException("Response lost after delivery.")
+            uncertain = await self.open_urgent(reason="Fixes a login security problem.")
+            self.assertEqual(uncertain.status_code, 409, uncertain.text)
+            self.assertIn("may already be open", uncertain.text)
         # Opening asks the Client; it records no decision and starts nothing.
         self.assertEqual(
             self.store.list_release_review_decision_records(product="example-site"), ()

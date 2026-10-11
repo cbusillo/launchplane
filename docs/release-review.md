@@ -163,8 +163,8 @@ and that only the Client's Accept starts (or, while held, approves) the release;
 an admin also reads that their decision is recorded as an override and does not
 start it. During a live temporary hotfix, the first line instead explains that
 the Client's Accept keeps the fix and Request changes rolls it back; an override
-is unavailable then. The Director's normal review names the separate temporary-
-hotfix control as the exception for breakage on the live site. The latest decision and its written feedback appear above
+is unavailable then. The Director keeps the current testing checklist for a
+further hotfix; only other viewers see the live fix's saved checklist. The Director's normal review names the separate temporary hotfix control as the exception for breakage on the live site. The latest decision and its written feedback appear above
 the checklist. Admins get a separate **Admin Approval Override** section
 and approval-justification field explaining that their decision supplies
 approval under their own identity and replaces an earlier

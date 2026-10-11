@@ -489,7 +489,9 @@ def publish_release_invitation(
                     request_marker=request_marker,
                     last_decision=last_decision,
                 )
-                if reminded or _now() < due:
+                # An explicit urgent-open retry only confirms the existing request;
+                # routine workers retain the scheduled reminder behavior.
+                if reminded or _now() < due or urgent_reason:
                     _remember_delivery(backoff, receipt, due, reminded)
                     return True
                 # One durable reminder per open request. A lost response is

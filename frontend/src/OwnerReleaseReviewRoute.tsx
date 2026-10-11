@@ -150,7 +150,10 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const releaseStarts = !!response && response.release_on_acceptance !== "held";
   const liveSite = response ? safeExternalUrl(response.live_site_url) : null;
   const liveSiteName = response ? `${response.display_name}${liveSite ? ` (${liveSite.host})` : ""}` : "";
-  const reviewingHotfix = !!response?.reviewing_temporary_hotfix;
+  const activeHotfix = !!response?.reviewing_temporary_hotfix;
+  // The Director keeps the current testing checklist so a further hotfix can
+  // bind it; other viewers review the already-live fix's saved checklist.
+  const reviewingHotfix = activeHotfix && !response?.can_start_temporary_hotfix;
   const incomplete = !checklist || !(reviewingHotfix || testingUrl) || response?.review.checklist_complete !== true;
   const hasChanges = !!checklist && (
     checklist.production.artifact_id !== checklist.candidate.artifact_id
@@ -160,10 +163,10 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const client = response?.owner_github_login ?? "";
   // A viewer who is not the Client learns first who the Client is and that their
   // own decision cannot start the release.
-  const clientRule = client ? reviewingHotfix
+  const clientRule = client ? activeHotfix
     ? `${client} is the Client. The urgent fix is already live; ${client}'s Accept keeps it as the accepted release, and Request changes rolls it back.`
     : `${client} is the Client. ${client}'s Accept ${releaseStarts ? "starts" : "approves"} this release.${response?.can_start_temporary_hotfix && hasChanges ? " You can also start a temporary hotfix for breakage on the live site, using the separate control below." : " Only the Client can accept a normal release."}` : "";
-  const adminRule = reviewingHotfix
+  const adminRule = activeHotfix
     ? "An admin approval override is unavailable while the live fix awaits the Client's review."
     : "A normal approval you record here is an admin override and does not start the release.";
   const viewerRole = response?.viewer_is_owner
@@ -175,7 +178,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     <div className="owner-review-intro">
       <p className="eyebrow">Release decision</p>
       <h1 data-route-heading tabIndex={-1}>Review this release</h1>
-      <p>{response?.reviewing_temporary_hotfix ? "An urgent temporary fix is already live. Open the live site and check each item below before recording your decision." : "Review the changes proposed for production. Open the testing site and check each item below before recording your decision."}</p>
+      <p>{reviewingHotfix ? "An urgent temporary fix is already live. Open the live site and check each item below before recording your decision." : "Review the changes proposed for production. Open the testing site and check each item below before recording your decision."}</p>
     </div>
     {error ? <p role="alert" className="owner-review-alert">{error}</p> : null}
     {!response && !error ? <p role="status">Loading the release checklist…</p> : null}
@@ -183,7 +186,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       <h2>{response.display_name}</h2>
       <p className="owner-review-state">{viewerRole}</p>
       {!response.owner_github_login ? <p role="alert">No Client set for this product. Ask an admin to name one.</p> : null}
-      {response.reviewing_temporary_hotfix
+      {reviewingHotfix
         // The urgent fix runs on the live site; testing may already carry newer work.
         ? liveSite ? <a className="button button-primary owner-review-preview" href={liveSite.toString()} target="_blank" rel="noreferrer">Open the live site</a> : null
         : testingUrl ? <a className="button button-primary owner-review-preview" href={testingUrl.toString()} target="_blank" rel="noreferrer">Open the testing site</a> : null}
@@ -222,7 +225,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
           <button className="button" type="button" disabled={busy || !reason.trim()} onClick={() => void decide("changes_requested", reason)}>Request changes</button>
         </div>
       </section> : null}
-      {checklist && hasChanges && !reviewingHotfix && response.can_override && client && !latestDecision ? <section className="owner-review-action" aria-label="Ask the Client now">
+      {checklist && hasChanges && !activeHotfix && response.can_override && client && !latestDecision ? <section className="owner-review-action" aria-label="Ask the Client now">
         <h3>Ask {client} to review this release now</h3>
         <p>A release with only engineering changes waits for the next release that has something for {client} to check. If this one must go live sooner, such as a security or reliability fix, say why in plain words. Launchplane sends {client} a release review with your reason; nothing goes live until {client} accepts it. If {client} was already asked about this release, nothing new is sent.</p>
         <label><span>Why this release cannot wait</span><textarea value={urgentReason} maxLength={1000} disabled={busy} onChange={event => setUrgentReason(event.target.value)} /></label>
@@ -231,7 +234,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         </div>
         {urgentSent ? <p role="status" className="owner-review-success">A release review request is open for {client}. Nothing has been deployed.</p> : null}
       </section> : null}
-      {checklist && response.can_override && !reviewingHotfix ? <section className="owner-review-action release-review-override" aria-label="Admin Approval Override">
+      {checklist && response.can_override && !activeHotfix ? <section className="owner-review-action release-review-override" aria-label="Admin Approval Override">
         <h3>Admin Approval Override</h3>
         <p>This records approval under your admin identity for a later production deployment without Client acceptance. It replaces any earlier request for changes. Explain why you are overriding the Client review.</p>
         <label><span>Justification for approving this release by override</span><textarea value={overrideReason} maxLength={4000} disabled={busy} onChange={event => setOverrideReason(event.target.value)} /></label>

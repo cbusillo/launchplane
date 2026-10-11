@@ -212,6 +212,7 @@ test("Urgent invitation controls respect a live hotfix and an unchanged candidat
   });
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "engineer", github_id: 9002, role: "admin", organizations: [], teams: [] } } }));
   await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  response.live_site_url = "https://live.example.invalid/";
   response.reviewing_temporary_hotfix = true;
   for (const director of [false, true]) {
     response.can_start_temporary_hotfix = director;
@@ -222,6 +223,12 @@ test("Urgent invitation controls respect a live hotfix and an unchanged candidat
     await expect(role).toContainText("override is unavailable");
     await expect(page.getByRole("region", { name: "Admin Approval Override", exact: true })).toHaveCount(0);
     await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: director ? "Open the testing site" : "Open the live site", exact: true })).toBeVisible();
+    if (director) {
+      await page.getByText("Technical details", { exact: true }).click();
+      await expect(page.getByText("Proposed production version:", { exact: true })).toBeVisible();
+      await expect(page.getByText("Live urgent fix:", { exact: true })).toHaveCount(0);
+    }
   }
   response.reviewing_temporary_hotfix = false;
   await page.reload();

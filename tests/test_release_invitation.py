@@ -513,6 +513,16 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(sum("@site-owner" in post.get("body", "") for post in self.posts), 1)
         self.assertIn("**Why now:** Fixes a login security problem.", self.comments[0]["body"])
 
+    def test_urgent_retry_does_not_send_the_workers_due_reminder(self) -> None:
+        self.make_engineering_only()
+        self.assertTrue(self.publish(urgent_reason="Security fix."))
+        posts = len(self.posts)
+        self.now += timedelta(days=3)
+        self.assertTrue(self.publish(urgent_reason="Security fix."))
+        self.assertEqual(len(self.posts), posts)
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.posts), posts + 1)
+
     def read_review(self, **_kwargs: Any) -> ReleaseReviewStatus:
         self.read_count += 1
         return self.review
