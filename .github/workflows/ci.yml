@@ -981,25 +981,54 @@ jobs:
           CANDIDATE_BRANCH: ${{ needs.candidate_ci.outputs.branch }}
         run: |
           set -euo pipefail
-          workflow_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .workflow_id)"
-          deadline=$((SECONDS + 1500))
-          while [ "${SECONDS}" -lt "${deadline}" ]; do
-            runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/runs?event=push&head_sha=${CANDIDATE_SHA}&per_page=100")"
-            source="$(jq -c --arg sha "${CANDIDATE_SHA}" --arg branch "${CANDIDATE_BRANCH}" \
+          workflow_id=
+          latest_source() {
+            jq -c --arg sha "${CANDIDATE_SHA}" --arg branch "${CANDIDATE_BRANCH}" \
               --argjson workflow "${workflow_id}" '
               [.workflow_runs[] | select(.event == "push" and .head_sha == $sha and
                 .head_branch == $branch and .workflow_id == $workflow)] | max_by(.id) // null
-              ' <<<"${runs}")"
+              '
+          }
+          deadline=$((SECONDS + 1500))
+          while [ "${SECONDS}" -lt "${deadline}" ]; do
+            if [ -z "${workflow_id}" ]; then
+              if ! workflow_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .workflow_id)"; then
+                sleep 15
+                continue
+              fi
+            fi
+            runs_endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/runs?event=push&head_sha=${CANDIDATE_SHA}&per_page=100"
+            if ! runs="$(gh api "${runs_endpoint}")"; then
+              sleep 15
+              continue
+            fi
+            source="$(latest_source <<<"${runs}")"
             if [ "${source}" != "null" ] && [ "$(jq -r .status <<<"${source}")" = "completed" ]; then
               if [ "$(jq -r .conclusion <<<"${source}")" != "success" ]; then
-                echo "Candidate push CI did not pass: ${source}" >&2
-                exit 1
+                echo "Candidate push CI did not pass; waiting for a successful rerun." >&2
+                sleep 15
+                continue
               fi
               source_id="$(jq -r .id <<<"${source}")"
-              jobs="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/actions/runs/${source_id}/attempts/$(jq -r .run_attempt <<<"${source}")/jobs?per_page=100")"
+              if ! jobs="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/actions/runs/${source_id}/attempts/$(jq -r .run_attempt <<<"${source}")/jobs?per_page=100")"; then
+                sleep 15
+                continue
+              fi
               jq -e '[.[].jobs[] | select(.name == "ci-gate")] |
                 length == 1 and all(.status == "completed" and .conclusion == "success")' \
                 <<<"${jobs}" >/dev/null
+              if ! confirmed_runs="$(gh api "${runs_endpoint}")"; then
+                sleep 15
+                continue
+              fi
+              confirmed_source="$(latest_source <<<"${confirmed_runs}")"
+              if ! jq -e --argjson source "${source}" '
+                .id == $source.id and .run_attempt == $source.run_attempt and
+                .status == "completed" and .conclusion == "success"
+                ' <<<"${confirmed_source}" >/dev/null; then
+                sleep 15
+                continue
+              fi
               echo "Candidate ${CANDIDATE_SHA} passed push CI: $(jq -r .html_url <<<"${source}")" \
                 >> "${GITHUB_STEP_SUMMARY}"
               exit 0
@@ -1010,6 +1039,7 @@ jobs:
           exit 1
 
       - name: Report CI time against budget
+        if: needs.candidate_ci.outputs.delegated != 'true'
         # Reports only; a slow run is a signal to fix a lane, not a failure.
         continue-on-error: true
         env:

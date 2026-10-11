@@ -77,25 +77,27 @@ class CandidateCiWorkflowTests(unittest.TestCase):
         *,
         jobs: object | None = None,
         missing_api: bool = False,
+        transient_endpoint: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         step = self.workflow.step_named("ci_gate", "Require the exact candidate push CI")
         assert step is not None
         with TemporaryDirectory() as directory:
             root = Path(directory)
             responses = root / "responses.json"
-            responses.write_text(
-                json.dumps(
-                    {}
-                    if missing_api
-                    else {
-                        self.current_path: [{"workflow_id": 7}],
-                        self.runs_path: [
-                            {"workflow_runs": entries} for entries in (runs or [[self.source]])
-                        ],
-                        self.jobs_path: [self.jobs if jobs is None else jobs],
-                    }
-                )
+            fixtures: dict[str, list[object]] = (
+                {}
+                if missing_api
+                else {
+                    self.current_path: [{"workflow_id": 7}],
+                    self.runs_path: [
+                        {"workflow_runs": entries} for entries in (runs or [[self.source]])
+                    ],
+                    self.jobs_path: [self.jobs if jobs is None else jobs],
+                }
             )
+            if transient_endpoint is not None:
+                fixtures[transient_endpoint].insert(0, None)
+            responses.write_text(json.dumps(fixtures))
             gh = root / "gh"
             gh.write_text(
                 f"#!{sys.executable}\n"
@@ -116,6 +118,8 @@ class CandidateCiWorkflowTests(unittest.TestCase):
                 if len(replies) > 1:
                     replies.pop(0)
                     file.write_text(json.dumps(data))
+                    if payload is None:
+                        sys.exit(1)
                 value = json.dumps(payload)
                 if '--jq' in sys.argv:
                     query = sys.argv[sys.argv.index('--jq') + 1]
@@ -176,6 +180,17 @@ class CandidateCiWorkflowTests(unittest.TestCase):
         result = self.proof([[queued], [self.source]])
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_failed_source_can_recover_on_a_new_attempt(self) -> None:
+        failed = self.source | {"conclusion": "failure", "run_attempt": 1}
+        result = self.proof([[failed], [self.source]])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_transient_api_errors_wait_for_current_evidence(self) -> None:
+        for endpoint in (self.current_path, self.runs_path, self.jobs_path):
+            with self.subTest(endpoint=endpoint):
+                result = self.proof(transient_endpoint=endpoint)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_unrelated_evidence_and_missing_source_cannot_pass(self) -> None:
         for mismatch in (
             {"event": "pull_request"},
@@ -193,6 +208,10 @@ class CandidateCiWorkflowTests(unittest.TestCase):
             with self.subTest(status=status):
                 newer = self.source | {"id": 101, "status": status, "conclusion": conclusion}
                 self.assertNotEqual(self.proof([[self.source, newer]]).returncode, 0)
+
+    def test_a_rerun_started_during_job_read_cannot_pass(self) -> None:
+        rerun = self.source | {"status": "queued", "conclusion": None, "run_attempt": 3}
+        self.assertNotEqual(self.proof([[self.source], [rerun]]).returncode, 0)
 
     def test_source_and_gate_must_both_complete_successfully(self) -> None:
         for conclusion in ("failure", "cancelled", "skipped", None):
