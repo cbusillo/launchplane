@@ -62,7 +62,7 @@ class ClientTestNotesTests(unittest.TestCase):
                 self.assertTrue(client_test_notes(notes, review_override=True).error)
         self.assertTrue(client_test_notes("Nothing for the owner to test").error)
 
-    def test_merged_declarations_are_compatible_but_new_admission_is_strict(self) -> None:
+    def test_open_pr_admission_requires_a_reason_in_the_supported_format(self) -> None:
         for notes in (
             "Nothing for the Client to test",
             "Nothing for the owner to test",
@@ -74,16 +74,11 @@ class ClientTestNotesTests(unittest.TestCase):
             with self.subTest(notes=notes):
                 self.assertTrue(client_test_notes(notes).error)
                 self.assertTrue(client_test_notes(notes, review_override=True).error)
-                self.assertFalse(client_test_notes(notes, historical=True).error)
-                self.assertFalse(
-                    client_test_notes(notes, historical=True, review_override=True).error
-                )
 
     def test_placeholder_punctuation_is_not_a_client_instruction(self) -> None:
         for notes in ("N/A.", "None.", "TBD - later", "<!-- old template -->"):
             with self.subTest(notes=notes):
                 self.assertTrue(client_test_notes(notes).error)
-                self.assertFalse(client_test_notes(notes, historical=True).error)
 
     def test_formatted_declaration_is_refused_instead_of_requesting_review(self) -> None:
         for notes in (

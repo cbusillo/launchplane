@@ -31,7 +31,6 @@ from control_plane.release_review_github import (
     recorded_preview_hosts,
     read_release_changes,
 )
-from control_plane.client_test_notes import client_test_notes
 from control_plane.release_review_shared import read_shared_source_changes, repository_key
 from control_plane.release_compatibility import classify_release_database_compatibility
 from control_plane.workflows.launchplane import (
@@ -226,7 +225,6 @@ def build_release_review(
             candidate_commit=candidate.source_commit,
             read=read,
             preview_hosts=preview_hosts,
-            review_label=profile.owner.review_label,
         )
         if production.shared_addons_digest != candidate.shared_addons_digest:
             shared_sources, additional_changes = read_shared_source_changes(
@@ -235,7 +233,6 @@ def build_release_review(
                 repository=profile.repository,
                 read=read,
                 preview_hosts=preview_hosts,
-                review_label=profile.owner.review_label,
             )
     except ReleaseEvidenceUnavailable:
         raise
@@ -332,17 +329,9 @@ def checklist_blockers(checklist: ReleaseChecklist) -> tuple[str, ...]:
     ]
     for repository, items, untracked in groups:
         for item in items:
-            notes_error = (
-                item.client_test_notes_error
-                or client_test_notes(item.owner_test_notes, historical=True).error
-            )
             if not item.owner_test_notes.strip():
                 blockers.append(
                     f"Pull request {repository}#{item.pull_request_number} has no Client test notes."
-                )
-            elif notes_error:
-                blockers.append(
-                    f"Pull request {repository}#{item.pull_request_number}: {notes_error}"
                 )
             # A merge-train batch PR names each of its pull requests that came without notes.
             for number in pull_requests_missing_owner_test_notes(item.owner_test_notes):

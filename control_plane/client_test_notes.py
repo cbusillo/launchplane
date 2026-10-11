@@ -70,27 +70,13 @@ class ClientTestNotes:
     explicit_override: bool = False
 
 
-def client_test_notes(
-    notes: str, *, review_override: bool = False, historical: bool = False
-) -> ClientTestNotes:
-    if historical:
-        # Release review previously accepted every nonempty merged notes value.
-        # Admission owns the new rule; do not reinterpret a saved Client Accept.
-        value = notes.strip()
-        return ClientTestNotes(
-            not value.casefold().startswith(
-                (NOTHING_TO_TEST.casefold(), LEGACY_NOTHING_TO_TEST.casefold())
-            ),
-            "" if value else "Client test notes are missing.",
-            review_override,
-        )
+def client_test_notes(notes: str, *, review_override: bool = False) -> ClientTestNotes:
     notes = re.sub(r"<!--[\s\S]*?-->", "", notes).strip()
     sections = re.split(r"(?m)^### #([0-9]+)[^\n]*\n", notes)
     if len(sections) > 1:
         member_notes = ([sections[0]] if sections[0].strip() else []) + sections[2::2]
         members = tuple(
-            client_test_notes(section, review_override=review_override, historical=historical)
-            for section in member_notes
+            client_test_notes(section, review_override=review_override) for section in member_notes
         )
         return ClientTestNotes(
             any(member.review_required for member in members),
@@ -133,7 +119,7 @@ def client_test_notes(
                 True, "The Client review label requires real Client test notes.", True
             )
         return ClientTestNotes(False)
-    if not historical and any(
+    if any(
         marker.casefold() in value.casefold()
         for marker in (NOTHING_TO_TEST, LEGACY_NOTHING_TO_TEST)
     ):
@@ -145,11 +131,8 @@ def client_test_notes(
     return ClientTestNotes(True, explicit_override=review_override)
 
 
-def change_client_review(
-    *, body: str, labels: Iterable[str], review_label: str, historical: bool = False
-) -> ClientTestNotes:
+def change_client_review(*, body: str, labels: Iterable[str], review_label: str) -> ClientTestNotes:
     return client_test_notes(
         owner_test_notes(body),
         review_override=review_label.strip().casefold() in {label.casefold() for label in labels},
-        historical=historical,
     )

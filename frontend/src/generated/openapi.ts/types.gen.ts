@@ -4001,7 +4001,6 @@ export type ReleaseReviewDecisionRecord = {
 
 export type ReleaseReviewItem = {
     already_reviewed: boolean;
-    client_test_notes_error?: string;
     head_sha: string;
     merge_commit: string;
     owner_test_notes: string;

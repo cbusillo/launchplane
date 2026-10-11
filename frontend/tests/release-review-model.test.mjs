@@ -39,11 +39,3 @@ test("shows only the reason after the nothing-to-test marker", () => {
   assert.equal(untestedReason("Nothing for the Client to test"), "");
   assert.equal(untestedReason("Nothing for the owner to test: CI only."), "CI only.");
 });
-
-
-test("invalid engineering-only notes remain visible as a check", () => {
-  const invalid = { ...item(9, "Nothing for the Client to test:"), client_test_notes_error: "A reason is required." };
-  const grouped = groupReleaseItems([invalid]);
-  assert.deepEqual(grouped.nothingToTest, []);
-  assert.deepEqual(grouped.checks[0].items, [invalid]);
-});

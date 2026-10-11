@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qs, quote, urlsplit
 
-from control_plane.client_test_notes import _markdown_lines, change_client_review
+from control_plane.client_test_notes import _markdown_lines
 from control_plane.client_test_notes import owner_test_notes as owner_test_notes
 from control_plane.contracts.release_review import ReleaseReviewItem
 from control_plane.contracts.preview_record import PreviewRecord
@@ -105,7 +105,6 @@ def read_release_changes(
     candidate_commit: str,
     read: GitHubRead,
     preview_hosts: tuple[str, ...] = (),
-    review_label: str = "owner-review",
 ) -> tuple[tuple[ReleaseReviewItem, ...], tuple[str, ...]]:
     repository_path = quote(repository)
     commits: list[str] = []
@@ -186,18 +185,7 @@ def read_release_changes(
                 notes, preview_era_notes = release_test_notes(
                     owner_test_notes(pull.get("body") or ""), preview_hosts=preview_hosts
                 )
-                intent = change_client_review(
-                    body=str(pull.get("body") or ""),
-                    historical=True,
-                    labels=(
-                        str(label.get("name") or "")
-                        for label in pull.get("labels", ())
-                        if isinstance(label, dict)
-                    ),
-                    review_label=review_label,
-                )
                 item = ReleaseReviewItem(
-                    client_test_notes_error=intent.error,
                     pull_request_number=number,
                     title=title,
                     url=f"https://github.com/{repository}/pull/{number}",
