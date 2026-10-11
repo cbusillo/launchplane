@@ -19,6 +19,8 @@ preview check on a repository without a product preview. Open PRs using the
 older role word still require a reason (a colon or sentence separator is
 supported) and cannot override a review label. Compatibility for already-merged
 notes is described in [release-review.md](release-review.md).
+Editing the PR body re-plans its preview and review intent without needing a
+push or label change.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
 Launchplane accepts a product-review decision.
 

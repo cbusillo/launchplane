@@ -565,8 +565,10 @@ class EngineeringNotesReleaseTests(unittest.TestCase):
                 ("Nothing for the Client to test: CI only.", [], False),
                 ("Nothing for the Client to test", [], False),
                 ("Nothing for the owner to test", [{"name": "owner-review"}], False),
-                ("Nothing for the Client to test: CI only.", [{"name": "owner-review"}], True),
-                ("Nothing for the Client to test:", [], True),
+                ("Nothing for the Client to test: CI only.", [{"name": "owner-review"}], False),
+                ("Nothing for the Client to test. Automated dependency update.", [], False),
+                ("Nothing for the Client to test.", [], False),
+                ("Nothing for the Client to test:", [], False),
                 ("", [], True),
             ):
                 with self.subTest(notes=notes, labels=labels):

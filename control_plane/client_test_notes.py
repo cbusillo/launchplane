@@ -73,6 +73,17 @@ class ClientTestNotes:
 def client_test_notes(
     notes: str, *, review_override: bool = False, historical: bool = False
 ) -> ClientTestNotes:
+    if historical:
+        # Release review previously accepted every nonempty merged notes value.
+        # Admission owns the new rule; do not reinterpret a saved Client Accept.
+        value = notes.strip()
+        return ClientTestNotes(
+            not value.casefold().startswith(
+                (NOTHING_TO_TEST.casefold(), LEGACY_NOTHING_TO_TEST.casefold())
+            ),
+            "" if value else "Client test notes are missing.",
+            review_override,
+        )
     notes = re.sub(r"<!--[\s\S]*?-->", "", notes).strip()
     sections = re.split(r"(?m)^### #([0-9]+)[^\n]*\n", notes)
     if len(sections) > 1:
@@ -88,7 +99,11 @@ def client_test_notes(
         )
     # Template comments and empty placeholders are not instructions for a Client.
     value = notes
-    if not value or value.casefold() in {"none", "n/a", "todo", "tbd"}:
+    placeholder = value.casefold().rstrip(" .!?:;")
+    if not value or any(
+        placeholder == marker or placeholder.startswith(marker + " -")
+        for marker in ("none", "n/a", "todo", "tbd")
+    ):
         return ClientTestNotes(True, "Client test notes are missing.", review_override)
     marker = next(
         (
@@ -100,10 +115,6 @@ def client_test_notes(
     )
     if marker:
         suffix = value[len(marker) :]
-        if historical and not suffix:
-            # Old merged declarations were valid without a reason. New PR
-            # admission is strict; release evidence must not rewrite that history.
-            return ClientTestNotes(False)
         # Older notes used a sentence separator; retain that spelling with a reason.
         separators = {":", "."} if marker == LEGACY_NOTHING_TO_TEST else {":"}
         if (

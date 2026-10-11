@@ -65,7 +65,8 @@ def recorded_train_candidate(
     from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 
     records = cast(
-        tuple[MergeTrainBatchCandidateRecord, ...], reader(repository=repository.lower())
+        tuple[MergeTrainBatchCandidateRecord, ...],
+        reader(repository=repository.lower(), base_branch=base_branch.strip()),
     )
     return any(
         record.candidate.candidate_ref.removeprefix("refs/heads/") == ref

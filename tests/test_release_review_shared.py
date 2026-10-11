@@ -126,15 +126,15 @@ class SharedReleaseReviewTests(unittest.TestCase):
             self.assertIn(source.items[0].owner_test_notes, body)
         self.assertEqual(self.store.list_deployment_records(), ())
 
-    def test_shared_engineering_notes_allow_release_and_empty_reasons_block(self) -> None:
+    def test_shared_engineering_notes_allow_release_and_missing_notes_block(self) -> None:
         self.github.notes = "Nothing for the Client to test: Shared CI maintenance only."
         accepted = self.accept()
         self.assertTrue(self.review().approved)
         self.assertTrue(accepted.checklist.shared_sources)
-        self.github.notes = "Nothing for the Client to test:"
+        self.github.notes = ""
         review = self.review()
         self.assertFalse(review.approved)
-        self.assertTrue(any("nonempty reason" in blocker for blocker in review.blockers))
+        self.assertTrue(any("has no Client test notes" in blocker for blocker in review.blockers))
 
     def test_shared_release_membership_comes_from_recorded_artifact_sources(self) -> None:
         from control_plane.client_release_repositories import client_release_profiles

@@ -176,11 +176,11 @@ Provider error text is never returned or logged, because it can contain private
 URLs. Missing test notes and commits without a merged pull request are
 visible checklist blockers. The [Client notes contract](owner-acceptance.md)
 owns valid engineering-only declarations and supported historical spellings.
-Previously merged bare declarations remain readable so adopting the rule does
-not invalidate an existing release Accept. New open PRs must supply a reason;
-admission refuses bare declarations. Other invalid notes must be corrected on
-the PR named in the blocker (the batch PR for batch landings); a changed
-checklist needs fresh acceptance.
+Previously merged nonempty notes retain their historical meaning so adopting
+the rule does not invalidate an existing release Accept. Open PR admission owns
+the new notes validation, including the reason and label-override rules.
+Missing notes remain a blocker. Correct them on the PR named in the blocker
+(the batch PR for batch landings); a changed checklist needs fresh acceptance.
 Previous preview acceptance is an annotation, never release approval.
 Changes to existing shared Odoo addon sources appear in separate Client checklist
 sections, with each repository's exact production-to-testing SHA range, merged
