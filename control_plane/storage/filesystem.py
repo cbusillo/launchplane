@@ -2424,6 +2424,7 @@ class FilesystemRecordStore:
         *,
         repository: str = "",
         base_branch: str = "",
+        base_sha: str = "",
         status: str = "",
         batch_id: str = "",
         limit: int | None = None,
@@ -2436,6 +2437,7 @@ class FilesystemRecordStore:
             )
             if (not repository or record.candidate.repository == repository.lower())
             and (not base_branch or record.candidate.base_branch == base_branch)
+            and (not base_sha or record.candidate.base_sha == base_sha)
             and (not status or record.status == status)
             and (not batch_id or record.candidate.batch_id == batch_id)
         ]

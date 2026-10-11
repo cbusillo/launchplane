@@ -74,6 +74,7 @@ class MergeTrainBatchCandidateRecordStore(Protocol):
         *,
         repository: str = "",
         base_branch: str = "",
+        base_sha: str = "",
         status: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainBatchCandidateRecord, ...]: ...

@@ -834,12 +834,17 @@ not label both members as individually broken; feedback names the failing
 candidate checks and tests against the base used for that candidate.
 
 Before ordinary planning or failed-candidate reflow creates a candidate, the
-controller checks persisted failure history, including superseded records.
+controller checks persisted failure history, including superseded records. The
+database scopes that read to the current base commit before loading payloads.
 An identical repository, base branch and SHA, policy key and digest, and ordered
 member heads resume recovery from the failed record rather than rebuilding it.
 This survives a restart or a queue change that later returns to the failed
 membership. Conflict probing that reduces the queue back to a known failed
 group also resumes isolation immediately, retaining the new conflict holds.
+Stopped recovery persists those holds and reports their conflicts too, so later
+passes do not repeat the probe. A newer passing observation of the same inputs
+supersedes an older failure; it permits fresh planning with new checks rather
+than authorizing a landing from historical evidence.
 Changed base, policy, order or member heads permit fresh validation. Unreadable
 failure evidence stays stopped without assigning blame or rebuilding; the
 existing same-SHA passing-check and infrastructure recovery budgets still apply.
@@ -1442,9 +1447,12 @@ Controller actions have these retry/stop semantics:
   still goes through blocker isolation. The batch-body and infrastructure
   budgets remain separate. Conclusive failures enter isolation before inspecting
   generated-body changes; a changed body never spends CI on the same proven
-  failing inputs. When failure evidence is inconclusive, a multi-entry merge batch whose service PR is closed and
-  confirmed unmerged may be rebuilt once for the same ordered heads and base,
-  only when the body Launchplane would generate now differs from that bound
+  failing inputs. Pending, missing or unreadable failure evidence also stops
+  without a body rebuild or blame. After fresh passing checks on the original
+  SHA establish recovery and its check-retry budget has been spent, a multi-entry
+  merge batch whose service PR is closed and confirmed unmerged may use its
+  independent body budget once for the same ordered heads and base, only when
+  the body Launchplane would generate now differs from that bound
   failed PR's body. The replacement uses a separate candidate ref and persists
   `batch_body_retry_of`; candidate history preserves the used budget across
   controller restarts. No second rebuild is admitted for that queue/base, even

@@ -27,6 +27,7 @@ from control_plane.merge_train_controller_run_once import (
 )
 from control_plane.merge_train_github import GitHubMergeTrainClient
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
 from tests.test_merge_train_batch_pull_request import _BatchProvider
@@ -104,6 +105,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         conflicts: tuple[MergeTrainBatchHeldOutEntry, ...] = (),
         observe_checks: bool = False,
         failure_evidence: CandidateCheckFailures | None = None,
+        base_status: str = "pass",
     ) -> dict[str, Any]:
         record = build_merge_train_batch_candidate_record(
             candidate=candidate, source="test", updated_at="2026-10-03T12:00:00Z"
@@ -111,7 +113,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         store.write_merge_train_batch_candidate_record(record)
         client = Mock(wraps=self.client)
         client.read_merge_train_snapshot.return_value = self.snapshot
-        client.read_base_check_status.return_value = "pass"
+        client.read_base_check_status.return_value = base_status
         client.probe_batch_entry_conflicts.return_value = conflicts
         if not observe_checks:
             client.observe_batch_candidate_checks.return_value = candidate
@@ -213,6 +215,45 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             self.assertEqual(observed.required_checks_status, "pending")
             self.assertEqual(observed.status, "ready_for_checks")
 
+    def test_candidate_history_filters_base_before_limit(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend), TemporaryDirectory() as directory:
+                store = (
+                    FilesystemRecordStore(state_dir=Path(directory))
+                    if backend == "filesystem"
+                    else PostgresRecordStore(
+                        database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite3'}"
+                    )
+                )
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                try:
+                    current = build_merge_train_batch_candidate_record(
+                        candidate=self.candidate, source="test", updated_at="2026-10-03T12:00:00Z"
+                    )
+                    other = build_merge_train_batch_candidate_record(
+                        candidate=self.candidate.model_copy(update={"base_sha": "other-base"}),
+                        source="test",
+                        updated_at="2026-10-03T12:10:00Z",
+                    )
+                    store.write_merge_train_batch_candidate_record(current)
+                    store.write_merge_train_batch_candidate_record(other)
+                    self.assertEqual(
+                        store.list_merge_train_batch_candidate_records(
+                            repository=self.snapshot.repository,
+                            base_branch=self.snapshot.base_branch,
+                            base_sha=self.candidate.base_sha,
+                            limit=1,
+                        ),
+                        (current,),
+                    )
+                    self.assertEqual(
+                        store.list_merge_train_batch_candidate_records(base_sha="missing-base"), ()
+                    )
+                finally:
+                    if isinstance(store, PostgresRecordStore):
+                        store.close()
+
     def test_passing_rerun_retry_budget_survives_restart(self) -> None:
         self.provider.checks_failed = False
         with TemporaryDirectory() as directory:
@@ -308,55 +349,20 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                     )
                 )
 
-    def test_changed_closed_body_can_retry_when_failure_evidence_is_inconclusive(self) -> None:
+    def test_changed_body_does_not_rebuild_without_conclusive_failure_evidence(self) -> None:
         self.provider.body = self.provider.body.split("## Owner test notes")[0]
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
-            dry = self._reflow(
-                store,
-                self.candidate,
-                mutate=False,
-                failure_evidence=CandidateCheckFailures(checks=()),
+            result = self._reflow(
+                store, self.candidate, failure_evidence=CandidateCheckFailures(checks=())
             )
-            self.assertEqual(dry["controller_action"], "plan_candidate")
+            self.assertEqual(result["controller_action"], "candidate_failed")
+            self.reflow_client.add_pull_request_label.assert_not_called()
             self.assertFalse(
                 any(
                     record.candidate.batch_body_retry_of
                     for record in store.list_merge_train_batch_candidate_records()
                 )
-            )
-            result = self._reflow(
-                store, self.candidate, failure_evidence=CandidateCheckFailures(checks=())
-            )
-            replacement = MergeTrainBatchCandidate.model_validate(result["candidate"])
-            self.assertEqual(result["controller_action"], "plan_candidate")
-            self.assertNotEqual(replacement.candidate_ref, self.candidate.candidate_ref)
-            self.assertTrue(replacement.batch_body_retry_of)
-            self.assertEqual(replacement.entries, self.candidate.entries)
-            self.assertEqual(replacement.base_sha, self.candidate.base_sha)
-            # The retry ref has no PR yet; it goes through ordinary batch creation.
-            built = replacement.model_copy(
-                update={"candidate_sha": "rebuilt-sha", "status": "ready_for_checks"}
-            )
-            provider = _BatchProvider(built)
-            provider.number = self.provider.number + 1
-            new_client = GitHubMergeTrainClient(transport=provider)
-            new_number = new_client.ensure_batch_pull_request(candidate=built)
-            self.assertNotEqual(new_number, self.provider.number)
-            self.assertIn("## Owner test notes", provider.body)
-            posted_body = next(body for method, _, body in provider.requests if method == "POST")
-            assert posted_body is not None
-            self.assertEqual(posted_body["head"], built.candidate_ref.removeprefix("refs/heads/"))
-            # A restarted process reads the persisted budget, even if generation changes again.
-            restarted = FilesystemRecordStore(state_dir=Path(directory))
-            failed_retry = built.model_copy(
-                update={"status": "failed", "required_checks_status": "fail"}
-            )
-            # The spent body retry hands the failure to isolation instead of a second retry.
-            isolated = self._reflow(restarted, failed_retry)
-            self.assertEqual(isolated["reason_code"], "failure_isolation")
-            self.assertFalse(
-                MergeTrainBatchCandidate.model_validate(isolated["candidate"]).batch_body_retry_of
             )
 
     def test_real_failure_is_split_even_when_generated_body_changed(self) -> None:
@@ -427,6 +433,32 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 result["superseded_merge_train_batch_candidate_record_id"], failed_record.record_id
             )
 
+    def test_later_passing_retry_supersedes_historical_failure(self) -> None:
+        for retry_field in ("check_retry_of", "infrastructure_retry_of"):
+            with self.subTest(retry_field=retry_field), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(state_dir=Path(directory))
+                failure = build_merge_train_batch_candidate_record(
+                    candidate=self.candidate, source="test", updated_at="2026-10-03T12:00:00Z"
+                ).model_copy(update={"status": "superseded"})
+                store.write_merge_train_batch_candidate_record(failure)
+                passed = self.candidate.model_copy(
+                    update={
+                        "status": "passed",
+                        "required_checks_status": "pass",
+                        "candidate_sha": "passing-retry-sha",
+                        retry_field: failure.record_id,
+                    }
+                )
+                store.write_merge_train_batch_candidate_record(
+                    build_merge_train_batch_candidate_record(
+                        candidate=passed, source="test", updated_at="2026-10-03T12:01:00Z"
+                    ).model_copy(update={"status": "superseded"})
+                )
+                result = self._fresh_plan(store, mutate=True)
+                self.assertEqual(result["controller_action"], "plan_candidate")
+                self.assertNotIn("reason_code", result)
+                self.reflow_client.read_candidate_check_failures.assert_not_called()
+
     def test_historical_failure_does_not_apply_to_changed_inputs(self) -> None:
         for changed in ("base", "head", "policy", "order"):
             with self.subTest(changed=changed), TemporaryDirectory() as directory:
@@ -494,7 +526,10 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                     self.assertTrue(active[0].candidate.check_retry_of)
                     self.assertEqual(active[0].candidate.entries, self.candidate.entries)
                 else:
-                    self.assertEqual(active, ())
+                    self.assertEqual([record.candidate.status for record in active], ["failed"])
+                    self.assertEqual(
+                        active[0].candidate.candidate_sha, self.candidate.candidate_sha
+                    )
 
     def test_reflow_to_an_older_failed_group_retires_the_current_lineage(self) -> None:
         with TemporaryDirectory() as directory:
@@ -587,6 +622,44 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 [(entry.pull_request_number, entry.conflicts_with) for entry in persisted.held_out],
                 [(3, (1, 2)), (2, ())],
             )
+
+    def test_red_base_resume_preserves_conflict_holds_and_feedback(self) -> None:
+        third = self.snapshot.pull_requests[1].model_copy(
+            update={
+                "number": 3,
+                "head_sha": "third-head",
+                "head_ref": "third-branch",
+                "created_at": "2026-10-03T12:30:00Z",
+            }
+        )
+        self.snapshot = self.snapshot.model_copy(
+            update={"pull_requests": (*self.snapshot.pull_requests, third)}
+        )
+        hold = MergeTrainBatchHeldOutEntry(
+            pull_request_number=3,
+            head_sha=third.head_sha,
+            conflicts_with=(1, 2),
+            probe_base_sha=self.snapshot.base_sha,
+            conflicts_with_head_shas=tuple(pr.head_sha for pr in self.snapshot.pull_requests[:2]),
+        )
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            result = self._reflow(store, self.candidate, conflicts=(hold,), base_status="fail")
+            self.assertEqual(result["reason_code"], "base_checks_not_green")
+            persisted = store.list_merge_train_batch_candidate_records(status="active")[0].candidate
+            self.assertEqual(persisted.held_out, (hold,))
+            messages = [
+                payload["message"]
+                for payload in build_feedback_payloads(response={"result": result})
+                if payload["pull_request_number"] == 3
+            ]
+            self.assertTrue(messages)
+            self.assertTrue(all("conflicts with #1, #2" in str(message) for message in messages))
+            restarted = FilesystemRecordStore(state_dir=Path(directory))
+            later = self._reflow(restarted, persisted, base_status="fail")
+            self.assertEqual(later["reason_code"], "base_checks_not_green")
+            self.reflow_client.probe_batch_entry_conflicts.assert_not_called()
+            self.reflow_client.add_pull_request_label.assert_not_called()
 
     def test_active_batch_reports_later_review_wait_even_when_that_pr_is_behind(self) -> None:
         from control_plane.merge_train_controller_run_once import (
