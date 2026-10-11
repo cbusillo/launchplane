@@ -32,8 +32,42 @@ FIRST_PARENT_PAGE_LIMIT = 3
 _GITHUB_API = "https://api.github.com"
 
 
+BuildProvenanceReasonCode = Literal[
+    "artifact_record_conflict",
+    "build_purpose_mismatch",
+    "build_run_missing",
+    "download_too_large",
+    "github_read_failed",
+    "github_response_invalid",
+    "image_repository_mismatch",
+    "manifest_artifact_expired",
+    "manifest_artifact_missing",
+    "manifest_commit_mismatch",
+    "manifest_invalid",
+    "not_on_first_parent_history",
+    "pull_request_head_mismatch",
+    "pull_request_number_missing",
+    "recorded_image_mismatch",
+    "repository_id_mismatch",
+    "repository_id_missing",
+    "repository_invalid",
+    "tenant_lock_mismatch",
+]
+
+
 class BuildProvenanceError(Exception):
-    """The build run does not prove the artifact; nothing may be recorded."""
+    """The build run does not prove the artifact; nothing may be recorded.
+
+    Only code and run_id are suitable for agent-facing rejection evidence.
+    The message remains admin detail and can include upstream response text.
+    """
+
+    def __init__(
+        self, message: str, *, code: BuildProvenanceReasonCode, run_id: int | None = None
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.run_id = run_id
 
 
 class BuildProvenanceTransport(Protocol):
@@ -65,15 +99,19 @@ class GitHubBuildProvenanceTransport:
             )
             if not location:
                 raise BuildProvenanceError(
-                    f"GitHub read failed for {path}: {redirect}"
+                    f"GitHub read failed for {path}: {redirect}", code="github_read_failed"
                 ) from redirect
         except (URLError, OSError, HTTPException) as error:
-            raise BuildProvenanceError(f"GitHub read failed for {path}: {error}") from error
+            raise BuildProvenanceError(
+                f"GitHub read failed for {path}: {error}", code="github_read_failed"
+            ) from error
         try:
             with urlopen(Request(url=location), timeout=self._timeout_seconds) as response:
                 return _bounded_read(response, path)
         except (HTTPError, URLError, OSError, HTTPException) as error:
-            raise BuildProvenanceError(f"GitHub read failed for {path}: {error}") from error
+            raise BuildProvenanceError(
+                f"GitHub read failed for {path}: {error}", code="github_read_failed"
+            ) from error
 
     def _api_request(self, path: str) -> Request:
         return Request(
@@ -91,14 +129,16 @@ class GitHubBuildProvenanceTransport:
                 return bytes(response.read())
         except (HTTPError, URLError, OSError, HTTPException) as error:
             raise BuildProvenanceError(
-                f"GitHub read failed for {request.full_url}: {error}"
+                f"GitHub read failed for {request.full_url}: {error}", code="github_read_failed"
             ) from error
 
 
 def _bounded_read(response: object, path: str) -> bytes:
     data = bytes(response.read(MAX_MANIFEST_BYTES + 1))  # type: ignore[attr-defined]
     if len(data) > MAX_MANIFEST_BYTES:
-        raise BuildProvenanceError(f"The download from {path} is larger than allowed.")
+        raise BuildProvenanceError(
+            f"The download from {path} is larger than allowed.", code="download_too_large"
+        )
     return data
 
 
@@ -138,14 +178,28 @@ def verify_build_artifact(
         manifest = ArtifactIdentityManifest.model_validate(manifest_payload)
     except ValidationError as error:
         raise BuildProvenanceError(
-            "The build manifest is not a valid artifact manifest."
+            "The build manifest is not a valid artifact manifest.",
+            code="manifest_invalid",
+            run_id=source_build.run_id,
         ) from error
     if manifest.schema_version != 2:
-        raise BuildProvenanceError("The build manifest must be schema version 2.")
+        raise BuildProvenanceError(
+            "The build manifest must be schema version 2.",
+            code="manifest_invalid",
+            run_id=source_build.run_id,
+        )
     if manifest.source_commit != commit:
-        raise BuildProvenanceError("The build manifest names a different source commit.")
+        raise BuildProvenanceError(
+            "The build manifest names a different source commit.",
+            code="manifest_commit_mismatch",
+            run_id=source_build.run_id,
+        )
     if manifest.image.repository.rstrip("/") != image_repository.strip().rstrip("/"):
-        raise BuildProvenanceError("The build manifest names a different image repository.")
+        raise BuildProvenanceError(
+            "The build manifest names a different image repository.",
+            code="image_repository_mismatch",
+            run_id=source_build.run_id,
+        )
     tenant_locks = [
         lock
         for lock in (
@@ -154,7 +208,11 @@ def verify_build_artifact(
         if lock.scope == "tenant"
     ]
     if not tenant_locks or tenant_locks[0].source_repository.casefold() != repository.casefold():
-        raise BuildProvenanceError("The build manifest's tenant lock is not from this repository.")
+        raise BuildProvenanceError(
+            "The build manifest's tenant lock is not from this repository.",
+            code="tenant_lock_mismatch",
+            run_id=source_build.run_id,
+        )
     return VerifiedBuildArtifact(
         manifest=manifest.model_copy(
             update={
@@ -232,18 +290,30 @@ def verify_generic_web_build(
         manifest = GenericWebBuildManifest.model_validate(manifest_payload)
     except ValidationError as error:
         raise BuildProvenanceError(
-            "The build manifest is not a valid generic-web build manifest."
+            "The build manifest is not a valid generic-web build manifest.",
+            code="manifest_invalid",
+            run_id=source_build.run_id,
         ) from error
     if manifest.source_commit != commit:
-        raise BuildProvenanceError("The build manifest names a different source commit.")
+        raise BuildProvenanceError(
+            "The build manifest names a different source commit.",
+            code="manifest_commit_mismatch",
+            run_id=source_build.run_id,
+        )
     if manifest.image.repository.rstrip("/") != image_repository.strip().rstrip("/"):
-        raise BuildProvenanceError("The build manifest names a different image repository.")
+        raise BuildProvenanceError(
+            "The build manifest names a different image repository.",
+            code="image_repository_mismatch",
+            run_id=source_build.run_id,
+        )
     if (
         recorded_image_reference
         and recorded_image_reference != f"{manifest.image.repository}@{manifest.image.digest}"
     ):
         raise BuildProvenanceError(
-            "The historical build does not match the recorded running image."
+            "The historical build does not match the recorded running image.",
+            code="recorded_image_mismatch",
+            run_id=source_build.run_id,
         )
     return VerifiedGenericWebBuild(manifest=manifest, source_build=source_build)
 
@@ -261,13 +331,19 @@ def _verified_build_run(
     """The build run that proves this commit, and its uploaded manifest, unvalidated."""
     repository_path = _repository_path(repository)
     if not repository_id.strip():
-        raise BuildProvenanceError("The product needs its immutable repository id recorded.")
+        raise BuildProvenanceError(
+            "The product needs its immutable repository id recorded.", code="repository_id_missing"
+        )
     if purpose == "preview" and pull_request_number is None:
-        raise BuildProvenanceError("A preview artifact needs its pull request number.")
+        raise BuildProvenanceError(
+            "A preview artifact needs its pull request number.", code="pull_request_number_missing"
+        )
 
     repository_payload = _object(transport.get_json(f"/repos/{repository_path}"), "repository")
     if str(repository_payload.get("id")) != repository_id.strip():
-        raise BuildProvenanceError("The repository's id is not the product's recorded id.")
+        raise BuildProvenanceError(
+            "The repository's id is not the product's recorded id.", code="repository_id_mismatch"
+        )
     default_branch = _text(repository_payload.get("default_branch"), "default branch")
 
     run = _select_build_run(
@@ -278,42 +354,49 @@ def _verified_build_run(
         purpose=purpose,
         default_branch=default_branch,
     )
-    if purpose == "release":
-        _require_first_parent(
+    run_id = _int(run.get("id"), "run id")
+    try:
+        if purpose == "release":
+            _require_first_parent(
+                transport=transport,
+                repository_path=repository_path,
+                default_branch=default_branch,
+                commit=commit,
+            )
+        elif check_current_head:
+            pull_request = _object(
+                transport.get_json(f"/repos/{repository_path}/pulls/{pull_request_number}"),
+                "pull request",
+            )
+            head = _object(pull_request.get("head"), "pull request head")
+            if str(head.get("sha") or "").lower() != commit:
+                raise BuildProvenanceError(
+                    "The commit is not the pull request's current head.",
+                    code="pull_request_head_mismatch",
+                )
+
+        run_attempt = _int(run.get("run_attempt") or 1, "run attempt")
+        github_artifact_id, manifest_payload = _download_manifest(
             transport=transport,
             repository_path=repository_path,
-            default_branch=default_branch,
-            commit=commit,
+            run_id=run_id,
+            run_attempt=run_attempt,
         )
-    elif check_current_head:
-        pull_request = _object(
-            transport.get_json(f"/repos/{repository_path}/pulls/{pull_request_number}"),
-            "pull request",
+        source_build = ArtifactSourceBuild(
+            repository=repository,
+            repository_id=repository_id.strip(),
+            workflow_path=BUILD_WORKFLOW_PATH,
+            event="push" if purpose == "release" else "pull_request",
+            purpose=purpose,
+            pull_request_number=pull_request_number,
+            run_id=run_id,
+            run_attempt=run_attempt,
+            github_artifact_id=github_artifact_id,
+            manifest_artifact_id="",
         )
-        head = _object(pull_request.get("head"), "pull request head")
-        if str(head.get("sha") or "").lower() != commit:
-            raise BuildProvenanceError("The commit is not the pull request's current head.")
-
-    run_id = _int(run.get("id"), "run id")
-    run_attempt = _int(run.get("run_attempt") or 1, "run attempt")
-    github_artifact_id, manifest_payload = _download_manifest(
-        transport=transport,
-        repository_path=repository_path,
-        run_id=run_id,
-        run_attempt=run_attempt,
-    )
-    source_build = ArtifactSourceBuild(
-        repository=repository,
-        repository_id=repository_id.strip(),
-        workflow_path=BUILD_WORKFLOW_PATH,
-        event="push" if purpose == "release" else "pull_request",
-        purpose=purpose,
-        pull_request_number=pull_request_number,
-        run_id=run_id,
-        run_attempt=run_attempt,
-        github_artifact_id=github_artifact_id,
-        manifest_artifact_id="",
-    )
+    except BuildProvenanceError as error:
+        error.run_id = run_id
+        raise
     return source_build, manifest_payload
 
 
@@ -333,7 +416,9 @@ def record_verified_build_artifact(
     """
     manifest = verified.manifest
     if manifest.source_build is None or manifest.source_build.purpose != "release":
-        raise BuildProvenanceError("Only a release build is recorded for testing and prod.")
+        raise BuildProvenanceError(
+            "Only a release build is recorded for testing and prod.", code="build_purpose_mismatch"
+        )
     try:
         existing = record_store.read_artifact_manifest(manifest.artifact_id)
     except FileNotFoundError:
@@ -341,7 +426,8 @@ def record_verified_build_artifact(
         return manifest
     if existing.model_dump(mode="json") != manifest.model_dump(mode="json"):
         raise BuildProvenanceError(
-            f"Artifact {manifest.artifact_id} is already recorded with different content."
+            f"Artifact {manifest.artifact_id} is already recorded with different content.",
+            code="artifact_record_conflict",
         )
     return existing
 
@@ -374,7 +460,8 @@ def _select_build_run(
     ]
     if not runs:
         raise BuildProvenanceError(
-            f"No successful {event} run of {BUILD_WORKFLOW_PATH} built {commit} in this repository."
+            f"No successful {event} run of {BUILD_WORKFLOW_PATH} built {commit} in this repository.",
+            code="build_run_missing",
         )
     return max(
         runs,
@@ -405,7 +492,8 @@ def _require_first_parent(
         if sha == commit:
             return
     raise BuildProvenanceError(
-        f"{commit} is not on {default_branch}'s first-parent history within the checked range."
+        f"{commit} is not on {default_branch}'s first-parent history within the checked range.",
+        code="not_on_first_parent_history",
     )
 
 
@@ -476,33 +564,48 @@ def _download_manifest(
         if artifact.get("name") == name
     ]
     if len(artifacts) != 1:
-        raise BuildProvenanceError(f"Run {run_id} must upload exactly one {name} artifact.")
+        raise BuildProvenanceError(
+            f"Run {run_id} must upload exactly one {name} artifact.",
+            code="manifest_artifact_missing",
+        )
     artifact = artifacts[0]
     if artifact.get("expired"):
-        raise BuildProvenanceError(f"Run {run_id}'s {name} artifact has expired.")
+        raise BuildProvenanceError(
+            f"Run {run_id}'s {name} artifact has expired.", code="manifest_artifact_expired"
+        )
     artifact_id = _int(artifact.get("id"), "artifact id")
     if _int(artifact.get("size_in_bytes") or 0, "artifact size") > MAX_MANIFEST_BYTES:
-        raise BuildProvenanceError(f"Run {run_id}'s {name} artifact is larger than allowed.")
+        raise BuildProvenanceError(
+            f"Run {run_id}'s {name} artifact is larger than allowed.", code="download_too_large"
+        )
     archive = transport.get_bytes(f"/repos/{repository_path}/actions/artifacts/{artifact_id}/zip")
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as zip_file:
             members = [info for info in zip_file.infolist() if not info.is_dir()]
             if len(members) != 1:
-                raise BuildProvenanceError(f"The {name} artifact must hold exactly one file.")
+                raise BuildProvenanceError(
+                    f"The {name} artifact must hold exactly one file.", code="manifest_invalid"
+                )
             with zip_file.open(members[0]) as member:
                 manifest_bytes = member.read(MAX_MANIFEST_BYTES + 1)
             if len(manifest_bytes) > MAX_MANIFEST_BYTES:
-                raise BuildProvenanceError(f"The {name} manifest is larger than allowed.")
+                raise BuildProvenanceError(
+                    f"The {name} manifest is larger than allowed.", code="download_too_large"
+                )
             manifest = json.loads(manifest_bytes)
     except (zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError) as error:
-        raise BuildProvenanceError(f"The {name} artifact is not a readable manifest.") from error
+        raise BuildProvenanceError(
+            f"The {name} artifact is not a readable manifest.", code="manifest_invalid"
+        ) from error
     return artifact_id, _object(manifest, "manifest")
 
 
 def _repository_path(repository: str) -> str:
     owner, separator, name = repository.strip().partition("/")
     if not owner or not separator or not name or "/" in name:
-        raise BuildProvenanceError("The product repository must be owner/name.")
+        raise BuildProvenanceError(
+            "The product repository must be owner/name.", code="repository_invalid"
+        )
     return f"{quote(owner, safe='')}/{quote(name, safe='')}"
 
 
@@ -512,7 +615,9 @@ def _repository_id(value: object) -> str:
 
 def _object(value: object, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
-        raise BuildProvenanceError(f"GitHub returned an unexpected {label}.")
+        raise BuildProvenanceError(
+            f"GitHub returned an unexpected {label}.", code="github_response_invalid"
+        )
     return value
 
 
@@ -522,11 +627,11 @@ def _list(value: object) -> list[object]:
 
 def _int(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise BuildProvenanceError(f"GitHub returned no {label}.")
+        raise BuildProvenanceError(f"GitHub returned no {label}.", code="github_response_invalid")
     return value
 
 
 def _text(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise BuildProvenanceError(f"GitHub returned no {label}.")
+        raise BuildProvenanceError(f"GitHub returned no {label}.", code="github_response_invalid")
     return value.strip()
