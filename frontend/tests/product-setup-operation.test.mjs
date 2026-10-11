@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test, afterEach } from "node:test";
 import { declarationSetupRequest, environmentSetupRequest, reviewedSetupApply } from "../src/product-setup-operation.ts";
 import { applyProductExpectedConfig, applyProductStableLaneRepair } from "../src/api.ts";
+import { BROWSER_WRITE_ROUTES } from "../src/browser-write-contract.ts";
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
@@ -34,8 +35,8 @@ test("setup API uses current CSRF and caller operation keys without bearer crede
   await applyProductExpectedConfig(declarations, { idempotencyKey: "declaration-key" });
   const writes = calls.filter(call => call.init.method === "POST");
   assert.equal(writes.length, 2);
-  assert.equal(writes[0].url, "/v1/product-profiles/stable-lane-repair/apply");
-  assert.equal(writes[1].url, "/v1/product-profiles/expected-config/apply");
+  assert.equal(writes[0].url, BROWSER_WRITE_ROUTES.productStableLaneRepairApply);
+  assert.equal(writes[1].url, BROWSER_WRITE_ROUTES.productExpectedConfigApply);
   for (const [index, key] of ["environment-key", "declaration-key"].entries()) {
     const headers = new Headers(writes[index].init.headers);
     assert.equal(headers.get("X-CSRF-Token"), "current-csrf");

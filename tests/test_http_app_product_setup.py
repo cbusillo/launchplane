@@ -75,6 +75,15 @@ class SignedInProductSetupTests(unittest.IsolatedAsyncioTestCase):
             session = manager.issue(_github_human_identity())
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
+                    "local_operators": [
+                        {
+                            "subjects": ["local-owner-agent"],
+                            "token_labels": ["local-owner-read"],
+                            "products": [original.product],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.expected_config.apply"],
+                        }
+                    ],
                     "terminal_agents": [
                         {
                             "subjects": ["read-only-agent"],
@@ -228,6 +237,13 @@ class SignedInProductSetupTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     denied = await request(app, "POST", route, payload=payload, headers=headers)
                     self.assertEqual(denied.status_code, 403, denied.json())
+                    if (
+                        route.endswith("expected-config/apply")
+                        and headers.get("Authorization") == "Bearer local-operator-token"
+                    ):
+                        self.assertEqual(
+                            denied.json()["error"]["code"], "live_product_requires_operator"
+                        )
                 read_only_session = manager.issue(
                     replace(_github_human_identity(role="read_only"), github_id=124)
                 )

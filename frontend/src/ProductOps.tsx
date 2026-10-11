@@ -451,7 +451,7 @@ function ProductWorkspace({
       </header>
 
       <ProductWorkspaceNav product={product} route={route} />
-      {admin && !fixtureMode ? <a href="#product-setup-title">Environment setup</a> : null}
+      {admin && !fixtureMode ? <a className="button" href="#product-setup-title">Environment setup</a> : null}
 
       <a className="mobile-next-inspection" href={`#${inspection.targetId}`}>
         <span>
