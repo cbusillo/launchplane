@@ -31656,7 +31656,8 @@
             "enum": [
               "accepted",
               "changes_requested",
-              "overridden"
+              "overridden",
+              "temporary_hotfix"
             ],
             "title": "Decision",
             "type": "string"
@@ -31721,7 +31722,8 @@
             "enum": [
               "accepted",
               "changes_requested",
-              "overridden"
+              "overridden",
+              "temporary_hotfix"
             ],
             "title": "Decision",
             "type": "string"
@@ -31752,7 +31754,8 @@
             "enum": [
               "",
               "promote",
-              "promote_with_rollback_drill"
+              "promote_with_rollback_drill",
+              "rollback"
             ],
             "title": "Release Start",
             "type": "string"
@@ -31842,6 +31845,11 @@
             "title": "Can Override",
             "type": "boolean"
           },
+          "can_start_temporary_hotfix": {
+            "default": false,
+            "title": "Can Start Temporary Hotfix",
+            "type": "boolean"
+          },
           "display_name": {
             "title": "Display Name",
             "type": "string"
@@ -31883,6 +31891,11 @@
           "review": {
             "$ref": "#/components/schemas/ReleaseReviewStatus"
           },
+          "reviewing_temporary_hotfix": {
+            "default": false,
+            "title": "Reviewing Temporary Hotfix",
+            "type": "boolean"
+          },
           "trace_id": {
             "title": "Trace Id",
             "type": "string"
@@ -31894,6 +31907,7 @@
         },
         "required": [
           "can_override",
+          "can_start_temporary_hotfix",
           "display_name",
           "live_site_url",
           "owner_github_login",
@@ -31901,6 +31915,7 @@
           "release_on_acceptance",
           "release_run",
           "review",
+          "reviewing_temporary_hotfix",
           "trace_id",
           "viewer_is_owner"
         ],

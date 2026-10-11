@@ -164,7 +164,10 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecordChanged,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
+from control_plane.contracts.durable_operation_authorization import (
+    RELEASE_DECISION_GRANTS,
+    DurableOperationAuthorization,
+)
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
@@ -11041,7 +11044,7 @@ class PostgresRecordStore(HumanSessionStore):
         recovery = build_odoo_release_recovery(self, record)
         if (
             record.status == "fail"
-            and record.authorization.grant == "client_release_acceptance"
+            and record.authorization.grant in RELEASE_DECISION_GRANTS
             and odoo_release_wrote_production(record)
             and recovery is None
         ):
