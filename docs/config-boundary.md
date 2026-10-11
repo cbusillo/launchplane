@@ -330,7 +330,7 @@ admin-supplied inputs, and thin connector mechanics keep explicit allow
 reasons and do not fail the default gate. Root `SECURITY.md` and `LICENSE` files
 are documentation, including private vulnerability-reporting links and license
 prose. This exact-path allowance does not cover similarly named runtime files
-or files under configuration directories. Markdown PR templates in the repository
+or files in other directories. Markdown PR templates in the repository
 root or `.github/`, including named templates in `PULL_REQUEST_TEMPLATE/`, are
 documentation for this classification. That allowance does not cover executable
 workflows or non-Markdown runtime files in those directories.
