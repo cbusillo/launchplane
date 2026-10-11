@@ -259,7 +259,7 @@ class CulpritIsolationTests(unittest.TestCase):
         self.assertEqual(train.stopped["details"]["base_sha"], train.snapshot.base_sha)
         feedback = build_feedback_payloads(response={"result": train.stopped})
         self.assertEqual({payload["pull_request_number"] for payload in feedback}, {1, 2, 3, 4})
-        self.assertTrue(all(payload["event"] == "waiting" for payload in feedback))
+        self.assertTrue(all(payload["event"] == "blocked" for payload in feedback))
         self.assertTrue(all("base branch main" in str(payload["message"]) for payload in feedback))
 
     def test_lone_member_is_not_blamed_until_base_checks_pass(self) -> None:
@@ -274,6 +274,11 @@ class CulpritIsolationTests(unittest.TestCase):
                 self.assertEqual(train.landed, [])
                 assert train.stopped is not None
                 self.assertEqual(train.stopped["reason_code"], "base_checks_not_green")
+                feedback = build_feedback_payloads(response={"result": train.stopped})
+                self.assertEqual(
+                    feedback[0]["event"], "waiting" if status == "pending" else "blocked"
+                )
+                self.assertIn("base branch main", str(feedback[0]["message"]))
                 # Reobserve a rerun passing on the same base, without changing the queue.
                 train.run(culprits={1}, base_status="pass")
                 self.assertEqual(train.blocked, [1])

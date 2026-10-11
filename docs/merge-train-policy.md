@@ -785,13 +785,18 @@ candidate's check runs, commit statuses and the annotations of failed runs:
   base changes, so a runner outage never blocks a pull request. A retry that
   fails on a real check is isolated as below.
 - **Base checks.** Before splitting or blaming a pull request, the controller
-  reads checks on the candidate's exact base commit using the candidate's check
-  rules. If a check fails there too, or the base's required checks are pending,
+  reads the base's required checks and the checks that failed on the candidate,
+  on the candidate's exact base commit. Unrelated base-only checks do not stop
+  isolation. If a candidate check fails there too, or the base's required checks are pending,
   missing or unreadable, it stays stopped with `reason_code: base_checks_not_green`
   and a reason naming the base branch. No pull request gets `blocked_label`, and
   the failed candidate stays active for fresh reads on the next pass. A rerun
   passing on the same base allows isolation to resume; a changed base or eligible
   queue uses the existing replacement path.
+  Feedback names the base failure or missing evidence as needing attention;
+  pending checks are reported as waiting. A repository without required-check
+  evidence on its base stays stopped without blame; evidence must be supplied
+  before isolation can identify a culprit.
 - **Failure isolation.** On a verified green base, a failed candidate with several members is
   split: the first half is retested on the same base, and the rest wait as
   `held_out` entries with reason `failure_isolation`. A hold lasts only while

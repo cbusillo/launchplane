@@ -4395,11 +4395,20 @@ def _recover_failed_merge_train_candidate(
             lease=lease,
         )
     try:
-        base_check_status = github_client.read_base_check_status(candidate=failed)
+        base_check_status = github_client.read_base_check_status(
+            candidate=failed, failed_check_names=failures.check_names
+        )
     except MergeTrainGitHubError:
         base_check_status = "unknown"
     if base_check_status != "pass":
         # Failure on an unverified base cannot identify a queued change as its cause.
+        base_detail = (
+            "has failing checks"
+            if base_check_status == "fail"
+            else "still has checks pending"
+            if base_check_status == "pending"
+            else "has missing or unreadable check evidence"
+        )
         return {
             "repository": repository,
             "base_branch": base_branch,
@@ -4410,7 +4419,7 @@ def _recover_failed_merge_train_candidate(
             "reason_code": "base_checks_not_green",
             "blocking_reason": {
                 "code": "merge_train_base_checks_not_green",
-                "message": f"The base branch {base_branch} has not passed its own checks; "
+                "message": f"The base branch {base_branch} {base_detail}; "
                 "queued pull requests are not blamed.",
             },
             "details": {
