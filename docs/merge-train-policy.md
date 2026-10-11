@@ -616,7 +616,7 @@ request payload exists. Otherwise the candidate has no exact-SHA check evidence
 and remains fail-closed in `ready_for_checks`.
 
 Launchplane's own CI runs its full validation on that candidate push once. A
-same-repository PR headed by `launchplane/train/**` skips the validation jobs
+same-repository PR headed by `launchplane/train/**`, when routing succeeds, skips the validation jobs
 and reports only `candidate-ci-delegated`, identifying its head SHA and branch.
 That routing check supplies no validation evidence and never publishes a
 `ci-gate`, even when the push is missing, pending or failed. The push remains
