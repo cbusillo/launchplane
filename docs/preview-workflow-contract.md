@@ -289,10 +289,8 @@ records a decision:
   @client") or `failure` ("Changes requested by @client");
 - a decision recorded for an older head does not count, because the Client
   reviews what is actually previewed, so the check returns to `in_progress`;
-  the one exception is an acceptance carried across a base-only refresh made by
-  the merge train, which is saved as its own decision for the new head and shown
-  as `success` ("Accepted by @client (carried from `<short head>` after a
-  base-only refresh)"); see
+  a carried acceptance is saved as its own decision for the new head and shown
+  as `success` with its source acceptance. The carry rules are owned by
   [carried acceptance](owner-acceptance.md#carried-acceptance);
 - marked with no Client: `in_progress`, `No Client set for this product`;
 - unmarked: no check is written.

@@ -1468,11 +1468,15 @@ id and login, and `decided_at`. The newest record for a repository and pull
 request is the current decision. The record authorizes nothing.
 
 A record with `carried_from` was not decided again: it carries an acceptance to
-a new head after a base-only refresh by the merge train (see
+a new head after an unchanged-feature base update or rebase (see
 [carried acceptance](owner-acceptance.md#carried-acceptance)). `carried_from`
 names the decision record and head it came from, the reason
-(`merge_train_base_refresh`), and the merge train branch refresh records that
-produced the new head. Its `decided_at` is when Launchplane carried it.
+(`merge_train_base_refresh` or `unchanged_patch_base_update`), the immutable
+`comparison_base_sha`, and any merge train branch refresh records that produced
+the new head. Older train carries remain readable without a comparison base;
+their refresh records supply it. A carry outside the train requires a full
+comparison base revision and needs no train refresh record. Its `decided_at` is
+when Launchplane carried it.
 `base_branch` is the pull request's base branch when the decision was first shown
 on it; an acceptance carries, and a carried acceptance applies, only on that base.
 

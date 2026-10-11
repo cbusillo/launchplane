@@ -1,29 +1,29 @@
-"""Carry a Client's acceptance across a base-only refresh made by the merge train.
+"""Carry a Client's acceptance when a base update preserves the feature patch.
 
 The Client accepts a change, seen on its preview. When the merge train only merges
 the base branch into the pull request, the change is the same, so asking again
 protects nothing. The acceptance carries to the new head only when all hold:
 
-1. Every commit between the accepted head and the new head is exactly the merge
-   commit the train's own refresh produced: the train read the provider's new head
-   back after asking for the refresh and recorded it, the previous head, and the
-   base commit it merged. That base commit is on the pull request's current base
-   branch, which is the base the acceptance was given on.
+1. The pull request still targets the base branch recorded on the acceptance.
+   Train refresh records supply an immutable base when available; other updates,
+   including rebases, use a pinned commit read from that same base branch.
 2. The pull request's change against its base is the same at both heads: every
    changed file has the same name, status, and added and removed lines, in order.
-   Hunk positions and context lines are not compared, so a base edit that moves or
-   surrounds the change in a file it also changes does not stop the carry.
+   Outside the train, context, section names and file modes must also match, and
+   each hunk's position must follow the base's own line shifts. Recorded train
+   refreshes can incorporate base context edits.
 3. The carry is saved as its own decision record naming the decision and head it
-   came from and the train's refresh records, so it reads as carried, not re-decided.
+   came from and the comparison base, so it reads as carried, not re-decided.
 
-Anything else (another commit, another merge with the same parents, a conflict
-resolution, a different base, a new Client, an unreadable or truncated diff) leaves
+Anything that changes the feature patch (including conflict resolution), a
+different base, a new Client, or an unreadable or truncated diff leaves
 the new head waiting for a decision.
 """
 
 from collections.abc import Callable
 from datetime import datetime, timezone
 import logging
+import re
 from typing import Final
 from urllib.parse import quote
 from uuid import uuid4
@@ -32,12 +32,17 @@ from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.product_review import ProductReviewCarry, ProductReviewDecisionRecord
+from control_plane.contracts.product_review import (
+    ProductReviewCarry,
+    ProductReviewCarryReason,
+    ProductReviewDecisionRecord,
+)
 from control_plane.merge_train_branch_refresh import (
     optional_merge_train_branch_refresh_read_store,
 )
 from control_plane.product_review import ProductReviewStore
 from control_plane.source_control_change import change_fingerprint as _change_fingerprint
+from control_plane.source_control_change import patch_positions_match_base_update
 
 # A busy train may refresh a pull request more than once before anyone looks.
 MAX_REFRESHES: Final = 10
@@ -60,7 +65,7 @@ def carry_owner_acceptance(
     """Save and return the carried acceptance for `head_sha`, or None when it does not carry."""
 
     refresh_store = optional_merge_train_branch_refresh_read_store(store)
-    if refresh_store is None or not base_branch.strip():
+    if not base_branch.strip():
         return None
     head = head_sha.strip().lower()
     decisions = store.list_product_review_decision_records(
@@ -72,8 +77,12 @@ def carry_owner_acceptance(
     if not _carryable(accepted, profile) or accepted.base_branch != base_branch.strip():
         # Accepted on another base (or one never recorded): the change is not the same.
         return None
-    refreshes = refresh_store.list_merge_train_branch_refresh_records(
-        repository=profile.repository, pull_request_number=pull_request_number
+    refreshes = (
+        refresh_store.list_merge_train_branch_refresh_records(
+            repository=profile.repository, pull_request_number=pull_request_number
+        )
+        if refresh_store is not None
+        else ()
     )
     carry = _base_only_refresh(
         repository=profile.repository,
@@ -83,24 +92,77 @@ def carry_owner_acceptance(
         refreshes=refreshes,
         read=read,
     )
-    if carry is None:
-        return None
-    refresh_record_ids, base_commit = carry
+    reason: ProductReviewCarryReason
+    if carry is not None:
+        refresh_record_ids, base_commit = carry
+        reason = "merge_train_base_refresh"
+    else:
+        refresh_record_ids = ()
+        branch = quote(base_branch.strip(), safe="")
+        base_commit = _text(
+            _object(read(f"/repos/{_path(profile.repository)}/branches/{branch}"), "commit").get(
+                "sha"
+            )
+        ).lower()
+        if re.fullmatch(r"[0-9a-f]{40}", base_commit) is None:
+            return None
+        reason = "unchanged_patch_base_update"
+    responses: dict[str, object] = {}
+
+    def comparison_read(path: str) -> object:
+        # These comparisons and trees are bound to immutable commits. Reuse the
+        # comparisons; trees are needed only after text and positions match.
+        if path not in responses:
+            responses[path] = read(path)
+        return responses[path]
+
     accepted_change = _change_fingerprint(
         repository=profile.repository,
         base=base_commit,
         head=accepted.head_sha,
-        read=read,
-        changed_lines_only=True,
+        read=comparison_read,
+        include_blobs=False,
+        changed_lines_only=reason == "merge_train_base_refresh",
+        ignore_hunk_positions=reason == "unchanged_patch_base_update",
     )
-    if accepted_change is None or accepted_change != _change_fingerprint(
+    if not accepted_change or accepted_change != _change_fingerprint(
         repository=profile.repository,
         base=base_commit,
         head=head,
-        read=read,
-        changed_lines_only=True,
+        read=comparison_read,
+        include_blobs=False,
+        changed_lines_only=reason == "merge_train_base_refresh",
+        ignore_hunk_positions=reason == "unchanged_patch_base_update",
     ):
         return None
+    if reason == "unchanged_patch_base_update":
+        if not patch_positions_match_base_update(
+            repository=profile.repository,
+            base=base_commit,
+            accepted_head=accepted.head_sha,
+            head=head,
+            read=comparison_read,
+        ):
+            return None
+        accepted_modes = _change_fingerprint(
+            repository=profile.repository,
+            base=base_commit,
+            head=accepted.head_sha,
+            read=comparison_read,
+            include_blobs=False,
+            ignore_hunk_positions=True,
+            include_file_modes=True,
+        )
+        if accepted_modes is None or accepted_modes != _change_fingerprint(
+            repository=profile.repository,
+            base=base_commit,
+            head=head,
+            read=comparison_read,
+            include_blobs=False,
+            ignore_hunk_positions=True,
+            include_file_modes=True,
+        ):
+            return None
     with store.product_review_lock(
         repository=profile.repository, pull_request_number=pull_request_number
     ):
@@ -124,13 +186,15 @@ def carry_owner_acceptance(
                 "carried_from": ProductReviewCarry(
                     record_id=accepted.record_id,
                     head_sha=accepted.head_sha.strip().lower(),
+                    reason=reason,
                     refresh_record_ids=refresh_record_ids,
+                    comparison_base_sha=base_commit,
                 ),
             }
         )
         store.write_product_review_decision_record(record)
     _LOGGER.info(
-        "Carried a Client acceptance across a merge train base refresh.",
+        "Carried a Client acceptance across an unchanged-patch base update.",
         extra={
             "repository": profile.repository,
             "pull_request_number": pull_request_number,
