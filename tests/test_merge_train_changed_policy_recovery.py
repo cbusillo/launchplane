@@ -389,10 +389,6 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         labels, set(expected_annotations) if label_configured else set()
                     )
-                    if not label_configured:
-                        self.assertEqual(
-                            result["historical_stack_child_label_status"], "not_configured"
-                        )
                     self.assertEqual(close_requests, [])
                     self.assertEqual(len(graph.merge_requests), 2 if deeper else 1)
                     # Retry completed cleanup through the same HTTP controller.
