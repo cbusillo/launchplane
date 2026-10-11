@@ -50,6 +50,7 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewReadinessRequest,
     GenericWebPreviewRefreshRequest,
     GenericWebPreviewRefreshResult,
+    generic_web_preview_anchor_repo,
     preview_pr_number_from_slug,
 )
 from control_plane.workflows.launchplane import find_preview_record
@@ -379,12 +380,7 @@ def _generic_web_preview_anchor_pr_url(
 
 
 def _generic_web_preview_anchor_repo(profile: LaunchplaneProductProfileRecord) -> str:
-    _owner, separator, repo = profile.repository.strip().partition("/")
-    if not separator or not repo.strip():
-        raise click.ClickException(
-            "Generic web preview profile repository must use owner/repo format."
-        )
-    return repo.strip()
+    return generic_web_preview_anchor_repo(profile.repository)
 
 
 def _generic_web_preview_anchor_head_sha(request: GenericWebPreviewRefreshRequest) -> str:

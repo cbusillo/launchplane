@@ -54,3 +54,22 @@ updates:
         update-types:
           - minor
           - patch
+
+  - package-ecosystem: npm
+    # Frontend build and test tooling, managed with pnpm (frontend/pnpm-lock.yaml).
+    directory: "/frontend"
+    open-pull-requests-limit: 5
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+    labels:
+      - dependencies
+    groups:
+      routine-version-updates:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

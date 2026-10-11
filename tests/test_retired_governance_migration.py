@@ -12,11 +12,7 @@ from control_plane.storage.postgres import Base
 from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
 from control_plane.storage.schema_migration import alembic_config
 
-_RETIRED_TABLES = (
-    "launchplane_manager_preview_approval_events",
-    "launchplane_repository_human_role_policies",
-    "launchplane_tenant_technical_human_waiver_events",
-)
+_RETIRED_TABLES = migration.RETIRED_TABLES
 
 
 def assert_retired_governance_drop(test: unittest.TestCase, database_url: str) -> None:
@@ -47,7 +43,7 @@ def assert_retired_governance_drop(test: unittest.TestCase, database_url: str) -
             artifact = metadata.tables["launchplane_artifact_manifests"]
             retained = connection.execute(select(artifact)).all()
         previous_tables = set(inspect(engine).get_table_names())
-        command.upgrade(config, EXPECTED_ALEMBIC_HEAD_REVISION)
+        command.upgrade(config, migration.revision)
         test.assertEqual(
             set(inspect(engine).get_table_names()), previous_tables - set(_RETIRED_TABLES)
         )
