@@ -401,6 +401,7 @@ from control_plane.merge_train_pr_feedback import (
     write_merge_train_pr_feedback_record,
     require_merge_train_pr_feedback_record_store,
 )
+from control_plane.merge_train_release_hold import merge_train_release_hold_reader
 from control_plane.merge_train_run_once import (
     MergeTrainRunOnceEnvelope,
     MergeTrainRunOnceResult,
@@ -6355,6 +6356,7 @@ def create_launchplane_fastapi_app(
                 admission_evaluator=admission_evaluator,
                 before_release=store_controller_idempotency_before_release,
                 branch_refresh_store=optional_merge_train_branch_refresh_store(record_store),
+                release_hold_reader=merge_train_release_hold_reader(record_store),
             )
         except MergeTrainGitHubStaleHeadError as error:
             return merge_train_github_stale_state_response(trace_id=trace_id, error=error)

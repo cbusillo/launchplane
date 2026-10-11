@@ -2,7 +2,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import logging
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -57,6 +57,7 @@ from control_plane.merge_train import (
     build_merge_train_dry_run_result,
     discover_merge_train_stack,
     merge_train_stack_child_readiness_check,
+    merge_train_snapshot_of,
     merge_train_stack_child_readiness_reasons,
 )
 from control_plane.merge_admission import (
@@ -112,6 +113,9 @@ from control_plane.workflows.merge_train_controller import (
     latest_merge_train_stack_collapse_progress_record,
 )
 
+
+if TYPE_CHECKING:
+    from control_plane.merge_train_release_hold import MergeTrainReleaseHoldReader
 
 _LOGGER = logging.getLogger(__name__)
 DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS = 300
@@ -359,6 +363,7 @@ def execute_merge_train_controller_run_once(
     admission_store: MergeAdmissionRecordStore,
     admission_evaluator: MergeAdmissionEvaluator,
     before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
+    release_hold_reader: "MergeTrainReleaseHoldReader | None" = None,
     effect_executor: MergeTrainSemanticEffectExecutor | None = None,
     branch_refresh_store: MergeTrainBranchRefreshWriteStore | None = None,
 ) -> MergeTrainControllerRunOnceResult:
@@ -398,6 +403,7 @@ def execute_merge_train_controller_run_once(
         admission_store=admission_store,
         admission_evaluator=admission_evaluator,
         before_release=before_release,
+        release_hold_reader=release_hold_reader,
     )
 
 
@@ -417,6 +423,7 @@ def execute_merge_train_controller_with_client(
     admission_store: MergeAdmissionRecordStore,
     admission_evaluator: MergeAdmissionEvaluator,
     before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
+    release_hold_reader: "MergeTrainReleaseHoldReader | None" = None,
 ) -> MergeTrainControllerRunOnceResult:
     github_client.begin_snapshot_pass(policy=repository_policy, read_only=not request.mutate)
     try:
@@ -435,6 +442,7 @@ def execute_merge_train_controller_with_client(
             admission_store=admission_store,
             admission_evaluator=admission_evaluator,
             before_release=before_release,
+            release_hold_reader=release_hold_reader,
         )
     finally:
         github_client.end_snapshot_pass()
@@ -456,6 +464,7 @@ def _execute_merge_train_controller_with_client(
     admission_store: MergeAdmissionRecordStore,
     admission_evaluator: MergeAdmissionEvaluator,
     before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
+    release_hold_reader: "MergeTrainReleaseHoldReader | None" = None,
 ) -> MergeTrainControllerRunOnceResult:
     """Internal controller core with an explicit caller-owned scoped provider client.
 
@@ -594,6 +603,7 @@ def _execute_merge_train_controller_with_client(
                     landing_store=landing_store,
                     stack_collapse_store=stack_collapse_store,
                     lease=lease,
+                    release_hold_reader=release_hold_reader,
                 )
     except MergeTrainControllerLeaseLostError:
         raise
@@ -2347,7 +2357,19 @@ def _advance_without_active_landing(
     landing_store: MergeTrainBatchLandingPlanRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
     lease: MergeTrainControllerLeaseContext,
+    release_hold_reader: "MergeTrainReleaseHoldReader | None" = None,
 ) -> dict[str, object]:
+    # A landing already under way finishes; nothing new is built or landed while
+    # a Client-accepted release built from this repository runs.
+    release_hold = release_hold_reader(request.repository) if release_hold_reader else None
+    if release_hold is not None:
+        return {
+            "repository": request.repository,
+            "base_branch": request.base_branch,
+            "mode": "blocked",
+            "controller_action": "release_hold",
+            "blocking_reason": release_hold.blocking_reason(),
+        }
     active_candidate_record = latest_merge_train_batch_candidate_record(
         record_store=candidate_store,
         repository=request.repository,
@@ -2818,9 +2840,14 @@ def _reflow_stale_candidate_record(
                 )
             }
         )
+    # Pull requests that became eligible after this candidate was built wait for
+    # the next one; only a change to its own members replans it.
     dry_run_result = build_merge_train_dry_run_result(
         policy=policy,
-        snapshot=candidate_snapshot,
+        snapshot=merge_train_snapshot_of(
+            candidate_snapshot,
+            [entry.pull_request_number for entry in candidate_record.candidate.entries],
+        ),
         batch_landing=candidate_record.ordinary_job_binding is None,
     )
     candidate_matches_queue = _merge_train_candidate_matches_dry_run_queue(

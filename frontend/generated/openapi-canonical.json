@@ -18358,6 +18358,19 @@
           "github_token": {
             "$ref": "#/components/schemas/MergeTrainGitHubTokenSource"
           },
+          "max_batch_size": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Batch Size",
+            "x-launchplane-optional-response": true
+          },
           "merge_identity": {
             "$ref": "#/components/schemas/MergeTrainIdentity"
           },
@@ -18453,6 +18466,19 @@
           },
           "github_token": {
             "$ref": "#/components/schemas/MergeTrainGitHubTokenSource"
+          },
+          "max_batch_size": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Batch Size",
+            "x-launchplane-optional-response": true
           },
           "merge_identity": {
             "$ref": "#/components/schemas/MergeTrainIdentity"
@@ -73197,6 +73223,19 @@
                       },
                       "github_token": {
                         "$ref": "#/$defs/MergeTrainGitHubTokenSource"
+                      },
+                      "max_batch_size": {
+                        "anyOf": [
+                          {
+                            "exclusiveMinimum": 0,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Max Batch Size",
+                        "x-launchplane-optional-response": true
                       },
                       "merge_identity": {
                         "$ref": "#/$defs/MergeTrainIdentity"

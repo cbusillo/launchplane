@@ -16506,6 +16506,19 @@
           "github_token": {
             "$ref": "#/components/schemas/MergeTrainGitHubTokenSource"
           },
+          "max_batch_size": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Batch Size",
+            "x-launchplane-optional-response": true
+          },
           "merge_identity": {
             "$ref": "#/components/schemas/MergeTrainIdentity"
           },

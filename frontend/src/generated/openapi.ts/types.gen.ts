@@ -1482,6 +1482,7 @@ export type MergeTrainRepositoryPolicyOutput = {
     enqueue_label: string;
     failure_policy: 'pause_train' | 'continue_after_blocking_pr';
     github_token: MergeTrainGitHubTokenSource;
+    max_batch_size?: number | null;
     merge_identity: MergeTrainIdentity;
     merge_method: 'merge' | 'squash' | 'rebase';
     provider_delivery_protection_expectation?: ProviderDeliveryProtectionExpectationV1 | null;
