@@ -59,7 +59,7 @@ class BuildProvenanceError(Exception):
     """The build run does not prove the artifact; nothing may be recorded.
 
     Only code and run_id are suitable for agent-facing rejection evidence.
-    The message remains operator detail and can include upstream response text.
+    The message remains admin detail and can include upstream response text.
     """
 
     def __init__(

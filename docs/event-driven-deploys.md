@@ -82,7 +82,7 @@ reservation. The webhook request never waits on a deploy.
     saved plan includes run and history counts, rejected builds, and whether
     recorded runtime identity supplied baseline evidence. Each `rejected_builds`
     entry records `commit`, `run_id` (null until verification selects a run),
-    a fixed `code` from `BuildProvenanceReasonCode`, and operator-only `error`
+    a fixed `code` from `BuildProvenanceReasonCode`, and admin-only `error`
     text. Agent-facing readers use the code and run id; the error can contain
     upstream response text and API paths. Missing evidence
     leaves the lane unchanged with a recorded reason.
