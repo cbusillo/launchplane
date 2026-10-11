@@ -616,21 +616,17 @@ request payload exists. Otherwise the candidate has no exact-SHA check evidence
 and remains fail-closed in `ready_for_checks`.
 
 Launchplane's own CI runs its full validation on that candidate push once. A
-same-repository PR headed by `launchplane/train/**` runs a lightweight `ci-gate`
-that waits for the push run instead of repeating the validation jobs. Ordinary
-PRs, including forks using the same branch spelling, keep their full CI path.
-The delegated gate reads the current workflow's push runs for the exact head SHA
-and branch, selects the latest run and its current attempt, and requires both a
-successful completed run and its successful completed `ci-gate` job. It reports
-the source run URL. Missing, still-running, non-successful or temporarily
-unreadable run evidence waits up to 25 minutes, allowing a push rerun to finish.
-Malformed evidence or a non-successful source gate cannot pass. If the wait
-expires, rerun the lightweight PR gate after fixing the push run so its failed
-check does not remain on the batch PR or prevent main's tree reuse. A new
-candidate SHA requires its own push validation. The push gate
-remains authoritative for candidate observation; this changes neither Security
-and CodeQL nor the required-check policy. Actions still records two workflow
-events for a batch candidate, but only the push executes the full CI suite.
+same-repository PR headed by `launchplane/train/**` skips the validation jobs
+and reports only `candidate-ci-delegated`, identifying its head SHA and branch.
+That routing check supplies no validation evidence and never publishes a
+`ci-gate`, even when the push is missing, pending or failed. The push remains
+the only producer of the candidate's required `ci-gate`; an informational PR
+check cannot satisfy or supersede it. Observation and protected landing still
+require the actual candidate's required checks. A new candidate SHA requires
+its own push validation. Ordinary PRs, including forks using the same branch
+spelling, keep their full CI path. Security, CodeQL and the required-check policy
+are unchanged. Actions still records two workflow events for a batch candidate,
+but only the push executes the full CI suite.
 
 Candidate observation reads the target branch's live required-status-check
 policy and requires every named check, including any pinned GitHub App id, to be

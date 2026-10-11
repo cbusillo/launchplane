@@ -947,9 +947,10 @@ jobs:
         run: uv run --extra dev launchplane ci postgres-integration
 
   ci_gate:
-    name: ci-gate
+    # A routing-only PR check must never supersede the push's required ci-gate.
+    name: ${{ needs.candidate_ci.outputs.delegated == 'true' && 'candidate-ci-delegated' || 'ci-gate' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
     needs:
       - candidate_ci
       - repository_pins
@@ -973,70 +974,17 @@ jobs:
       actions: read
       contents: read
     steps:
-      - name: Require the exact candidate push CI
+      - name: Report delegated candidate CI
         if: needs.candidate_ci.outputs.delegated == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ needs.candidate_ci.outputs.sha }}
           CANDIDATE_BRANCH: ${{ needs.candidate_ci.outputs.branch }}
         run: |
           set -euo pipefail
-          workflow_id=
-          latest_source() {
-            jq -c --arg sha "${CANDIDATE_SHA}" --arg branch "${CANDIDATE_BRANCH}" \
-              --argjson workflow "${workflow_id}" '
-              [.workflow_runs[] | select(.event == "push" and .head_sha == $sha and
-                .head_branch == $branch and .workflow_id == $workflow)] | max_by(.id) // null
-              '
-          }
-          deadline=$((SECONDS + 1500))
-          while [ "${SECONDS}" -lt "${deadline}" ]; do
-            if [ -z "${workflow_id}" ]; then
-              if ! workflow_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" --jq .workflow_id)"; then
-                sleep 15
-                continue
-              fi
-            fi
-            runs_endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/runs?event=push&head_sha=${CANDIDATE_SHA}&per_page=100"
-            if ! runs="$(gh api "${runs_endpoint}")"; then
-              sleep 15
-              continue
-            fi
-            source="$(latest_source <<<"${runs}")"
-            if [ "${source}" != "null" ] && [ "$(jq -r .status <<<"${source}")" = "completed" ]; then
-              if [ "$(jq -r .conclusion <<<"${source}")" != "success" ]; then
-                echo "Candidate push CI did not pass; waiting for a successful rerun." >&2
-                sleep 15
-                continue
-              fi
-              source_id="$(jq -r .id <<<"${source}")"
-              if ! jobs="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/actions/runs/${source_id}/attempts/$(jq -r .run_attempt <<<"${source}")/jobs?per_page=100")"; then
-                sleep 15
-                continue
-              fi
-              jq -e '[.[].jobs[] | select(.name == "ci-gate")] |
-                length == 1 and all(.status == "completed" and .conclusion == "success")' \
-                <<<"${jobs}" >/dev/null
-              if ! confirmed_runs="$(gh api "${runs_endpoint}")"; then
-                sleep 15
-                continue
-              fi
-              confirmed_source="$(latest_source <<<"${confirmed_runs}")"
-              if ! jq -e --argjson source "${source}" '
-                .id == $source.id and .run_attempt == $source.run_attempt and
-                .status == "completed" and .conclusion == "success"
-                ' <<<"${confirmed_source}" >/dev/null; then
-                sleep 15
-                continue
-              fi
-              echo "Candidate ${CANDIDATE_SHA} passed push CI: $(jq -r .html_url <<<"${source}")" \
-                >> "${GITHUB_STEP_SUMMARY}"
-              exit 0
-            fi
-            sleep 15
-          done
-          echo "No completed authoritative push CI for candidate ${CANDIDATE_SHA}." >&2
-          exit 1
+          echo "Full CI runs on the push of ${CANDIDATE_BRANCH} at ${CANDIDATE_SHA}." \
+            >> "${GITHUB_STEP_SUMMARY}"
+          echo 'This routing check is not ci-gate and supplies no validation evidence. The candidate push must pass the required ci-gate before landing.' \
+            >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Report CI time against budget
         if: needs.candidate_ci.outputs.delegated != 'true'

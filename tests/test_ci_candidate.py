@@ -2,12 +2,21 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import sys
 from tempfile import TemporaryDirectory
-import textwrap
 import unittest
 
 from tests.support.workflows import load_workflow
+from tests.test_merge_train_github import (
+    _batch_candidate,
+    _combined_status,
+    _protected_branch_with_checks,
+    _required_check_run,
+)
+from control_plane.merge_train_github import (
+    GitHubMergeTrainClient,
+    MergeTrainGitHubError,
+    RecordingMergeTrainGitHubTransport,
+)
 
 
 class CandidateCiWorkflowTests(unittest.TestCase):
@@ -16,25 +25,6 @@ class CandidateCiWorkflowTests(unittest.TestCase):
         self.repository = "example/control-plane"
         self.sha = "a" * 40
         self.branch = "launchplane/train/example/batch"
-        prefix = f"repos/{self.repository}/actions"
-        self.current_path = f"{prefix}/runs/99"
-        self.runs_path = f"{prefix}/workflows/7/runs?event=push&head_sha={self.sha}&per_page=100"
-        self.jobs_path = f"{prefix}/runs/100/attempts/2/jobs?per_page=100"
-        self.source_url = "https://example.invalid/run/100"
-        self.source: dict[str, object] = {
-            "id": 100,
-            "workflow_id": 7,
-            "event": "push",
-            "head_sha": self.sha,
-            "head_branch": self.branch,
-            "status": "completed",
-            "conclusion": "success",
-            "run_attempt": 2,
-            "html_url": self.source_url,
-        }
-        self.jobs: list[dict[str, object]] = [
-            {"jobs": [{"name": "ci-gate", "status": "completed", "conclusion": "success"}]}
-        ]
 
     def route(self, *, event: str = "pull_request", **head: str) -> dict[str, str]:
         step = self.workflow.step_named("candidate_ci", "Route candidate CI")
@@ -71,91 +61,6 @@ class CandidateCiWorkflowTests(unittest.TestCase):
             )
             return dict(line.split("=", 1) for line in output.read_text().splitlines())
 
-    def proof(
-        self,
-        runs: list[list[dict[str, object]]] | None = None,
-        *,
-        jobs: object | None = None,
-        missing_api: bool = False,
-        transient_endpoint: str | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        step = self.workflow.step_named("ci_gate", "Require the exact candidate push CI")
-        assert step is not None
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            responses = root / "responses.json"
-            fixtures: dict[str, list[object]] = (
-                {}
-                if missing_api
-                else {
-                    self.current_path: [{"workflow_id": 7}],
-                    self.runs_path: [
-                        {"workflow_runs": entries} for entries in (runs or [[self.source]])
-                    ],
-                    self.jobs_path: [self.jobs if jobs is None else jobs],
-                }
-            )
-            if transient_endpoint is not None:
-                fixtures[transient_endpoint].insert(0, None)
-            responses.write_text(json.dumps(fixtures))
-            gh = root / "gh"
-            gh.write_text(
-                f"#!{sys.executable}\n"
-                + textwrap.dedent("""\
-                import json
-                import os
-                from pathlib import Path
-                import subprocess
-                import sys
-
-                file = Path(os.environ['RESPONSES'])
-                data = json.loads(file.read_text())
-                endpoint = next(arg for arg in sys.argv if arg.startswith('repos/'))
-                replies = data.get(endpoint)
-                if not replies:
-                    sys.exit(1)
-                payload = replies[0]
-                if len(replies) > 1:
-                    replies.pop(0)
-                    file.write_text(json.dumps(data))
-                    if payload is None:
-                        sys.exit(1)
-                value = json.dumps(payload)
-                if '--jq' in sys.argv:
-                    query = sys.argv[sys.argv.index('--jq') + 1]
-                    sys.exit(subprocess.run(['jq', '-r', query], input=value, text=True).returncode)
-                print(value)
-                """)
-            )
-            gh.chmod(0o700)
-            # An unresolved wait stops immediately in the fixture; a queued->passed
-            # fixture permits exactly one poll, without sleeping on wall time.
-            sleep = root / "sleep"
-            sleep.write_text('#!/bin/sh\n[ ! -f "$POLL_MARKER" ] || exit 1\ntouch "$POLL_MARKER"\n')
-            sleep.chmod(0o700)
-            summary = root / "summary"
-            result = subprocess.run(
-                ["bash", "-c", step.run],
-                env=os.environ
-                | {
-                    "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
-                    "RESPONSES": str(responses),
-                    "POLL_MARKER": str(root / "polled"),
-                    "GITHUB_REPOSITORY": self.repository,
-                    "GITHUB_RUN_ID": "99",
-                    "CANDIDATE_SHA": self.sha,
-                    "CANDIDATE_BRANCH": self.branch,
-                    "GITHUB_STEP_SUMMARY": str(summary),
-                },
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                self.assertIn(self.sha, summary.read_text())
-                self.assertIn(self.source_url, summary.read_text())
-            return result
-
     def test_only_same_repository_train_pr_delegates(self) -> None:
         self.assertEqual(
             self.route(), {"sha": self.sha, "branch": self.branch, "delegated": "true"}
@@ -170,67 +75,6 @@ class CandidateCiWorkflowTests(unittest.TestCase):
         ):
             with self.subTest(parameters=parameters):
                 self.assertEqual(self.route(**parameters), {"delegated": "false"})
-
-    def test_exact_push_and_successful_gate_pass(self) -> None:
-        result = self.proof()
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_queued_source_waits_until_success(self) -> None:
-        queued = self.source | {"status": "queued", "conclusion": None}
-        result = self.proof([[queued], [self.source]])
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_failed_source_can_recover_on_a_new_attempt(self) -> None:
-        failed = self.source | {"conclusion": "failure", "run_attempt": 1}
-        result = self.proof([[failed], [self.source]])
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_transient_api_errors_wait_for_current_evidence(self) -> None:
-        for endpoint in (self.current_path, self.runs_path, self.jobs_path):
-            with self.subTest(endpoint=endpoint):
-                result = self.proof(transient_endpoint=endpoint)
-                self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_unrelated_evidence_and_missing_source_cannot_pass(self) -> None:
-        for mismatch in (
-            {"event": "pull_request"},
-            {"head_sha": "b" * 40},
-            {"head_branch": "main"},
-            {"workflow_id": 8},
-        ):
-            with self.subTest(mismatch=mismatch):
-                self.assertNotEqual(self.proof([[self.source | mismatch]]).returncode, 0)
-        self.assertNotEqual(self.proof([[]]).returncode, 0)
-        self.assertNotEqual(self.proof(missing_api=True).returncode, 0)
-
-    def test_latest_failed_or_pending_run_vetoes_old_success(self) -> None:
-        for status, conclusion in (("completed", "failure"), ("queued", None)):
-            with self.subTest(status=status):
-                newer = self.source | {"id": 101, "status": status, "conclusion": conclusion}
-                self.assertNotEqual(self.proof([[self.source, newer]]).returncode, 0)
-
-    def test_a_rerun_started_during_job_read_cannot_pass(self) -> None:
-        rerun = self.source | {"status": "queued", "conclusion": None, "run_attempt": 3}
-        self.assertNotEqual(self.proof([[self.source], [rerun]]).returncode, 0)
-
-    def test_source_and_gate_must_both_complete_successfully(self) -> None:
-        for conclusion in ("failure", "cancelled", "skipped", None):
-            with self.subTest(conclusion=conclusion):
-                self.assertNotEqual(
-                    self.proof([[self.source | {"conclusion": conclusion}]]).returncode, 0
-                )
-                jobs = [
-                    {"jobs": [{"name": "ci-gate", "status": "completed", "conclusion": conclusion}]}
-                ]
-                self.assertNotEqual(self.proof(jobs=jobs).returncode, 0)
-        invalid_jobs: tuple[object, ...] = (
-            [{"jobs": []}],
-            [{"jobs": [{"name": "ci-gate", "status": "queued"}]}],
-            {},
-        )
-        for invalid in invalid_jobs:
-            with self.subTest(jobs=invalid):
-                self.assertNotEqual(self.proof(jobs=invalid).returncode, 0)
 
     def test_failed_routing_cannot_fall_through_to_tree_reuse(self) -> None:
         step = self.workflow.step_named("ci_gate", "Require successful CI path")
@@ -248,3 +92,59 @@ class CandidateCiWorkflowTests(unittest.TestCase):
             text=True,
         )
         self.assertNotEqual(result.returncode, 0)
+
+    def test_delegation_cannot_replace_missing_required_candidate_ci(self) -> None:
+        candidate = _batch_candidate().model_copy(
+            update={"candidate_sha": self.sha, "status": "ready_for_checks"}
+        )
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _protected_branch_with_checks(),
+                _combined_status(),
+                {
+                    "check_runs": [
+                        _required_check_run("candidate-ci-delegated", "completed", "success"),
+                        _required_check_run("security-gate", "completed", "success"),
+                    ]
+                },
+            )
+        )
+        with self.assertRaisesRegex(
+            MergeTrainGitHubError, "missing required check evidence: ci-gate"
+        ):
+            GitHubMergeTrainClient(transport=transport).observe_batch_candidate_checks(
+                candidate=candidate
+            )
+        self.assertTrue(all(self.sha in request.path for request in transport.requests[1:]))
+
+    def test_delegation_never_overrides_the_actual_candidate_gate(self) -> None:
+        candidate = _batch_candidate().model_copy(
+            update={"candidate_sha": self.sha, "status": "ready_for_checks"}
+        )
+        for status, conclusion, expected in (
+            ("queued", None, "pending"),
+            ("completed", "failure", "fail"),
+            ("completed", "success", "pass"),
+        ):
+            with self.subTest(status=status, conclusion=conclusion):
+                source = _required_check_run("ci-gate", status, conclusion) | {"id": 1}
+                routing = _required_check_run("candidate-ci-delegated", "completed", "success") | {
+                    "id": 2
+                }
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks(),
+                        _combined_status(),
+                        {
+                            "check_runs": [
+                                source,
+                                routing,
+                                _required_check_run("security-gate", "completed", "success"),
+                            ]
+                        },
+                    )
+                )
+                observed = GitHubMergeTrainClient(
+                    transport=transport
+                ).observe_batch_candidate_checks(candidate=candidate)
+                self.assertEqual(observed.required_checks_status, expected)
