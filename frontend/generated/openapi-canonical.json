@@ -13591,6 +13591,16 @@
           "promotion_workflow": {
             "$ref": "#/components/schemas/ProductPromotionWorkflowProfile"
           },
+          "public_website": {
+            "default": "required",
+            "enum": [
+              "required",
+              "none"
+            ],
+            "title": "Public Website",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "release_on_acceptance": {
             "default": "held",
             "enum": [
@@ -17543,7 +17553,8 @@
           "reason": {
             "enum": [
               "entry_conflict",
-              "failure_isolation"
+              "failure_isolation",
+              "dependency_not_ready"
             ],
             "title": "Reason",
             "type": "string"
@@ -18358,6 +18369,19 @@
           "github_token": {
             "$ref": "#/components/schemas/MergeTrainGitHubTokenSource"
           },
+          "max_batch_size": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Batch Size",
+            "x-launchplane-optional-response": true
+          },
           "merge_identity": {
             "$ref": "#/components/schemas/MergeTrainIdentity"
           },
@@ -18453,6 +18477,19 @@
           },
           "github_token": {
             "$ref": "#/components/schemas/MergeTrainGitHubTokenSource"
+          },
+          "max_batch_size": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Batch Size",
+            "x-launchplane-optional-response": true
           },
           "merge_identity": {
             "$ref": "#/components/schemas/MergeTrainIdentity"
@@ -29322,6 +29359,15 @@
           "provenance": {
             "$ref": "#/components/schemas/DataProvenance"
           },
+          "public_website": {
+            "default": "required",
+            "enum": [
+              "required",
+              "none"
+            ],
+            "title": "Public Website",
+            "type": "string"
+          },
           "trust_state": {
             "default": "missing",
             "enum": [
@@ -31397,6 +31443,11 @@
                 "type": "null"
               }
             ]
+          },
+          "probe_effective": {
+            "default": false,
+            "title": "Probe Effective",
+            "type": "boolean"
           },
           "provenance": {
             "$ref": "#/components/schemas/DataProvenance"
@@ -35526,6 +35577,8 @@
           "code": {
             "enum": [
               "missing_route_authority",
+              "public_website_not_applicable",
+              "public_website_check_missing",
               "route_authority_disabled",
               "stale_route_authority",
               "desired_domain_unknown",
@@ -35576,6 +35629,7 @@
           },
           "severity": {
             "enum": [
+              "info",
               "warning",
               "error"
             ],
@@ -73197,6 +73251,19 @@
                       },
                       "github_token": {
                         "$ref": "#/$defs/MergeTrainGitHubTokenSource"
+                      },
+                      "max_batch_size": {
+                        "anyOf": [
+                          {
+                            "exclusiveMinimum": 0,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Max Batch Size",
+                        "x-launchplane-optional-response": true
                       },
                       "merge_identity": {
                         "$ref": "#/$defs/MergeTrainIdentity"

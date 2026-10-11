@@ -920,6 +920,7 @@ export type LaunchplaneProductProfileRecord = {
     product: string;
     production_use: 'unknown' | 'prelaunch' | 'live';
     promotion_workflow: ProductPromotionWorkflowProfile;
+    public_website?: 'required' | 'none';
     release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing';
     repository: string;
     repository_id: string;
@@ -1407,7 +1408,7 @@ export type MergeTrainHeldOutSummary = {
     conflicts_with: Array<number>;
     head_sha: string;
     pull_request_number: number;
-    reason: 'entry_conflict' | 'failure_isolation';
+    reason: 'entry_conflict' | 'failure_isolation' | 'dependency_not_ready';
 };
 
 export type MergeTrainIdentity = {
@@ -1482,6 +1483,7 @@ export type MergeTrainRepositoryPolicyOutput = {
     enqueue_label: string;
     failure_policy: 'pause_train' | 'continue_after_blocking_pr';
     github_token: MergeTrainGitHubTokenSource;
+    max_batch_size?: number | null;
     merge_identity: MergeTrainIdentity;
     merge_method: 'merge' | 'squash' | 'rebase';
     provider_delivery_protection_expectation?: ProviderDeliveryProtectionExpectationV1 | null;
@@ -2835,6 +2837,7 @@ export type ProductDesiredTopology = {
     domains: Array<ProductTopologyDomain>;
     health_url: string;
     provenance: DataProvenance;
+    public_website: 'required' | 'none';
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
 
@@ -3186,6 +3189,7 @@ export type ProductObservedIngress = {
     monitoring_intent: 'public' | 'private' | 'prelaunch';
     observed_at: string;
     observed_runtime_identity: RuntimeIdentity | null;
+    probe_effective: boolean;
     provenance: DataProvenance;
     record_id: string;
     runtime_identity_detail: string;
@@ -3859,11 +3863,11 @@ export type ProductTopologyTlsOwnership = {
 };
 
 export type ProductTopologyWarning = {
-    code: 'missing_route_authority' | 'route_authority_disabled' | 'stale_route_authority' | 'desired_domain_unknown' | 'domain_divergence' | 'provider_placement_missing' | 'placement_divergence' | 'external_ingress_internals_unsupported' | 'ingress_ownership_unknown' | 'ingress_divergence' | 'tls_ownership_unknown' | 'tls_ownership_divergence' | 'tls_observation_missing' | 'stale_tls_observation' | 'tls_mismatch' | 'tls_expiring' | 'tls_expired' | 'tls_untrusted' | 'tls_unavailable' | 'tls_unsupported' | 'public_ingress_observation_missing' | 'stale_public_ingress_observation' | 'public_runtime_identity_unverified' | 'public_ingress_failure';
+    code: 'missing_route_authority' | 'public_website_not_applicable' | 'public_website_check_missing' | 'route_authority_disabled' | 'stale_route_authority' | 'desired_domain_unknown' | 'domain_divergence' | 'provider_placement_missing' | 'placement_divergence' | 'external_ingress_internals_unsupported' | 'ingress_ownership_unknown' | 'ingress_divergence' | 'tls_ownership_unknown' | 'tls_ownership_divergence' | 'tls_observation_missing' | 'stale_tls_observation' | 'tls_mismatch' | 'tls_expiring' | 'tls_expired' | 'tls_untrusted' | 'tls_unavailable' | 'tls_unsupported' | 'public_ingress_observation_missing' | 'stale_public_ingress_observation' | 'public_runtime_identity_unverified' | 'public_ingress_failure';
     detail: string;
     domain_name: string;
     scope: 'authority' | 'placement' | 'domains' | 'ingress' | 'tls' | 'observation';
-    severity: 'warning' | 'error';
+    severity: 'info' | 'warning' | 'error';
 };
 
 export type ProductionBackupAuthorityStatus = {
