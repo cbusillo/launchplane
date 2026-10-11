@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence } from "../src/product-environment-signal.ts";
+import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, publicObservationGap } from "../src/product-environment-signal.ts";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 Object.defineProperty(globalThis, "window", { configurable: true, value: { location: { search: "" } } });
@@ -255,3 +255,13 @@ test("expired negative TLS observations remain failures", () => {
   lane.topology.observed.tls_domains = [domain];
   assert.equal(environmentOperationalTone(lane), "danger");
 });
+
+ test("incomplete public observations expose a diagnostic while fresh evidence has no gap", () => {
+  const lane = environment();
+  assert.equal(publicObservationGap(lane.topology), null);
+  lane.topology.observed.ingress.runtime_identity_status = "unchecked";
+  assert.ok(publicObservationGap(lane.topology));
+  lane.topology.observed.ingress.runtime_identity_status = "match";
+  lane.topology.desired.domains = [];
+  assert.ok(publicObservationGap(lane.topology));
+ });

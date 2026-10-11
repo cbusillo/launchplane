@@ -21,7 +21,7 @@ import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { environmentEvidenceDeadlines, environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { environmentEvidenceDeadlines, environmentOperationalTone, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -420,6 +420,7 @@ function ProductWorkspace({
               {product.display_name}
             </h1>
             <EvidenceBadge
+              qualifier="Stored topology"
               state={product.trust_state}
               timestamp={evidenceTimestamp(product.provenance)}
             />
@@ -456,8 +457,8 @@ function ProductWorkspace({
           <div>
             <strong>Operational evidence is incomplete</strong>
             <p>
-              Launchplane shows only recorded product state. Missing or stale lane
-              evidence is not replaced with inferred health.
+              Launchplane shows recorded product state. Incomplete or negative health
+              observations need review before relying on this lane.
             </p>
           </div>
         </div>
@@ -683,6 +684,7 @@ function EnvironmentRow({
         </div>
         <EvidenceBadge
           compact
+          qualifier="Stored topology"
           state={environment.trust_state}
           timestamp={evidenceTimestamp(environment.provenance)}
         />
@@ -721,7 +723,7 @@ function EnvironmentRow({
           </small>
         </div>
         <div>
-          <dt>Evidence updated</dt>
+          <dt>Stored topology updated</dt>
           <dd>{formatEvidenceTime(environment.provenance)}</dd>
           <small>{trustLabel(environment.trust_state)}</small>
         </div>
@@ -926,10 +928,12 @@ export function EvidenceBadge({
   compact = false,
   state,
   timestamp = "",
+  qualifier = "",
 }: {
   compact?: boolean;
   state: TrustState;
   timestamp?: string;
+  qualifier?: string;
 }) {
   return (
     <span
@@ -939,7 +943,7 @@ export function EvidenceBadge({
       title={timestamp ? `${trustLabel(state)} · ${formatTime(timestamp)}` : trustLabel(state)}
     >
       <span aria-hidden="true" />
-      <strong>{trustLabel(state)}</strong>
+      <strong>{qualifier ? `${qualifier} · ` : ""}{trustLabel(state)}</strong>
       {!compact && timestamp ? <small>{formatTime(timestamp)}</small> : null}
     </span>
   );
@@ -1149,7 +1153,7 @@ function nextSafeInspection(
   if (incomplete) {
     return {
       title: `Inspect ${environmentLabel(incomplete.environment)} evidence`,
-      detail: `The lane is ${trustLabel(incomplete.trust_state).toLowerCase()}. Confirm freshness and missing records before relying on its state.`,
+      detail: `Stored topology is ${trustLabel(incomplete.trust_state).toLowerCase()}. Confirm route authority before a managed route change; current health is evaluated from fresh observations.`,
       targetId: `lane-${safeAnchor(incomplete.environment)}`,
     };
   }
@@ -1207,7 +1211,7 @@ export function signalHeadline(environment: ProductEnvironmentSummary | null, to
     return "Needs attention";
   }
   if (tone === "warning") {
-    return "Review warning";
+    return environment ? publicObservationGap(expireEnvironmentEvidence(environment).topology) ?? "Review warning" : "Review warning";
   }
   if (!environment || tone === "missing") {
     return "Evidence missing";

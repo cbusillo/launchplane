@@ -116,7 +116,7 @@ PublicIngressTlsStatus = Literal[
     "unsupported",
 ]
 PublicIngressTlsNameMatchSource = Literal["san", "subject", "none"]
-PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service"]
+PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service", "profile_intent"]
 
 PUBLIC_TLS_EXPIRING_DAYS = 14
 PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS = 30 * 60
@@ -1183,8 +1183,12 @@ def build_public_ingress_material_fingerprint(
         recorded = tls_target.tls.recorded
         tls_status = tls_target.tls.status
         route_authority = PublicIngressIncidentRouteAuthority(
-            kind="route_binding",
-            target_keys=(f"tls-domain:{recorded.domain_name}",),
+            kind="public_urls" if recorded.route_binding_status == "missing" else "route_binding",
+            target_keys=(
+                _canonical_material_url(tls_target.url)
+                if recorded.route_binding_status == "missing"
+                else f"tls-domain:{recorded.domain_name}",
+            ),
             domain_name=recorded.domain_name,
             route_binding_status=recorded.route_binding_status,
             ingress_provider=recorded.ingress_provider,

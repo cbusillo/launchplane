@@ -872,6 +872,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                 self.assertEqual(tls.recorded.route_binding_status, "missing")
                 self.assertEqual(tls.recorded.owner, "none")
                 self.assertEqual(tls.recorded.freshness_status, "missing")
+                self.assertEqual(tls.recorded.source_kind, "profile_intent")
                 self.assertEqual(tls.probe.validated_address_count, probe.validated_address_count)
                 self.assertEqual(store.route_bindings, [])
                 if probe.status == "valid":
@@ -888,6 +889,79 @@ class PublicIngressMonitorTests(unittest.TestCase):
                         incident.material_fingerprint.route_authority.route_binding_status,
                         "missing",
                     )
+
+    def test_live_disabled_binding_is_preserved_in_tls_observation(self) -> None:
+        store = _Store((_profile().model_copy(update={"production_use": "live"}),))
+        binding = _route_binding().model_copy(update={"status": "disabled"})
+        store.route_bindings.append(binding)
+        target = next(
+            target
+            for target in discover_public_ingress_monitor_targets(store)
+            if target.check_kind == "tls"
+        )
+        self.assertEqual(target.tls_route_binding_status, binding.status)
+        self.assertEqual(target.tls_owner, binding.tls.owner)
+        self.assertTrue(target.route_binding_sha256)
+        observation = check_public_ingress_target(
+            target=target,
+            checked_at="2026-07-14T12:00:00Z",
+            timeout_seconds=10,
+            http_get=lambda *_args: self.fail("TLS target must not fetch HTTP"),
+            tls_get=_constant_tls_probe(
+                PublicTlsProbeResult(
+                    status="valid",
+                    failure_code=None,
+                    summary="valid",
+                    validated_address_count=1,
+                    certificate=_tls_certificate(),
+                )
+            ),
+        )
+        tls = observation.targets[0].tls
+        assert tls is not None
+        self.assertEqual(tls.recorded.route_binding_status, binding.status)
+        self.assertEqual(tls.recorded.owner, binding.tls.owner)
+
+    def test_tls_transition_fences_binding_created_after_profile_discovery(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+            )
+            try:
+                store.ensure_schema()
+                store.write_product_profile_record(
+                    _profile().model_copy(update={"production_use": "live"})
+                )
+                target = next(
+                    target
+                    for target in discover_public_ingress_monitor_targets(store)
+                    if target.check_kind == "tls"
+                )
+                store.write_route_binding_record(_route_binding())
+                observation = check_public_ingress_target(
+                    target=target,
+                    checked_at="2026-07-14T12:00:00Z",
+                    timeout_seconds=10,
+                    http_get=lambda *_args: self.fail("TLS target must not fetch HTTP"),
+                    tls_get=_constant_tls_probe(
+                        PublicTlsProbeResult(
+                            status="unreachable", failure_code="dns_failure", summary="DNS failed"
+                        )
+                    ),
+                )
+                incidents = reconcile_public_ingress_incident(
+                    record_store=store, record=observation, write_records=False
+                )
+                result = store.write_public_ingress_transition_with_outbox(
+                    observation=observation,
+                    incidents=incidents,
+                    expected_profile_sha256=target.profile_sha256,
+                    expected_route_binding_sha256=target.route_binding_sha256,
+                )
+                self.assertEqual(result.status, "authority_changed")
+                self.assertEqual(store.list_public_ingress_incident_records(), ())
+            finally:
+                store.close()
 
     def test_live_no_website_does_not_invent_public_tls_targets(self) -> None:
         profile = _profile().model_copy(update={"production_use": "live", "public_website": "none"})

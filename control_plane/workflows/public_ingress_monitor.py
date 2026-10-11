@@ -51,6 +51,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     monitored_check_identity,
     PUBLIC_TLS_EXPIRING_DAYS,
     PUBLIC_TLS_STALE_AFTER_SECONDS,
+    PublicIngressRouteBindingSourceKind,
     PublicIngressCheckKind,
     PublicIngressFailureCode,
     PublicIngressIncidentEvent,
@@ -130,9 +131,6 @@ DEPLOY_FENCE_RECONCILE_GRACE = timedelta(minutes=15)
 # and the public route can still answer from the previous container for a few
 # seconds. A mismatch is probed once more after this delay before it counts.
 RUNTIME_IDENTITY_CONFIRMATION_DELAY_SECONDS = 30
-
-
-PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service"]
 
 
 class PublicIngressMonitorStore(Protocol):
@@ -2805,7 +2803,6 @@ def _tls_monitor_targets(
             product=profile.product,
             context_name=lane.context,
             instance_name=lane.instance,
-            status="active",
             limit=1,
         )
         if callable(list_route_bindings)
@@ -2836,6 +2833,8 @@ def _tls_monitor_targets(
                 require_runtime_identity=False,
                 tls_domain_name=domain.domain_name,
                 tls_domain_role=domain.role,
+                route_binding_sha256="missing",
+                tls_source_kind="profile_intent",
                 tls_source_label="Product-profile public domain intent; route authority is absent.",
                 tls_source_record_ids=(profile.product,),
                 tls_refreshed_at=profile.updated_at,
@@ -2845,6 +2844,8 @@ def _tls_monitor_targets(
             for domain in product_lane_public_domains(lane)
             if domain.tls_expected
         )
+    if route_binding.status == "disabled" and profile.production_use != "live":
+        return ()
     targets: list[PublicIngressMonitorTarget] = []
     for domain in route_binding.domains:
         if not isinstance(domain, RouteBindingDomain):

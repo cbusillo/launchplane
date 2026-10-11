@@ -97,18 +97,20 @@ function healthWarnings(environment: ProductEnvironmentSummary): Topology["warni
   return environment.topology.warnings.filter(warning => !routeDiagnostics.has(warning.code));
 }
 
-function observedPublicRouteVerified(topology: Topology): boolean {
-  if (!publicTopologyApplicable(topology)) return true;
+export function publicObservationGap(topology: Topology): string | null {
+  if (!publicTopologyApplicable(topology)) return null;
   const ingress = topology.observed.ingress;
-  if (!ingress.probe_effective || ingress.status !== "pass" ||
-      ingress.trust_state !== "verified" || ingress.runtime_identity_status !== "match") return false;
+  if (!ingress.probe_effective || ingress.status !== "pass" || ingress.trust_state !== "verified")
+    return "Public route observation incomplete";
+  if (ingress.runtime_identity_status !== "match") return "Public runtime identity unverified";
   const expectedTls = topology.desired.domains.filter(domain => domain.tls_expected);
-  return expectedTls.length > 0 && expectedTls.every(expected =>
+  if (!expectedTls.length) return "Public HTTPS domain missing";
+  return expectedTls.every(expected =>
     topology.observed.tls_domains.some(observed =>
       observed.domain_name === expected.domain_name && observed.status === "valid" &&
       observed.trust_state === "verified" && observed.public_name_match &&
       observed.validated_address_count > 0 && observed.days_remaining !== null &&
-      observed.days_remaining > 0));
+      observed.days_remaining > 0)) ? null : "Public DNS/TLS observation incomplete";
 }
 
 export function environmentOperationalTone(environment: ProductEnvironmentSummary | null, now = Date.now()): SignalTone {
@@ -134,7 +136,7 @@ export function environmentOperationalTone(environment: ProductEnvironmentSummar
   if (
     otherWarnings.length || warnings.some(warning => warning.severity !== "info") ||
     environment.topology.observed.placement.trust_state !== "verified" ||
-    !observedPublicRouteVerified(environment.topology) ||
+    publicObservationGap(environment.topology) !== null ||
     publicTopologyApplicable(environment.topology) && (
       !checks.some(check => check.kind === "public_http") ||
       environment.topology.observed.ingress.trust_state === "stale" ||
