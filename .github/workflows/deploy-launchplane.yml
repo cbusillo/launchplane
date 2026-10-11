@@ -793,6 +793,14 @@ jobs:
             || { [ "$status_code" != "200" ] && [ "$status_code" != "202" ]; }; then
             if [ -s "$SELF_DEPLOY_RESPONSE_FILE" ]; then
               cat "$SELF_DEPLOY_RESPONSE_FILE" >&2
+              if jq -e '.error.code == "self_deploy_fence_conflict"' "$SELF_DEPLOY_RESPONSE_FILE" >/dev/null; then
+                {
+                  printf '%s\n' '## Self-deploy fence conflict' ''
+                  printf '%s\n' '```json'
+                  jq '{error, records}' "$SELF_DEPLOY_RESPONSE_FILE"
+                  printf '%s\n' '```'
+                } >> "$GITHUB_STEP_SUMMARY"
+              fi
             fi
             echo "Launchplane self deploy request failed with HTTP ${status_code}." >&2
             exit 1
