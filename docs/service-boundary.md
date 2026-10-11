@@ -123,6 +123,12 @@ governed expectation, custody and currentness contract.
 - native FastAPI health route: `GET /v1/health`, backed by a Pydantic response
   model and included in OpenAPI as a service contract proof
 - native FastAPI Launchplane service runtime reads:
+  - `GET /v1/service/health-monitor/status`, requiring
+    `launchplane_service.read` for the Launchplane service context; returns
+    bounded persisted scheduler completion and watchdog report receipts, with
+    no request payloads, keys, leases or monitor invocation. See
+    [health monitoring operations](operations.md)
+    for paging and the separate notification-delivery qualification.
   - `GET /v1/service/runtime`, requiring `launchplane_service.read` for the
     Launchplane service context and returning runtime metadata only
   - `GET /v1/service/odoo-workers/status`, requiring
