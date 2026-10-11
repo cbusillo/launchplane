@@ -66,6 +66,10 @@ class HealthMonitorStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(oversized.status_code, 400)
             self.assertEqual(future.status_code, 400)
             self.assertEqual(future.json()["error"]["code"], "invalid_slot_range")
+            self.assertIn(
+                str(future.status_code),
+                app.openapi()["paths"]["/v1/service/health-monitor/status"]["get"]["responses"],
+            )
 
     async def test_requires_authentication_service_read_and_database_storage(self) -> None:
         for authorized, token, expected in (
@@ -90,3 +94,7 @@ class HealthMonitorStatusHttpTests(unittest.IsolatedAsyncioTestCase):
                         headers={"Authorization": "Bearer local-operator-token"} if token else {},
                     )
                 self.assertEqual(response.status_code, expected)
+                self.assertIn(
+                    str(response.status_code),
+                    app.openapi()["paths"]["/v1/service/health-monitor/status"]["get"]["responses"],
+                )

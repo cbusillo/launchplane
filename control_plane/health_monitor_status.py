@@ -77,7 +77,18 @@ def read_health_monitor_status(
             store.read_idempotency_record(scope=_SCOPE, route_path=_ROUTE, idempotency_key=key)
         )
 
-    first_slot = max(0, last_slot - slots + 1)
+    activation_record = store.read_idempotency_record(
+        scope=_SCOPE, route_path=_ROUTE, idempotency_key="enabled"
+    )
+    activation = _receipt(activation_record)
+    activation_slot = (
+        monitor_slot(
+            datetime.fromisoformat(activation_record.created_at.replace("Z", "+00:00")).timestamp()
+        )
+        if activation is not None and activation_record is not None
+        else None
+    )
+    first_slot = max(activation_slot or 0, last_slot - slots + 1)
     evidence = []
     for slot in range(last_slot, first_slot - 1, -1):
         scheduled = slot * MONITOR_INTERVAL_SECONDS
@@ -107,7 +118,11 @@ def read_health_monitor_status(
         observed_at=_timestamp(now),
         interval_seconds=MONITOR_INTERVAL_SECONDS,
         completion_grace_seconds=MONITOR_COMPLETION_GRACE_SECONDS,
-        activation=read("enabled"),
+        activation=activation,
         slots=evidence,
-        next_end_slot=first_slot - 1 if first_slot > 0 else None,
+        next_end_slot=(
+            first_slot - 1
+            if activation_slot is not None and first_slot > activation_slot and evidence
+            else None
+        ),
     )

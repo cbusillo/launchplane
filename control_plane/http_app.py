@@ -24971,6 +24971,13 @@ def create_launchplane_fastapi_app(
         response_model=HealthMonitorStatusResponse,
         operation_id="read_health_monitor_receipts",
         summary="Read persisted health-monitor scheduler and watchdog receipts",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     app.add_api_route(

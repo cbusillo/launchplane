@@ -65,7 +65,7 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
         self.assertEqual(self.probe.call_count, 2)
 
     def test_receipts_survive_restart_and_distinguish_miss_from_recovery(self) -> None:
-        self.now += MONITOR_COMPLETION_GRACE_SECONDS
+        self.now += MONITOR_INTERVAL_SECONDS + MONITOR_COMPLETION_GRACE_SECONDS
         self.scheduler.watch_once()
         self.now += 1
         self.scheduler.run_once()
@@ -101,6 +101,22 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
         )
         self.assertEqual(older.slots[0].slot, completed_slot)
         self.assertTrue(older.slots[0].completed_on_time)
+
+    def test_paging_stops_at_activation_or_when_activation_is_unknown(self) -> None:
+        activated_slot = monitor_slot(self.now)
+        status = read_health_monitor_status(self.store, now=self.now, slots=48)
+        self.assertEqual([slot.slot for slot in status.slots], [activated_slot])
+        self.assertIsNone(status.next_end_slot)
+        before_activation = read_health_monitor_status(
+            self.store, now=self.now, end_slot=activated_slot - 1
+        )
+        self.assertEqual(before_activation.slots, [])
+        self.assertIsNone(before_activation.next_end_slot)
+        with patch.object(self.store, "read_idempotency_record", return_value=None):
+            unknown = read_health_monitor_status(self.store, now=self.now)
+        self.assertIsNone(unknown.activation)
+        self.assertIsNone(unknown.next_end_slot)
+        self.assertTrue(all(slot.completion is None for slot in unknown.slots))
 
     def test_receipt_read_refuses_invalid_ranges_and_unrelated_fingerprint(self) -> None:
         for slots, end_slot in ((0, None), (49, None), (1, -1), (1, monitor_slot(self.now) + 1)):

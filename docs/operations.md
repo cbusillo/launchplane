@@ -1551,6 +1551,9 @@ Read persisted clock evidence with `GET /v1/service/health-monitor/status`
 under the [existing service-read authority](service-boundary.md). `slots` selects one to
 48 UTC half-hour slots (six by default), newest first; pass the returned
 `next_end_slot` as `end_slot` to read an earlier window across service restarts.
+Paging stops at the persisted activation slot; when activation is unavailable,
+no automatic continuation is offered. Explicit historical windows can still be
+requested, and missing activation is not proof the scheduler is disabled.
 The database-backed response includes activation, scheduled starts, completion
 deadlines, completion times and record IDs, on-time completion, and separate
 missed/healthy watchdog report receipts. A missing receipt is `null`, never
