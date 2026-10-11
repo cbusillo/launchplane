@@ -108,16 +108,6 @@ class MergeTrainEventTests(TestCase):
                 },
             ),
             ("check_suite", {"action": "completed", "check_suite": {"head_branch": "feature"}}),
-            (
-                "workflow_run",
-                {
-                    "action": "completed",
-                    "workflow_run": {
-                        "head_branch": "feature",
-                        "pull_requests": [{"number": 8, "base": {"ref": "release"}}],
-                    },
-                },
-            ),
             # Another train's candidate.
             (
                 "check_suite",
@@ -156,6 +146,33 @@ class MergeTrainEventTests(TestCase):
                     )
                 )
         self.store.notify_merge_train.assert_not_called()
+
+    def test_a_pr_wakes_the_train_of_its_base_or_every_train_it_may_stack_on(self) -> None:
+        policy = self.policy.policy
+        release = policy.policies[0].model_copy(update={"base_branch": "release"})
+        self.policy_reader.return_value = self.policy.model_copy(
+            update={"policy": policy.model_copy(update={"policies": (*policy.policies, release)})}
+        )
+        main_train = "merge-train-controller:cbusillo:alpha:main"
+        release_train = "merge-train-controller:cbusillo:alpha:release"
+        for base, woken in (
+            ("release", (release_train,)),
+            ("main", (main_train,)),
+            # A stack child's base is its parent's branch, which either train may root.
+            ("parent-feature", (main_train, release_train)),
+        ):
+            with self.subTest(base=base):
+                self.store.notify_merge_train.reset_mock()
+                wake_merge_train_for_event(
+                    self.store,
+                    "check_run",
+                    {
+                        "repository": {"id": 42},
+                        "action": "completed",
+                        "check_run": {"pull_requests": [{"number": 8, "base": {"ref": base}}]},
+                    },
+                )
+                self.store.notify_merge_train.assert_called_once_with(woken)
 
     def test_unmapped_disabled_or_unrelated_events_do_not_notify(self) -> None:
         payload: dict[str, object] = {
@@ -253,9 +270,14 @@ class MergeTrainEventTests(TestCase):
     def _notifications(self, *payloads: str) -> list[SimpleNamespace]:
         pending = [SimpleNamespace(payload=payload) for payload in reversed(payloads)]
 
-        # psycopg returns a generator with close().
-        def notifications(**_: object) -> Iterator[SimpleNamespace]:
-            while pending:
+        # psycopg returns a generator with close() and honors stop_after.
+        def notifications(
+            *, timeout: float, stop_after: int | None = None
+        ) -> Iterator[SimpleNamespace]:
+            del timeout
+            yielded = 0
+            while pending and (stop_after is None or yielded < stop_after):
+                yielded += 1
                 yield pending.pop()
 
         self.connect.return_value.notifies.side_effect = notifications
@@ -265,6 +287,7 @@ class MergeTrainEventTests(TestCase):
         connection = self.connect.return_value
         pending = self._notifications("alpha", "beta", "alpha")
         listener = MergeTrainEventListener("postgresql://test")
+        # The first hint ends the wait; the two queued behind it join the same pass.
         self.assertEqual(listener.wait(300, Event()), frozenset({"alpha", "beta"}))
         connection.execute.assert_called_once()
         self.assertEqual(pending, [])
@@ -289,3 +312,7 @@ class MergeTrainEventTests(TestCase):
         self.assertIsNone(listener.wait(300, stop, monotonic=lambda: 0))
         stop.wait.assert_called_once_with(timeout=300)
         self.assertIsNone(listener.connection)
+        self.connect.side_effect = None
+        self._notifications("alpha")
+        self.assertEqual(listener.wait(300, Event()), frozenset({"alpha"}))
+        self.assertEqual(self.connect.call_count, 2)

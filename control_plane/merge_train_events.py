@@ -67,8 +67,11 @@ def wake_merge_train_for_event(
             and (action not in {"labeled", "unlabeled"} or target.enqueue_label == label)
         )
     else:
+        train_bases = frozenset(target.base_branch for target in policies)
         policies = tuple(
-            target for target in policies if _completion_concerns_target(event, payload, target)
+            target
+            for target in policies
+            if _completion_concerns_target(event, payload, target, train_bases)
         )
     if not policies:
         return False
@@ -87,14 +90,19 @@ def wake_merge_train_for_event(
 
 
 def _completion_concerns_target(
-    event: str, payload: dict[str, object], target: MergeTrainRepositoryPolicy
+    event: str,
+    payload: dict[str, object],
+    target: MergeTrainRepositoryPolicy,
+    train_bases: frozenset[str],
 ) -> bool:
     """Whether a completed head could be this train's PR, candidate or base.
 
-    A train only waits on checks of PRs into its base, its own candidate refs and
-    its base branch. Labels are not in check payloads, so every PR into the base
-    still wakes its train; completions on other branches or bases do not. A head
-    GitHub cannot associate (a fork PR, say) is left to the timed sweep.
+    A train waits only on checks of PRs rooted at its base (stacks included), its
+    own candidate refs and its base branch. Labels are not in check payloads, so
+    every such PR still wakes its train. A PR into another branch may be a stack
+    child, so it wakes every train except when that branch is another train's
+    base. A head with no PR on another branch, or another train's candidate,
+    wakes nothing; fork PRs, which the train never admits, look the same.
     """
     if event == "status":
         branches = tuple(
@@ -108,11 +116,10 @@ def _completion_concerns_target(
         suite = _mapping(run, "check_suite") if event == "check_run" else run
         branches = tuple(branch for branch in (_string(suite, "head_branch"),) if branch)
         pull_requests = _objects(run.get("pull_requests")) if run else ()
-    if any(
-        _string(_mapping(pull_request, "base"), "ref") == target.base_branch
-        for pull_request in pull_requests
-    ):
-        return True
+    for pull_request in pull_requests:
+        base = _string(_mapping(pull_request, "base"), "ref")
+        if base == target.base_branch or base not in train_bases:
+            return True
     candidate_prefix = (
         f"launchplane/train/{target.repository.lower()}/{target.base_branch.replace('/', '-')}/"
     )
