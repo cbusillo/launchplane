@@ -105,9 +105,12 @@ def owner_review_status(
     if decision.decision == "accepted":
         description = f"Accepted by @{decision.owner_github_login}"
         if decision.carried_from is not None:
-            description += (
-                f" (carried from {decision.carried_from.head_sha[:7]} after a base-only refresh)"
+            update = (
+                "a base-only refresh"
+                if decision.carried_from.reason == "merge_train_base_refresh"
+                else "an unchanged-feature base update"
             )
+            description += f" (carried from {decision.carried_from.head_sha[:7]} after {update})"
         return OwnerReviewStatus(state="success", description=description)
     return OwnerReviewStatus(
         state="failure", description=f"Changes requested by @{decision.owner_github_login}"
