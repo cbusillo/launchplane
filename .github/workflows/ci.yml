@@ -390,16 +390,9 @@ jobs:
           password: ${{ github.token }}
 
       - name: Build runtime image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: .
-          load: true
-          tags: ${{ env.LAUNCHPLANE_CI_IMAGE_TAG }}
-          pull: true
-          no-cache-filters: runtime
-          cache-from: >-
-            type=gha,scope=launchplane-ci
+        env:
+          LAUNCHPLANE_CI_BUILDER: ${{ steps.buildx.outputs.name }}
+        run: bash scripts/build-ci-runtime-image.sh
 
       - name: Verify runtime worker clients
         run: |
@@ -482,16 +475,9 @@ jobs:
           version: v5.3.1
 
       - name: Build runtime image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: .
-          load: true
-          tags: ${{ env.LAUNCHPLANE_CI_IMAGE_TAG }}
-          pull: true
-          no-cache-filters: runtime
-          cache-from: >-
-            type=gha,scope=launchplane-ci
+        env:
+          LAUNCHPLANE_CI_BUILDER: ${{ steps.buildx.outputs.name }}
+        run: bash scripts/build-ci-runtime-image.sh
 
       - name: Verify runtime worker clients
         run: |
