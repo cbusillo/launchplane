@@ -86,6 +86,7 @@ from tests.http_app_test_support import (
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 from tests.support.openapi import openapi_document, openapi_response
 from tests.support.auth import _identity, _local_operator_policy, _StubVerifier
+from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from tests.support.merge_train import (
     _AdmissionInvokingMergeTrainGitHubClient,
     _BlockedAdmissionMergeTrainGitHubClient,
@@ -4155,7 +4156,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             failed_payload["records"]["merge_train_batch_candidate_record_id"],
         )
 
-    async def test_keeps_checked_failed_candidate_terminal_with_unchanged_queue(self) -> None:
+    async def test_blocks_lone_failed_candidate_member_and_names_its_failure(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
@@ -4196,20 +4197,29 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                     _FakeMergeTrainSnapshotReader,
                 ),
             ):
+                _FakeFailingMergeTrainGitHubClient.labels_added = []
                 failed_response = await _post_merge_train_controller_run_once(app, request_payload)
-                terminal_response = await _post_merge_train_controller_run_once(
-                    app, request_payload
-                )
+                block_response = await _post_merge_train_controller_run_once(app, request_payload)
+            remaining = store.list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main", status="active"
+            )
 
         failed_payload = failed_response.json()
-        terminal_payload = terminal_response.json()
+        block_payload = block_response.json()
         self.assertTrue(failed_payload["result"]["candidate"]["candidate_sha"])
-        self.assertEqual(terminal_response.status_code, 202)
-        self.assertEqual(terminal_payload["result"]["controller_action"], "candidate_failed")
-        self.assertEqual(
-            terminal_payload["records"]["merge_train_batch_candidate_record_id"],
-            failed_payload["records"]["merge_train_batch_candidate_record_id"],
-        )
+        self.assertEqual(block_response.status_code, 202)
+        result = block_payload["result"]
+        self.assertEqual(result["controller_action"], "block")
+        self.assertEqual(result["reason_code"], "candidate_failure_isolated")
+        self.assertEqual(result["block_result"]["status"], "blocked")
+        self.assertEqual(_FakeFailingMergeTrainGitHubClient.labels_added, [(1, "merge-blocked")])
+        # The failed lineage is retired so the next pass plans the rest of the queue.
+        self.assertEqual(remaining, ())
+        feedback = build_feedback_payloads(response=block_payload)
+        self.assertEqual([item["pull_request_number"] for item in feedback], [1])
+        message = cast(str, feedback[0]["message"])
+        self.assertIn("test_shard (0)", message)
+        self.assertIn("`tests.test_widget.WidgetTests.test_renders`", message)
 
     async def test_recovers_failed_candidate_when_rerun_checks_pass(self) -> None:
         with (
