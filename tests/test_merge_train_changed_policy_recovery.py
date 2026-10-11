@@ -231,8 +231,8 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         class Client(_FakeMergeTrainGitHubClient):
+            @staticmethod
             def verify_unlanded_batch(
-                self,
                 *,
                 landing_plan: Any,
                 allow_changed_base: bool = False,
