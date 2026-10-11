@@ -8,8 +8,8 @@ from tests.support.workflows import load_workflow
 
 
 class AuditPolicyWorkflowTests(unittest.TestCase):
+    @staticmethod
     def classify(
-        self,
         paths: tuple[str, ...],
         *,
         event: str = "pull_request",
@@ -145,7 +145,13 @@ class AuditPolicyWorkflowTests(unittest.TestCase):
         assert step is not None
         result = subprocess.run(
             ["bash", "-c", step.run],
-            env=os.environ | {"AUDIT_POLICY_RESULT": "failure", "VERIFIED_TREE": "true"},
+            env=os.environ
+            | {
+                "RUNNER_POOL_RESULT": "success",
+                "CANDIDATE_CI_RESULT": "success",
+                "AUDIT_POLICY_RESULT": "failure",
+                "VERIFIED_TREE": "true",
+            },
             capture_output=True,
             text=True,
         )
@@ -162,6 +168,8 @@ class AuditPolicyWorkflowTests(unittest.TestCase):
                     ["bash", "-c", step.run],
                     env=os.environ
                     | {
+                        "RUNNER_POOL_RESULT": "success",
+                        "CANDIDATE_CI_RESULT": "success",
                         "AUDIT_POLICY_RESULT": "success",
                         "VERIFIED_TREE": "true",
                         "REPOSITORY_PINS_RESULT": pins,

@@ -2,7 +2,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import logging
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -19,6 +19,7 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_candidate_record,
     build_merge_train_batch_landing_plan,
     build_merge_train_batch_landing_plan_record,
+    dependency_not_ready_holds,
 )
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerLeaseLostError,
@@ -57,6 +58,7 @@ from control_plane.merge_train import (
     build_merge_train_dry_run_result,
     discover_merge_train_stack,
     merge_train_stack_child_readiness_check,
+    merge_train_snapshot_of,
     merge_train_stack_child_readiness_reasons,
 )
 from control_plane.merge_admission import (
@@ -65,8 +67,13 @@ from control_plane.merge_admission import (
     MergeAdmissionEvaluator,
     MergeAdmissionRecordStore,
 )
-from control_plane.merge_train_batch_pull_request import changed_closed_batch_body
+from control_plane.merge_train_batch_pull_request import (
+    bound_closed_batch_pull_request,
+    changed_closed_batch_body,
+)
+
 from control_plane.merge_train_batch_candidate import (
+    MergeTrainBatchCandidateBaseHistoryReadStore,
     MergeTrainBatchCandidateRecordStore,
     merge_train_snapshot_has_stack_topology,
 )
@@ -90,6 +97,11 @@ from control_plane.merge_train_github import (
     merge_train_conflict_probe_ref,
     merge_train_construction_ref,
 )
+from control_plane.merge_train_original_review import (
+    ORIGINAL_REVIEW_RECOVERY_CODE,
+    original_review_recovery_records,
+    original_review_recovery_details,
+)
 from control_plane.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecordStore,
     stack_collapse_expected_root_head_sha,
@@ -105,7 +117,11 @@ from control_plane.workflows.merge_train_controller import (
 )
 
 
+if TYPE_CHECKING:
+    from control_plane.merge_train_release_hold import MergeTrainReleaseHoldReader
+
 _LOGGER = logging.getLogger(__name__)
+_QUEUE_RETRY_RETIREMENT_SOURCE = "service:controller:queue-retry-retirement:"
 DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS = 300
 MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION = "merge_train_controller_run_once"
 MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS = (
@@ -351,6 +367,7 @@ def execute_merge_train_controller_run_once(
     admission_store: MergeAdmissionRecordStore,
     admission_evaluator: MergeAdmissionEvaluator,
     before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
+    release_hold_reader: "MergeTrainReleaseHoldReader | None" = None,
     effect_executor: MergeTrainSemanticEffectExecutor | None = None,
     branch_refresh_store: MergeTrainBranchRefreshWriteStore | None = None,
 ) -> MergeTrainControllerRunOnceResult:
@@ -390,6 +407,7 @@ def execute_merge_train_controller_run_once(
         admission_store=admission_store,
         admission_evaluator=admission_evaluator,
         before_release=before_release,
+        release_hold_reader=release_hold_reader,
     )
 
 
@@ -409,6 +427,7 @@ def execute_merge_train_controller_with_client(
     admission_store: MergeAdmissionRecordStore,
     admission_evaluator: MergeAdmissionEvaluator,
     before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
+    release_hold_reader: "MergeTrainReleaseHoldReader | None" = None,
 ) -> MergeTrainControllerRunOnceResult:
     github_client.begin_snapshot_pass(policy=repository_policy, read_only=not request.mutate)
     try:
@@ -427,6 +446,7 @@ def execute_merge_train_controller_with_client(
             admission_store=admission_store,
             admission_evaluator=admission_evaluator,
             before_release=before_release,
+            release_hold_reader=release_hold_reader,
         )
     finally:
         github_client.end_snapshot_pass()
@@ -448,6 +468,7 @@ def _execute_merge_train_controller_with_client(
     admission_store: MergeAdmissionRecordStore,
     admission_evaluator: MergeAdmissionEvaluator,
     before_release: Callable[[MergeTrainControllerRunOnceResult], None] | None = None,
+    release_hold_reader: "MergeTrainReleaseHoldReader | None" = None,
 ) -> MergeTrainControllerRunOnceResult:
     """Internal controller core with an explicit caller-owned scoped provider client.
 
@@ -505,6 +526,51 @@ def _execute_merge_train_controller_with_client(
             admission_store=admission_store,
             lease=lease,
         )
+        if result is not None and not request.mutate:
+            history = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
+                repository=request.repository, base_branch=request.base_branch
+            )
+            # Completed landing cleanup resumes from its exact stored proof;
+            # it does not perform fresh queue discovery.
+            if history and lease.record.active_action == "land_batch":
+                landing = _merge_train_landing_record_by_id(
+                    record_store=landing_store,
+                    repository=request.repository,
+                    base_branch=request.base_branch,
+                    record_id=lease.record.active_record_id,
+                )
+                if (
+                    landing is not None
+                    and latest_completed_merge_train_batch_landing_plan_record(
+                        record_store=landing_store,
+                        repository=request.repository,
+                        base_branch=request.base_branch,
+                        batch_id=landing.landing_plan.batch_id,
+                        candidate_sha=landing.landing_plan.candidate_sha,
+                        policy_sha256=landing.landing_plan.policy_sha256,
+                        include_lineage_retirements=True,
+                    )
+                    is not None
+                ):
+                    history = ()
+            if history:
+                snapshot = github_client.read_merge_train_snapshot(
+                    repository=request.repository, base_branch=request.base_branch
+                )
+                review_recovery = original_review_recovery_records(
+                    records=history, snapshot=snapshot, ancestry=github_client
+                )
+                if review_recovery:
+                    prior_details = result.get("details")
+                    if isinstance(prior_details, dict) and prior_details.get("code"):
+                        result["details"] = {
+                            **prior_details,
+                            "original_review_recovery": original_review_recovery_details(
+                                review_recovery
+                            ),
+                        }
+                    else:
+                        result["details"] = original_review_recovery_details(review_recovery)
         if result is None:
             active_landing_record = latest_merge_train_batch_landing_plan_record(
                 record_store=landing_store,
@@ -541,6 +607,7 @@ def _execute_merge_train_controller_with_client(
                     landing_store=landing_store,
                     stack_collapse_store=stack_collapse_store,
                     lease=lease,
+                    release_hold_reader=release_hold_reader,
                 )
     except MergeTrainControllerLeaseLostError:
         raise
@@ -1015,6 +1082,73 @@ def _advance_active_landing_record(
     active_landing_record: MergeTrainBatchLandingPlanRecord,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object]:
+    history = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
+        repository=request.repository, base_branch=request.base_branch
+    )
+    landing_numbers = {
+        entry.pull_request_number for entry in active_landing_record.landing_plan.entries
+    }
+    history = tuple(
+        record
+        for record in history
+        if any(entry.pull_request_number in landing_numbers for entry in record.plan.entries)
+    )
+    if history and not _ordinary_landing_terminal_success(active_landing_record):
+        snapshot = github_client.read_merge_train_snapshot(
+            repository=request.repository, base_branch=request.base_branch
+        )
+        review_recovery = original_review_recovery_records(
+            records=history, snapshot=snapshot, ancestry=github_client, raise_on_unavailable=True
+        )
+        affected = {
+            entry.pull_request_number for record in review_recovery for entry in record.plan.entries
+        }
+        if any(
+            entry.pull_request_number in affected
+            for entry in active_landing_record.landing_plan.entries
+        ):
+            if (
+                active_landing_record.ordinary_job_binding is None
+                and active_landing_record.landing_plan.policy_key == repository_policy.policy_key
+                and all(
+                    entry.status == "planned"
+                    for entry in active_landing_record.landing_plan.entries
+                )
+                and lease.record.active_phase in {"select_next_action", "persist_landing_plan"}
+            ):
+                retired = _retire_changed_policy_landing(
+                    request=request,
+                    trace_id=trace_id,
+                    recorded_at=recorded_at,
+                    github_client=github_client,
+                    candidate_store=candidate_store,
+                    landing_store=landing_store,
+                    stack_collapse_store=stack_collapse_store,
+                    admission_store=admission_store,
+                    admission_evaluator=admission_evaluator,
+                    landing_record=active_landing_record,
+                    lease=lease,
+                    retirement_source="original-review-recovery",
+                )
+                details = original_review_recovery_details(review_recovery)
+                if active_landing_record.landing_plan.policy_sha256 != policy_sha256:
+                    details["policy_changed"] = {
+                        "code": "merge_train_stack_collapse_policy_changed",
+                        "record_id": active_landing_record.record_id,
+                        "policy_sha256": active_landing_record.landing_plan.policy_sha256,
+                    }
+                retired["details"] = details
+                return retired
+            return {
+                "repository": request.repository,
+                "base_branch": request.base_branch,
+                "mode": "blocked",
+                "controller_action": "original_review_recovery",
+                "controller_reconciliation_status": "required",
+                "merge_train_batch_landing_plan_record_id": active_landing_record.record_id,
+                "details": original_review_recovery_details(review_recovery),
+            }
+
     if (
         active_landing_record.ordinary_job_binding is None
         and active_landing_record.landing_plan.policy_key == repository_policy.policy_key
@@ -1309,7 +1443,7 @@ def _advance_active_landing_record(
                 "mode": "blocked",
                 "controller_action": "land_batch",
                 "controller_reconciliation_status": "required",
-                "controller_reconciliation_detail": "ordinary_landing_recovery_required",
+                "reconciliation_detail": "ordinary_landing_recovery_required",
                 "landing_plan": preserved_record.landing_plan.model_dump(mode="json"),
                 "error": {
                     "code": "ordinary_landing_recovery_required",
@@ -1426,6 +1560,7 @@ _LINEAGE_RETIREMENT_SOURCE_PREFIX = "service:controller:lineage-changed-landing:
 _RETIRED_LANDING_SOURCE_PREFIXES = (
     "service:controller:policy-changed-landing:",
     _LINEAGE_RETIREMENT_SOURCE_PREFIX,
+    "service:controller:original-review-recovery:",
 )
 
 
@@ -1454,6 +1589,7 @@ def _retire_changed_policy_landing(
             policy_sha256=plan.policy_sha256,
         )
         is not None
+        and retirement_source != "original-review-recovery"
     ):
         raise MergeTrainControllerRequestError(
             "Policy-change recovery of a collapsed stack requires explicit reconciliation."
@@ -1465,8 +1601,13 @@ def _retire_changed_policy_landing(
         raise MergeTrainControllerRequestError(
             "Policy-change recovery requires the exact recorded candidate."
         )
+    observed_pr_heads: dict[int, tuple[str, str]] = {}
     observed_base_sha, observed_base_tree_sha = _verify_retirement_has_no_effect(
-        github_client=github_client, admission_store=admission_store, plan=plan
+        github_client=github_client,
+        admission_store=admission_store,
+        plan=plan,
+        allow_moved_heads=retirement_source == "original-review-recovery",
+        observed_pr_heads=observed_pr_heads,
     )
     if not request.mutate:
         return {
@@ -1486,12 +1627,15 @@ def _retire_changed_policy_landing(
         trace_id=trace_id,
     )
     for entry in plan.entries:
+        observed_head, observed_tree = observed_pr_heads.get(
+            entry.pull_request_number, (entry.expected_head_sha, entry.expected_head_tree_sha)
+        )
         guard.reconcile_existing_no_effect(
             entry=entry,
             observed_base_sha=observed_base_sha,
             observed_base_tree_sha=observed_base_tree_sha,
-            observed_head_sha=entry.expected_head_sha,
-            observed_head_tree_sha=entry.expected_head_tree_sha,
+            observed_head_sha=observed_head,
+            observed_head_tree_sha=observed_tree,
             observed_pull_request_state="open",
             observed_at=guard.observation_time_provider(),
         )
@@ -1525,6 +1669,8 @@ def _verify_retirement_has_no_effect(
     github_client: GitHubMergeTrainClient,
     admission_store: MergeAdmissionRecordStore,
     plan: MergeTrainBatchLandingPlan,
+    allow_moved_heads: bool = False,
+    observed_pr_heads: dict[int, tuple[str, str]] | None = None,
 ) -> tuple[str, str]:
     allow_changed_base = True
     for entry in plan.entries:
@@ -1540,8 +1686,16 @@ def _verify_retirement_has_no_effect(
             )
             if not outcomes or outcomes[0].status != "rejected":
                 allow_changed_base = False
+    if allow_moved_heads:
+        return github_client.verify_unlanded_batch(
+            landing_plan=plan,
+            allow_changed_base=allow_changed_base,
+            allow_moved_heads=True,
+            observed_pr_heads=observed_pr_heads,
+        )
     return github_client.verify_unlanded_batch(
-        landing_plan=plan, allow_changed_base=allow_changed_base
+        landing_plan=plan,
+        allow_changed_base=allow_changed_base,
     )
 
 
@@ -1599,6 +1753,7 @@ def _resume_unrecorded_landing_retirement(
     if not isinstance(retirement_source, str) or retirement_source not in {
         "policy-changed-landing",
         "lineage-changed-landing",
+        "original-review-recovery",
     }:
         return None
     candidate_record = _candidate_record_for_landing_plan(
@@ -1612,6 +1767,7 @@ def _resume_unrecorded_landing_retirement(
         github_client=github_client,
         admission_store=admission_store,
         plan=landing_record.landing_plan,
+        allow_moved_heads=retirement_source == "original-review-recovery",
     )
     return _record_landing_retirement(
         trace_id=trace_id,
@@ -1750,8 +1906,6 @@ def _finish_landed_merge_train_batch(
         return result
     if landed_record.ordinary_job_binding is not None:
         result["landing_progress"] = "complete"
-    elif not repository_policy.stack_child_disposition_label:
-        result["historical_stack_child_label_status"] = "not_configured"
     if not collapse_records:
         if lease.record.step_payload.get("stack_collapse_plan_record_id"):
             raise MergeTrainControllerRequestError(
@@ -1852,7 +2006,7 @@ def _reconcile_completed_landing_after_policy_change(
             mode="blocked",
             reason_code=reason,
             controller_reconciliation_status="required",
-            controller_reconciliation_detail=reason,
+            reconciliation_detail=reason,
             blocking_reason={
                 "code": reason,
                 "message": message,
@@ -2205,7 +2359,19 @@ def _advance_without_active_landing(
     landing_store: MergeTrainBatchLandingPlanRecordStore,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
     lease: MergeTrainControllerLeaseContext,
+    release_hold_reader: "MergeTrainReleaseHoldReader | None" = None,
 ) -> dict[str, object]:
+    # A landing already under way finishes; nothing new is built or landed while
+    # a Client-accepted release built from this repository runs.
+    release_hold = release_hold_reader(request.repository) if release_hold_reader else None
+    if release_hold is not None:
+        return {
+            "repository": request.repository,
+            "base_branch": request.base_branch,
+            "mode": "blocked",
+            "controller_action": "release_hold",
+            "blocking_reason": release_hold.blocking_reason(),
+        }
     active_candidate_record = latest_merge_train_batch_candidate_record(
         record_store=candidate_store,
         repository=request.repository,
@@ -2649,6 +2815,7 @@ def _reflow_stale_candidate_record(
         snapshot=snapshot,
         records=_read_obsolete_stack_collapse_records(
             store=stack_collapse_store,
+            github_client=github_client,
             snapshot=snapshot,
             repository_policy=repository_policy,
             policy_sha256=policy_sha256,
@@ -2675,9 +2842,14 @@ def _reflow_stale_candidate_record(
                 )
             }
         )
+    # Pull requests that became eligible after this candidate was built wait for
+    # the next one; only a change to its own members replans it.
     dry_run_result = build_merge_train_dry_run_result(
         policy=policy,
-        snapshot=candidate_snapshot,
+        snapshot=merge_train_snapshot_of(
+            candidate_snapshot,
+            [entry.pull_request_number for entry in candidate_record.candidate.entries],
+        ),
         batch_landing=candidate_record.ordinary_job_binding is None,
     )
     candidate_matches_queue = _merge_train_candidate_matches_dry_run_queue(
@@ -2697,6 +2869,28 @@ def _reflow_stale_candidate_record(
                     "batch_id": candidate_record.candidate.batch_id,
                 },
             )
+            retry = candidate_record.candidate
+            if (
+                candidate_record.ordinary_job_binding is None
+                and len(retry.entries) > 1
+                and retry.candidate_sha
+                and retry.status in {"building", "ready_for_checks"}
+                and (
+                    retry.check_retry_of
+                    or retry.infrastructure_retry_of
+                    or retry.batch_body_retry_of
+                )
+                and bound_closed_batch_pull_request(client=github_client, candidate=retry) is None
+            ):
+                # Record the controller's queue-retirement intent before closing.
+                # A crash after the close must not turn it into a manual-close hold.
+                lease.checkpoint(active_phase="record_retry_queue_retirement")
+                retirement = build_merge_train_batch_candidate_record(
+                    candidate=retry,
+                    source=f"{_QUEUE_RETRY_RETIREMENT_SOURCE}{trace_id}",
+                    updated_at=recorded_at,
+                ).model_copy(update={"status": "superseded"})
+                candidate_store.write_merge_train_batch_candidate_record(retirement)
             _close_service_batch_pull_request(
                 github_client=github_client,
                 candidate_record=candidate_record,
@@ -2725,8 +2919,51 @@ def _reflow_stale_candidate_record(
         )
         result["superseded_merge_train_batch_candidate_record_id"] = candidate_record.record_id
         return result
+    if (
+        candidate_record.ordinary_job_binding is None
+        and candidate_record.candidate.candidate_sha
+        and (
+            candidate_record.candidate.check_retry_of
+            or candidate_record.candidate.infrastructure_retry_of
+            or candidate_record.candidate.batch_body_retry_of
+        )
+        and any(
+            record.source.startswith(_QUEUE_RETRY_RETIREMENT_SOURCE)
+            and record.candidate.candidate_ref == candidate_record.candidate.candidate_ref
+            and record.candidate.candidate_sha == candidate_record.candidate.candidate_sha
+            and record.candidate.policy_sha256 == policy_sha256
+            for record in _candidate_history_on_base(
+                candidate_store=candidate_store,
+                repository=request.repository,
+                base_branch=request.base_branch,
+                base_sha=snapshot.base_sha,
+            )
+        )
+    ):
+        # The queue may return immediately after a crash during retirement,
+        # while the pre-close record is still active. Resume its recorded intent
+        # before the ordinary observation path sees the closed PR as a failure.
+        recovery = _resume_known_failed_batch(
+            candidate_store=candidate_store,
+            github_client=github_client,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            snapshot=candidate_snapshot,
+            dry_run_result=dry_run_result,
+            held_out=candidate_record.candidate.held_out,
+            merge_method=repository_policy.merge_method,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=request.mutate,
+            lease=lease,
+        )
+        if recovery is not None:
+            return recovery
     if candidate_record.ordinary_job_binding is None and any(
-        pr.owner_review_required and pr.required_checks_status != "pass"
+        (
+            pr.client_test_notes_error
+            or (pr.owner_review_required and pr.required_checks_status != "pass")
+        )
         for pr in dry_run_result.queue
         if pr.number in dry_run_result.queue_order
     ):
@@ -2734,16 +2971,20 @@ def _reflow_stale_candidate_record(
             pr
             for pr in dry_run_result.queue
             if pr.number in dry_run_result.queue_order
-            and pr.owner_review_required
-            and pr.required_checks_status != "pass"
+            and (
+                pr.client_test_notes_error
+                or (pr.owner_review_required and pr.required_checks_status != "pass")
+            )
         )
         dry_run_result = dry_run_result.model_copy(
             update={
                 "selected_pr": waiting_pr,
                 "intended_next_action": "block"
-                if waiting_pr.required_checks_status == "fail"
+                if waiting_pr.client_test_notes_error or waiting_pr.required_checks_status == "fail"
                 else "wait_for_checks",
-                "next_action_detail": f"Wait for current-head Client review and required checks on pull request #{waiting_pr.number}."
+                "next_action_detail": f"Pull request #{waiting_pr.number}: {waiting_pr.client_test_notes_error}"
+                if waiting_pr.client_test_notes_error
+                else f"Wait for current-head Client review and required checks on pull request #{waiting_pr.number}."
                 if waiting_pr.required_checks_status != "fail"
                 else f"Current-head review or required checks failed on pull request #{waiting_pr.number}.",
             }
@@ -2990,6 +3231,7 @@ def _without_obsolete_stack_collapse_pull_requests(
 def _read_obsolete_stack_collapse_records(
     *,
     store: MergeTrainStackCollapsePlanRecordStore,
+    github_client: GitHubMergeTrainClient,
     snapshot: MergeTrainDryRunSnapshot,
     repository_policy: MergeTrainRepositoryPolicy,
     policy_sha256: str,
@@ -3001,12 +3243,17 @@ def _read_obsolete_stack_collapse_records(
             repository=snapshot.repository, base_branch=snapshot.base_branch, status=status
         )
     )
-    return _obsolete_stack_collapse_records(
+    obsolete = _obsolete_stack_collapse_records(
         records=records,
         snapshot=snapshot,
         repository_policy=repository_policy,
         policy_sha256=policy_sha256,
     )
+
+    review = original_review_recovery_records(
+        records=records, snapshot=snapshot, ancestry=github_client
+    )
+    return tuple({record.record_id: record for record in (*obsolete, *review)}.values())
 
 
 def _advance_without_candidate_record(
@@ -3081,6 +3328,20 @@ def _advance_without_candidate_record(
         repository_policy=repository_policy,
         policy_sha256=policy_sha256,
     )
+    policy_obsolete_records = obsolete_records
+    review_recovery = original_review_recovery_records(
+        records=waiting_records + retired_records,
+        snapshot=snapshot,
+        ancestry=github_client,
+    )
+    obsolete_records = tuple(
+        {record.record_id: record for record in (*obsolete_records, *review_recovery)}.values()
+    )
+    block_code = (
+        ORIGINAL_REVIEW_RECOVERY_CODE
+        if review_recovery
+        else "merge_train_stack_collapse_policy_changed"
+    )
     obsolete_numbers = {
         entry.pull_request_number for record in obsolete_records for entry in record.plan.entries
     }
@@ -3094,18 +3355,29 @@ def _advance_without_candidate_record(
         )
 
     def report_obsolete(result: dict[str, object]) -> dict[str, object]:
-        if obsolete_records:
+        if policy_obsolete_records:
             result["details"] = {
                 "code": "merge_train_stack_collapse_policy_changed",
-                "record_id": obsolete_records[0].record_id,
+                "record_id": policy_obsolete_records[0].record_id,
                 "entries": [
                     {
                         "record_id": record.record_id,
                         "root_pull_request_number": record.plan.root_pull_request_number,
+                        "root_initial_head_sha": record.plan.root_initial_head_sha,
+                        "original_child_pull_request_numbers": [
+                            mutation.child_pull_request_number for mutation in record.plan.mutations
+                        ],
                     }
-                    for record in sorted(obsolete_records, key=lambda record: record.record_id)
+                    for record in sorted(
+                        policy_obsolete_records, key=lambda record: record.record_id
+                    )
                 ],
             }
+        if review_recovery:
+            details = original_review_recovery_details(review_recovery)
+            if policy_obsolete_records:
+                details["policy_changed"] = result["details"]
+            result["details"] = details
         return result
 
     latest_records = tuple(record for record in latest_records if independent(record))
@@ -3255,9 +3527,12 @@ def _advance_without_candidate_record(
             "mode": "blocked",
             "controller_action": "block",
             "blocking_reason": {
-                "code": "merge_train_stack_collapse_policy_changed",
-                "message": "This saved stack requires its original policy or a new root head; unrelated work "
-                "can proceed while its proof remains blocked.",
+                "code": block_code,
+                "message": (
+                    "A code-owned child is still carried in another PR outside the base. Restore the original PR branches without the carry; preserve the recorded history and current-head reviews. Unrelated work can proceed."
+                    if review_recovery
+                    else "This saved stack requires its original policy or a new root head; unrelated work can proceed while its proof remains blocked."
+                ),
             },
         }
     return report_obsolete(live_result)
@@ -3345,12 +3620,23 @@ def _advance_waiting_stack_collapse_record(
             "collapse_id": waiting_collapse_record.plan.collapse_id,
         },
     )
+    # The root-only dry run cannot see the rest of the queue. Record its
+    # dependency holds for failed-candidate recovery, which reads the full queue.
+    dependency_holds = (
+        dependency_not_ready_holds(
+            build_merge_train_dry_run_result(policy=policy, snapshot=snapshot, batch_landing=True),
+            root_snapshot.base_sha,
+        )
+        if lease.record.ordinary_job_binding is None
+        else ()
+    )
     candidate = build_merge_train_batch_candidate(
         ordinary_job_binding=lease.record.ordinary_job_binding,
         dry_run_result=dry_run_result,
         base_sha=root_snapshot.base_sha,
         policy_sha256=policy_sha256,
         created_at=recorded_at,
+        held_out=dependency_holds,
         stack_collapse_root=MergeTrainStackCollapseRootProof(
             collapse_record_id=waiting_collapse_record.record_id,
             collapse_id=waiting_collapse_record.plan.collapse_id,
@@ -3921,6 +4207,26 @@ def _advance_from_live_snapshot(
             "dry_run_result": dry_run_result.model_dump(mode="json"),
         }
 
+    if lease.record.ordinary_job_binding is None:
+        recovery = _resume_known_failed_batch(
+            candidate_store=candidate_store,
+            github_client=github_client,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            snapshot=probe.snapshot,
+            dry_run_result=probe.dry_run_result,
+            held_out=probe.held_out,
+            merge_method=policy.find_repository_policy(
+                repository=request.repository, base_branch=request.base_branch
+            ).merge_method,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=request.mutate,
+            lease=lease,
+            conflict_probe=probe.report,
+        )
+        if recovery is not None:
+            return recovery
     controller_action = "plan_candidate"
     candidate = build_merge_train_batch_candidate(
         ordinary_job_binding=lease.record.ordinary_job_binding,
@@ -4015,6 +4321,7 @@ def try_reflow_failed_merge_train_candidate(
         snapshot=snapshot,
         records=_read_obsolete_stack_collapse_records(
             store=stack_collapse_store,
+            github_client=github_client,
             snapshot=snapshot,
             repository_policy=policy.find_repository_policy(
                 repository=repository, base_branch=base_branch
@@ -4049,7 +4356,6 @@ def try_reflow_failed_merge_train_candidate(
         }
     if dry_run_result.intended_next_action not in {"merge", "update_branch"}:
         return None
-    body_retry_approved = False
     queue_unchanged = _merge_train_candidate_matches_dry_run_queue(
         candidate=active_candidate_record.candidate,
         dry_run_result=dry_run_result,
@@ -4066,58 +4372,52 @@ def try_reflow_failed_merge_train_candidate(
             and len(failed.entries) > 1
             and merge_method == "merge"
         ):
-            reason = "batch_body_retry_already_used"
-            retry_used = failed.batch_body_retry_of or any(
-                record.candidate.batch_body_retry_of
-                and _merge_train_candidate_matches_dry_run_queue(
-                    candidate=record.candidate,
-                    dry_run_result=dry_run_result,
-                    base_sha=snapshot.base_sha,
-                )
-                for record in candidate_store.list_merge_train_batch_candidate_records(
-                    repository=repository, base_branch=base_branch
-                )
+            recovered = _retry_closed_candidate_after_passing_checks(
+                candidate_store=candidate_store,
+                active_candidate_record=active_candidate_record,
+                github_client=github_client,
+                policy=policy,
+                policy_sha256=policy_sha256,
+                snapshot=snapshot,
+                dry_run_result=dry_run_result,
+                held_out=held_out,
+                repository=repository,
+                base_branch=base_branch,
+                recorded_at=recorded_at,
+                trace_id=trace_id,
+                mutate=mutate,
+                lease=lease,
             )
-            if not retry_used:
-                reason = "closed_batch_body_unchanged_or_unavailable"
-                if failed.required_checks_status == "fail":
-                    try:
-                        changed_body = changed_closed_batch_body(
-                            client=github_client, candidate=failed
-                        )
-                    except (MergeTrainGitHubError, MergeAdmissionDeniedError):
-                        changed_body = False
-                    if changed_body:
-                        reason = "closed_batch_body_changed"
-                        body_retry_approved = True
-            if reason != "closed_batch_body_changed":
-                recovery = _recover_failed_merge_train_candidate(
-                    candidate_store=candidate_store,
-                    active_candidate_record=active_candidate_record,
-                    github_client=github_client,
-                    policy=policy,
-                    policy_sha256=policy_sha256,
-                    snapshot=snapshot,
-                    dry_run_result=dry_run_result,
-                    held_out=held_out,
-                    repository=repository,
-                    base_branch=base_branch,
-                    recorded_at=recorded_at,
-                    trace_id=trace_id,
-                    mutate=mutate,
-                    lease=lease,
-                )
-                if recovery is not None:
-                    return recovery
-                return {
-                    "repository": repository,
-                    "base_branch": base_branch,
-                    "mode": "dry-run",
-                    "controller_action": "candidate_failed",
-                    "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
-                    "candidate": failed.model_dump(mode="json"),
-                    "reason_code": reason,
-                }
+            if recovered is not None:
+                return recovered
+            # Real failures must shrink the batch before any generated-body retry.
+            recovery = _recover_failed_merge_train_candidate(
+                candidate_store=candidate_store,
+                active_candidate_record=active_candidate_record,
+                github_client=github_client,
+                policy=policy,
+                policy_sha256=policy_sha256,
+                snapshot=snapshot,
+                dry_run_result=dry_run_result,
+                held_out=held_out,
+                repository=repository,
+                base_branch=base_branch,
+                recorded_at=recorded_at,
+                trace_id=trace_id,
+                mutate=mutate,
+                lease=lease,
+            )
+            if recovery is not None:
+                return recovery
+            return {
+                "repository": repository,
+                "base_branch": base_branch,
+                "mode": "dry-run",
+                "controller_action": "candidate_failed",
+                "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+                "candidate": failed.model_dump(mode="json"),
+                "reason_code": "failed_candidate_recovery_unavailable",
+            }
         else:
             reobserved = _reobserve_failed_merge_train_candidate(
                 candidate_store=candidate_store,
@@ -4129,6 +4429,8 @@ def try_reflow_failed_merge_train_candidate(
                 recorded_at=recorded_at,
                 trace_id=trace_id,
                 mutate=mutate,
+                lease=lease,
+                held_out=held_out,
             )
             if reobserved is not None:
                 return reobserved
@@ -4197,6 +4499,63 @@ def try_reflow_failed_merge_train_candidate(
         }
     if probe.dry_run_result.intended_next_action != "merge":
         return None
+    if active_candidate_record.ordinary_job_binding is None:
+        recovery = _resume_known_failed_batch(
+            candidate_store=candidate_store,
+            github_client=github_client,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            snapshot=probe.snapshot,
+            dry_run_result=probe.dry_run_result,
+            held_out=probe.held_out,
+            merge_method=merge_method,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=mutate,
+            lease=lease,
+            conflict_probe=probe.report,
+        )
+        if recovery is not None:
+            if mutate:
+                # The matching historical failure can belong to another batch.
+                # Retire the current lineage too, without retiring the replacement.
+                replacement_id = recovery.get("merge_train_batch_candidate_record_id")
+                if recovery["controller_action"] == "block" and "candidate" not in recovery:
+                    replacement_id = None
+                details = recovery.get("details")
+                recovery_source_id = recovery.get(
+                    "superseded_merge_train_batch_candidate_record_id"
+                ) or (
+                    details.get("recovery_source_record_id") if isinstance(details, dict) else None
+                )
+                lease.checkpoint(
+                    active_action="reflow_candidate",
+                    active_phase="retire_reflowed_failed_lineage",
+                    active_record_id=active_candidate_record.record_id,
+                    active_pull_request_number=None,
+                    step_payload={
+                        "retired_candidate_record_id": active_candidate_record.record_id,
+                        "recovery_source_record_id": recovery_source_id,
+                        "replacement_record_id": replacement_id,
+                    },
+                )
+                _supersede_active_merge_train_batch_candidate_records(
+                    record_store=candidate_store,
+                    repository=repository,
+                    base_branch=base_branch,
+                    batch_id=active_candidate_record.candidate.batch_id,
+                    replacement_record_id=(
+                        replacement_id if isinstance(replacement_id, str) else None
+                    ),
+                )
+                recovery["details"] = {
+                    **(details if isinstance(details, dict) else {}),
+                    "retired_candidate_record_id": active_candidate_record.record_id,
+                }
+                recovery["retired_merge_train_batch_candidate_record_id"] = (
+                    active_candidate_record.record_id
+                )
+            return recovery
     candidate = build_merge_train_batch_candidate(
         ordinary_job_binding=active_candidate_record.ordinary_job_binding,
         dry_run_result=probe.dry_run_result,
@@ -4216,31 +4575,16 @@ def try_reflow_failed_merge_train_candidate(
             base_sha=probe.snapshot.base_sha,
         )
     ):
-        if not body_retry_approved:
-            # A probe reducing a changed queue back to the failed membership
-            # cannot evade the unchanged-queue gates or mint another retry.
-            return _stop_failed_batch_after_conflict_probe(
-                candidate_store=candidate_store,
-                active_candidate_record=active_candidate_record,
-                probe=probe,
-                repository=repository,
-                base_branch=base_branch,
-                recorded_at=recorded_at,
-                trace_id=trace_id,
-                mutate=mutate,
-                lease=lease,
-            )
-        # A separate ref prevents rediscovery of the failed closed batch PR.
-        batch_id = candidate.batch_id + "-body-retry"
-        candidate = MergeTrainBatchCandidate.model_validate(
-            {
-                **candidate.model_dump(mode="python"),
-                "batch_id": batch_id,
-                "candidate_ref": build_merge_train_batch_candidate_ref(
-                    repository=repository, base_branch=base_branch, batch_id=batch_id
-                ),
-                "batch_body_retry_of": active_candidate_record.record_id,
-            }
+        return _stop_failed_batch_after_conflict_probe(
+            candidate_store=candidate_store,
+            active_candidate_record=active_candidate_record,
+            probe=probe,
+            repository=repository,
+            base_branch=base_branch,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=mutate,
+            lease=lease,
         )
     result: dict[str, object] = {
         "repository": candidate.repository,
@@ -4265,6 +4609,274 @@ def try_reflow_failed_merge_train_candidate(
             lease=lease,
         )
     return result
+
+
+def _candidate_history_on_base(
+    *,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    repository: str,
+    base_branch: str,
+    base_sha: str,
+) -> tuple[MergeTrainBatchCandidateRecord, ...]:
+    return cast(
+        MergeTrainBatchCandidateBaseHistoryReadStore, candidate_store
+    ).list_merge_train_batch_candidate_records(
+        repository=repository, base_branch=base_branch, base_sha=base_sha
+    )
+
+
+def _resume_known_failed_batch(
+    *,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    github_client: GitHubMergeTrainClient,
+    policy: MergeTrainPolicy,
+    policy_sha256: str,
+    snapshot: MergeTrainDryRunSnapshot,
+    dry_run_result: MergeTrainDryRunResult,
+    held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
+    merge_method: str,
+    recorded_at: str,
+    trace_id: str,
+    mutate: bool,
+    lease: MergeTrainControllerLeaseContext,
+    conflict_probe: dict[str, object] | None = None,
+) -> dict[str, object] | None:
+    """Resume recorded failure isolation rather than rebuild identical failed inputs."""
+    matching_records = tuple(
+        record
+        for record in _candidate_history_on_base(
+            candidate_store=candidate_store,
+            repository=snapshot.repository,
+            base_branch=snapshot.base_branch,
+            base_sha=snapshot.base_sha,
+        )
+        if record.ordinary_job_binding is None
+        and record.candidate.policy_key == dry_run_result.policy_key
+        and record.candidate.policy_sha256 == policy_sha256
+        and _merge_train_candidate_matches_dry_run_queue(
+            candidate=record.candidate,
+            dry_run_result=dry_run_result,
+            base_sha=snapshot.base_sha,
+        )
+    )
+    if matching_records:
+        latest = matching_records[0]
+        retry = latest.candidate
+        parent = next(
+            (
+                record
+                for record in matching_records
+                if record.record_id
+                in {retry.check_retry_of, retry.infrastructure_retry_of, retry.batch_body_retry_of}
+                and record.candidate.required_checks_status == "fail"
+            ),
+            None,
+        )
+        unfinished_retry = (
+            parent is not None
+            and latest.status == "superseded"
+            and retry.status in {"planned", "building", "ready_for_checks"}
+        )
+        if (
+            parent is not None
+            and latest.status == "superseded"
+            and retry.status == "failed"
+            and retry.required_checks_status not in {"pass", "fail"}
+        ):
+            return _stop_failed_batch_after_conflict_probe(
+                candidate_store=candidate_store,
+                active_candidate_record=latest,
+                probe=_ConflictProbeOutcome(snapshot, dry_run_result, held_out, conflict_probe),
+                repository=snapshot.repository,
+                base_branch=snapshot.base_branch,
+                recorded_at=recorded_at,
+                trace_id=trace_id,
+                mutate=mutate,
+                lease=lease,
+                stopped_result={"reason_code": "candidate_retry_unavailable"},
+            )
+        if unfinished_retry and retry.candidate_sha:
+            try:
+                observed = github_client.observe_batch_candidate_checks(candidate=retry)
+                closed = bound_closed_batch_pull_request(client=github_client, candidate=retry)
+            except (MergeTrainGitHubError, MergeAdmissionDeniedError):
+                return _stop_failed_batch_after_conflict_probe(
+                    candidate_store=candidate_store,
+                    active_candidate_record=latest,
+                    probe=_ConflictProbeOutcome(snapshot, dry_run_result, held_out, conflict_probe),
+                    repository=snapshot.repository,
+                    base_branch=snapshot.base_branch,
+                    recorded_at=recorded_at,
+                    trace_id=trace_id,
+                    mutate=mutate,
+                    lease=lease,
+                    stopped_result={"reason_code": "candidate_retry_evidence_unavailable"},
+                )
+            if observed.required_checks_status == "fail":
+                latest = latest.model_copy(update={"candidate": observed})
+                matching_records = (latest, *matching_records[1:])
+                unfinished_retry = False
+            elif closed is not None and latest.source.startswith(_QUEUE_RETRY_RETIREMENT_SOURCE):
+                # The controller intentionally closed this unfinished retry.
+                # Reconstruct it on its existing budget/ref, after rereading S.
+                retry = retry.model_copy(update={"candidate_sha": ""})
+            elif closed is not None:
+                return _stop_failed_batch_after_conflict_probe(
+                    candidate_store=candidate_store,
+                    active_candidate_record=latest,
+                    probe=_ConflictProbeOutcome(snapshot, dry_run_result, held_out, conflict_probe),
+                    repository=snapshot.repository,
+                    base_branch=snapshot.base_branch,
+                    recorded_at=recorded_at,
+                    trace_id=trace_id,
+                    mutate=mutate,
+                    lease=lease,
+                    stopped_result={"reason_code": "candidate_retry_closed"},
+                )
+            else:
+                # Construction already finished: resume observing this exact SHA.
+                retry = observed
+        if unfinished_retry and retry.batch_body_retry_of and parent is not None:
+            # Legacy body retries did not require passing evidence. Keep the
+            # current no-rebuild rule when resuming one of those records too.
+            try:
+                unfinished_retry = (
+                    github_client.observe_batch_candidate_checks(
+                        candidate=parent.candidate
+                    ).required_checks_status
+                    == "pass"
+                )
+            except MergeTrainGitHubError:
+                unfinished_retry = False
+        if unfinished_retry:
+            candidate = build_merge_train_batch_candidate(
+                dry_run_result=dry_run_result,
+                base_sha=snapshot.base_sha,
+                policy_sha256=policy_sha256,
+                created_at=recorded_at,
+                held_out=held_out,
+            ).model_copy(
+                update={
+                    "batch_id": retry.batch_id,
+                    "candidate_ref": retry.candidate_ref,
+                    "check_retry_of": retry.check_retry_of,
+                    "check_retry_evidence": retry.check_retry_evidence,
+                    "infrastructure_retry_of": retry.infrastructure_retry_of,
+                    "batch_body_retry_of": retry.batch_body_retry_of,
+                }
+            )
+            if retry.candidate_sha:
+                candidate = retry.model_copy(update={"held_out": held_out})
+            result: dict[str, object] = {
+                "repository": snapshot.repository,
+                "base_branch": snapshot.base_branch,
+                "mode": "plan_candidate" if mutate else "dry-run",
+                "controller_action": "plan_candidate",
+                "reason_code": "candidate_retry_resumed",
+                "superseded_merge_train_batch_candidate_record_id": latest.record_id,
+                "candidate": candidate.model_dump(mode="json"),
+                "dry_run_result": dry_run_result.model_dump(mode="json"),
+            }
+            if mutate:
+                result["merge_train_batch_candidate_record_id"] = _persist_replacement_candidate(
+                    candidate_store=candidate_store,
+                    active_candidate_record=latest,
+                    candidate=candidate,
+                    repository=snapshot.repository,
+                    base_branch=snapshot.base_branch,
+                    recorded_at=recorded_at,
+                    trace_id=trace_id,
+                    lease=lease,
+                )
+            return result
+    failed_record = next(
+        (
+            record
+            for record in matching_records
+            if record.candidate.candidate_sha
+            and (
+                record.candidate.status == "failed"
+                and record.candidate.required_checks_status == "fail"
+                or record.candidate.status == "passed"
+                and record.candidate.required_checks_status == "pass"
+            )
+        ),
+        None,
+    )
+    if failed_record is None or failed_record.candidate.status == "passed":
+        return None
+    if len(failed_record.candidate.entries) > 1 and merge_method == "merge":
+        recovered = _retry_closed_candidate_after_passing_checks(
+            candidate_store=candidate_store,
+            active_candidate_record=failed_record,
+            github_client=github_client,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            snapshot=snapshot,
+            dry_run_result=dry_run_result,
+            held_out=held_out,
+            repository=snapshot.repository,
+            base_branch=snapshot.base_branch,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=mutate,
+            lease=lease,
+        )
+    else:
+        recovered = _reobserve_failed_merge_train_candidate(
+            candidate_store=candidate_store,
+            active_candidate_record=failed_record,
+            github_client=github_client,
+            merge_method=merge_method,
+            repository=snapshot.repository,
+            base_branch=snapshot.base_branch,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=mutate,
+            lease=lease,
+            held_out=held_out,
+        )
+    recovery = recovered or _recover_failed_merge_train_candidate(
+        candidate_store=candidate_store,
+        active_candidate_record=failed_record,
+        github_client=github_client,
+        policy=policy,
+        policy_sha256=policy_sha256,
+        snapshot=snapshot,
+        dry_run_result=dry_run_result,
+        held_out=held_out,
+        repository=snapshot.repository,
+        base_branch=snapshot.base_branch,
+        recorded_at=recorded_at,
+        trace_id=trace_id,
+        mutate=mutate,
+        lease=lease,
+    )
+    stopped = recovery or {
+        "repository": snapshot.repository,
+        "base_branch": snapshot.base_branch,
+        "mode": "dry-run",
+        "controller_action": "candidate_failed",
+        "merge_train_batch_candidate_record_id": failed_record.record_id,
+        "candidate": failed_record.candidate.model_dump(mode="json"),
+        "reason_code": "failed_candidate_recovery_unavailable",
+    }
+    if stopped["controller_action"] != "candidate_failed" and not (
+        stopped["controller_action"] == "block" and held_out
+    ):
+        return stopped
+    return _stop_failed_batch_after_conflict_probe(
+        candidate_store=candidate_store,
+        active_candidate_record=failed_record,
+        probe=_ConflictProbeOutcome(snapshot, dry_run_result, held_out, conflict_probe),
+        repository=snapshot.repository,
+        base_branch=snapshot.base_branch,
+        recorded_at=recorded_at,
+        trace_id=trace_id,
+        mutate=mutate,
+        lease=lease,
+        stopped_result=stopped,
+    )
 
 
 def _persist_replacement_candidate(
@@ -4314,6 +4926,121 @@ def _persist_replacement_candidate(
     return candidate_record.record_id
 
 
+def _retry_closed_candidate_after_passing_checks(
+    *,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    active_candidate_record: MergeTrainBatchCandidateRecord,
+    github_client: GitHubMergeTrainClient,
+    policy: MergeTrainPolicy,
+    policy_sha256: str,
+    snapshot: MergeTrainDryRunSnapshot,
+    dry_run_result: MergeTrainDryRunResult,
+    held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
+    repository: str,
+    base_branch: str,
+    recorded_at: str,
+    trace_id: str,
+    mutate: bool,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object] | None:
+    failed = active_candidate_record.candidate
+    if failed.required_checks_status != "fail":
+        return None
+    try:
+        observed = github_client.observe_batch_candidate_checks(candidate=failed)
+        if observed.required_checks_status != "pass":
+            return None
+        closed = bound_closed_batch_pull_request(client=github_client, candidate=failed)
+    except (MergeTrainGitHubError, MergeAdmissionDeniedError):
+        return None
+    if closed is None:
+        return None
+    details: dict[str, object] = {
+        "observed_candidate_sha": failed.candidate_sha,
+        "controller_pass_recorded_at": recorded_at,
+        "required_checks_status": observed.required_checks_status,
+        "closed_batch_pull_request_number": closed["number"],
+    }
+    retry_used = failed.check_retry_of or any(
+        record.candidate.check_retry_of
+        and _merge_train_candidate_matches_dry_run_queue(
+            candidate=record.candidate, dry_run_result=dry_run_result, base_sha=snapshot.base_sha
+        )
+        for record in _candidate_history_on_base(
+            candidate_store=candidate_store,
+            repository=repository,
+            base_branch=base_branch,
+            base_sha=snapshot.base_sha,
+        )
+    )
+    if retry_used:
+        # This budget cannot suppress a still-unused generated-body retry.
+        body_retry_used = failed.batch_body_retry_of or any(
+            record.candidate.batch_body_retry_of
+            and _merge_train_candidate_matches_dry_run_queue(
+                candidate=record.candidate,
+                dry_run_result=dry_run_result,
+                base_sha=snapshot.base_sha,
+            )
+            for record in _candidate_history_on_base(
+                candidate_store=candidate_store,
+                repository=repository,
+                base_branch=base_branch,
+                base_sha=snapshot.base_sha,
+            )
+        )
+        try:
+            if not body_retry_used and changed_closed_batch_body(
+                client=github_client, candidate=failed
+            ):
+                return _plan_failed_candidate_replacement(
+                    reason_code="closed_batch_body_changed",
+                    candidate_store=candidate_store,
+                    github_client=github_client,
+                    active_candidate_record=active_candidate_record,
+                    policy=policy,
+                    policy_sha256=policy_sha256,
+                    snapshot=snapshot,
+                    holds=held_out,
+                    details=details,
+                    repository=repository,
+                    base_branch=base_branch,
+                    recorded_at=recorded_at,
+                    trace_id=trace_id,
+                    mutate=mutate,
+                    lease=lease,
+                )
+        except (MergeTrainGitHubError, MergeAdmissionDeniedError):
+            pass
+        return {
+            "repository": repository,
+            "base_branch": base_branch,
+            "mode": "dry-run",
+            "controller_action": "candidate_failed",
+            "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+            "candidate": failed.model_dump(mode="json"),
+            "reason_code": "candidate_check_retry_used",
+            "details": details,
+        }
+    return _plan_failed_candidate_replacement(
+        reason_code="candidate_checks_recovered",
+        candidate_store=candidate_store,
+        github_client=github_client,
+        active_candidate_record=active_candidate_record,
+        policy=policy,
+        policy_sha256=policy_sha256,
+        snapshot=snapshot,
+        holds=held_out,
+        details=details,
+        repository=repository,
+        base_branch=base_branch,
+        recorded_at=recorded_at,
+        trace_id=trace_id,
+        mutate=mutate,
+        lease=lease,
+    )
+
+
 def _recover_failed_merge_train_candidate(
     *,
     candidate_store: MergeTrainBatchCandidateRecordStore,
@@ -4334,9 +5061,9 @@ def _recover_failed_merge_train_candidate(
     """Move an unchanged candidate that failed its checks toward landing the rest.
 
     An infrastructure failure is rebuilt once with the same members; a second
-    one stays stopped without blaming anyone. Any other
-    failure of several members retests the first half on the same base while
-    the rest wait; when one member fails alone, only that pull request is
+    one stays stopped without blaming anyone. Other failures stay stopped until
+    the base's own checks pass, then retest the first half while the rest wait.
+    When one member fails alone on a green base, only that pull request is
     blocked. ``None`` keeps the failure stopped.
     """
     failed = active_candidate_record.candidate
@@ -4381,6 +5108,7 @@ def _recover_failed_merge_train_candidate(
         return _plan_failed_candidate_replacement(
             reason_code="infrastructure_retry",
             candidate_store=candidate_store,
+            github_client=github_client,
             active_candidate_record=active_candidate_record,
             policy=policy,
             policy_sha256=policy_sha256,
@@ -4394,12 +5122,47 @@ def _recover_failed_merge_train_candidate(
             mutate=mutate,
             lease=lease,
         )
+    try:
+        base_check_status = github_client.read_base_check_status(
+            candidate=failed, failed_check_names=failures.check_identity_names
+        )
+    except MergeTrainGitHubError:
+        base_check_status = "unknown"
+    if base_check_status != "pass":
+        # Failure on an unverified base cannot identify a queued change as its cause.
+        base_detail = (
+            "has failing checks"
+            if base_check_status == "fail"
+            else "still has checks pending"
+            if base_check_status == "pending"
+            else "has missing or unreadable check evidence"
+        )
+        return {
+            "repository": repository,
+            "base_branch": base_branch,
+            "mode": "dry-run",
+            "controller_action": "candidate_failed",
+            "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+            "candidate": failed.model_dump(mode="json"),
+            "reason_code": "base_checks_not_green",
+            "blocking_reason": {
+                "code": "merge_train_base_checks_not_green",
+                "message": f"The base branch {base_branch} {base_detail}; "
+                "queued pull requests are not blamed.",
+            },
+            "details": {
+                **details,
+                "base_sha": failed.base_sha,
+                "base_checks_status": base_check_status,
+            },
+        }
     if len(failed.entries) > 1:
         retested = failed.entries[: len(failed.entries) // 2]
         waiting = failed.entries[len(retested) :]
         return _plan_failed_candidate_replacement(
             reason_code="failure_isolation",
             candidate_store=candidate_store,
+            github_client=github_client,
             active_candidate_record=active_candidate_record,
             policy=policy,
             policy_sha256=policy_sha256,
@@ -4449,8 +5212,11 @@ def _infrastructure_retry_used(
         and _merge_train_candidate_matches_dry_run_queue(
             candidate=record.candidate, dry_run_result=dry_run_result, base_sha=base_sha
         )
-        for record in candidate_store.list_merge_train_batch_candidate_records(
-            repository=failed.repository, base_branch=failed.base_branch
+        for record in _candidate_history_on_base(
+            candidate_store=candidate_store,
+            repository=failed.repository,
+            base_branch=failed.base_branch,
+            base_sha=base_sha,
         )
     )
 
@@ -4459,6 +5225,7 @@ def _plan_failed_candidate_replacement(
     *,
     reason_code: str,
     candidate_store: MergeTrainBatchCandidateRecordStore,
+    github_client: GitHubMergeTrainClient,
     active_candidate_record: MergeTrainBatchCandidateRecord,
     policy: MergeTrainPolicy,
     policy_sha256: str,
@@ -4486,6 +5253,46 @@ def _plan_failed_candidate_replacement(
     )
     if plan_dry_run.intended_next_action != "merge" or plan_dry_run.queue_order != expected_order:
         return None
+    if reason_code == "failure_isolation":
+        recovery = _resume_known_failed_batch(
+            candidate_store=candidate_store,
+            github_client=github_client,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            snapshot=snapshot,
+            dry_run_result=plan_dry_run,
+            held_out=holds,
+            merge_method=policy.find_repository_policy(
+                repository=repository, base_branch=base_branch
+            ).merge_method,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=mutate,
+            lease=lease,
+        )
+        if recovery is not None:
+            if mutate:
+                replacement_id = recovery.get("merge_train_batch_candidate_record_id")
+                lease.checkpoint(
+                    active_action="reflow_candidate",
+                    active_phase="retire_reflowed_failed_lineage",
+                    active_record_id=active_candidate_record.record_id,
+                    active_pull_request_number=None,
+                    step_payload={"replacement_record_id": replacement_id},
+                )
+                _supersede_active_merge_train_batch_candidate_records(
+                    record_store=candidate_store,
+                    repository=repository,
+                    base_branch=base_branch,
+                    batch_id=failed.batch_id,
+                    replacement_record_id=(
+                        replacement_id if isinstance(replacement_id, str) else None
+                    ),
+                )
+                recovery["retired_merge_train_batch_candidate_record_id"] = (
+                    active_candidate_record.record_id
+                )
+            return recovery
     candidate = build_merge_train_batch_candidate(
         dry_run_result=plan_dry_run,
         base_sha=snapshot.base_sha,
@@ -4493,9 +5300,16 @@ def _plan_failed_candidate_replacement(
         created_at=recorded_at,
         held_out=holds,
     )
-    if reason_code == "infrastructure_retry":
+    retry_kind = {
+        "infrastructure_retry": ("infrastructure-retry", "infrastructure_retry_of"),
+        "candidate_checks_recovered": ("check-retry", "check_retry_of"),
+        "closed_batch_body_changed": ("body-retry", "batch_body_retry_of"),
+    }.get(reason_code)
+    if retry_kind is not None:
         # A separate ref keeps the retry from rediscovering the failed run and batch PR.
-        batch_id = candidate.batch_id + "-infrastructure-retry"
+        check_retry = reason_code == "candidate_checks_recovered"
+        suffix, retry_field = retry_kind
+        batch_id = candidate.batch_id + "-" + suffix
         candidate = MergeTrainBatchCandidate.model_validate(
             {
                 **candidate.model_dump(),
@@ -4503,7 +5317,21 @@ def _plan_failed_candidate_replacement(
                 "candidate_ref": build_merge_train_batch_candidate_ref(
                     repository=repository, base_branch=base_branch, batch_id=batch_id
                 ),
-                "infrastructure_retry_of": active_candidate_record.record_id,
+                retry_field: active_candidate_record.record_id,
+                **(
+                    {
+                        "check_retry_evidence": {
+                            "candidate_sha": details["observed_candidate_sha"],
+                            "controller_pass_recorded_at": details["controller_pass_recorded_at"],
+                            "required_checks_status": details["required_checks_status"],
+                            "closed_batch_pull_request_number": details[
+                                "closed_batch_pull_request_number"
+                            ],
+                        }
+                    }
+                    if check_retry
+                    else {}
+                ),
             }
         )
     result: dict[str, object] = {
@@ -4616,6 +5444,8 @@ def _reobserve_failed_merge_train_candidate(
     recorded_at: str,
     trace_id: str,
     mutate: bool,
+    lease: MergeTrainControllerLeaseContext,
+    held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
 ) -> dict[str, object] | None:
     """Let an unchanged candidate recover when its failed checks pass on a re-run.
 
@@ -4638,6 +5468,7 @@ def _reobserve_failed_merge_train_candidate(
         return None
     if observed_candidate.required_checks_status == "fail":
         return None
+    observed_candidate = observed_candidate.model_copy(update={"held_out": held_out})
     result: dict[str, object] = {
         "repository": repository,
         "base_branch": base_branch,
@@ -4647,6 +5478,13 @@ def _reobserve_failed_merge_train_candidate(
         "candidate": observed_candidate.model_dump(mode="json"),
     }
     if mutate:
+        lease.checkpoint(
+            active_action="reflow_candidate",
+            active_phase="persist_reobserved_candidate",
+            active_record_id=active_candidate_record.record_id,
+            active_pull_request_number=None,
+            step_payload={"candidate_record_id": active_candidate_record.record_id},
+        )
         candidate_record = build_merge_train_batch_candidate_record(
             ordinary_job_binding=active_candidate_record.ordinary_job_binding,
             candidate=observed_candidate,
@@ -4924,6 +5762,7 @@ def _stop_failed_batch_after_conflict_probe(
     trace_id: str,
     mutate: bool,
     lease: MergeTrainControllerLeaseContext,
+    stopped_result: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Keep the failed batch stopped, but remember the pull requests the probe held out.
 
@@ -4933,7 +5772,8 @@ def _stop_failed_batch_after_conflict_probe(
     """
     failed = active_candidate_record.candidate
     record_id = active_candidate_record.record_id
-    if mutate and probe.held_out != failed.held_out:
+    superseded_record_id: str | None = None
+    if mutate and (probe.held_out != failed.held_out or active_candidate_record.status != "active"):
         lease.checkpoint(
             active_action="reflow_candidate",
             active_phase="persist_held_out_entries",
@@ -4950,14 +5790,33 @@ def _stop_failed_batch_after_conflict_probe(
         )
         candidate_store.write_merge_train_batch_candidate_record(updated_record)
         record_id = updated_record.record_id
+        _supersede_active_merge_train_batch_candidate_records(
+            record_store=candidate_store,
+            repository=repository,
+            base_branch=base_branch,
+            batch_id=failed.batch_id,
+            replacement_record_id=record_id,
+        )
+        if active_candidate_record.status == "active":
+            superseded_record_id = active_candidate_record.record_id
     result: dict[str, object] = {
         "repository": repository,
         "base_branch": base_branch,
         "mode": "dry-run",
         "controller_action": "candidate_failed",
+        "reason_code": "unchanged_batch_after_conflict_probe",
+        **(stopped_result or {}),
         "merge_train_batch_candidate_record_id": record_id,
         "candidate": failed.model_dump(mode="json"),
-        "reason_code": "unchanged_batch_after_conflict_probe",
+    }
+    if superseded_record_id is not None:
+        result["superseded_merge_train_batch_candidate_record_id"] = superseded_record_id
+    else:
+        result.pop("superseded_merge_train_batch_candidate_record_id", None)
+    details = result.get("details")
+    result["details"] = {
+        **(details if isinstance(details, dict) else {}),
+        "recovery_source_record_id": active_candidate_record.record_id,
     }
     if probe.report is not None:
         result["conflict_probe"] = probe.report
@@ -5013,7 +5872,10 @@ def _surviving_held_out_entries(
     unchanged. A failure-isolation hold also needs its base and head, and lasts
     only while every member of the candidate retesting without it
     (``isolating_entries``) is still queued at the same head; planning without
-    that candidate releases it.
+    that candidate releases it. A dependency-not-ready hold lasts while its base
+    and head are unchanged, whether or not the head has settled yet, so a head
+    that settles mid-candidate waits for the next base instead of replacing the
+    candidate.
     """
     if not held_out:
         return ()
@@ -5028,17 +5890,26 @@ def _surviving_held_out_entries(
     preceding: list[tuple[int, str]] = []
     surviving: list[MergeTrainBatchHeldOutEntry] = []
     for entry in queue:
-        if not entry.eligible:
-            continue
         hold = holds.get(entry.number)
-        if (
+        unchanged = (
             hold is not None
             and hold.head_sha == entry.head_sha
             and hold.probe_base_sha == snapshot.base_sha
+        )
+        if not entry.eligible:
+            # A dependency still waiting on its own head stays held, so later
+            # rewrites of the hold list cannot drop it before it settles.
+            if unchanged and hold is not None and hold.reason == "dependency_not_ready":
+                surviving.append(hold)
+            continue
+        if (
+            unchanged
+            and hold is not None
             and (
                 isolation_active
                 if hold.reason == "failure_isolation"
-                else tuple(zip(hold.conflicts_with, hold.conflicts_with_head_shas))
+                else hold.reason == "dependency_not_ready"
+                or tuple(zip(hold.conflicts_with, hold.conflicts_with_head_shas))
                 == tuple(preceding)
             )
         ):
@@ -5133,6 +6004,7 @@ def _records_for_result(result: dict[str, object]) -> dict[str, str]:
         "merge_train_batch_landing_plan_record_id",
         "merge_train_stack_collapse_plan_record_id",
         "superseded_merge_train_batch_candidate_record_id",
+        "retired_merge_train_batch_candidate_record_id",
     )
     return {
         key: value for key in record_keys if isinstance((value := result.get(key)), str) and value
@@ -5154,7 +6026,7 @@ def _controller_result_reconciliation_detail(
     current_detail: str,
 ) -> str:
     if result.get("controller_reconciliation_status") == "required":
-        result_detail = result.get("controller_reconciliation_detail")
+        result_detail = result.get("reconciliation_detail")
         if isinstance(result_detail, str) and result_detail.strip():
             return result_detail.strip()
         return current_detail

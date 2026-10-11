@@ -915,6 +915,12 @@
             ],
             "title": "Database Update Modules"
           },
+          "examined_baseline_inputs_sha256": {
+            "default": "",
+            "pattern": "^(|[0-9a-f]{64})$",
+            "title": "Examined Baseline Inputs Sha256",
+            "type": "string"
+          },
           "examined_inputs_sha256": {
             "default": "",
             "pattern": "^(|[0-9a-f]{64})$",
@@ -2037,6 +2043,69 @@
           "items"
         ],
         "title": "AuthzManagedSetCollectionSummary",
+        "type": "object"
+      },
+      "AuthzManagedSetEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "import_origin": {
+            "const": "unknown",
+            "default": "unknown",
+            "title": "Import Origin",
+            "type": "string"
+          },
+          "independent_maintenance": {
+            "const": "unknown",
+            "default": "unknown",
+            "title": "Independent Maintenance",
+            "type": "string"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "observations": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AuthzSetMaintenanceObservation"
+            },
+            "title": "Observations",
+            "type": "array"
+          },
+          "presence": {
+            "enum": [
+              "present",
+              "absent",
+              "unknown"
+            ],
+            "title": "Presence",
+            "type": "string"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "rule_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule Count"
+          }
+        },
+        "required": [
+          "index",
+          "presence",
+          "reason_codes"
+        ],
+        "title": "AuthzManagedSetEvidence",
         "type": "object"
       },
       "AuthzManagedSetSummary": {
@@ -3294,6 +3363,247 @@
           "authorization_chain"
         ],
         "title": "AuthzRepositoryScopeSourceCounts",
+        "type": "object"
+      },
+      "AuthzRetirementEvidenceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_set_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 25,
+            "title": "Managed Set Ids",
+            "type": "array"
+          },
+          "policy_record_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Policy Record Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "minimum": 1.0,
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "policy_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "workflows": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AuthzWorkflowEvidenceCandidate"
+            },
+            "maxItems": 25,
+            "title": "Workflows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "policy_record_id",
+          "policy_revision",
+          "policy_sha256"
+        ],
+        "title": "AuthzRetirementEvidenceRequest",
+        "type": "object"
+      },
+      "AuthzRetirementEvidenceResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "history": {
+            "$ref": "#/components/schemas/AuthzRetirementHistoryCoverage"
+          },
+          "managed_sets": {
+            "items": {
+              "$ref": "#/components/schemas/AuthzManagedSetEvidence"
+            },
+            "title": "Managed Sets",
+            "type": "array"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/AuthzPolicyRecordSummary"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "unmanaged_workflows": {
+            "items": {
+              "$ref": "#/components/schemas/AuthzUnmanagedWorkflowEvidence"
+            },
+            "title": "Unmanaged Workflows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "trace_id",
+          "policy",
+          "history",
+          "managed_sets",
+          "unmanaged_workflows"
+        ],
+        "title": "AuthzRetirementEvidenceResponse",
+        "type": "object"
+      },
+      "AuthzRetirementHistoryCoverage": {
+        "additionalProperties": false,
+        "properties": {
+          "oldest_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Revision"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "returned_count": {
+            "title": "Returned Count",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "complete",
+              "partial"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "returned_count",
+          "state",
+          "reason_codes"
+        ],
+        "title": "AuthzRetirementHistoryCoverage",
+        "type": "object"
+      },
+      "AuthzSetMaintenanceObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "caller_type": {
+            "enum": [
+              "github_actions",
+              "github_human",
+              "terminal_agent",
+              "local_operator",
+              "local_admin",
+              "unknown"
+            ],
+            "title": "Caller Type",
+            "type": "string"
+          },
+          "introduced": {
+            "title": "Introduced",
+            "type": "boolean"
+          },
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "policy_sha256",
+          "caller_type",
+          "introduced"
+        ],
+        "title": "AuthzSetMaintenanceObservation",
+        "type": "object"
+      },
+      "AuthzUnmanagedWorkflowEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "reason_codes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "rule_sha256s": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Rule Sha256S",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "potential_dependency",
+              "no_matching_rule",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "state"
+        ],
+        "title": "AuthzUnmanagedWorkflowEvidence",
+        "type": "object"
+      },
+      "AuthzWorkflowEvidenceCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "default": "workflow_ref",
+            "enum": [
+              "workflow_ref",
+              "job_workflow_ref"
+            ],
+            "title": "Binding",
+            "type": "string"
+          },
+          "repository": {
+            "maxLength": 512,
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+            "title": "Repository",
+            "type": "string"
+          },
+          "workflow_path": {
+            "maxLength": 1024,
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$",
+            "title": "Workflow Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "workflow_path"
+        ],
+        "title": "AuthzWorkflowEvidenceCandidate",
         "type": "object"
       },
       "BackupGateEvidence": {
@@ -11758,6 +12068,77 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HealthMonitorStatus": {
+        "properties": {
+          "activation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitorCompletionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completion_grace_seconds": {
+            "title": "Completion Grace Seconds",
+            "type": "integer"
+          },
+          "interval_seconds": {
+            "title": "Interval Seconds",
+            "type": "integer"
+          },
+          "next_end_slot": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next End Slot"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/MonitorSlotEvidence"
+            },
+            "title": "Slots",
+            "type": "array"
+          }
+        },
+        "required": [
+          "observed_at",
+          "interval_seconds",
+          "completion_grace_seconds",
+          "activation",
+          "slots",
+          "next_end_slot"
+        ],
+        "title": "HealthMonitorStatus",
+        "type": "object"
+      },
+      "HealthMonitorStatusResponse": {
+        "properties": {
+          "monitor": {
+            "$ref": "#/components/schemas/HealthMonitorStatus"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "monitor"
+        ],
+        "title": "HealthMonitorStatusResponse",
+        "type": "object"
+      },
       "HealthResponse": {
         "additionalProperties": false,
         "properties": {
@@ -13280,6 +13661,16 @@
           },
           "promotion_workflow": {
             "$ref": "#/components/schemas/ProductPromotionWorkflowProfile"
+          },
+          "public_website": {
+            "default": "required",
+            "enum": [
+              "required",
+              "none"
+            ],
+            "title": "Public Website",
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "release_on_acceptance": {
             "default": "held",
@@ -17233,7 +17624,8 @@
           "reason": {
             "enum": [
               "entry_conflict",
-              "failure_isolation"
+              "failure_isolation",
+              "dependency_not_ready"
             ],
             "title": "Reason",
             "type": "string"
@@ -18048,6 +18440,19 @@
           "github_token": {
             "$ref": "#/components/schemas/MergeTrainGitHubTokenSource"
           },
+          "max_batch_size": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Batch Size",
+            "x-launchplane-optional-response": true
+          },
           "merge_identity": {
             "$ref": "#/components/schemas/MergeTrainIdentity"
           },
@@ -18143,6 +18548,19 @@
           },
           "github_token": {
             "$ref": "#/components/schemas/MergeTrainGitHubTokenSource"
+          },
+          "max_batch_size": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Batch Size",
+            "x-launchplane-optional-response": true
           },
           "merge_identity": {
             "$ref": "#/components/schemas/MergeTrainIdentity"
@@ -18464,6 +18882,92 @@
           "reason_codes"
         ],
         "title": "MergeTrainStructuralCandidateResult",
+        "type": "object"
+      },
+      "MonitorCompletionReceipt": {
+        "properties": {
+          "completed_at": {
+            "title": "Completed At",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "completed_at"
+        ],
+        "title": "MonitorCompletionReceipt",
+        "type": "object"
+      },
+      "MonitorSlotEvidence": {
+        "properties": {
+          "completed_on_time": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed On Time"
+          },
+          "completion": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitorCompletionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completion_deadline_at": {
+            "title": "Completion Deadline At",
+            "type": "string"
+          },
+          "healthy_report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitorCompletionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "missed_report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitorCompletionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scheduled_at": {
+            "title": "Scheduled At",
+            "type": "string"
+          },
+          "slot": {
+            "title": "Slot",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "slot",
+          "scheduled_at",
+          "completion_deadline_at",
+          "completion",
+          "completed_on_time",
+          "missed_report",
+          "healthy_report"
+        ],
+        "title": "MonitorSlotEvidence",
         "type": "object"
       },
       "NpmplusIngressApplyEnvelope": {
@@ -22916,6 +23420,169 @@
           "base_branch"
         ],
         "title": "OrdinaryAgentTarget",
+        "type": "object"
+      },
+      "OriginalReviewHistoryChange": {
+        "properties": {
+          "child_head_sha": {
+            "title": "Child Head Sha",
+            "type": "string"
+          },
+          "child_pull_request_number": {
+            "title": "Child Pull Request Number",
+            "type": "integer"
+          },
+          "merge_commit_sha": {
+            "title": "Merge Commit Sha",
+            "type": "string"
+          },
+          "parent_head_ref": {
+            "title": "Parent Head Ref",
+            "type": "string"
+          },
+          "parent_initial_head_sha": {
+            "title": "Parent Initial Head Sha",
+            "type": "string"
+          },
+          "parent_pull_request_number": {
+            "title": "Parent Pull Request Number",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "planned",
+              "mutated",
+              "blocked",
+              "stale"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "parent_pull_request_number",
+          "parent_head_ref",
+          "parent_initial_head_sha",
+          "child_pull_request_number",
+          "child_head_sha",
+          "merge_commit_sha",
+          "status"
+        ],
+        "title": "OriginalReviewHistoryChange",
+        "type": "object"
+      },
+      "OriginalReviewHistoryEntry": {
+        "properties": {
+          "collapse_id": {
+            "title": "Collapse Id",
+            "type": "string"
+          },
+          "original_changes": {
+            "items": {
+              "$ref": "#/components/schemas/OriginalReviewHistoryChange"
+            },
+            "title": "Original Changes",
+            "type": "array"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "root_head_ref": {
+            "title": "Root Head Ref",
+            "type": "string"
+          },
+          "root_initial_head_sha": {
+            "title": "Root Initial Head Sha",
+            "type": "string"
+          },
+          "root_pull_request_number": {
+            "title": "Root Pull Request Number",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "superseded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "collapse_id",
+          "status",
+          "updated_at",
+          "root_pull_request_number",
+          "root_head_ref",
+          "root_initial_head_sha",
+          "original_changes"
+        ],
+        "title": "OriginalReviewHistoryEntry",
+        "type": "object"
+      },
+      "OriginalReviewHistoryResponse": {
+        "properties": {
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/OriginalReviewHistoryEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "history_digest": {
+            "title": "History Digest",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "trace_id",
+          "repository",
+          "base_branch",
+          "history_digest",
+          "entries",
+          "next_cursor",
+          "truncated"
+        ],
+        "title": "OriginalReviewHistoryResponse",
         "type": "object"
       },
       "OutgoingEmailQuery": {
@@ -28849,6 +29516,15 @@
           "provenance": {
             "$ref": "#/components/schemas/DataProvenance"
           },
+          "public_website": {
+            "default": "required",
+            "enum": [
+              "required",
+              "none"
+            ],
+            "title": "Public Website",
+            "type": "string"
+          },
           "trust_state": {
             "default": "missing",
             "enum": [
@@ -30925,6 +31601,11 @@
               }
             ]
           },
+          "probe_effective": {
+            "default": false,
+            "title": "Probe Effective",
+            "type": "boolean"
+          },
           "provenance": {
             "$ref": "#/components/schemas/DataProvenance"
           },
@@ -32196,6 +32877,49 @@
         "title": "ProductPreviewProfile",
         "type": "object"
       },
+      "ProductPreviewReference": {
+        "additionalProperties": false,
+        "properties": {
+          "change_number": {
+            "minimum": 1.0,
+            "title": "Change Number",
+            "type": "integer"
+          },
+          "change_url": {
+            "title": "Change Url",
+            "type": "string"
+          },
+          "preview_id": {
+            "title": "Preview Id",
+            "type": "string"
+          },
+          "recorded_state": {
+            "enum": [
+              "pending",
+              "active",
+              "failed",
+              "paused",
+              "teardown_pending",
+              "destroyed"
+            ],
+            "title": "Recorded State",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "preview_id",
+          "change_number",
+          "change_url",
+          "recorded_state",
+          "updated_at"
+        ],
+        "title": "ProductPreviewReference",
+        "type": "object"
+      },
       "ProductPreviewSummary": {
         "additionalProperties": false,
         "properties": {
@@ -32230,6 +32954,29 @@
               "source_record_id": "",
               "stale_after": ""
             }
+          },
+          "records": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductPreviewReference"
+            },
+            "title": "Records",
+            "type": "array"
+          },
+          "records_status": {
+            "default": "unsupported",
+            "enum": [
+              "available",
+              "authorization_denied",
+              "unsupported"
+            ],
+            "title": "Records Status",
+            "type": "string"
+          },
+          "records_truncated": {
+            "default": false,
+            "title": "Records Truncated",
+            "type": "boolean"
           },
           "slug_template": {
             "default": "",
@@ -33898,15 +34645,23 @@
       },
       "ProductReviewCarry": {
         "additionalProperties": false,
-        "description": "Where a carried acceptance came from: the Client decided on another head.\n\n`merge_train_base_refresh`: the merge train only merged the base branch into the\npull request, and the pull request's change against its base adds and removes\nthe same lines.",
+        "description": "The source acceptance and immutable evidence for an unchanged feature patch.",
         "properties": {
+          "comparison_base_sha": {
+            "default": "",
+            "title": "Comparison Base Sha",
+            "type": "string"
+          },
           "head_sha": {
             "title": "Head Sha",
             "type": "string"
           },
           "reason": {
-            "const": "merge_train_base_refresh",
             "default": "merge_train_base_refresh",
+            "enum": [
+              "merge_train_base_refresh",
+              "unchanged_patch_base_update"
+            ],
             "title": "Reason",
             "type": "string"
           },
@@ -33915,18 +34670,17 @@
             "type": "string"
           },
           "refresh_record_ids": {
+            "default": [],
             "items": {
               "type": "string"
             },
-            "minItems": 1,
             "title": "Refresh Record Ids",
             "type": "array"
           }
         },
         "required": [
           "record_id",
-          "head_sha",
-          "refresh_record_ids"
+          "head_sha"
         ],
         "title": "ProductReviewCarry",
         "type": "object"
@@ -34980,6 +35734,8 @@
           "code": {
             "enum": [
               "missing_route_authority",
+              "public_website_not_applicable",
+              "public_website_check_missing",
               "route_authority_disabled",
               "stale_route_authority",
               "desired_domain_unknown",
@@ -35030,6 +35786,7 @@
           },
           "severity": {
             "enum": [
+              "info",
               "warning",
               "error"
             ],
@@ -37433,7 +38190,8 @@
             "enum": [
               "accepted",
               "changes_requested",
-              "overridden"
+              "overridden",
+              "temporary_hotfix"
             ],
             "title": "Decision",
             "type": "string"
@@ -37498,7 +38256,8 @@
             "enum": [
               "accepted",
               "changes_requested",
-              "overridden"
+              "overridden",
+              "temporary_hotfix"
             ],
             "title": "Decision",
             "type": "string"
@@ -37529,7 +38288,8 @@
             "enum": [
               "",
               "promote",
-              "promote_with_rollback_drill"
+              "promote_with_rollback_drill",
+              "rollback"
             ],
             "title": "Release Start",
             "type": "string"
@@ -37555,6 +38315,12 @@
             "default": false,
             "title": "Already Reviewed",
             "type": "boolean"
+          },
+          "client_test_notes_error": {
+            "default": "",
+            "title": "Client Test Notes Error",
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "head_sha": {
             "pattern": "^[0-9a-f]{40}$",
@@ -37608,6 +38374,11 @@
             "title": "Can Override",
             "type": "boolean"
           },
+          "can_start_temporary_hotfix": {
+            "default": false,
+            "title": "Can Start Temporary Hotfix",
+            "type": "boolean"
+          },
           "display_name": {
             "title": "Display Name",
             "type": "string"
@@ -37648,6 +38419,11 @@
           },
           "review": {
             "$ref": "#/components/schemas/ReleaseReviewStatus"
+          },
+          "reviewing_temporary_hotfix": {
+            "default": false,
+            "title": "Reviewing Temporary Hotfix",
+            "type": "boolean"
           },
           "trace_id": {
             "title": "Trace Id",
@@ -50350,6 +51126,106 @@
         "summary": "Reconcile managed authz policy rules"
       }
     },
+    "/v1/authz-policies/retirement-evidence": {
+      "post": {
+        "operationId": "read_authz_retirement_evidence",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthzRetirementEvidenceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthzRetirementEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read scoped policy-bound retirement evidence without selectors or mutations"
+      }
+    },
     "/v1/authz-policies/revisions": {
       "get": {
         "operationId": "read_authz_policy_revision_history",
@@ -56300,6 +57176,12 @@
                         ],
                         "title": "Database Update Modules"
                       },
+                      "examined_baseline_inputs_sha256": {
+                        "default": "",
+                        "pattern": "^(|[0-9a-f]{64})$",
+                        "title": "Examined Baseline Inputs Sha256",
+                        "type": "string"
+                      },
                       "examined_inputs_sha256": {
                         "default": "",
                         "pattern": "^(|[0-9a-f]{64})$",
@@ -57773,6 +58655,12 @@
                         ],
                         "title": "Database Update Modules"
                       },
+                      "examined_baseline_inputs_sha256": {
+                        "default": "",
+                        "pattern": "^(|[0-9a-f]{64})$",
+                        "title": "Examined Baseline Inputs Sha256",
+                        "type": "string"
+                      },
                       "examined_inputs_sha256": {
                         "default": "",
                         "pattern": "^(|[0-9a-f]{64})$",
@@ -58965,6 +59853,12 @@
                           }
                         ],
                         "title": "Database Update Modules"
+                      },
+                      "examined_baseline_inputs_sha256": {
+                        "default": "",
+                        "pattern": "^(|[0-9a-f]{64})$",
+                        "title": "Examined Baseline Inputs Sha256",
+                        "type": "string"
                       },
                       "examined_inputs_sha256": {
                         "default": "",
@@ -72514,6 +73408,19 @@
                       },
                       "github_token": {
                         "$ref": "#/$defs/MergeTrainGitHubTokenSource"
+                      },
+                      "max_batch_size": {
+                        "anyOf": [
+                          {
+                            "exclusiveMinimum": 0,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Max Batch Size",
+                        "x-launchplane-optional-response": true
                       },
                       "merge_identity": {
                         "$ref": "#/$defs/MergeTrainIdentity"
@@ -88408,6 +89315,258 @@
         "summary": "Disable individually selected obsolete service GITHUB_TOKEN records"
       }
     },
+    "/v1/service/health-monitor/status": {
+      "get": {
+        "operationId": "read_health_monitor_receipts",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "slots",
+            "required": false,
+            "schema": {
+              "default": 6,
+              "maximum": 48,
+              "minimum": 1,
+              "title": "Slots",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_slot",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Slot"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthMonitorStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read persisted health-monitor scheduler and watchdog receipts"
+      }
+    },
+    "/v1/service/merge-train/review-history": {
+      "get": {
+        "operationId": "read_merge_train_original_review_history",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "repository",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Repository",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "base_branch",
+            "required": false,
+            "schema": {
+              "default": "main",
+              "title": "Base Branch",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 1000,
+              "title": "Cursor",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OriginalReviewHistoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read scoped active and retired stack review recovery evidence"
+      }
+    },
     "/v1/service/odoo-workers/reconcile": {
       "post": {
         "operationId": "reconcile_odoo_stable_operation_workers",
@@ -91581,6 +92740,7 @@
     "/v1/ordinary-agent-operations/{principal_id}/{operation_id}": "read_human_ordinary_agent_operation",
     "/v1/owner-secret-inputs": "read_owner_secret_inputs",
     "/v1/previews/readiness": "read_preview_readiness",
+    "/v1/previews/{preview_id}/history": "read_preview_history",
     "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs": "read_ordinary_agent_delivery_authorization_candidate_inputs",
     "/v1/privileged-operations/merge-train-targets/inputs": "read_ordinary_agent_merge_train_target_inputs",
     "/v1/privileged-operations/ordinary-agent-delivery-activation/options": "read_ordinary_agent_delivery_activation_options",
@@ -91590,6 +92750,7 @@
     "/v1/product-profiles": "list_product_profiles",
     "/v1/product-profiles/{product}": "read_product_profile",
     "/v1/product-profiles/{product}/mutation-receipts/{field}": "read_product_profile_mutation_receipt",
+    "/v1/product-profiles/{product}/reconcile-requests": "read_product_reconcile_requests",
     "/v1/product-review": "read_product_review",
     "/v1/production-backup-gates/operations/{operation_id}": "read_production_backup_gate_operation",
     "/v1/products": "list_products",

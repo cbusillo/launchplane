@@ -29,9 +29,20 @@ DurableOperationIdentityType = Literal[
 # "client_release_acceptance": the product's recorded Client accepted the release;
 # no policy rule. It names the decision, and the worker re-checks that the decision
 # is still the product's newest, accepted, by its Client, and that releases are not held.
+# "temporary_hotfix": the Director started a temporary hotfix; no policy rule. It names
+# the decision, and the worker re-checks that the decision is still the product's newest
+# and that the active policy still names its caller as administrator.
 DurableOperationGrant = Literal[
-    "policy_rule", "launchplane_reconcile", "policy_administrator", "client_release_acceptance"
+    "policy_rule",
+    "launchplane_reconcile",
+    "policy_administrator",
+    "client_release_acceptance",
+    "temporary_hotfix",
 ]
+# Grants that name a release decision Launchplane's release worker runs.
+RELEASE_DECISION_GRANTS: frozenset[str] = frozenset(
+    {"client_release_acceptance", "temporary_hotfix"}
+)
 LAUNCHPLANE_RECONCILE_SUBJECT = "launchplane-reconciler"
 _MANAGED_RULE_TEXT_FIELDS = ("managed_set_id", "managed_rule_id")
 _POLICY_PROVENANCE_TEXT_FIELDS = ("policy_record_id", "policy_sha256", "policy_source")
@@ -148,19 +159,21 @@ class DurableOperationAuthorization(BaseModel):
         self.release_decision_record_id = self.release_decision_record_id.strip()
         if not self.instances:
             raise ValueError("Durable operation authorization requires exact instances.")
-        if (self.grant == "client_release_acceptance") != bool(self.release_decision_record_id):
-            raise ValueError("Only a Client release grant names a release decision, and it must.")
+        if (self.grant in RELEASE_DECISION_GRANTS) != bool(self.release_decision_record_id):
+            raise ValueError("Only a release decision grant names a release decision, and it must.")
         if (self.grant == "client_release_acceptance") != (self.caller.role == "client"):
             raise ValueError("Only a Client release grant has a Client caller.")
-        if self.grant == "client_release_acceptance":
+        if self.grant == "temporary_hotfix" and self.caller.role != "admin":
+            raise ValueError("A temporary hotfix grant has the Director's admin caller.")
+        if self.grant in RELEASE_DECISION_GRANTS:
             if self.caller.identity_type != "github_human":
-                raise ValueError("A Client release grant requires a GitHub human caller.")
+                raise ValueError("A release decision grant requires a GitHub human caller.")
             if (
                 any(getattr(self, field_name) for field_name in _POLICY_RULE_TEXT_FIELDS)
                 or self.policy_revision
                 or self.policy_schema_version is not None
             ):
-                raise ValueError("A Client release grant carries no policy rule.")
+                raise ValueError("A release decision grant carries no policy rule.")
             return self
         if self.grant == "launchplane_reconcile":
             if self.caller.identity_type != "launchplane_reconcile":
@@ -198,7 +211,7 @@ class DurableOperationAuthorization(BaseModel):
         # the other grants omit the fields they never carry.
         payload = handler(self)
         if isinstance(payload, dict):
-            if self.grant != "client_release_acceptance":
+            if self.grant not in RELEASE_DECISION_GRANTS:
                 payload.pop("release_decision_record_id", None)
             if self.grant == "policy_rule":
                 payload.pop("grant", None)

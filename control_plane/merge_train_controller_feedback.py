@@ -72,7 +72,7 @@ def build_feedback_payloads(
         }
         for pull_request_number in pull_request_numbers
     ]
-    if controller_action in {"plan_candidate", "candidate_failed"}:
+    if controller_action in {"plan_candidate", "candidate_failed", "block"}:
         payloads.extend(
             {
                 "schema_version": 1,
@@ -214,6 +214,12 @@ def _container_identity(container: dict[str, Any], container_name: str) -> tuple
 
 
 def _feedback_event(*, controller_action: str, result: dict[str, Any]) -> str:
+    if result.get("reason_code") == "base_checks_not_green":
+        return (
+            "waiting"
+            if _as_dict(result.get("details")).get("base_checks_status") == "pending"
+            else "blocked"
+        )
     candidate = _as_dict(result.get("candidate"))
     landing_plan = _as_dict(result.get("landing_plan"))
     candidate_status = _string(candidate.get("status"))
@@ -266,6 +272,14 @@ def _feedback_message(
             )
         return "Launchplane needs to refresh this pull request's branch before continuing."
     if event == "blocked":
+        selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
+        if selected.get("client_test_notes_error"):
+            message = (
+                f"Launchplane cannot admit this pull request: {selected['client_test_notes_error']}"
+            )
+            if _as_dict(result.get("block_result")).get("status") == "blocked":
+                message += " Correct the PR's Client test notes and remove the block label to rejoin the queue. Other eligible pull requests can proceed."
+            return message
         applied = _as_dict(result.get("block_result"))
         if applied.get("status") == "blocked":
             if _string(result.get("reason_code")) == "candidate_failure_isolated":
@@ -300,6 +314,8 @@ def _feedback_message(
             return f"Launchplane needs attention before the train can continue: {detail}"
         return "Launchplane needs attention before the train can continue."
     if event == "waiting":
+        if result.get("reason_code") == "base_checks_not_green":
+            return f"Launchplane is waiting for the base checks: {_blocking_detail(result)}"
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
         if selected.get("owner_review_required") is True and "candidate" not in result:
             return (
@@ -387,6 +403,9 @@ def _held_out_messages(
             continue
         if probed is not None and number not in probed:
             continue
+        if held_out_entry.get("reason") == "dependency_not_ready":
+            # Nothing for its author to do; it joins the next candidate.
+            continue
         if held_out_entry.get("reason") == "failure_isolation":
             messages.append(
                 (
@@ -432,6 +451,7 @@ def _pull_request_numbers(
             or phase == "batch-candidate"
             or "merge_train_batch_candidate_record_id" in result
             or selected.get("owner_review_required") is True
+            or bool(selected.get("client_test_notes_error"))
             or _as_dict(result.get("block_result")).get("status") == "blocked"
         ) and (isinstance(number, int) and number > 0):
             return [number]

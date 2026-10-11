@@ -9,7 +9,8 @@
         "authorization_admission_and_landing_are_independent": true,
         "engineering_review_advisory": true,
         "github_projection_role": "routing_and_status_only",
-        "owner_acceptance_authoritative": true
+        "owner_acceptance_authoritative": true,
+        "temporary_hotfix_start": "director_human_session_only"
       },
       "product_lifecycle": {
         "active_automation_states": [
@@ -626,8 +627,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "ede632460946a5b980227f079923703fff64003c"
+    "source_commit_sha": "f586bff3113c18a6b02f2fac74f22c46be26c1b1"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "2926ccf90b6afeb66331da6af80017ae74cc15d746cb8656c22725c8f59bbd0b"
+  "semantic_digest_sha256": "dc3c667510deac38fe32ce7d146bbc60ae9b745ba47d4a3f4a40bb8c32998d28"
 }

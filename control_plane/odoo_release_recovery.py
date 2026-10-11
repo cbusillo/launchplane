@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.deployment_record import deployment_record_passed
+from control_plane.contracts.durable_operation_authorization import RELEASE_DECISION_GRANTS
 from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromotionOperationRecord
 from control_plane.contracts.odoo_prod_rollback_operation import (
     ODOO_PROD_ROLLBACK_ACTION,
@@ -76,7 +77,7 @@ def build_odoo_release_recovery(
 ) -> OdooProdRollbackOperationRecord | None:
     if (
         source.status != "fail"
-        or source.authorization.grant != "client_release_acceptance"
+        or source.authorization.grant not in RELEASE_DECISION_GRANTS
         or source.idempotency_scope != "client-release"
         or not odoo_release_wrote_production(source)
         or source.result is None
@@ -98,7 +99,7 @@ def build_odoo_release_recovery(
     except (FileNotFoundError, KeyError, IndexError, ValueError):
         return None
     if (
-        decision.decision != "accepted"
+        decision.decision not in ("accepted", "temporary_hotfix")
         or not decision.release_start
         or not decision.release_issue_url
         or decision.product != source.product

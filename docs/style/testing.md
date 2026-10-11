@@ -136,11 +136,13 @@ controller's narrow single-entry exception is defined in
 Main retains its existing PR-tree reuse, tightened to require that the base is
 an ancestor of the PR head as well as matching trees and a successful gate.
 The workflow does not extend that shortcut: a historical PR gate alone cannot
-identify the merge-ref tree tested before a retarget. PR events, unrelated
+identify the merge-ref tree tested before a retarget. Ordinary PR events, unrelated
 branches, and missing API evidence run the full suite. Construction branches
 must remain outside required workflow triggers. Concurrency and required checks
 are unchanged, and every published final candidate SHA still receives its own
-gate.
+gate. Generated same-repository train PRs delegate to that exact candidate's
+push CI rather than running a second suite; the evidence and failure contract
+is owned by [candidate validation](../merge-train-policy.md#candidate-validation).
 
 The `ci-gate` job reports the run's wall time against a 10-minute pull-request
 budget in the job summary and raises a warning annotation when a run exceeds
@@ -164,6 +166,26 @@ shard plan includes per-target timing-source diagnostics:
   across discovered child targets.
 - `default`: no timing history exists yet, so the planner uses the conservative
   default estimate until a shard timing artifact teaches it better.
+
+Train candidate CI and Security use the reserved `launchplane-candidate`
+self-hosted label for both push and generated candidate PR events, including
+bootstrap, browser, and summary jobs. The reserved lanes and their live
+qualification are owned by [shiny-infra-ops#488](https://github.com/cbusillo/shiny-infra-ops/issues/488).
+Ordinary jobs keep their existing hosted or configured self-hosted routing.
+Forks stay hosted. The shared selector in `scripts/select-ci-runner.sh` fails
+closed when ordinary self-hosted work has no configured label. Dynamic jobs
+retain independent same-repository guards because a fork controls its checkout;
+bootstrap and summary runner expressions enforce that boundary before checkout.
+Every existing gate still runs. Browser isolation is described in
+[Browser smoke](#browser-smoke). CodeQL retains its separate hosted workflow.
+Existing PR-number concurrency cancels superseded PR runs; candidate creation
+and reset pushes retain the SHA-isolated concurrency documented in
+[merge-train policy](../merge-train-policy.md#candidate-construction).
+
+The test aggregate and summary gates use `!cancelled()` so they still report
+failed prerequisites but do not remain queued after a superseding push cancels
+the run. An `always()` aggregate can retain the old workflow's concurrency slot
+while it waits for a runner, preventing the new head's CI from starting.
 
 GitHub Actions remains the source of truth for required pull-request gates.
 Local validation should be proportionate: use targeted behavior proof by
@@ -205,9 +227,11 @@ It proves Compose convergence, not the deployed provider invocation or worker
 authorization. Run it locally only with an available test Docker engine and an
 already-built image.
 
-CI image builds may import an existing build cache, but do not export one.
-Uploading an optional cache must not hold up the required Compose qualification
-and vulnerability scan after the image is already built and loaded.
+CI image builds use the job-specific Buildx builder without importing or
+exporting shared build caches. `scripts/build-ci-runtime-image.sh` retries once
+without build cache only when cache-key computation reports the missing-layer
+`httpReadSeeker` error; unrelated failures and a failed retry remain blocking.
+The loaded image still runs every Compose qualification and vulnerability scan.
 
 The CI container-scan jobs pin the setup action and request Docker Compose
 v5.3.1 before that qualification. Local reproduction requires a compatible
@@ -224,9 +248,23 @@ type, OpenAPI, and production-build gate:
 ```bash
 pnpm --dir frontend exec playwright install chromium
 pnpm --dir frontend test:browser
+pnpm --dir frontend exec node --test tests/browser-support/server-isolation.test.mjs
 ```
 
-The Playwright suite starts the Vite development server and uses only repo-local
+The Playwright suite starts its own Vite development server on an OS-assigned
+loopback port. Playwright captures the listener URL from Vite's startup output
+and passes it to workers; overlapping runner jobs never reuse another job's
+server. The isolation test holds two focused browser probes open together using
+the smoke configuration and checks that their origins differ. It runs as part
+of `test:browser`; the standalone command above is for focused diagnosis.
+It writes only task-local test artifacts.
+
+CI uses a bounded worker count in `frontend/playwright.config.ts`, including
+self-hosted candidate lanes. Shared-host CPU count is not a per-job browser
+budget. Local runs retain Playwright's default concurrency; use its `--workers`
+option for a measured diagnostic comparison.
+
+The suite uses only repo-local
 development fixtures. Product-detail journeys use `?fixture=products`; product
 inventory boundaries use `?fixture=empty` and `?fixture=error`. Anonymous
 authentication is simulated by intercepting only `/v1/auth/session`; no product
@@ -234,18 +272,53 @@ or runtime mutation reaches a deployed Launchplane service. Journeys cover the
 rendered authentication prompt, honest empty and error product inventories,
 product workspace, recent activity, environment diagnostics, blocked and
 dry-run action boundaries, plus mixed, ready, unsupported, denied, failed,
-empty, and loading operational-readiness states. Each journey runs at desktop
-and narrow widths, checks route-heading and keyboard focus behavior, rejects
-duplicate document IDs and horizontal overflow, and fails on unexpected
+empty, and loading operational-readiness states. Desktop runs every test; narrow
+width runs only tests explicitly tagged `@layout` or `@responsive`. Mark tests
+whose purpose includes layout, overflow, touch-target spacing, or responsive
+behavior using Playwright test details, for example:
+
+```typescript
+test("readiness controls fit the viewport", { tag: "@layout" }, async ({ page }) => {
+  // Exercise the controls and assert the layout behavior.
+});
+```
+
+Use `@responsive` for behavior that changes with viewport size. Tagging is an
+explicit coverage choice: a screenshot or an incidental overflow guard alone
+does not require tagging every functional journey. The screenshot journeys
+required by `frontend/scripts/assert-browser-smoke-artifacts.mjs` are retained
+as representative layout tests, alongside focused responsive and spacing cases.
+Unmarked journeys retain desktop coverage; narrow-width defects in those
+journeys are an accepted coverage tradeoff (Q175, #3384). Check actual selection with
+`pnpm --dir frontend exec playwright test --list --project=desktop` and
+`pnpm --dir frontend exec playwright test --list --project=narrow`.
+
+The core admin journeys check route-heading and keyboard focus behavior, reject
+duplicate document IDs and horizontal overflow, and fail on unexpected
 mutation requests, console errors, uncaught page errors, failed requests, or
 HTTP error responses.
 
 Screenshots, traces, and failure evidence are written under
-`tmp/browser-smoke/`. CI uploads that directory from the dedicated hosted browser
+`tmp/browser-smoke/`. CI uploads that directory from the dedicated browser
 job. Every run clears prior evidence first and verifies the complete desktop and
 narrow screenshot set before passing. These screenshots are review evidence
 rather than pixel-diff baselines, so intentional visual changes do not require
 snapshot churn.
+
+The browser job runs Vite and Chromium together inside a per-job Docker container
+on both hosted and self-hosted runners. Its private network namespace prevents
+sibling jobs' Docker bridge lifecycle from reaching Chromium's network-change
+observer; OS-assigned Vite ports still isolate overlapping suite processes.
+The digest-pinned Playwright image supplies browser system libraries. Browser
+execution runs inside the container, with private shared memory and the job's
+actual UID/GID so artifacts remain writable by subsequent runner jobs. The host
+installs frontend dependencies; the container uses the job's Node executable
+and the image's Chromium. The wrapper verifies that its namespace differs from
+the host and removes only its captured container ID, including after failures.
+The workflow owns the image pin. Match the
+image's Playwright version to the frontend dependency when updating it. Preserve
+the same suite, diagnostics, timeouts and zero retries when qualifying changes
+under normal sibling CI load.
 
 Development fixtures remain excluded from production authority. `pnpm --dir
 frontend validate` still runs the independent production build and

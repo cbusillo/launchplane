@@ -1719,6 +1719,17 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             fixture = _HistoricalCompletionFixture(Path(directory))
             store.write_merge_train_policy_record(fixture.policy_record)
             store.write_merge_train_batch_candidate_record(fixture.candidate_record)
+            self.assertEqual(
+                store.list_merge_train_batch_candidate_records(
+                    repository=fixture.candidate_record.candidate.repository,
+                    base_branch=fixture.candidate_record.candidate.base_branch,
+                    base_sha=fixture.candidate_record.candidate.base_sha,
+                ),
+                (fixture.candidate_record,),
+            )
+            self.assertEqual(
+                store.list_merge_train_batch_candidate_records(base_sha="absent-base"), ()
+            )
             store.write_merge_train_batch_landing_plan_record(fixture.landing_record)
             store.write_merge_train_controller_state_record(fixture.controller)
             seed_crowded_scoped_history(

@@ -3,6 +3,10 @@
 Recording a decision deploys nothing by itself. A Client's acceptance of a product
 whose releases are not held is stamped with how its release runs, and Launchplane's
 worker then promotes it through the gated path (``control_plane.client_release``).
+
+Only the Director, the signed-in person the active policy names as administrator,
+records a temporary hotfix; the worker promotes it the same way. Once it is live the
+Client reviews that exact checklist, and a request for changes rolls it back.
 """
 
 from collections.abc import Callable
@@ -17,7 +21,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.client_release import (
     ClientReleaseRunView,
+    live_temporary_hotfix,
     read_client_release_run,
+    rejection_rollback_pending,
+    rejection_rollback_target,
     release_start_for_acceptance,
 )
 from control_plane.contracts.product_profile_record import (
@@ -28,7 +35,9 @@ from control_plane.contracts.release_review import (
     ReleaseDecision,
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
+    ReleaseStart,
 )
+from control_plane.durable_operation_authorization import read_active_authz_policy_record
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.product_review import viewer_is_product_owner
 from control_plane.release_review import (
@@ -37,6 +46,7 @@ from control_plane.release_review import (
     checklist_blockers,
 )
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity, LaunchplaneIdentity
+from control_plane.storage.postgres import PostgresRecordStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +74,10 @@ class ReleaseReviewResponse(BaseModel):
     release_on_acceptance: ReleaseOnAcceptance = "held"
     live_site_url: str = ""
     release_run: ClientReleaseRunView | None = None
+    # Whether the viewer is the Director and may ship a temporary hotfix, and whether
+    # the review shown is a live temporary hotfix awaiting the Client.
+    can_start_temporary_hotfix: bool = False
+    reviewing_temporary_hotfix: bool = False
 
 
 class ReleaseReviewDecisionEnvelope(BaseModel):
@@ -146,6 +160,28 @@ def register_release_review_routes(
             context="launchplane",
         )
 
+    def is_director(store: object, identity: LaunchplaneIdentity) -> bool:
+        if not isinstance(identity, GitHubHumanIdentity) or not isinstance(
+            store, PostgresRecordStore
+        ):
+            return False
+        try:
+            policy = read_active_authz_policy_record(store).policy
+        except (LookupError, TypeError):
+            return False
+        return policy.names_administrator(identity)
+
+    def hotfix_supported(profile: LaunchplaneProductProfileRecord) -> bool:
+        # The gated release worker runs Odoo and generic web; a prelaunch product has
+        # no release gate, and standing acceptance already releases the Director's own.
+        return (
+            profile.driver_id in {"odoo", "generic-web"}
+            and profile.production_use != "prelaunch"
+            and profile.release_on_acceptance != "director_standing"
+            and profile.owner.is_set
+            and any(lane.instance == "prod" for lane in profile.lanes)
+        )
+
     def release_run(
         store: object, profile: LaunchplaneProductProfileRecord
     ) -> ClientReleaseRunView | None:
@@ -163,20 +199,64 @@ def register_release_review_routes(
         trace_id: str,
     ) -> ReleaseReviewResponse:
         prod_lane = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
+        viewer_is_owner = isinstance(identity, GitHubHumanIdentity) and viewer_is_product_owner(
+            profile=profile, identity=identity
+        )
+        hotfix = live_temporary_hotfix(store, profile)
+        director = (
+            not viewer_is_owner and hotfix_supported(profile) and is_director(store, identity)
+        )
+        # The Client reviews the live hotfix's exact checklist; the Director keeps seeing
+        # what testing carries now, so a further fix binds the right candidate.
+        newest = (
+            cast(ReleaseReviewStore, store).list_release_review_decision_records(
+                product=profile.product, limit=1
+            )
+            if hotfix is not None
+            else ()
+        )
+        review = (
+            ReleaseReviewStatus(
+                approved=True,
+                checklist_complete=True,
+                checklist=hotfix.checklist,
+                checklist_digest=hotfix.checklist_digest,
+                # The hotfix, or the Client's rejection of it awaiting publication.
+                latest_decision=newest[0] if newest else hotfix,
+            )
+            if hotfix is not None and not director
+            else dependencies.current_review(store, profile, trace_id)
+        )
         return ReleaseReviewResponse(
             trace_id=trace_id,
             product=profile.product,
             display_name=profile.display_name,
             owner_github_login=profile.owner.github_login,
-            viewer_is_owner=isinstance(identity, GitHubHumanIdentity)
-            and viewer_is_product_owner(profile=profile, identity=identity),
+            viewer_is_owner=viewer_is_owner,
             can_override=can_override(profile, identity),
-            review=dependencies.current_review(store, profile, trace_id),
+            review=review,
             release_on_acceptance=release_start_for_acceptance(store=store, profile=profile)
             or "held",
             live_site_url=prod_lane.base_url if prod_lane is not None else "",
             release_run=release_run(store, profile),
+            can_start_temporary_hotfix=director,
+            reviewing_temporary_hotfix=hotfix is not None,
         )
+
+    def decision_release_start(
+        store: object,
+        profile: LaunchplaneProductProfileRecord,
+        decision: ReleaseDecision,
+        current: ReleaseReviewResponse,
+    ) -> ReleaseStart:
+        if decision == "temporary_hotfix":
+            return "promote"
+        if current.reviewing_temporary_hotfix:
+            # The hotfix is already live: Accept keeps it; a request for changes rolls back.
+            return "rollback" if decision == "changes_requested" else ""
+        if decision == "accepted":
+            return release_start_for_acceptance(store=store, profile=profile)
+        return ""
 
     def read_release_review(
         product: Annotated[str, Query(min_length=1, max_length=256)],
@@ -196,20 +276,89 @@ def register_release_review_routes(
     ) -> ReleaseReviewResponse:
         trace_id = common.next_trace_id()
         profile = profile_for_viewer(record_store, envelope.product, identity, trace_id)
+        hotfix = envelope.decision == "temporary_hotfix"
         allowed = (
             can_override(profile, identity)
             if envelope.decision == "overridden"
+            # Never an agent, a workflow, another admin role or the Client: only the
+            # person the active policy names as administrator.
+            else (
+                not viewer_is_product_owner(profile=profile, identity=identity)
+                and is_director(record_store, identity)
+            )
+            if hotfix
             else viewer_is_product_owner(profile=profile, identity=identity)
         )
         if not allowed:
             raise common.http_error(
                 status_code=403,
                 trace_id=trace_id,
-                code="release_decision_denied",
-                message="You cannot make this release decision.",
+                code="temporary_hotfix_denied" if hotfix else "release_decision_denied",
+                message="Only the Director can start a temporary hotfix."
+                if hotfix
+                else "You cannot make this release decision.",
             )
         current = response(record_store, profile, identity, trace_id)
+        latest = cast(ReleaseReviewStore, record_store).list_release_review_decision_records(
+            product=profile.product, limit=1
+        )
+        if (
+            not hotfix
+            and latest
+            and latest[0].decision == "temporary_hotfix"
+            and latest[0].release_issue_url
+            and current.release_run is not None
+            and current.release_run.state in {"waiting", "running"}
+        ):
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="temporary_hotfix_in_progress",
+                message="An urgent temporary fix is going live now. Reload in a few minutes to review it.",
+            )
+        if rejection_rollback_pending(record_store, profile):
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="temporary_hotfix_rollback_in_progress",
+                message="The Client's request for changes is rolling the site back, or its rollback stopped and needs an admin rollback. Reload once production has left the rejected fix.",
+            )
+        if current.reviewing_temporary_hotfix and envelope.decision == "overridden":
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="temporary_hotfix_awaiting_client",
+                message="The live temporary hotfix waits for the Client's review.",
+            )
         review = current.review
+        if hotfix:
+            refusal = ""
+            if not hotfix_supported(profile):
+                refusal = "This product has no gated release path for a temporary hotfix."
+            elif current.release_run is not None and current.release_run.state == "running":
+                # A waiting release has admitted nothing; this newer decision stops it.
+                refusal = "A release step is still running. Wait for it to finish."
+            elif (
+                rejection_rollback_target(cast(PostgresRecordStore, record_store), profile) is None
+            ):
+                refusal = "No Client-accepted release has a passing production deployment to roll back to. Use an admin override and hand promotion instead."
+            if refusal:
+                raise common.http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="temporary_hotfix_unavailable",
+                    message=refusal,
+                )
+            if (
+                review.checklist is not None
+                and review.checklist.production == review.checklist.candidate
+            ):
+                raise common.http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="temporary_hotfix_unavailable",
+                    message="Testing carries the version production already runs.",
+                )
         if review.checklist is None or review.checklist_digest != envelope.checklist_digest:
             raise common.http_error(
                 status_code=409,
@@ -217,7 +366,9 @@ def register_release_review_routes(
                 code="release_checklist_changed",
                 message="The release checklist changed or is unavailable. Reload it before deciding.",
             )
-        if envelope.decision == "accepted" and checklist_blockers(review.checklist):
+        if envelope.decision in ("accepted", "temporary_hotfix") and checklist_blockers(
+            review.checklist
+        ):
             raise common.http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -235,11 +386,7 @@ def register_release_review_routes(
             actor_github_login=identity.login,
             decided_at=datetime.now(UTC).isoformat(),
             # Fixed now: holding releases later stops the run but never edits this.
-            release_start=(
-                release_start_for_acceptance(store=record_store, profile=profile)
-                if envelope.decision == "accepted"
-                else ""
-            ),
+            release_start=decision_release_start(record_store, profile, envelope.decision, current),
         )
         previous = review.latest_decision
         store = cast(ReleaseReviewStore, record_store)

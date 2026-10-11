@@ -1550,6 +1550,21 @@ records show alert and recovery delivery.
 Watchdog reporting has its own renewed lease and DB-backed per-slot receipts,
 so replicas and restarts share miss/recovery delivery state.
 
+Read persisted clock evidence with `GET /v1/service/health-monitor/status`
+under the [existing service-read authority](service-boundary.md). `slots` selects one to
+48 UTC half-hour slots (six by default), newest first; pass the returned
+`next_end_slot` as `end_slot` to read an earlier window across service restarts.
+Paging stops at the persisted activation slot; when activation is unavailable,
+no automatic continuation is offered. Explicit historical windows can still be
+requested, and missing activation is not proof the scheduler is disabled.
+The database-backed response includes activation, scheduled starts, completion
+deadlines, completion times and record IDs, on-time completion, and separate
+missed/healthy watchdog report receipts. A missing receipt is `null`, never
+proof of completion or delivery. This GET starts no monitor or watchdog pass
+and changes no record. Other idempotency scopes, leases, keys and payloads are
+not exposed. A watchdog receipt proves its reporting callback completed; verify
+the incident and notification records separately for actual alert delivery.
+
 If the entire service is down, it cannot send a notification until it restarts;
 an external availability monitor is needed for alerts during a total outage.
 This scheduler does not create an external monitoring account or credential.
@@ -2487,10 +2502,8 @@ return a typed blocked result rather than guessing a domain.
   `DOKPLOY_TOKEN`, `DOKPLOY_HOST`, Launchplane's own service and admin
   tokens, and any value shaped like a GitHub token (`ghp_`, `gho_`, `ghs_`,
   `github_pat_` and similar). The error names the key and its source, never
-  the value. The one exception is global- and context-scope records, where
-  Launchplane keeps its own operating credentials such as the preview
-  PR-comment token: those named keys are withheld from the app instead of
-  refused. Live-target runtime sync, ship and promotion, Odoo previews, Odoo
+  the value. Launchplane's own credentials live in the `launchplane_service`
+  secret store, which no app render reads. Live-target runtime sync, ship and promotion, Odoo previews, Odoo
   target replacement, and the Odoo prod backup gate resolve through the site
   environment (`resolve_site_runtime_environment`): no global values, the
   lane's `retired_provider_keys` dropped, and a key the product declares for
@@ -2646,22 +2659,9 @@ context only, and `context_instance` has both context and instance.
   replacement passes, rollback refreshes prod inventory with rollback provenance
   and annotates the current prod promotion record.
 - `POST /v1/drivers/odoo/prod-backup-gate` captures the DB and filestore backup
-  evidence required before Odoo prod promotion. It resolves `ODOO_DB_NAME`,
-  `ODOO_FILESTORE_PATH`, and `ODOO_BACKUP_ROOT` from DB-backed runtime
-  environment records, runs a Dokploy schedule against the compose lane, stops
-  the web service while capturing, and writes the backup-gate record only after
-  the exact schedule deployment emits nonce-, record-, and database-bound
-  completion evidence with non-empty artifact sizes and SHA-256 values. A
-  provider `done` status without that bounded marker fails the gate. A web
-  service stopped for capture must restart successfully and read back as
-  `running`; restart or final status-read failure makes the schedule fail. Recovery
-  on an earlier backup failure still attempts the restart and preserves that
-  original non-zero exit status. Directory
-  preparation accepts only the dedicated `/volumes/data/backups/launchplane`
-  tree and assigns only its exact backup-root/database/record path to the
-  script-runner identity, so stale root-owned directories cannot make `pg_dump`
-  fail after the provider has reported success or broaden ownership changes to
-  unrelated mounted data.
+  evidence required before Odoo prod promotion. See
+  [online Odoo recovery tuples](odoo-online-backups.md) for the capture,
+  consistency, verification and failure contract.
 - Odoo rollback is image/release-tuple rollback, not VM snapshot rollback. Do not
   invent artifact ids, source commits, backup gates, or env-file overlays to make
   a rollback proceed; write or import the real Launchplane records first.

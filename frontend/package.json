@@ -15,22 +15,22 @@
     "preview": "vite preview --host 127.0.0.1",
     "check:openapi-drift": "node scripts/check-openapi-drift.mjs",
     "test": "node --experimental-strip-types --import ./tests/register-typescript.mjs --test tests/*.test.mjs",
-    "test:browser": "node scripts/prepare-browser-smoke.mjs && playwright test && node scripts/assert-browser-smoke-artifacts.mjs",
+    "test:browser": "node scripts/prepare-browser-smoke.mjs && node --test tests/browser-support/*.test.mjs && playwright test && node scripts/assert-browser-smoke-artifacts.mjs",
     "typecheck": "tsc --noEmit",
     "validate": "pnpm test && pnpm check:openapi-drift && pnpm build"
   },
   "dependencies": {
-    "lucide-react": "1.12.0",
-    "react": "19.2.5",
-    "react-dom": "19.2.5"
+    "lucide-react": "1.51.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
     "@hey-api/openapi-ts": "0.99.0",
-    "@playwright/test": "1.61.1",
-    "@vitejs/plugin-react": "6.0.1",
-    "@types/react": "19.2.14",
-    "@types/react-dom": "19.2.3",
+    "@playwright/test": "1.63.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
     "typescript": "6.0.3",
-    "vite": "8.0.16"
+    "vite": "8.3.2"
   }
 }

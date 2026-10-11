@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from control_plane.contracts.merge_train_policy import (
     MERGE_TRAIN_POLICY_TARGETS_READ_ACTION,
     MergeTrainPolicyRecord,
+    MergeTrainRepositoryPolicy,
     MergeTrainSchedulerPolicy,
     MergeTrainServiceAuthz,
 )
@@ -23,6 +24,10 @@ from control_plane.merge_train_admission import (
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
+)
+from control_plane.merge_train_review_history import (
+    OriginalReviewHistoryResponse,
+    read_original_review_history,
 )
 from control_plane.service_auth import LaunchplaneIdentity
 from control_plane.workflows.ship import utc_now_timestamp
@@ -222,19 +227,12 @@ def register_merge_train_read_routes(
             admission=admission_decision.model_dump(mode="json"),
         )
 
-    def read_merge_train_controller_status(
-        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
-        record_store: Annotated[object, Depends(dependencies.get_record_store)],
-        repository: Annotated[str, Query()] = "",
-        base_branch: Annotated[str, Query()] = "main",
-    ) -> MergeTrainControllerStatusResponse:
-        trace_id = dependencies.next_trace_id()
-        status_request = merge_train_admission_query(
-            dependencies=dependencies,
-            repository=repository,
-            base_branch=base_branch,
-            trace_id=trace_id,
-        )
+    def require_diagnostic_policy(
+        identity: LaunchplaneIdentity,
+        record_store: object,
+        status_request: MergeTrainAdmissionQuery,
+        trace_id: str,
+    ) -> tuple[MergeTrainPolicyRecord, MergeTrainRepositoryPolicy]:
         try:
             policy_record = resolve_merge_train_policy_record(record_store)
         except MergeTrainPolicyStoreMissingError as error:
@@ -265,6 +263,24 @@ def register_merge_train_read_routes(
                 code="authorization_denied",
                 message="Workflow cannot read the requested merge train controller status.",
             )
+        return policy_record, repository_policy
+
+    def read_merge_train_controller_status(
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        repository: Annotated[str, Query()] = "",
+        base_branch: Annotated[str, Query()] = "main",
+    ) -> MergeTrainControllerStatusResponse:
+        trace_id = dependencies.next_trace_id()
+        status_request = merge_train_admission_query(
+            dependencies=dependencies,
+            repository=repository,
+            base_branch=base_branch,
+            trace_id=trace_id,
+        )
+        policy_record, repository_policy = require_diagnostic_policy(
+            identity, record_store, status_request, trace_id
+        )
         merge_train_store = cast(MergeTrainRunHistoryStore, record_store)
         read_model = build_merge_train_controller_status_read_model(
             store=merge_train_store,
@@ -278,6 +294,31 @@ def register_merge_train_read_routes(
         return MergeTrainControllerStatusResponse(
             trace_id=trace_id,
             controller_status=read_model,
+        )
+
+    def read_merge_train_review_history(
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        repository: Annotated[str, Query()] = "",
+        base_branch: Annotated[str, Query()] = "main",
+        cursor: Annotated[str, Query(max_length=1000)] = "",
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    ) -> OriginalReviewHistoryResponse:
+        trace_id = dependencies.next_trace_id()
+        query = merge_train_admission_query(
+            dependencies=dependencies,
+            repository=repository,
+            base_branch=base_branch,
+            trace_id=trace_id,
+        )
+        require_diagnostic_policy(identity, record_store, query, trace_id)
+        return read_original_review_history(
+            store=cast(MergeTrainRunHistoryStore, record_store),
+            repository=query.repository,
+            base_branch=query.base_branch,
+            trace_id=trace_id,
+            cursor=cursor,
+            limit=limit,
         )
 
     def read_merge_train_policy_targets(
@@ -369,6 +410,15 @@ def register_merge_train_read_routes(
         response_model=MergeTrainAdmissionResponse,
         operation_id="read_merge_train_admission",
         summary="Read merge train admission",
+        responses=responses,
+    )
+    app.add_api_route(
+        "/v1/service/merge-train/review-history",
+        read_merge_train_review_history,
+        methods=["GET"],
+        response_model=OriginalReviewHistoryResponse,
+        operation_id="read_merge_train_original_review_history",
+        summary="Read scoped active and retired stack review recovery evidence",
         responses=responses,
     )
     app.add_api_route(

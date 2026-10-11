@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Protocol, Self, TypeAlias
+from typing import Annotated, Any, Literal, Protocol, Self, TypeAlias, cast
 from dataclasses import fields
 import json
 
@@ -95,7 +95,7 @@ class _SemanticCommand(StrictFrozenModel):
         effect_type = cls.model_fields["effect"].annotation
         if effect_type is None:
             raise ValueError("semantic command has no effect type")
-        if set(value) - {field.name for field in fields(effect_type)}:
+        if set(value) - {field.name for field in fields(cast(type[Any], effect_type))}:
             raise ValueError("unknown semantic effect field")
         lineage = value.get("lineage")
         if isinstance(lineage, dict) and set(lineage) - {

@@ -30,8 +30,10 @@ or credential is created. The worker uses Launchplane's own bootstrap
 per unchanged profile and lane versions until delivery. After a confirmed receipt,
 the worker remembers delivery in memory until the reminder is due or the candidate
 changes; a replica restart reads the durable receipt again. Once the single
-reminder is delivered, unchanged candidates need no further GitHub reads. Settled versions also need no
-GitHub read. This cache never supplies acceptance or bypasses release checks.
+reminder is delivered, unchanged candidates need no further GitHub reads. A decision on unchanged
+lane versions is settled only while its checklist digest matches the current checklist; each worker
+rechecks that at most every 30 minutes, and edited test notes that change the checklist send the
+Client a fresh request. This cache never supplies acceptance or bypasses release checks.
 
 The product repository keeps one issue for these requests. Launchplane finds it
 by a standalone `release_request_issue_marker(product)` line in the issue body;
@@ -73,6 +75,10 @@ preview feedback; titles, labels and the existence of a preview are not classifi
 For a batch landing, the stored landing plan binds the batch PR and merge commit
 to its constituent PRs; each constituent uses its own review evidence and its
 section of the batch's Client test notes.
+The invitation names each Client-facing member from its generated notes heading
+and includes that member's instructions, rather than naming the synthetic batch.
+Fenced examples cannot introduce member sections; duplicate member sections
+refuse publication. The release still needs its own Client Accept.
 Durable `release-client-change` receipts record which PRs have been announced in
 this open review. Engineering-only candidates update the current invitation
 silently, with no new comment or mention. Notes edits and already-announced changes
@@ -127,8 +133,12 @@ It prints the issue and comment markers and makes no service or GitHub request.
 The review leads with the product, the viewer's Client or admin role, the
 testing-site link, and **What to test**. Pull requests with identical
 `Client test notes` appear as one check listing each change it covers, and a change missing
-notes appears as its own check. Changes whose notes begin with
-`Nothing for the Client to test` collapse into one expandable count. This grouping
+notes appears as its own check. Changes with valid `Nothing for the Client to test: <reason>` notes collapse
+into one expandable count. The reason must be nonempty, and a change carrying
+the product's review label cannot use that declaration. Invalid or missing
+notes stay visible and block Client acceptance, including shared-repository
+changes. Real test notes also request the change's preview review without a
+label; see [Client review](owner-acceptance.md). This grouping
 is display only: the checklist, its digest, and blockers remain per pull request. A collapsed **Technical details**
 section identifies the **Current production version** and **Proposed production
 version** (currently in testing). Accepting records approval for that proposed
@@ -170,9 +180,14 @@ with the trace ID and logged with it: `testing_lane_missing`,
 `candidate_identity_missing`, `release_record_missing`, or `github_read_failed`.
 Provider error text is never returned or logged, because it can contain private
 URLs. Missing test notes and commits without a merged pull request are
-visible checklist blockers. `Nothing for the Client to test` is valid test notes.
-Pull requests written before the role words changed say `Owner test notes` and
-`Nothing for the owner to test`; Launchplane and the CI action read both.
+visible checklist blockers. The [Client notes contract](owner-acceptance.md)
+owns valid engineering-only declarations and supported historical spellings.
+New checklists validate reasons and the review-label override. An existing
+recorded Client Accept for the same artifact pair and real notes keeps its
+binding; derived validation annotations do not change that release's identity.
+Without that Accept, invalid or missing notes must be corrected on the PR named
+in the blocker (the batch PR for batch landings). Changing the actual notes or
+release facts needs fresh acceptance.
 Previous preview acceptance is an annotation, never release approval.
 Changes to existing shared Odoo addon sources appear in separate Client checklist
 sections, with each repository's exact production-to-testing SHA range, merged
@@ -274,16 +289,9 @@ dispatches a workflow. The [overall direction](https://github.com/cbusillo/direc
 owns who may start a release; the normal acceptance-started implementation is
 described below.
 
-The Director-started temporary hotfix path for live breakage is direction,
-not implemented behavior. Until it is built and activated, this contract
-provides no way to start one; an admin override or existing grant is not that
-path.
-
-That path uses the same verified backup, release record, post-deploy checks,
-and automatic rollback. Launchplane immediately sends the Client a release
-review for the exact candidate, marked as an urgent temporary fix with the
-reason. Acceptance hands the final check back to the Client; a rejection
-rolls back to their last accepted release.
+The Director can also ship a temporary hotfix for live breakage before the
+Client accepts it; see [Temporary hotfix](#temporary-hotfix). An admin override
+or an existing grant is not that path.
 
 ## Acceptance starts the release
 
@@ -336,7 +344,8 @@ checklist. No agent receives a promotion grant and no product workflow calls
 Launchplane. Enabling this setting is a production-release activation; prepare
 and verify the Client, testing lane and backup policy before applying it.
 Changing unrelated profile metadata does not re-accept or retry that checklist.
-Settled decisions on unchanged lane versions require no background GitHub read.
+Settled decisions on unchanged lane versions are rechecked against the current checklist at most
+every 30 minutes on each worker.
 Incomplete standing reviews back off for five minutes on each worker; changing
 the profile or lane versions triggers a fresh review. This timer never supplies
 acceptance or replaces the checks immediately before a release effect.
@@ -346,6 +355,96 @@ while a release is running still returns the original decision.
 The stable worker advances Client releases on one background thread per replica,
 so a generic-web deploy or rollback wait does not block queued Odoo operations.
 Shutdown finishes an admitted operation and starts no further product release.
+
+## Temporary hotfix
+
+The [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
+lets the Director ship a temporary hotfix for live breakage before the Client
+accepts it. On the review page, the Director, and nobody else, sees a
+**Temporary hotfix** section. The Director is the signed-in person whom the active
+authorization policy names as administrator by immutable GitHub ID. The section
+puts exactly the listed candidate live and asks why. The browser records it
+through `POST /v1/release-review/decisions` with `decision: temporary_hotfix`, the
+current `checklist_digest` and a required `reason`, under the session's CSRF
+protection.
+
+The route refuses with `403 temporary_hotfix_denied`:
+
+- agent and workflow tokens
+- other admins, including holders of `product_profile.write`
+- the product's own Client
+
+It refuses with `409`:
+
+- `temporary_hotfix_unavailable` for a prelaunch, `director_standing` or
+  non-Odoo/non-generic-web product, or one without a prod lane or Client
+- `temporary_hotfix_unavailable` while a release step is running
+- `temporary_hotfix_unavailable` when testing carries what production runs
+- `temporary_hotfix_unavailable` when no Client-accepted release has a passing
+  production deployment to roll back to; the admin override and hand promotion
+  remain available then
+- `release_checklist_changed` for a stale or unavailable checklist
+- `release_checklist_incomplete` for an incomplete one
+
+The decision binds the exact checklist digest, so it puts live exactly the
+changes listed. Keeping it to one small change is the Director's judgment.
+
+The hotfix runs on the gated path described above, whatever
+`release_on_acceptance` says; that setting only decides what a Client's Accept
+does. The worker records a verified backup, then the promotion, with its release
+record, post-deploy and health checks, and automatic rollback or Odoo recovery.
+Each step carries a `temporary_hotfix` grant that names the decision and the
+Director. Before each step and each provider effect, the worker checks again that:
+
+- the decision is still the product's newest one
+- the active policy still names the Director as administrator
+- the lanes still carry the checklist's versions
+
+Removing the Director from the policy, or recording a newer decision, therefore
+stops the hotfix before its next effect.
+
+The hotfix's release record is created in the product repository before
+anything deploys. It is the Client's notice:
+
+- it mentions the Client
+- it says plainly that an urgent temporary fix is going live before their review
+- it gives the reason and links the review page (built from
+  `LAUNCHPLANE_PUBLIC_URL`)
+
+While the hotfix is going live, Client decisions return
+`409 temporary_hotfix_in_progress`. Once it is live, the Client's review page
+shows that exact checklist (`reviewing_temporary_hotfix: true`) with the reason:
+
+- **Accept** records a normal accepted release with no `release_start`; the
+  fix is already live.
+- **Request changes** records the decision with `release_start: rollback`.
+  The worker then rolls production back to the newest Client-accepted release
+  with a passing production deployment, under the Client's release grant. It
+  uses the existing paths: an Odoo rollback operation, or generic web's fenced
+  rollback. This rollback runs even while releases are held.
+
+The review links the live site, because testing may already carry newer work.
+Until production no longer runs the rejected candidate, every new decision
+returns `409 temporary_hotfix_rollback_in_progress`, including the admin
+override and another hotfix. If the rollback stops (it fails, or its provider
+outcome needs reconciliation), the existing admin rollback or reconciliation
+path takes production off the rejected fix, and decisions resume. If a Client
+decision's release record could not be published, the review stays open on the
+same hotfix, even when the Client edits their reason, and a rejection keeps its
+rollback.
+
+The admin override is refused while a live hotfix awaits the Client. The
+Director keeps seeing the current testing candidate, so a further hotfix binds
+the right version. A later hotfix replaces the pending review, and a rejection
+still returns to the last Client-accepted release. There is no deadline,
+extension or per-product limit. The next normal release includes or replaces
+the fix as usual. A failed hotfix stops like any release; the Client's review
+then shows the ordinary checklist.
+
+The isolated rehearsal, `tests.test_temporary_hotfix`, runs on the
+`example-site` test product with SQLite and synthetic providers. It covers
+start, Client acceptance, Client rejection with rollback, the refusals, and
+the policy recheck.
 
 ### A control-plane replacement drains release effects first
 
@@ -441,9 +540,11 @@ retains the existing service rollback and gated break-glass paths in
 First rollout must still occur with no active or invited Client release:
 containers running earlier code do not enforce this fence. The additive schema
 migration also requires a schema-compatible repair image; an older image whose
-schema guard rejects the new head cannot resume workers. Qualify the installed
-service and both worker families before the Supervisor retires its temporary
-Client-invitation landing hold. This protects planned service replacements, not
+schema guard rejects the new head cannot resume workers. The installed service
+and both worker families were qualified (#3145), so Launchplane lands normally
+during Client releases (Q160); a release holds only its own product's merge
+train, as [merge-train policy](merge-train-policy.md#candidate-construction)
+describes. This protects planned service replacements, not
 arbitrary host loss or a forced kill of an unsafe provider effect; those remain
 truthfully interrupted and require the existing reconciliation path. The isolated
 rehearsal is `tests.test_client_release_redeploy`; it drains during each step for
@@ -452,8 +553,7 @@ lifespan and health read, reopens worker storage, resumes the drill once, and pr
 forward outcomes after automatic recovery. PostgreSQL integration separately
 proves both admission-versus-drain race orders with real database locks.
 The local rehearsal uses synthetic providers and SQLite; its API starts in a
-new process while the test reopens worker storage. Installed worker-process and
-provider qualification remains the Supervisor's next step.
+new process while the test reopens worker storage.
 
 The runtime image uses the environment installed during its locked build;
 startup does not resolve or rebuild Python dependencies. This lets a compatible

@@ -270,13 +270,13 @@ def batch_pull_request_body(
     )
 
 
-def changed_closed_batch_body(
+def bound_closed_batch_pull_request(
     *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
-) -> bool:
-    """Require exact closed, unmerged batch binding before comparing generated input."""
+) -> dict[str, object] | None:
+    """Read an exactly bound batch with a confirmed absent provider effect."""
     payload = _find_batch_pull_request(client=client, candidate=candidate)
     if payload is None:
-        return False
+        return None
     bound = _bound_batch_pull_request(payload, candidate)
     number = bound["number"]
     assert isinstance(number, int)
@@ -285,6 +285,16 @@ def changed_closed_batch_body(
     )
     closed = _bound_batch_pull_request(detail, candidate)
     if closed.get("state") != "closed" or closed.get("merged") is not False:
+        return None
+    return closed
+
+
+def changed_closed_batch_body(
+    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
+) -> bool:
+    """Require exact closed, unmerged batch binding before comparing generated input."""
+    closed = bound_closed_batch_pull_request(client=client, candidate=candidate)
+    if closed is None:
         return False
     return closed["body"] != batch_pull_request_body(client=client, candidate=candidate)
 
