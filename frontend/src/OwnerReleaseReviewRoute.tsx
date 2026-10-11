@@ -161,7 +161,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     : `${client} is the Client. ${client}'s Accept ${releaseStarts ? "starts" : "approves"} this release.${response?.can_start_temporary_hotfix ? " You can also start a temporary hotfix for breakage on the live site, using the separate control below." : " Only the Client's acceptance starts a normal release."}` : "";
   const adminRule = reviewingHotfix
     ? "An admin approval override is unavailable while the live fix awaits the Client's review."
-    : "A decision you record here is an admin override and does not start the release.";
+    : "A normal approval you record here is an admin override and does not start the release.";
   const viewerRole = response?.viewer_is_owner
     ? "Reviewing as the Client"
     : response?.can_override
