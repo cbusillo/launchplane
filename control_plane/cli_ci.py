@@ -18,6 +18,7 @@ from control_plane.unittest_sharding import (
     ShardPlan,
     ShardRunSummary,
     TIMING_SCHEMA_VERSION,
+    TemporaryImportRoot,
     UnittestShardingError,
     aggregate_shard_timings,
     contains_failed_test,
@@ -135,7 +136,8 @@ def postgres_integration_shard_targets(*, shard_count: int, shard_index: int) ->
     """Partition the existing gate's discovered tests, preserving template reuse per process."""
     validate_shard_index(shard_count=shard_count, shard_index=shard_index)
     loader = unittest.TestLoader()
-    suite = loader.loadTestsFromNames(POSTGRES_INTEGRATION_MODULES)
+    with TemporaryImportRoot(Path.cwd()):
+        suite = loader.loadTestsFromNames(POSTGRES_INTEGRATION_MODULES)
     if contains_failed_test(suite):
         raise UnittestShardingError("failed to load PostgreSQL integration tests")
     targets = tuple(iter_test_target_ids(suite))

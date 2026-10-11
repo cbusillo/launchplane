@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import subprocess
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -50,6 +52,26 @@ class PostgresIntegrationCommandTests(unittest.TestCase):
                     loaded = loader.loadTestsFromNames(shard)
                     self.assertCountEqual(iter_test_target_ids(loaded), shard)
                 self.assertFalse(loader.errors)
+
+    def test_discovery_does_not_require_an_editable_install_import_path(self) -> None:
+        source = "\n".join(
+            [
+                "import json, sys",
+                "from pathlib import Path",
+                "from control_plane.cli_ci import postgres_integration_shard_targets",
+                "root = Path.cwd().resolve()",
+                "sys.path[:] = [p for p in sys.path if Path(p or '.').resolve() != root]",
+                "print(json.dumps(postgres_integration_shard_targets(shard_count=3, shard_index=0)))",
+            ]
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", source], capture_output=True, text=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertCountEqual(
+            json.loads(result.stdout),
+            postgres_integration_shard_targets(shard_count=3, shard_index=0),
+        )
 
     @patch("control_plane.cli_ci.subprocess.run")
     def test_shard_executes_its_discovered_tests_and_propagates_failure(
