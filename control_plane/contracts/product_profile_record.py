@@ -17,6 +17,10 @@ OdooDataAuthority = Literal["unknown", "resettable", "restorable", "authoritativ
 OdooRebuildSourceMode = Literal["empty", "upstream_restore"]
 
 
+class ProductProfileChangedError(ValueError):
+    """The stored product profile no longer matches the compare-and-write snapshot."""
+
+
 class ProductImageProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

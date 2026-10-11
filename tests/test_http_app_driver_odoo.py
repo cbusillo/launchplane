@@ -2210,10 +2210,10 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             provider_operation_record.record_id,
         )
 
-    async def test_odoo_preview_env_withholds_launchplane_pr_comment_token(self) -> None:
-        # Launchplane keeps the token it uses for preview PR comments in the
-        # context's runtime records. The preview runs unmerged code, so its env
-        # must not carry that token, while Launchplane can still read it.
+    async def test_odoo_preview_refuses_platform_credentials_in_site_records(self) -> None:
+        # The preview runs unmerged code, so a platform credential in the site's
+        # context record or context secret refuses the apply instead of reaching it.
+        # Launchplane's own token lives in its service store, never in site records.
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -2302,11 +2302,10 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                     control_plane_root=root, context_name="cm"
                 )
 
-        self.assertEqual(response.status_code, 202, response.text)
-        applied_environment = apply_driver.call_args.kwargs["request"].environment_values
-        self.assertNotIn("GITHUB_TOKEN", applied_environment)
-        self.assertNotIn("GH_TOKEN", applied_environment)
-        self.assertEqual(applied_environment["ODOO_DB_PASSWORD"], "template-db-secret")
+        self.assertEqual(response.status_code, 400, response.text)
+        apply_driver.assert_not_called()
+        self.assertNotIn("context-record-comment-token", response.text)
+        self.assertNotIn("context-secret-comment-token", response.text)
         self.assertEqual(launchplane_comment_token, "")
 
     async def test_odoo_preview_blanks_copied_integration_credentials_without_a_preview_rule(
