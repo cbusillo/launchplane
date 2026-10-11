@@ -120,6 +120,15 @@ class MergeTrainHeadCheckReuse(BaseModel):
     required_checks: tuple[MergeTrainReusedCheck, ...] = Field(min_length=1)
 
 
+class MergeTrainCheckRetryEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_sha: str = Field(min_length=1)
+    controller_pass_recorded_at: str = Field(min_length=1)
+    required_checks_status: Literal["pass"] = "pass"
+    closed_batch_pull_request_number: int = Field(gt=0)
+
+
 class MergeTrainBatchCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -139,6 +148,11 @@ class MergeTrainBatchCandidate(BaseModel):
     batch_body_retry_of: str = Field(default="", exclude_if=lambda value: not value)
     # Record id of the failed candidate this one rebuilds after an infrastructure failure.
     infrastructure_retry_of: str = Field(default="", exclude_if=lambda value: not value)
+    # Failed record whose exact SHA subsequently passed checks before this rebuild.
+    check_retry_of: str = Field(default="", exclude_if=lambda value: not value)
+    check_retry_evidence: MergeTrainCheckRetryEvidence | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     stack_collapse_root: MergeTrainStackCollapseRootProof | None = None
     structural_provenance: MergeTrainStructuralProvenance | None = None
     required_checks_status: Literal["unknown", "pending", "pass", "fail"] = "unknown"
