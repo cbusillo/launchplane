@@ -18,6 +18,7 @@ from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchLandingPlanRecord,
 )
 from control_plane.release_invitation import (
+    SETTLED_DECISION_RECHECK_SECONDS,
     ReleaseInvitationBackoff,
     main,
     publish_release_invitation,
@@ -798,11 +799,36 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.comments), 1)
         self.assertEqual(len(self.edits), 1)
 
-    def test_settled_candidate_needs_no_github_read(self) -> None:
+    def test_settled_candidate_rechecks_its_checklist_at_most_every_half_hour(self) -> None:
         self.store.create_release_review_decision_record_if_absent(decision(self.store))
-        self.publish(ReleaseInvitationBackoff())
-        self.assertEqual(self.read_count, 0)
+        backoff = ReleaseInvitationBackoff()
+        self.publish(backoff)
+        self.publish(backoff)
+        self.assertEqual(self.read_count, 1)
+        self.now += timedelta(seconds=SETTLED_DECISION_RECHECK_SECONDS + 1)
+        self.publish(backoff)
+        self.assertEqual(self.read_count, 2)
         self.assertEqual(self.posts, [])
+
+    def test_changed_notes_after_acceptance_renew_the_client_request(self) -> None:
+        self.publish()
+        accepted = decision(self.store, date=self.now.isoformat())
+        self.assertEqual(accepted.checklist_digest, self.review.checklist_digest)
+        self.store.create_release_review_decision_record_if_absent(accepted)
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 1)
+
+        # Corrected test notes change the checklist on the same lane versions, so the
+        # saved acceptance no longer covers it and the Client is asked again.
+        self.now += timedelta(minutes=1)
+        self.review = self.review.model_copy(update={"checklist_digest": "f" * 64})
+        backoff = ReleaseInvitationBackoff()
+        self.publish(backoff)
+        self.assertEqual(len(self.comments), 2)
+        self.assertIn("@site-owner", self.comments[-1]["body"])
+        self.publish(backoff)
+        self.publish()
+        self.assertEqual(len(self.comments), 2)
 
     def test_large_repository_stops_after_finding_marked_issue(self) -> None:
         marker = release_request_issue_marker(self.profile.product)

@@ -34,10 +34,16 @@ from control_plane.workflows.launchplane import (
 )
 
 
+# How often a worker confirms that a decision on unchanged lane versions still covers
+# the current checklist. Changed test notes can invalidate it without a new candidate.
+SETTLED_DECISION_RECHECK_SECONDS = 1800
+
+
 @dataclass(slots=True)
 class ReleaseInvitationBackoff:
     next_reads: dict[str, tuple[str, float]] = field(default_factory=dict)
     delivered: dict[tuple[str, str], tuple[str, float]] = field(default_factory=dict)
+    settled: dict[str, tuple[str, float]] = field(default_factory=dict)
 
 
 def _now() -> datetime:
@@ -338,16 +344,40 @@ def publish_release_invitation(
                 return
             receipt_due = True
             backoff.delivered.pop(receipt[:2])
-    # A person already decided about these versions. This avoids polling GitHub
-    # for settled products without letting a cached result supply acceptance.
-    if any(
-        decision.checklist.production == production
-        and decision.checklist.candidate == candidate
-        and decision.checklist.repository == profile.repository
-        and decision.checklist.owner_github_id == profile.owner.github_id
-        for decision in store.list_release_review_decision_records(product=profile.product, limit=1)
-    ):
-        return
+    # A person already decided about these versions. The decision still settles the
+    # review only while it covers the current checklist; edited test notes change the
+    # checklist without a new candidate, and the Client then needs a fresh request.
+    settled = next(
+        (
+            decision
+            for decision in store.list_release_review_decision_records(
+                product=profile.product, limit=1
+            )
+            if decision.checklist.production == production
+            and decision.checklist.candidate == candidate
+            and decision.checklist.repository == profile.repository
+            and decision.checklist.owner_github_id == profile.owner.github_id
+        ),
+        None,
+    )
+    if settled is not None:
+        if backoff is not None:
+            checked, next_check = backoff.settled.get(profile.product, ("", 0))
+            if checked == settled.record_id and monotonic() < next_check:
+                return
+        current_review = current_release_review(
+            control_plane_root=control_plane_root, record_store=store, profile=profile
+        )
+        if current_review.unavailable_reason is not None or current_review.checklist_digest in (
+            "",
+            settled.checklist_digest,
+        ):
+            if backoff is not None:
+                backoff.settled[profile.product] = (
+                    settled.record_id,
+                    monotonic() + SETTLED_DECISION_RECHECK_SECONDS,
+                )
+            return
     # Do not compile a large checklist on every worker poll. This is a read
     # throttle only; GitHub's candidate marker remains the durable receipt.
     fingerprint = (
