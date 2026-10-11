@@ -4396,7 +4396,7 @@ def _recover_failed_merge_train_candidate(
         )
     try:
         base_check_status = github_client.read_base_check_status(
-            candidate=failed, failed_check_names=failures.check_names
+            candidate=failed, failed_check_names=failures.check_identity_names
         )
     except MergeTrainGitHubError:
         base_check_status = "unknown"

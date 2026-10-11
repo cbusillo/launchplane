@@ -140,6 +140,7 @@ class _TrainSimulation:
         culprits: set[int],
         infrastructure_failure: Any = lambda: None,
         base_status: Any = "pass",
+        base_reader: GitHubMergeTrainClient | None = None,
         mutate: bool = True,
         max_passes: int = 20,
         settle: bool = True,
@@ -175,7 +176,9 @@ class _TrainSimulation:
             client.read_merge_train_snapshot.return_value = self.snapshot
             client.observe_batch_candidate_checks.return_value = failed
             client.read_candidate_check_failures.return_value = failure
-            if isinstance(base_status, Exception):
+            if base_reader is not None:
+                client.read_base_check_status.side_effect = base_reader.read_base_check_status
+            elif isinstance(base_status, Exception):
                 client.read_base_check_status.side_effect = base_status
             else:
                 client.read_base_check_status.return_value = base_status
@@ -232,6 +235,42 @@ class _TrainSimulation:
 
 
 class CulpritIsolationTests(unittest.TestCase):
+    def test_shared_base_failure_is_not_blamed_when_display_name_is_sanitized(self) -> None:
+        for name in ("test_shard  (0)", "QA & integration"):
+            with self.subTest(name=name), TemporaryDirectory() as directory:
+                failures = classify_candidate_check_failures(
+                    check_runs=[_check_run(2, name, "failure")],
+                    commit_statuses=[],
+                    read_annotations=lambda _: [],
+                )
+                client = GitHubMergeTrainClient(
+                    transport=RecordingMergeTrainGitHubTransport(
+                        responses=(
+                            {
+                                "protected": True,
+                                "protection": {
+                                    "required_status_checks": {
+                                        "enforcement_level": "everyone",
+                                        "contexts": ["ci-gate"],
+                                    }
+                                },
+                            },
+                            {"statuses": []},
+                            {
+                                "check_runs": [
+                                    _check_run(1, "ci-gate", "success"),
+                                    _check_run(2, name, "failure"),
+                                ]
+                            },
+                        )
+                    )
+                )
+                train = _TrainSimulation(self, FilesystemRecordStore(state_dir=Path(directory)), 1)
+                train.run(culprits={1}, infrastructure_failure=lambda: failures, base_reader=client)
+                self.assertEqual(train.blocked, [])
+                assert train.stopped is not None
+                self.assertEqual(train.stopped["reason_code"], "base_checks_not_green")
+
     def test_red_base_dry_run_stops_without_writing(self) -> None:
         with TemporaryDirectory() as directory:
             train = _TrainSimulation(self, FilesystemRecordStore(state_dir=Path(directory)), 4)
