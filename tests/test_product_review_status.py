@@ -58,9 +58,16 @@ class _GitHub:
         labels: tuple[str, ...] = ("owner-review",),
         head_sha: str = _HEAD_SHA,
     ) -> None:
+        self.body = "## Client test notes\n" + (
+            "Try the changed page."
+            if "owner-review" in labels
+            else "Nothing for the Client to test: CI only."
+        )
         self.repository = repository
         self.labels = labels
         self.head_sha = head_sha
+        self.head_ref = "pr-42"
+        self.base_ref = ""
         self.statuses: list[dict[str, object]] = []
         self.legacy_statuses: list[dict[str, object]] = []
         self.check_runs: list[dict[str, object]] = []
@@ -95,9 +102,14 @@ class _GitHub:
             self.writes.append((method, path, body))
         if path == f"{repository_path}/pulls/{_PULL_REQUEST}":
             return {
-                "head": {"sha": self.head_sha},
+                "body": self.body,
+                "head": {
+                    "sha": self.head_sha,
+                    "ref": self.head_ref,
+                    "repo": {"full_name": self.repository},
+                },
                 "labels": [{"name": label} for label in self.labels],
-                "base": {"repo": {"id": 5150}},
+                "base": {"ref": self.base_ref, "repo": {"id": 5150}},
             }
         if path == f"{repository_path}/statuses/{self.head_sha}" and method == "POST":
             assert isinstance(body, dict)
@@ -334,6 +346,16 @@ class OwnerReviewStatusTests(unittest.TestCase):
             github.statuses[0]["description"], "Waiting for @site-owner to review the preview"
         )
 
+    def test_real_notes_without_label_publish_review_and_missing_notes_fail(self) -> None:
+        github = _GitHub(labels=())
+        github.body = "## Client test notes\nTry the changed prices."
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "pending")
+        github.body = "## Client test notes\n<!-- empty template -->"
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        self.assertIn("missing", str(github.statuses[0]["description"]))
+
     def test_marked_pull_request_without_an_owner_says_so(self) -> None:
         github = _GitHub()
 
@@ -567,6 +589,9 @@ class OwnerReviewStatusTests(unittest.TestCase):
 
 class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        review_read = patch("control_plane.http_app.pull_request_client_review", return_value=True)
+        review_read.start()
+        self.addCleanup(review_read.stop)
         temporary_directory = TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         self.root = Path(temporary_directory.name)
@@ -795,6 +820,165 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             (original,),
         )
         self.assertEqual(github.comments, [])
+
+    async def test_ready_feedback_without_client_explains_an_explicit_review_mark(self) -> None:
+        payload = product_profile_payload("verireel")
+        payload["owner"] = {}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(_preview_pr_feedback_identity()),
+            authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+            control_plane_root_path=self.root,
+            record_store_factory=lambda: self.store,
+        )
+        response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+        self.assertEqual(response.status_code, 202)
+        (feedback,) = self.store.list_preview_pr_feedback_records()
+        self.assertIn("no Client is set", feedback.comment_markdown)
+
+    async def test_ready_train_preview_does_not_publish_a_duplicate_client_review(self) -> None:
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from control_plane.workflows.preview_pr_feedback import pull_request_client_review
+
+        payload = product_profile_payload("verireel")
+        payload["repository"] = "every/verireel"
+        payload["owner"] = {"github_login": "site-owner", "github_id": str(_OWNER_GITHUB_ID)}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        candidate = SimpleNamespace(
+            candidate_ref="refs/heads/launchplane/train/every/verireel/main/batch",
+            candidate_sha=_HEAD_SHA,
+            base_branch="main",
+        )
+        github = _GitHub(repository="every/verireel", labels=())
+        github.body = "## Owner test notes\n### #12 Feature\nTry the price list."
+        github.head_ref = candidate.candidate_ref.removeprefix("refs/heads/")
+        github.base_ref = "main"
+        original = _decision(
+            decision="changes_requested", decided_at="2026-09-25T12:00:00Z"
+        ).model_copy(update={"product": "verireel", "repository": "every/verireel"})
+        self.store.write_product_review_decision_record(original)
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(_preview_pr_feedback_identity()),
+            authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+            control_plane_root_path=self.root,
+            record_store_factory=lambda: self.store,
+            owner_review_status_publisher=_publisher(github),
+        )
+        with (
+            patch(
+                "control_plane.http_app.pull_request_client_review",
+                side_effect=pull_request_client_review,
+            ),
+            patch.object(
+                self.store,
+                "list_merge_train_batch_candidate_records",
+                return_value=(SimpleNamespace(candidate=candidate),),
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.launchplane_github_token",
+                return_value=nullcontext("test-token"),
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.github_api_request",
+                return_value={
+                    "body": "## Owner test notes\n### #12 Feature\nTry the price list.",
+                    "head": {
+                        "ref": candidate.candidate_ref.removeprefix("refs/heads/"),
+                        "sha": _HEAD_SHA,
+                        "repo": {"full_name": "every/verireel"},
+                    },
+                    "base": {"ref": "main"},
+                    "labels": [],
+                },
+            ),
+        ):
+            response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+        self.assertEqual(response.status_code, 202, response.json())
+        self.assertEqual(github.statuses, [])
+        self.assertEqual(len(github.comments), 1)
+        (saved,) = self.store.list_product_review_decision_records(
+            repository="every/verireel", pull_request_number=42
+        )
+        self.assertTrue(saved.feedback_url)
+        (feedback,) = self.store.list_preview_pr_feedback_records()
+        self.assertNotIn("review the preview", feedback.comment_markdown)
+
+    async def test_ready_feedback_separates_invalid_notes_from_read_failures(self) -> None:
+        from control_plane.client_test_notes import ClientTestNotesRequired
+
+        payload = product_profile_payload("verireel")
+        payload["owner"] = {"github_login": "site-owner", "github_id": str(_OWNER_GITHUB_ID)}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(_preview_pr_feedback_identity()),
+            authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+            control_plane_root_path=self.root,
+            record_store_factory=lambda: self.store,
+        )
+        for error, status, code in (
+            (
+                ClientTestNotesRequired("The Client review label requires real Client test notes."),
+                409,
+                "client_test_notes_required",
+            ),
+            (
+                RuntimeError("private provider diagnostic"),
+                503,
+                "client_review_evidence_unavailable",
+            ),
+        ):
+            with (
+                self.subTest(code=code),
+                patch("control_plane.http_app.pull_request_client_review", side_effect=error),
+            ):
+                response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+                self.assertEqual(response.status_code, status)
+                self.assertIn(code, response.text)
+                self.assertNotIn("private provider diagnostic", response.text)
+
+    async def test_notes_refusal_retries_saved_feedback_without_changing_the_decision(self) -> None:
+        from control_plane.client_test_notes import ClientTestNotesRequired
+
+        payload = product_profile_payload("verireel")
+        payload["repository"] = "every/verireel"
+        payload["owner"] = {"github_login": "site-owner", "github_id": str(_OWNER_GITHUB_ID)}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        github = _GitHub(repository="every/verireel", labels=())
+        github.body = "## Client test notes\n"
+        original = _decision(
+            decision="changes_requested", decided_at="2026-09-25T12:00:00Z"
+        ).model_copy(update={"product": "verireel", "repository": "every/verireel"})
+        self.store.write_product_review_decision_record(original)
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(_preview_pr_feedback_identity()),
+            authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+            control_plane_root_path=self.root,
+            record_store_factory=lambda: self.store,
+            owner_review_status_publisher=_publisher(github),
+        )
+        with patch(
+            "control_plane.http_app.pull_request_client_review",
+            side_effect=ClientTestNotesRequired("Client test notes are missing."),
+        ):
+            response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        (saved,) = self.store.list_product_review_decision_records(
+            repository="every/verireel", pull_request_number=42
+        )
+        self.assertEqual(saved.decision, original.decision)
+        self.assertEqual(saved.reason, original.reason)
+        self.assertTrue(saved.feedback_url)
 
     async def test_ready_preview_feedback_writes_the_status_and_retires_leftovers(self) -> None:
         github = _GitHub(repository="every/verireel")

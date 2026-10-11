@@ -131,8 +131,12 @@ It prints the issue and comment markers and makes no service or GitHub request.
 The review leads with the product, the viewer's Client or admin role, the
 testing-site link, and **What to test**. Pull requests with identical
 `Client test notes` appear as one check listing each change it covers, and a change missing
-notes appears as its own check. Changes whose notes begin with
-`Nothing for the Client to test` collapse into one expandable count. This grouping
+notes appears as its own check. Changes with valid `Nothing for the Client to test: <reason>` notes collapse
+into one expandable count. The reason must be nonempty, and a change carrying
+the product's review label cannot use that declaration. Invalid or missing
+notes stay visible and block Client acceptance, including shared-repository
+changes. Real test notes also request the change's preview review without a
+label; see [Client review](owner-acceptance.md). This grouping
 is display only: the checklist, its digest, and blockers remain per pull request. A collapsed **Technical details**
 section identifies the **Current production version** and **Proposed production
 version** (currently in testing). Accepting records approval for that proposed
@@ -174,9 +178,14 @@ with the trace ID and logged with it: `testing_lane_missing`,
 `candidate_identity_missing`, `release_record_missing`, or `github_read_failed`.
 Provider error text is never returned or logged, because it can contain private
 URLs. Missing test notes and commits without a merged pull request are
-visible checklist blockers. `Nothing for the Client to test` is valid test notes.
-Pull requests written before the role words changed say `Owner test notes` and
-`Nothing for the owner to test`; Launchplane and the CI action read both.
+visible checklist blockers. The [Client notes contract](owner-acceptance.md)
+owns valid engineering-only declarations and supported historical spellings.
+New checklists validate reasons and the review-label override. An existing
+recorded Client Accept for the same artifact pair and real notes keeps its
+binding; derived validation annotations do not change that release's identity.
+Without that Accept, invalid or missing notes must be corrected on the PR named
+in the blocker (the batch PR for batch landings). Changing the actual notes or
+release facts needs fresh acceptance.
 Previous preview acceptance is an annotation, never release approval.
 Changes to existing shared Odoo addon sources appear in separate Client checklist
 sections, with each repository's exact production-to-testing SHA range, merged
