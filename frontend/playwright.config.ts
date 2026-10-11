@@ -39,6 +39,7 @@ export default defineConfig({
     },
     {
       name: "narrow",
+      grep: /@(?:layout|responsive)\b/,
       use: {
         ...devices["Desktop Chrome"],
         isMobile: false,

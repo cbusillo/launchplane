@@ -234,9 +234,27 @@ or runtime mutation reaches a deployed Launchplane service. Journeys cover the
 rendered authentication prompt, honest empty and error product inventories,
 product workspace, recent activity, environment diagnostics, blocked and
 dry-run action boundaries, plus mixed, ready, unsupported, denied, failed,
-empty, and loading operational-readiness states. Each journey runs at desktop
-and narrow widths, checks route-heading and keyboard focus behavior, rejects
-duplicate document IDs and horizontal overflow, and fails on unexpected
+empty, and loading operational-readiness states. Desktop runs every test; narrow
+width runs only tests explicitly tagged `@layout` or `@responsive`. Mark tests
+that exercise layout, overflow, touch-target spacing, or responsive behavior
+using Playwright test details, for example:
+
+```typescript
+test("readiness controls fit the viewport", { tag: "@layout" }, async ({ page }) => {
+  // Exercise the controls and assert the layout behavior.
+});
+```
+
+Use `@responsive` for behavior that changes with viewport size. A screenshot
+alone does not make a functional journey a layout test. The core screenshot
+journeys are tagged because they also assert horizontal overflow. Unmarked
+journeys retain desktop coverage; narrow-width defects in those journeys are
+an accepted coverage tradeoff (Q175, #3384). Check actual selection with
+`pnpm --dir frontend exec playwright test --list --project=desktop` and
+`pnpm --dir frontend exec playwright test --list --project=narrow`.
+
+The core operator journeys check route-heading and keyboard focus behavior, reject
+duplicate document IDs and horizontal overflow, and fail on unexpected
 mutation requests, console errors, uncaught page errors, failed requests, or
 HTTP error responses.
 
