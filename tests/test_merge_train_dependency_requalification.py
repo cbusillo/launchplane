@@ -69,7 +69,9 @@ class DependencyRequalificationTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(settled=settled, position=position):
                     await self._assert_candidate_kept(settled=settled, position=position)
 
-    async def test_changed_dependency_head_waits_for_the_next_candidate_without_a_hold(self) -> None:
+    async def test_changed_dependency_head_waits_for_the_next_candidate_without_a_hold(
+        self,
+    ) -> None:
         state = _DependencyState(mergeable="unknown")
         async with _controller(state) as (app, store, request):
             planned = await _post(app, request, "plan_candidate")
