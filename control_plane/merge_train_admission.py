@@ -9,6 +9,7 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRe
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
+from control_plane.contracts.merge_train_batch import MergeTrainHeldOutReason
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
 from control_plane.contracts.merge_train_admission import MergeTrainAdmissionDecision
 from control_plane.contracts.merge_admission_record import MergeAdmissionRecord
@@ -21,8 +22,14 @@ from control_plane.contracts.merge_train_admission import (
 )
 from control_plane.contracts.merge_train_admission import evaluate_merge_train_admission
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.merge_train_quota import defer_for_recorded_github_quota
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
+)
+from control_plane.workflows.merge_train_controller import (
+    decide_merge_train_controller_record_action,
+    latest_completed_merge_train_batch_landing_plan_record,
 )
 
 MergeTrainControllerPolicyStatus = Literal["current", "stale", "unchecked"]
@@ -78,7 +85,7 @@ class MergeTrainHeldOutSummary(BaseModel):
 
     pull_request_number: int
     head_sha: str
-    reason: Literal["entry_conflict"]
+    reason: MergeTrainHeldOutReason
     conflicts_with: tuple[int, ...] = ()
 
 
@@ -92,6 +99,10 @@ class MergeTrainControllerRecordSummary(BaseModel):
     policy_key: str = ""
     policy_sha256: str = ""
     policy_status: MergeTrainControllerPolicyStatus = "unchecked"
+    historical: bool = Field(
+        default=False,
+        description="Stored lineage has no remaining controller action; not current effect authority.",
+    )
     stale_reason: str = ""
     batch_id: str = ""
     pull_request_numbers: tuple[int, ...] = ()
@@ -209,6 +220,7 @@ class MergeTrainRunHistoryStore(Protocol):
         base_branch: str = "",
         status: str = "",
         limit: int | None = None,
+        batch_id: str = "",
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]: ...
 
     def list_merge_train_stack_collapse_plan_records(
@@ -266,6 +278,7 @@ def evaluate_merge_train_admission_from_store(
     current_policy_sha256: str = "",
     poll_interval_seconds: int = 60,
     backoff_seconds: int = 300,
+    policy_record: MergeTrainPolicyRecord | None = None,
 ) -> MergeTrainAdmissionDecision:
     controller_records = _list_active_controller_records(
         store=store, repository=repository, base_branch=base_branch
@@ -291,7 +304,7 @@ def evaluate_merge_train_admission_from_store(
         landing_plan_records=actionable_records.landing_plan_records,
         stack_collapse_plan_records=actionable_records.stack_collapse_plan_records,
     )
-    return evaluate_merge_train_admission(
+    decision = evaluate_merge_train_admission(
         repository=repository,
         base_branch=base_branch,
         requested_at=requested_at,
@@ -299,6 +312,12 @@ def evaluate_merge_train_admission_from_store(
         controller_decision=controller_decision,
         poll_interval_seconds=poll_interval_seconds,
         backoff_seconds=backoff_seconds,
+    )
+    return defer_for_recorded_github_quota(
+        decision=decision,
+        controller_state=controller_state,
+        store=store,
+        policy_record=policy_record,
     )
 
 
@@ -312,6 +331,7 @@ def build_merge_train_controller_status_read_model(
     current_policy_sha256: str = "",
     poll_interval_seconds: int = 60,
     backoff_seconds: int = 300,
+    policy_record: MergeTrainPolicyRecord | None = None,
 ) -> MergeTrainControllerStatusReadModel:
     controller_records = _list_active_controller_records(
         store=store, repository=repository, base_branch=base_branch
@@ -346,6 +366,12 @@ def build_merge_train_controller_status_read_model(
         poll_interval_seconds=poll_interval_seconds,
         backoff_seconds=backoff_seconds,
     )
+    admission = defer_for_recorded_github_quota(
+        decision=admission,
+        controller_state=controller_state,
+        store=store,
+        policy_record=policy_record,
+    )
     latest_run_age_seconds: int | None = None
     if latest_run is not None:
         try:
@@ -372,6 +398,8 @@ def build_merge_train_controller_status_read_model(
             generated_at=generated_at,
         ),
         controller_records=_summarize_controller_records(
+            store=store,
+            controller_state=controller_state,
             controller_records=controller_records,
             current_policy_key=current_policy_key,
             current_policy_sha256=current_policy_sha256,
@@ -831,6 +859,8 @@ def _string_tuple_field(payload: dict[str, object], key: str) -> tuple[str, ...]
 
 def _summarize_controller_records(
     *,
+    store: MergeTrainRunHistoryStore,
+    controller_state: MergeTrainControllerStateRecord | None,
     controller_records: MergeTrainControllerRecords,
     current_policy_key: str = "",
     current_policy_sha256: str = "",
@@ -861,9 +891,104 @@ def _summarize_controller_records(
             for record in controller_records.stack_collapse_plan_records
         ),
     ]
-    return tuple(
-        sorted(summaries, key=lambda summary: (summary.updated_at, summary.record_id), reverse=True)
+    historical_ids = _historical_controller_record_ids(
+        controller_records, store=store, controller_state=controller_state
     )
+    return tuple(
+        summary.model_copy(update={"historical": summary.record_id in historical_ids})
+        for summary in sorted(
+            summaries, key=lambda summary: (summary.updated_at, summary.record_id), reverse=True
+        )
+    )
+
+
+def _historical_controller_record_ids(
+    records: MergeTrainControllerRecords,
+    *,
+    store: MergeTrainRunHistoryStore,
+    controller_state: MergeTrainControllerStateRecord | None,
+) -> set[str]:
+    """Qualify history with the same stored-progress selector the controller uses.
+
+    Evaluate each lineage before current-policy filtering: an obsolete unfinished
+    lineage still needs retirement even when admission correctly selects no action.
+    """
+    active_binding = (
+        controller_state.ordinary_job_binding
+        if controller_state is not None and controller_state.status == "running"
+        else None
+    )
+    historical: set[str] = set()
+    for batch_id, binding in {
+        (record.candidate.batch_id, record.ordinary_job_binding)
+        for record in records.candidate_records
+    }:
+        candidates = tuple(
+            record
+            for record in records.candidate_records
+            if record.candidate.batch_id == batch_id and record.ordinary_job_binding == binding
+        )
+        candidate = candidates[0].candidate
+        # Completion can be outside the dashboard's recent-record window.
+        landings = store.list_merge_train_batch_landing_plan_records(
+            repository=candidate.repository,
+            base_branch=candidate.base_branch,
+            status="active",
+            batch_id=batch_id,
+        )
+        landings = tuple(record for record in landings if record.ordinary_job_binding == binding)
+        decision = decide_merge_train_controller_record_action(
+            candidate_records=candidates,
+            landing_plan_records=landings,
+            stack_collapse_plan_records=(),
+        )
+        completed = latest_completed_merge_train_batch_landing_plan_record(
+            landing_plan_records=landings, batch_id=batch_id, candidate_sha=candidate.candidate_sha
+        )
+        ordinary_complete = (
+            completed is not None
+            and completed.ordinary_job_binding is not None
+            and completed.ordinary_job_binding != active_binding
+        )
+        if decision.action in {"idle", "candidate_stopped"} or ordinary_complete:
+            historical.update(record.record_id for record in candidates)
+    for plan_id, binding in {
+        (record.landing_plan.plan_id, record.ordinary_job_binding)
+        for record in records.landing_plan_records
+    }:
+        landings = tuple(
+            record
+            for record in records.landing_plan_records
+            if record.landing_plan.plan_id == plan_id and record.ordinary_job_binding == binding
+        )
+        decision = decide_merge_train_controller_record_action(
+            candidate_records=(), landing_plan_records=landings, stack_collapse_plan_records=()
+        )
+        plan = landings[0].landing_plan
+        completed = latest_completed_merge_train_batch_landing_plan_record(
+            landing_plan_records=landings, batch_id=plan.batch_id, candidate_sha=plan.candidate_sha
+        )
+        ordinary_complete = (
+            completed is not None
+            and completed.ordinary_job_binding is not None
+            and completed.ordinary_job_binding != active_binding
+        )
+        # The selector is idle for terminal blocked/stale outcomes as well as
+        # successful ones. Reconciliation diagnostics independently retain attention.
+        if decision.action == "idle" or ordinary_complete:
+            historical.update(record.record_id for record in landings)
+    for collapse_id in {record.plan.collapse_id for record in records.stack_collapse_plan_records}:
+        collapses = tuple(
+            record
+            for record in records.stack_collapse_plan_records
+            if record.plan.collapse_id == collapse_id
+        )
+        decision = decide_merge_train_controller_record_action(
+            candidate_records=(), landing_plan_records=(), stack_collapse_plan_records=collapses
+        )
+        if decision.action == "idle":
+            historical.update(record.record_id for record in collapses)
+    return historical
 
 
 def _candidate_summary(

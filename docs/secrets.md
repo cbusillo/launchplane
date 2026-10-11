@@ -409,7 +409,9 @@ decryption key state denies the reveal or resolution.
   `control_plane/runtime_key_safety.py`), matched on whole underscore-separated
   key parts. The active policy record's `integration_key_markers` add
   product-specific ones. Policy apply adds markers and never removes one. `prod`
-  lanes keep the lane-exact shortcut.
+  lanes keep the lane-exact shortcut. Odoo's `web_map.token_map_box` override
+  retains its integration identity in the generated runtime binding key and
+  follows the same classification and preview-omission rules.
 - A production integration key may sit on a `testing` or `dev` lane only for a
   reason on an allowlist, recorded with evidence. Declaring such a key
   `shared_safe` on a non-production lane also needs a `sharing_reason` on the

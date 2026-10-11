@@ -55,19 +55,54 @@ from the candidate's artifact, commit and shared-input identity. The worker
 serializes publication across replicas using the existing release-publication
 lock and checks for that receipt before posting. A retry after a lost response
 adopts the existing comment; edits to checklist notes do not notify again.
-Before the Client accepts or requests changes, newer candidates update the same
-request comment's review link, change list, candidate identity and marker, without
-another mention or comment. The request also carries a `release-request` marker
-bound to the product, repository, Client identity and latest Client decision.
-A new candidate after the Client accepts or requests changes opens a new
-request and mentions the Client.
+The invitation greets the Client, shows the Client test notes for changes they
+reviewed or were asked to review on preview, and asks them to open the release
+page, check the testing site, and press Accept or Request changes. It explains
+what Accept does and displays the update time in Eastern time. Engineering-only
+titles are omitted; the complete checklist remains on the release page.
+Its first visible line names **Release review** and asks whether the site is
+working with these changes so they can go live. This is the site's release
+decision, separate from the one-change preview decision described in
+[Client review](owner-acceptance.md).
+
+Before the Client decides, a candidate containing new Client-facing changes posts
+one new invitation mentioning the Client and naming only the additions. A batch
+of changes gets one invitation. Client-facing evidence is an existing product
+preview decision or a bound per-PR review request in Launchplane's persisted
+preview feedback; titles, labels and the existence of a preview are not classifiers.
+For a batch landing, the stored landing plan binds the batch PR and merge commit
+to its constituent PRs; each constituent uses its own review evidence and its
+section of the batch's Client test notes.
+The invitation names each Client-facing member from its generated notes heading
+and includes that member's instructions, rather than naming the synthetic batch.
+Fenced examples cannot introduce member sections; duplicate member sections
+refuse publication. The release still needs its own Client Accept.
+Durable `release-client-change` receipts record which PRs have been announced in
+this open review. Engineering-only candidates update the current invitation
+silently, with no new comment or mention. Notes edits and already-announced changes
+do not notify again. The `release-request` marker binds the open review to the
+product, repository, Client identity and latest Client decision. A new candidate
+after acceptance or a request for changes opens a new review and mentions the Client.
 The worker adopts the newest legacy candidate-marked request created after that
-decision (or the newest one if there has been no decision); older receipts are
-left in place. Missing timestamps or ambiguous request markers refuse publication.
+decision (or the newest one if there has been no decision). Legacy PR links,
+including batch links bound to their constituents, seed the announcement history.
+An adopted manual receipt for the exact current candidate covers its included
+changes even without individual PR links. Bound request evidence compares
+repository names without case sensitivity, as GitHub does.
+The publisher updates the wording and marks older invitations in the same open
+review replaced once, collapsing the earlier wording and neutralizing its
+mentions while retaining delivery receipts and historical text. Release decision
+records remain the authority for accepted releases. Invitations from already
+decided reviews stay unchanged. After every publication, exactly one invitation
+in the open review is current. Lost post or replacement responses are recovered from those receipts;
+cleanup is completed before delivery is cached. Missing timestamps or identities
+refuse publication. No manual live-thread cleanup is needed.
 
 An undecided request gets at most one reminder, no sooner than three days after
-its original creation. Updating its candidate does not reset that clock or send
-a reminder during the update. A separate `release-reminder` marker binds the
+the current invitation's creation. Silent candidate updates do not reset that
+clock or send a reminder during the update. A fresh Client-facing addition resets
+the reminder deadline; the open review still gets at most one reminder. A reminder
+also replaces the older invitation. A separate `release-reminder` marker binds the
 reminder to the open request, so retries and worker restarts cannot send it twice,
 even when another candidate arrives. A decided or incomplete review gets no
 reminder. Markers are delivery
@@ -96,8 +131,12 @@ It prints the issue and comment markers and makes no service or GitHub request.
 The review leads with the product, the viewer's Client or admin role, the
 testing-site link, and **What to test**. Pull requests with identical
 `Client test notes` appear as one check listing each change it covers, and a change missing
-notes appears as its own check. Changes whose notes begin with
-`Nothing for the Client to test` collapse into one expandable count. This grouping
+notes appears as its own check. Changes with valid `Nothing for the Client to test: <reason>` notes collapse
+into one expandable count. The reason must be nonempty, and a change carrying
+the product's review label cannot use that declaration. Invalid or missing
+notes stay visible and block Client acceptance, including shared-repository
+changes. Real test notes also request the change's preview review without a
+label; see [Client review](owner-acceptance.md). This grouping
 is display only: the checklist, its digest, and blockers remain per pull request. A collapsed **Technical details**
 section identifies the **Current production version** and **Proposed production
 version** (currently in testing). Accepting records approval for that proposed
@@ -107,7 +146,8 @@ the checklist. Admins get a separate **Admin Approval Override** section
 and approval-justification field explaining that their decision supplies
 approval under their own identity and replaces an earlier
 request for changes. A saved decision whose release record has not been
-published shows that pending state beside the decision. Only the Client's
+published shows that pending state beside the decision. In the implemented
+normal release path, only the Client's
 acceptance can start a release, and only as described under
 [Acceptance starts the release](#acceptance-starts-the-release); every other
 decision is recorded without deploying.
@@ -138,9 +178,14 @@ with the trace ID and logged with it: `testing_lane_missing`,
 `candidate_identity_missing`, `release_record_missing`, or `github_read_failed`.
 Provider error text is never returned or logged, because it can contain private
 URLs. Missing test notes and commits without a merged pull request are
-visible checklist blockers. `Nothing for the Client to test` is valid test notes.
-Pull requests written before the role words changed say `Owner test notes` and
-`Nothing for the owner to test`; Launchplane and the CI action read both.
+visible checklist blockers. The [Client notes contract](owner-acceptance.md)
+owns valid engineering-only declarations and supported historical spellings.
+New checklists validate reasons and the review-label override. An existing
+recorded Client Accept for the same artifact pair and real notes keeps its
+binding; derived validation annotations do not change that release's identity.
+Without that Accept, invalid or missing notes must be corrected on the PR named
+in the blocker (the batch PR for batch landings). Changing the actual notes or
+release facts needs fresh acceptance.
 Previous preview acceptance is an annotation, never release approval.
 Changes to existing shared Odoo addon sources appear in separate Client checklist
 sections, with each repository's exact production-to-testing SHA range, merged
@@ -238,7 +283,13 @@ and raw generic-web promotion routes. Odoo evaluates it before backup in the
 combined run and again before direct promotion. The existing VeriReel service
 promotion wrapper also checks it. Readiness and direct dry-runs remain available
 while a Client decision is pending. Recording a decision never merges or
-dispatches a workflow, and only a Client's acceptance starts a release.
+dispatches a workflow. The [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
+owns who may start a release; the normal acceptance-started implementation is
+described below.
+
+The Director can also ship a temporary hotfix for live breakage before the
+Client accepts it; see [Temporary hotfix](#temporary-hotfix). An admin override
+or an existing grant is not that path.
 
 ## Acceptance starts the release
 
@@ -301,6 +352,219 @@ while a release is running still returns the original decision.
 The stable worker advances Client releases on one background thread per replica,
 so a generic-web deploy or rollback wait does not block queued Odoo operations.
 Shutdown finishes an admitted operation and starts no further product release.
+
+## Temporary hotfix
+
+The [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
+lets the Director ship a temporary hotfix for live breakage before the Client
+accepts it. On the review page, the Director, and nobody else, sees a
+**Temporary hotfix** section. The Director is the signed-in person whom the active
+authorization policy names as administrator by immutable GitHub ID. The section
+puts exactly the listed candidate live and asks why. The browser records it
+through `POST /v1/release-review/decisions` with `decision: temporary_hotfix`, the
+current `checklist_digest` and a required `reason`, under the session's CSRF
+protection.
+
+The route refuses with `403 temporary_hotfix_denied`:
+
+- agent and workflow tokens
+- other admins, including holders of `product_profile.write`
+- the product's own Client
+
+It refuses with `409`:
+
+- `temporary_hotfix_unavailable` for a prelaunch, `director_standing` or
+  non-Odoo/non-generic-web product, or one without a prod lane or Client
+- `temporary_hotfix_unavailable` while a release step is running
+- `temporary_hotfix_unavailable` when testing carries what production runs
+- `temporary_hotfix_unavailable` when no Client-accepted release has a passing
+  production deployment to roll back to; the admin override and hand promotion
+  remain available then
+- `release_checklist_changed` for a stale or unavailable checklist
+- `release_checklist_incomplete` for an incomplete one
+
+The decision binds the exact checklist digest, so it puts live exactly the
+changes listed. Keeping it to one small change is the Director's judgment.
+
+The hotfix runs on the gated path described above, whatever
+`release_on_acceptance` says; that setting only decides what a Client's Accept
+does. The worker records a verified backup, then the promotion, with its release
+record, post-deploy and health checks, and automatic rollback or Odoo recovery.
+Each step carries a `temporary_hotfix` grant that names the decision and the
+Director. Before each step and each provider effect, the worker checks again that:
+
+- the decision is still the product's newest one
+- the active policy still names the Director as administrator
+- the lanes still carry the checklist's versions
+
+Removing the Director from the policy, or recording a newer decision, therefore
+stops the hotfix before its next effect.
+
+The hotfix's release record is created in the product repository before
+anything deploys. It is the Client's notice:
+
+- it mentions the Client
+- it says plainly that an urgent temporary fix is going live before their review
+- it gives the reason and links the review page (built from
+  `LAUNCHPLANE_PUBLIC_URL`)
+
+While the hotfix is going live, Client decisions return
+`409 temporary_hotfix_in_progress`. Once it is live, the Client's review page
+shows that exact checklist (`reviewing_temporary_hotfix: true`) with the reason:
+
+- **Accept** records a normal accepted release with no `release_start`; the
+  fix is already live.
+- **Request changes** records the decision with `release_start: rollback`.
+  The worker then rolls production back to the newest Client-accepted release
+  with a passing production deployment, under the Client's release grant. It
+  uses the existing paths: an Odoo rollback operation, or generic web's fenced
+  rollback. This rollback runs even while releases are held.
+
+The review links the live site, because testing may already carry newer work.
+Until production no longer runs the rejected candidate, every new decision
+returns `409 temporary_hotfix_rollback_in_progress`, including the admin
+override and another hotfix. If the rollback stops (it fails, or its provider
+outcome needs reconciliation), the existing admin rollback or reconciliation
+path takes production off the rejected fix, and decisions resume. If a Client
+decision's release record could not be published, the review stays open on the
+same hotfix, even when the Client edits their reason, and a rejection keeps its
+rollback.
+
+The admin override is refused while a live hotfix awaits the Client. The
+Director keeps seeing the current testing candidate, so a further hotfix binds
+the right version. A later hotfix replaces the pending review, and a rejection
+still returns to the last Client-accepted release. There is no deadline,
+extension or per-product limit. The next normal release includes or replaces
+the fix as usual. A failed hotfix stops like any release; the Client's review
+then shows the ordinary checklist.
+
+The isolated rehearsal, `tests.test_temporary_hotfix`, runs on the
+`example-site` test product with SQLite and synthetic providers. It covers
+start, Client acceptance, Client rejection with rollback, the refusals, and
+the policy recheck.
+
+### A control-plane replacement drains release effects first
+
+The shared self-deploy route records a database admission fence before changing
+the provider. Its transaction lock also covers backup and Odoo release claims
+(including failure recovery) and generic-web release reservations. A Client can
+accept while replacement is preparing; that decision and pending steps remain
+durable, but no new release effect starts behind the fence. Operations admitted
+before it finish their admitted backup, deployment, drill, post-checks or
+compensation and commit normally. Separately queued Odoo compensation remains
+durable and resumes on replacement workers if it was not yet admitted. The API
+remains available during this drain. Completed step IDs
+are reused after replacement, so polling or a worker restart cannot duplicate
+their effects. The release read explains the pause; the engineering runtime read
+exposes `runtime.release_drain` and its running operation IDs.
+
+`POST /v1/drivers/launchplane/self-deploy` uses its existing authorization and a
+fresh, never-reused `deploy.oauth_env.LAUNCHPLANE_DEPLOYMENT_MARKER`. The workflow
+generates it from the run and attempt; direct callers supply a new marker for
+each new intent. While operations run it
+returns `result.deploy_state=draining`, without changing provider configuration
+or caching that poll as a completed idempotent response. Repeat the same payload
+and key until it returns `requested`. The Deploy Launchplane workflow does this
+with its existing request action. Each drain poll renews a two-minute pre-effect
+fence; an abandoned drain expires without stranding pending Client releases.
+Final admission rechecks the fence and running operations under the same lock.
+The typed Odoo and shared backup queues also contain workflow-started operations;
+their claims pause at this worker boundary and resume after replacement. Worker
+debug logs report that pause, and the runtime read exposes its cause. Generic-web
+workflow requests outside Client releases retain their existing reservations;
+this change covers Client-started generic-web releases.
+An active provider request returns pollable `dispatch_in_progress`, also without
+caching the intermediate response. An expired release lease stays a drain
+blocker: losing its heartbeat does not prove the provider effect ended. Reconcile
+that operation through its existing recovery route before replacement.
+The request action tolerates network errors while polling the drain. Its
+latest drain response is retained on timeout; a later failed request clears that
+response to retain uncertainty. Rollback skips only positively pre-effect
+outcomes. The authorized runtime read reconfirms its own matching image/marker
+when repair refusal restored a request whose startup raced the repair.
+The workflow performs this authorized read even after deployment or repair failure.
+Keyed and keyless self-deploys use the same canonical request fingerprint;
+per-caller idempotency response ownership is unchanged. A definite,
+non-retryable 4xx refusal of the first environment write records `refused`, frees
+this attempt's fence, and never dispatches or replays that request. The previous
+fence is restored: a refused repair cannot unlock an earlier uncertain replacement
+or unquarantine old workers. Timeouts, 5xx,
+remote command failures, or failures after that write remain uncertain and fenced.
+Bootstrap key-ring rollback keeps its existing expected-value/absence guards;
+when those refuse uncertain compensation, use the explicit service repair input
+with `bootstrap_secret_operation=preserve` after reviewing provider state.
+
+Provider dispatch is recorded before its first effect and never automatically
+replayed after an uncertain response. Per-request receipts survive later service
+replacements, so an old lost-response request stays settled. Only startup of the exact requested image
+and deployment marker confirms the replacement. The requested fence does not
+expire, and old worker processes remain fenced even after confirmation. Pending
+operations then run on the matching replacement workers. A changed candidate,
+revocation or admin release hold still refuses forward release work. A lost self-deploy dispatch response returns
+`self_deploy_reconciliation_required` on replay; matching replacement startup
+can settle it without another dispatch. If no matching replacement starts,
+the existing authorized self-deploy route accepts a new repair request with a
+new key, a compatible immutable image, a fresh marker, and
+`deploy.supersedes_deployment_marker` equal to the stuck fence's marker from
+`runtime.release_drain`. The target must also match that fence. This deliberately
+requests one new service replacement; it never replays the original dispatch
+or clears the fence before matching API process startup. Confirmation precedes
+the container health checks; failed deployment health starts a new repair fence,
+and already admitted effects must still finish before that replacement.
+Automatic service rollback
+uses the same marker-bound repair, including same-image configuration failures.
+For a cancelled run, manually dispatch Deploy Launchplane with the compatible
+`image_reference`, a new `self_deploy_idempotency_key` and the exact
+`supersedes_deployment_marker` from `runtime.release_drain`; this uses the existing
+workflow authorization. Automatic runs cannot set the repair input. After gated break-glass restores a compatible
+service, use this route to reconcile any remaining fence; never edit its DB row.
+Provider-call serialization refuses a repair while an earlier service request
+is still executing, so a late original dispatch cannot overtake that repair.
+A drain timeout before dispatch requests no service rollback; its pre-effect
+fence expires. Uncertain release outcomes retain their
+existing stopped or reconciliation state and are never retried by replacement.
+The reconciliation routes described below remain their supported recovery path.
+
+The workflow prepares separate drain and deployment-observation budgets before
+any provider effect. After `release_drain_complete=true`, image, marker and health
+waits share a new deadline using deployment/health budgets and other Compose worker
+graces. The release workers' drain allowance is excluded because their admitted
+operations already committed. A broken replacement therefore consumes the
+deployment budget rather than a two-hour capture window. Failed-image recovery
+retains the existing service rollback and gated break-glass paths in
+[operations](operations.md#launchplane-service-deploy-posture).
+
+First rollout must still occur with no active or invited Client release:
+containers running earlier code do not enforce this fence. The additive schema
+migration also requires a schema-compatible repair image; an older image whose
+schema guard rejects the new head cannot resume workers. The installed service
+and both worker families were qualified (#3145), so Launchplane lands normally
+during Client releases (Q160); a release holds only its own product's merge
+train, as [merge-train policy](merge-train-policy.md#candidate-construction)
+describes. This protects planned service replacements, not
+arbitrary host loss or a forced kill of an unsafe provider effect; those remain
+truthfully interrupted and require the existing reconciliation path. The isolated
+rehearsal is `tests.test_client_release_redeploy`; it drains during each step for
+both drivers, starts a separate replacement API process through its factory-store
+lifespan and health read, reopens worker storage, resumes the drill once, and preserves failed
+forward outcomes after automatic recovery. PostgreSQL integration separately
+proves both admission-versus-drain race orders with real database locks.
+The local rehearsal uses synthetic providers and SQLite; its API starts in a
+new process while the test reopens worker storage.
+
+The runtime image uses the environment installed during its locked build;
+startup does not resolve or rebuild Python dependencies. This lets a compatible
+repair image start without package-registry access. CI qualifies the packaged
+API and both release-worker entrypoints on an isolated network with PostgreSQL,
+then recreates them against the same database and checks the replacement marker.
+It also starts an isolated ordinary-agent worker replica to check its sanitized
+startup probe uses the installed Python environment.
+For the local `qualityGate.build.serviceCompose` command, first set
+`LAUNCHPLANE_CI_POSTGRES_IMAGE` from the top-level environment in the CI workflow;
+that workflow owns the PostgreSQL test image pin.
+
+### Interrupted provider operations
+
 Failures before any provider effect are recorded as terminal failures for this
 release rather than silently retried. An expired promotion lease is shown as
 `reconciliation_required`; the provider fence stays in place. The deploy recovery

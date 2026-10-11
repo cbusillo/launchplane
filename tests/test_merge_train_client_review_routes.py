@@ -40,7 +40,7 @@ def _review_store(*, review_label: str = "owner-review") -> Any:
     profile = SimpleNamespace(
         is_active=True,
         repository=REPOSITORY,
-        owner=SimpleNamespace(review_label=review_label),
+        owner=SimpleNamespace(review_label=review_label, is_set=True),
     )
     return SimpleNamespace(
         list_product_profile_records=lambda: (profile,),
@@ -54,6 +54,7 @@ def _labelled_pull_request_transport(
 ) -> RecordingMergeTrainGitHubTransport:
     pull = _github_pull_request(42)
     pull["labels"] = [{"name": "ready-to-merge"}, {"name": "owner-review"}]
+    pull["body"] = "## Client test notes\nTry the changed page."
     return RecordingMergeTrainGitHubTransport(
         responses=(
             _github_branch(),
@@ -133,6 +134,7 @@ class LegacyRunOnceClientReviewTests(unittest.TestCase):
     def test_mutating_run_once_rechecks_review_on_the_head_it_merges(self) -> None:
         pull = _github_pull_request(42)
         pull["labels"] = [{"name": "ready-to-merge"}, {"name": "owner-review"}]
+        pull["body"] = "## Client test notes\nTry the changed page."
         transport = _labelled_pull_request_transport((_owner_review_check("success"),))
         # Between the snapshot and the merge, the Client requests changes.
         transport.responses.extend(
@@ -170,6 +172,8 @@ class StandaloneCandidatePlanningClientReviewTests(unittest.TestCase):
     def test_plan_mode_waits_for_review_on_a_later_batch_member(self) -> None:
         first = _github_pull_request(41)
         second = _github_pull_request(42)
+        first["body"] = "## Client test notes\nNothing for the Client to test: CI only."
+        second["body"] = "## Client test notes\nTry the changed page."
         second["labels"] = [{"name": "ready-to-merge"}, {"name": "owner-review"}]
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
@@ -181,7 +185,6 @@ class StandaloneCandidatePlanningClientReviewTests(unittest.TestCase):
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
                 second,
-                {"permission": "admin"},
                 _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},

@@ -25,15 +25,27 @@ lease immediately before its provider merge. The live adapter resolves current
 engineering decision and run evidence, required technical checks, policy fingerprints, structural candidate
 provenance, queue position, rolling base, exact head/tree, candidate identity,
 and the expected effect SHA. It re-reads the active merge-train policy record
-and GitHub queue for every entry rather than treating request-start policy or
-stored candidate order as live evidence.
+for every entry and the GitHub queue for every sequential entry, rather than
+treating request-start policy or stored candidate order as live evidence.
+Protected batch landing shares queue and member reads within one pass, as
+described under [Batch And Recovery](#batch-and-recovery).
 
-Before building that live queue, admission excludes the candidate's conflict
-hold-outs only while both the PR number and head match the recorded hold-out,
-as planning does. An unchanged held-out PR that sorts ahead of a planned entry
-does not invalidate the landing. A changed head returns to the queue and is
-subject to the existing lineage check; new or changed entries ahead of the plan
-still refuse admission with `landing_lineage_changed`.
+The native controller route and scheduled controller create a repository-evidence
+reader per call. Within that reader they reuse up to 128 Git commit-to-tree
+results, keyed by repository ID and exact commit SHA. These immutable results
+cannot change with a PR update. Repository identity, PR metadata and confirmation,
+changed files, authorship, the live queue, active policy and technical checks are
+still read on every evaluation. Failed tree reads are never cached. The cache
+ends with the controller call; injected readers and the direct batch-landing
+endpoint retain their existing read behavior. This reduces one repeated read per
+unchanged member without treating prior admission or provider refusal as reusable
+authority.
+
+That live queue is built from the plan's unlanded entries alone, under every
+batch rule. Conflict hold-outs and pull requests that joined the queue after
+planning, wherever they sort, wait for the next candidate and do not invalidate
+the landing. A planned entry whose head moved, that left the queue, or that no
+longer fits the batch refuses admission with `landing_lineage_changed`.
 
 Only `ready` Level 2 evidence plus `exact` or `recorded_rolling` structural
 evidence may produce an admission. The guarded caller binds the expected lease
@@ -126,6 +138,18 @@ landing plan's digest. Queue, head, policy,
 technical-check, structural, lease, or expected-SHA drift refuses the next
 admission before mutation.
 
+Within one protected batch pass, the live adapter reads the open-PR queue
+snapshot and each member's repository evidence once and reuses them for every
+evaluation except the final admission, which rereads both before the
+member, batch-PR and base rechecks that precede the provider merge. Each
+member's head and open state, the active policy, technical checks and the
+controller fence are still read for every admission. Without this, a pass
+cost two evaluations per member, each reading every open PR in the
+repository, so an eight-member batch took about half an hour while holding
+the controller lease (#3069). The shared reads end with the pass; a queue
+change in between is caught by the final admission and records the earlier
+admissions as not dispatched.
+
 If a batch stops after admitting only a prefix but before dispatch, those
 admissions receive `rejected / batch_not_dispatched` outcomes with
 `provider_effect_attempted=false`. After an interrupted provider attempt,
@@ -183,6 +207,11 @@ ordered authoritatively by admission plus observation sequence, with timestamps
 retained only as metadata. Exact replay is idempotent; conflicting replay fails
 closed.
 
+New landing outcomes capture `observed_at` after the provider result or exact
+reconciliation has been processed, using a clock separate from the controller
+pass start. Existing immutable outcomes retain their recorded time. In the
+governance view, a legacy time that predates its matching admission is labeled
+"Recorded time (unqualified)"; the outcome and merge identity remain visible.
 
 ## Rolling branch identity and PR projections
 

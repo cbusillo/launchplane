@@ -47,6 +47,9 @@ but those jobs must have separate navigation:
   testing site for the Client's product. It allows only accept or request
   changes with feedback; it exposes no source,
   configuration, deploy, merge, secret, or access-administration action.
+  The Director alone also sees **Temporary hotfix** there, to put a fix for
+  live breakage on the gated path before the Client accepts it; see
+  [Temporary hotfix](release-review.md#temporary-hotfix).
 
 Product Ops is the default surface. Delivery Governance may reuse the same
 session, theme, and API transport, but it must not become a general issue
@@ -85,6 +88,18 @@ Reviewed Odoo preview plans are service-issued, short-lived, and bound to their
 artifact and provider-routing evidence. If that evidence changes or the plan
 expires, the UI must present a stale-plan result and obtain a new plan rather
 than offering a force-apply control.
+
+The workspace's read-only recorded-preview list exposes bounded identity
+references only under the existing `preview.read` grant. Selecting a change
+reads the canonical preview history and redacted product reconciliation route,
+each under its own existing authorization. Latest and serving generation
+references stay separate; missing reference evidence is not replaced by a
+different historical generation. Generation health and runtime identity
+declarations are recorded evidence, not current provider/runtime verification.
+Held or failed cleanup remains visible beside an explicit unknown provider
+state. Activity supplies the next supported inspection; this view enables no
+refresh/destroy/reconciliation mutation. Deployed acceptance still requires
+the actual product records and authenticated consumer, not development fixtures.
 
 ### Promote A Verified Release
 
@@ -197,6 +212,12 @@ Empty states are part of the product contract:
 Loading, empty, blocked, missing, unsupported, and error are different states
 and must not share a reassuring generic placeholder.
 
+The directory, workspace signal and preview detail use the preview summary's
+trust decision for the same inventory claim. Missing evidence means inventory
+unknown even when a count is recorded; zero recorded is not verified empty.
+Recorded counts remain labelled recorded, stale and unsupported evidence retain
+their uncertainty, and only verified inventory uses active or empty wording.
+
 ## Responsive Product Contract
 
 Desktop layouts optimize for fast comparison across testing, production, and
@@ -258,7 +279,13 @@ Admins should not normally need to choose a raw context or understand provider
 lookup rows before taking safe action.
 
 Incidents remain children of product environments rather than a separate raw
-record browser. Product summaries surface active incident count and severity;
+record browser. Product summaries surface active incident count and severity
+from the canonical lane-wide `health_monitoring.open_incidents` collection,
+including generated TLS, cadence and deploy-fence occurrences. This collection
+reuses the incident-history summary and notification state; configured checks
+do not define the incident inventory. Resolved occurrences remain in history
+and disappear from the active overview. Open occurrences also block a green
+operational signal, even when ordinary health checks pass;
 the environment view owns lifecycle state, material evidence, observation
 history, and delivery evidence for one occurrence. GitHub, email, and Discord
 notifications are sinks, not authority. Incident surfaces are `inspect` actions
@@ -267,6 +294,13 @@ confirmation, authorization, idempotency, replay, and result states. The read
 model may show provider-safe external links and bounded delivery failures, but
 must not expose destination or policy identities, raw outbox payloads, provider
 operation internals, raw target URLs, secret references, or provider error text.
+
+Monitoring completeness comes from each effective, incident-eligible check's
+observation and deadline. An absent, stale or unsupported observation is
+disclosed even when the active incident set is empty. Disabled and inapplicable
+probes do not imply missing evidence. `health_monitoring.provenance` describes
+the recorded monitoring intent; the retired aggregate `trust_state` is omitted
+so consumers use the checks instead of treating configuration as probe proof.
 
 The first product/site read endpoints are:
 
@@ -510,6 +544,12 @@ includes both its displayed integration and binding key so repeated binding-key
 names remain unambiguous; the server resolves that pair against the stored
 profile rather than trusting it as target authority. The browser does not send a
 raw context picker or checked-in product defaults.
+The generic product-config API uses the same credential-value validator as the
+form: password-bearing URLs/DSNs and recognized credentials cannot become plain
+runtime settings, even under a neutral or declared key. Managed secrets remain
+the supported encrypted path. Both entrypoints enforce the existing rule that
+the Director's agent cannot add undeclared settings to a live product; declared settings
+and non-live site settings remain supported within the caller's existing scope.
 
 Every form request stays bound to the profile used to construct it through
 planning and commit. Conflicting profile snapshots refuse the request before
@@ -534,10 +574,18 @@ immediate request local variable. The UI clears those inputs before dispatch and
 again on secret-input validation failure, request failure, route change, and
 unmount. Apply requires the admin to re-enter the same values; retained
 browser operation state contains only a fingerprint, idempotency key, redacted
-result, trace, and failure evidence. An uncertain apply locks every editable
-draft field so the only mutation retry preserves the original operation key and
-payload. Live-target endpoints returned in `next_actions` are rendered as
+result, trace, and failure evidence. An uncertain apply initially locks the draft
+and offers original-request re-entry, including after reload. Re-entry enables
+the existing fields only to reconstruct that request; its retained fingerprint
+rejects a different payload before dispatch. New dry-runs and Start over remain
+unavailable until that Apply settles. Secret values are cleared again after each
+retry, including a rejected mismatch. Live-target endpoints returned in `next_actions` are rendered as
 inspect-only evidence until they have a separate generated browser adapter.
+For both configuration forms, a server or gateway 5xx after dispatch keeps the
+Apply uncertain even when the error response is valid JSON. The retained key and
+fingerprint survive navigation/reload; a pre-dispatch failure or explicit client
+refusal remains definitive. A retry that began uncertain still requires evidence
+that the original operation settled before its identity can be discarded.
 
 The environment Managed secrets form can also select a credential supplied by the
 named Client. The Client receives the focused `/ui/owner-secrets` page, containing
@@ -613,6 +661,12 @@ types remain only for UI state and view models.
 
 ### Browser Route Contract
 
+The light/dark switch saves only an explicit choice in browser local storage,
+scoped to the browser profile and Launchplane origin. The saved choice applies
+before the first render on every UI route, survives return visits, and updates
+other open tabs. Without a valid saved choice, the existing dark default applies.
+If the browser refuses storage, the switch still works for the current page.
+
 The clean-slate shell uses URL-owned product selection under the service-owned
 `/ui` prefix:
 
@@ -657,13 +711,21 @@ without a public route binding, including for private-only services. That record
 does not establish public ingress, TLS ownership, or verified runtime identity;
 missing public route authority still blocks public-lane qualification.
 
+Products sidebar lane dots and their accessible descriptions use
+`environmentOperationalTone`, the same signal as product views. Absent lanes
+are neutral and described as absent (not recorded); missing or unsupported
+evidence stays unknown, warnings are amber, and failures are red.
+
 Open product inventories, workspaces, and environment evidence views refresh
 their read resources once a minute after a completed read. Hidden tabs pause
 automatic reads and catch up on focus or visibility return when due. Pending
 reads do not overlap; access-denied and missing resources require a manual retry.
 Evidence still expires at its recorded deadline while a read is delayed or
-failed. Only a new service response with fresh passing health and current runtime
-identity can restore green. Automatic reads do not reset action, settings, or
+failed, including recorded route authority, nested ingress/TLS ownership and
+observed TLS proof. A fresh health/identity observation cannot prolong expired
+applicable topology proof. Focus or visibility return re-evaluates the cached
+deadlines immediately. Only a new service response with fresh applicable proof,
+passing health and current runtime identity can restore green. Automatic reads do not reset action, settings, or
 promotion resources; the manual Refresh remains available.
 
 Each Delivery Governance or transitional engineering child route owns an

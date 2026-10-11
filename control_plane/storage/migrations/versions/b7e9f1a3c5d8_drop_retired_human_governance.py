@@ -23,14 +23,16 @@ down_revision: str = "49a61248b8c5"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+RETIRED_TABLES = (
+    "launchplane_tenant_technical_human_waiver_events",
+    "launchplane_repository_human_role_policies",
+    "launchplane_manager_preview_approval_events",
+)
+
 
 def upgrade() -> None:
     existing_tables = set(sa.inspect(op.get_bind()).get_table_names())
-    for table_name in (
-        "launchplane_tenant_technical_human_waiver_events",
-        "launchplane_repository_human_role_policies",
-        "launchplane_manager_preview_approval_events",
-    ):
+    for table_name in RETIRED_TABLES:
         if table_name in existing_tables:
             op.drop_table(table_name)
 

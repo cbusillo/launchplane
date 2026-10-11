@@ -28,6 +28,7 @@ MergeTrainAdmissionReason = Literal[
     "poll_interval_pending",
     "backoff_elapsed",
     "backoff_pending",
+    "github_rate_limit_pending",
 ]
 
 

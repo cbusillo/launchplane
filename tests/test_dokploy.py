@@ -3590,7 +3590,7 @@ domains = ["cm-testing.shinycomputers.com"]
 
         self.assertIn("ODOO_DB_NAME", str(raised_error.exception))
 
-    def test_backup_gate_requires_web_restart_and_preserves_backup_failure(self) -> None:
+    def test_online_backup_never_stops_web_and_preserves_capture_failure(self) -> None:
         script = dokploy_post_deploy._build_dokploy_odoo_backup_gate_script(
             compose_app_name="example-prod",
             backup_nonce="test-nonce",
@@ -3601,81 +3601,60 @@ domains = ["cm-testing.shinycomputers.com"]
         )
         fake_docker = """#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\\n' "$*" >> "$FAKE_COMMANDS"
 case "$1" in
     ps)
         case "$*" in
-            *service=database*) echo database ;;
             *service=script-runner*) echo runner ;;
             *service=web*) echo web ;;
             *) exit 90 ;;
         esac ;;
     inspect)
-        if [ "${@: -1}" = web ]; then
-            if [ "$FAKE_RESTART" = readback-fail ] && [ -f "$FAKE_STARTS" ]; then
-                exit 31
-            fi
-            if [ "$FAKE_RESTART" = initial-inspect-fail ] && [ "$(cat "$FAKE_STATE")" != running ]; then
-                exit 31
-            fi
-            cat "$FAKE_STATE"
-        else
-            echo running
-        fi ;;
-    stop) echo exited > "$FAKE_STATE" ;;
-    start)
-        echo start >> "$FAKE_STARTS"
-        case "$FAKE_RESTART" in
-            start-fail) exit 29 ;;
-            remains-stopped) ;;
-            *) echo running > "$FAKE_STATE" ;;
+        case "$*" in
+            *.Image*) printf 'sha256:%064d\\n' 0 ;;
+            *.State.Status*) echo running ;;
+            *) exit 90 ;;
         esac ;;
+    start|stop) exit 88 ;;
     exec)
-        if [[ "$*" == *pg_dump* ]] && [ "$FAKE_BACKUP_FAIL" = 1 ]; then exit 23; fi
-        if [[ "$*" == *python3* ]]; then cat >/dev/null; fi
+        if [[ "$*" == *python3* ]]; then
+            cat >/dev/null
+            exit "$FAKE_CAPTURE_STATUS"
+        fi
         echo 1000 ;;
     *) exit 91 ;;
 esac
 """
-        cases = (
-            ("running", 0, 0),
-            ("start-fail", 0, 1),
-            ("remains-stopped", 0, 1),
-            ("readback-fail", 0, 1),
-            ("initial-inspect-fail", 0, 0),
-            ("running", 1, 23),
-            ("start-fail", 1, 23),
-        )
-        for restart, backup_fail, expected_status in cases:
-            with self.subTest(restart=restart, backup_fail=backup_fail):
-                with TemporaryDirectory() as temporary_directory:
-                    root = Path(temporary_directory)
-                    docker = root / "docker"
-                    docker.write_text(fake_docker)
-                    docker.chmod(0o755)
-                    state = root / "state"
-                    state.write_text("running\n")
-                    starts = root / "starts"
-                    completed = subprocess.run(
-                        ["bash", "-s"],
-                        input=script,
-                        text=True,
-                        capture_output=True,
-                        timeout=10,
-                        env={
-                            **os.environ,
-                            "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
-                            "FAKE_STATE": str(state),
-                            "FAKE_STARTS": str(starts),
-                            "FAKE_RESTART": restart,
-                            "FAKE_BACKUP_FAIL": str(backup_fail),
-                        },
+        for capture_status in (0, 23):
+            with self.subTest(capture_status=capture_status), TemporaryDirectory() as directory:
+                root = Path(directory)
+                docker = root / "docker"
+                docker.write_text(fake_docker)
+                docker.chmod(0o755)
+                commands = root / "commands"
+                completed = subprocess.run(
+                    ["bash", "-s"],
+                    input=script,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    env={
+                        **os.environ,
+                        "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
+                        "FAKE_COMMANDS": str(commands),
+                        "FAKE_CAPTURE_STATUS": str(capture_status),
+                    },
+                )
+                self.assertEqual(completed.returncode, capture_status, completed.stderr)
+                executed = commands.read_text().splitlines()
+                self.assertTrue(any("python3" in command for command in executed))
+                self.assertFalse(
+                    any(
+                        command.split()[0] in {"stop", "start"}
+                        for command in executed
+                        if command.strip()
                     )
-                    self.assertEqual(completed.returncode, expected_status, completed.stderr)
-                    self.assertEqual(
-                        state.read_text().strip(),
-                        "exited" if restart in {"start-fail", "remains-stopped"} else "running",
-                    )
-                    self.assertTrue(starts.exists(), "web recovery was never attempted")
+                )
 
     def test_run_compose_odoo_backup_gate_uses_manual_schedule_with_consistency_script(
         self,
@@ -3684,7 +3663,7 @@ esac
             context="cm", instance="prod", target_id="compose-123", target_name="cm-prod"
         )
         backup_result: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "backup_nonce": "c" * 64,
             "backup_record_id": "backup-gate-cm-prod-1",
             "database_name": "cm",
@@ -3692,6 +3671,13 @@ esac
             "filestore_archive_sha256": "b" * 64,
             "database_dump_size": 4096,
             "filestore_archive_size": 8192,
+            "consistency_protocol": "postgres-exported-snapshot-odoo-hardlinks-v1",
+            "postgres_snapshot_id": "00000001-00000001-1",
+            "recovery_point_at": "2026-10-09T00:00:00+00:00",
+            "image_id": "sha256:" + "d" * 64,
+            "attachment_count": 2,
+            "attachment_file_count": 1,
+            "attachment_inventory_sha256": "e" * 64,
         }
         encoded_result = base64.b64encode(
             json.dumps(backup_result, sort_keys=True).encode()

@@ -134,17 +134,18 @@ def register_governance_projection_routes(
                 code="authorization_denied",
                 message="Caller cannot read merge-train governance evidence.",
             )
+        repository_evidence_unavailable = False
         try:
             repository_evidence = dependencies.repository_evidence_provider.resolve(target)
         except (RepositoryEvidenceError, LookupError, TypeError, ValueError):
-            raise common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="governance_evidence_unavailable",
-                message="Governance repository evidence is unavailable.",
-            ) from None
-        actual_base_branch = repository_evidence.base.base_ref if repository_evidence.base else ""
-        if actual_base_branch != normalized_base_branch:
+            repository_evidence = None
+            repository_evidence_unavailable = True
+        actual_base_branch = (
+            repository_evidence.base.base_ref
+            if repository_evidence is not None and repository_evidence.base
+            else ""
+        )
+        if repository_evidence is not None and actual_base_branch != normalized_base_branch:
             raise common.http_error(
                 status_code=400,
                 trace_id=trace_id,
@@ -161,6 +162,7 @@ def register_governance_projection_routes(
                 generated_at=dependencies.now(),
                 repository_evidence=repository_evidence,
                 github_token_source=repository_policy.github_token,
+                repository_evidence_unavailable=repository_evidence_unavailable,
             )
         except (LookupError, TypeError, ValueError):
             raise common.http_error(

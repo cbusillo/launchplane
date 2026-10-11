@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 import hashlib
 import json
 from typing import Protocol
@@ -53,6 +54,7 @@ from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainSnapshotReader,
     build_merge_train_dry_run_result,
+    merge_train_snapshot_of,
     review_conversations_reason,
 )
 from control_plane.merge_train_github import GitHubMergeTrainClient, GitHubMergeTrainSnapshotReader
@@ -194,6 +196,19 @@ def _ordinary_no_op_lifecycle_queue_matches(
     return live_queue_identity == expected_without_target
 
 
+@dataclass
+class _BatchEvidenceMemo:
+    active: bool = False
+    snapshots: dict[tuple[str, str], MergeTrainDryRunSnapshot] = field(default_factory=dict)
+    entries: dict[tuple[str, int, int], MergeTrainStructuralEntryObservation] = field(
+        default_factory=dict
+    )
+
+    def clear(self) -> None:
+        self.snapshots.clear()
+        self.entries.clear()
+
+
 @dataclass(frozen=True)
 class LiveMergeAdmissionEvaluator:
     store: object
@@ -201,6 +216,42 @@ class LiveMergeAdmissionEvaluator:
     technical_check_client: MergeAdmissionTechnicalCheckReader
     policy_record_provider: Callable[[], MergeTrainPolicyRecord] | None = None
     snapshot_reader: MergeTrainSnapshotReader | None = None
+    _batch_memo: _BatchEvidenceMemo = field(
+        default_factory=_BatchEvidenceMemo, init=False, repr=False, compare=False
+    )
+
+    @contextmanager
+    def reuse_batch_evidence(self) -> Iterator[Callable[[], None]]:
+        """Share one live queue snapshot and member evidence across a batch's evaluations.
+
+        Each evaluation of a protected batch otherwise rereads the whole open
+        queue and every member, so a pass costs members x open pull requests
+        provider reads (#3069). The yielded callable drops the shared reads;
+        the caller invokes it before the evaluation that must be fresh.
+        """
+        memo = self._batch_memo
+        if memo.active:
+            raise RuntimeError("Batch evidence reuse is already active for this evaluator.")
+        memo.active = True
+        try:
+            yield memo.clear
+        finally:
+            memo.active = False
+            memo.clear()
+
+    def _read_snapshot(
+        self, snapshot_reader: MergeTrainSnapshotReader, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        memo = self._batch_memo
+        key = (repository, base_branch)
+        if memo.active and key in memo.snapshots:
+            return memo.snapshots[key].model_copy(deep=True)
+        snapshot = snapshot_reader.read_merge_train_snapshot(
+            repository=repository, base_branch=base_branch
+        )
+        if memo.active:
+            memo.snapshots[key] = snapshot.model_copy(deep=True)
+        return snapshot
 
     def __post_init__(self) -> None:
         if self.snapshot_reader is None and not isinstance(
@@ -225,6 +276,11 @@ class LiveMergeAdmissionEvaluator:
         evaluated_at: str,
     ) -> MergeAdmissionEvaluation:
         landing_plan = landing_plan_record.landing_plan
+        expected_queue = tuple(
+            (plan_entry.pull_request_number, plan_entry.expected_head_sha)
+            for plan_entry in landing_plan.entries
+            if plan_entry.status not in {"merged", "skipped"}
+        )
         snapshot_reader = self.snapshot_reader
         if snapshot_reader is None:
             assert isinstance(
@@ -241,29 +297,23 @@ class LiveMergeAdmissionEvaluator:
                 if self.policy_record_provider is not None
                 else resolve_merge_train_policy_record(self.store)
             )
-            snapshot = snapshot_reader.read_merge_train_snapshot(
+            snapshot = self._read_snapshot(
+                snapshot_reader,
                 repository=landing_plan.repository,
                 base_branch=landing_plan.base_branch,
             )
-            # Use the same conflict hold-outs as planning, bound to the exact
-            # PR and head. A changed head returns to the live queue.
-            held_out = {
-                (held.pull_request_number, held.head_sha)
-                for held in candidate_record.candidate.held_out
-            }
-            snapshot = snapshot.model_copy(
-                update={
-                    "pull_requests": tuple(
-                        pull_request
-                        for pull_request in snapshot.pull_requests
-                        if (pull_request.number, pull_request.head_sha) not in held_out
-                    )
-                }
-            )
+            # Only the plan's own entries decide its lineage. Conflict hold-outs
+            # and pull requests that joined the queue after planning, wherever
+            # they sort, wait for the next candidate (#2637, #3327).
             live_queue = build_merge_train_dry_run_result(
                 policy=policy_record.policy,
-                snapshot=snapshot,
+                snapshot=merge_train_snapshot_of(
+                    snapshot, [number for number, _ in expected_queue]
+                ),
                 batch_landing=candidate_record.ordinary_job_binding is None,
+                # Already verified heads can briefly report unknown mergeability
+                # after the base moves. Unplanned heads retain their queue hold.
+                planned_dependency_heads=frozenset(expected_queue),
             )
             policy_record.policy.find_repository_policy(
                 repository=landing_plan.repository,
@@ -274,11 +324,6 @@ class LiveMergeAdmissionEvaluator:
                 "Active merge-train policy no longer admits the landing-plan lineage.",
                 reason_code="landing_policy_not_admitted",
             ) from error
-        expected_queue = tuple(
-            (plan_entry.pull_request_number, plan_entry.expected_head_sha)
-            for plan_entry in landing_plan.entries
-            if plan_entry.status not in {"merged", "skipped"}
-        )
         planned_numbers = {pull_request_number for pull_request_number, _ in expected_queue}
         for pull_request in snapshot.pull_requests:
             if (
@@ -295,11 +340,7 @@ class LiveMergeAdmissionEvaluator:
             (pull_request_number, live_queue_by_number[pull_request_number].head_sha)
             for pull_request_number in live_queue.queue_order
         )
-        # The planned entries must still lead the live queue, unchanged and in
-        # order. A pull request that joined behind them waits for the next
-        # candidate instead of wedging this landing (#2637); one that sorts ahead
-        # of a planned entry still changes the lineage.
-        queue_matches = live_queue_identity[: len(expected_queue)] == expected_queue
+        queue_matches = live_queue_identity == expected_queue
         if not queue_matches:
             queue_matches = _ordinary_no_op_lifecycle_queue_matches(
                 candidate_record=candidate_record,
@@ -378,11 +419,24 @@ class LiveMergeAdmissionEvaluator:
             limit=2,
         )
         active_authority = authorities[0] if len(authorities) == 1 else None
+        check_head_sha = landing_plan.candidate_sha
+        if candidate_record.candidate.head_check_reuse is not None:
+            if not isinstance(self.technical_check_client, GitHubMergeTrainClient) or (
+                self.technical_check_client.read_head_check_reuse(
+                    candidate=candidate_record.candidate
+                )
+                is None
+            ):
+                raise MergeAdmissionDeniedError(
+                    "Exact-head check reuse is no longer provable; rebuild with candidate CI.",
+                    reason_code="head_check_reuse_unavailable",
+                )
+            check_head_sha = candidate_record.candidate.head_check_reuse.head_sha
         technical_checks = self.technical_check_client.read_technical_checks(
             repository=landing_plan.repository,
             base_branch=landing_plan.base_branch,
             base_sha=observed_base_sha,
-            head_sha=landing_plan.candidate_sha,
+            head_sha=check_head_sha,
             evaluated_at=evaluated_at,
         )
         policy_fingerprints = self._policy_fingerprints(
@@ -428,17 +482,24 @@ class LiveMergeAdmissionEvaluator:
         pull_request_number: int,
         position: int,
     ) -> MergeTrainStructuralEntryObservation:
+        memo = self._batch_memo
+        key = (repository, pull_request_number, position)
+        if memo.active and key in memo.entries:
+            return memo.entries[key]
         target_reference = RepositoryTargetReference(
             repository=repository,
             pull_request_number=pull_request_number,
         )
         repository_evidence = self.repository_evidence_provider.resolve(target_reference)
-        return MergeTrainStructuralEntryObservation(
+        observation = MergeTrainStructuralEntryObservation(
             position=position,
             pull_request_number=pull_request_number,
             head_sha=repository_evidence.target.head_sha,
             head_tree_sha=repository_evidence.target.tree_sha,
         )
+        if memo.active:
+            memo.entries[key] = observation
+        return observation
 
     def _policy_fingerprints(
         self,

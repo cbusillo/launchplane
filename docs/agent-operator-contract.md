@@ -61,6 +61,9 @@ Anything not explicitly selected by the generator is absent. The artifact must
 never contain real product, tenant, repository, branch, domain, lane,
 provider-target, credential, admin, or runtime-topology authority.
 
+The [legacy preview reconciliation](legacy-preview-reconciliation.md) operation
+projects bounded inspection and a saved, reviewed provider-absent record plan.
+
 `apply_odoo_addon_settings` is the supported write for an Odoo lane's
 addon settings on its instance-override record, with Shopify as the first
 addon. It carries secret-binding references, never plaintext, and its apply

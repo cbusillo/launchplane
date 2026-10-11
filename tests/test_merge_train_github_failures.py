@@ -186,7 +186,12 @@ class MergeTrainGitHubFailureTests(unittest.TestCase):
                 self.assertEqual(
                     detail,
                     f"{classification}; request:GET /repos/{{owner}}/{{repo}}/pulls/{{number}} HTTP {status}"
-                    + ("; retry_after_seconds:60" if "Retry-After" in headers else ""),
+                    + ("; retry_after_seconds:60" if "Retry-After" in headers else "")
+                    + (
+                        "; primary_exhausted:true"
+                        if status == 403 and headers.get("X-RateLimit-Remaining") == "0"
+                        else ""
+                    ),
                 )
                 for private in (
                     "private-owner",

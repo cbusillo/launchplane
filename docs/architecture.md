@@ -55,8 +55,9 @@ delivery authority back into the forge.
 
 Each product profile names its Client. That person reviews product previews
 and the release checklist in Launchplane. These decisions do not enter machine
-merge readiness. The Client's release acceptance is the one decision that starts
-anything: for a product an admin has not held, it starts the gated production
+merge readiness. The [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
+owns release authority. In the implemented normal release path, for a product
+an admin has not held, the Client's acceptance starts the gated production
 promotion, which still checks release approval and backup evidence. See
 `docs/release-review.md`.
 
@@ -275,6 +276,15 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   post-deploy update all terminate here.
 
 ## Implementation Posture
+
+HTTP app construction reuses bounded, process-local route preparation in
+`control_plane/http_route_preparation.py`. Cached templates contain validation
+schemas and route metadata with placeholders for application callables. Each
+app receives independent route/dependency metadata, its own endpoint bindings,
+dependency overrides, middleware, lifespan, policy, stores and state. Callable
+instances, decorated dependencies, callbacks and custom operation-ID generators
+use ordinary FastAPI preparation. The cache is an optimization, never runtime
+configuration or record authority.
 
 - Use Postgres-backed storage and managed secrets for shared-service production
   truth.

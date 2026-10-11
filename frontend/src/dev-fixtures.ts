@@ -151,7 +151,17 @@ export function productsForFixture(
   if (fixture === "missing") {
     return [missingEvidenceProduct];
   }
-  return [atlasProduct, missingEvidenceProduct];
+  return [atlasProduct, missingEvidenceProduct].map((site) => ({
+    ...site,
+    environments: site.environments.map((environment) => {
+      const incident = incidentSummaryForFixture({
+        ...environment, product: site.product, display_name: site.display_name,
+      });
+      return { ...environment, health_monitoring: {
+        ...environment.health_monitoring, open_incidents: incident ? [incident] : [],
+      } };
+    }),
+  }));
 }
 
 export function environmentForFixture(
@@ -305,9 +315,9 @@ export function incidentsForFixture(
       (incident): incident is ProductIncidentSummary => incident !== null,
     ),
     trust_state:
-      incidentMode === "stale" ? "stale" : detail.health_monitoring.trust_state,
+      incidentMode === "stale" ? "stale" : "recorded",
     provenance: provenance(
-      incidentMode === "stale" ? "stale" : detail.health_monitoring.trust_state,
+      incidentMode === "stale" ? "stale" : "recorded",
       activeIncident
         ? "Launchplane incident history is available for this environment."
         : incidentMode === "stale"
@@ -1768,6 +1778,7 @@ export function mergeTrainStatusForFixture(
           blocked_count: reconciliationRequired ? 1 : 0,
           candidate_sha: "fixture-candidate-sha",
           held_out: [],
+          historical: false,
           merged_count: 0,
           planned_count: 2,
           policy_key: `${repository}:${baseBranch}`,
@@ -2237,6 +2248,9 @@ const atlasProduct: ProductSiteOverview = {
     slug_template: "pr-{number}",
     active_count: 3,
     latest_preview_id: "preview-example-3",
+    records_status: "unsupported",
+    records: [],
+    records_truncated: false,
     trust_state: "recorded",
     provenance: provenance(
       "recorded",
@@ -2269,6 +2283,9 @@ const missingEvidenceProduct: ProductSiteOverview = {
     slug_template: "",
     active_count: 0,
     latest_preview_id: "",
+    records_status: "unsupported",
+    records: [],
+    records_truncated: false,
     trust_state: "unsupported",
     provenance: provenance(
       "unsupported",
@@ -2306,7 +2323,7 @@ function incidentFixtureState(open: boolean) {
 }
 
 function incidentSummaryForFixture(
-  detail: ProductEnvironmentDetail,
+  detail: ProductEnvironmentSummary & Pick<ProductSiteOverview, "product" | "display_name">,
 ): ProductIncidentSummary | null {
   const ingress = detail.public_ingress;
   const check = detail.health_monitoring.checks.find(
@@ -2409,6 +2426,7 @@ function environmentFixture({
     available_actions: actionsForEnvironment(environment),
     driver_extensions: { odoo: null },
     health_monitoring: {
+      open_incidents: [],
       monitoring_intent: "public",
       public_incident_eligible: true,
       checks: [
@@ -2431,7 +2449,6 @@ function environmentFixture({
           provenance: provenance("verified", ingressSummary),
         },
       ],
-      trust_state: "recorded",
       provenance: provenance("recorded", "Public monitoring intent is recorded."),
     },
     public_ingress: {
@@ -2471,6 +2488,7 @@ function environmentFixture({
           ]
         : [],
       desired: {
+        public_website: "required",
         base_url: baseUrl,
         health_url: `${baseUrl}/health`,
         domains: [{ domain_name: host, role: "primary", tls_expected: true }],
@@ -2509,6 +2527,7 @@ function environmentFixture({
       },
       observed: {
         ingress: {
+          probe_effective: true,
           monitoring_intent: "public",
           incident_eligible: true,
           failure_code: warning ? "tls_hostname_mismatch" : "",
@@ -2675,6 +2694,7 @@ function missingEnvironmentFixture(
     available_actions: [],
     driver_extensions: { odoo: null },
     health_monitoring: {
+      open_incidents: [],
       monitoring_intent: "prelaunch",
       public_incident_eligible: false,
       checks: [
@@ -2697,7 +2717,6 @@ function missingEnvironmentFixture(
           provenance: missing,
         },
       ],
-      trust_state: "recorded",
       provenance: provenance("recorded", "Prelaunch monitoring intent is recorded."),
     },
     public_ingress: {
@@ -2728,6 +2747,7 @@ function missingEnvironmentFixture(
         },
       ],
       desired: {
+        public_website: "required",
         base_url: `https://${host}`,
         health_url: `https://${host}/health`,
         domains: [{ domain_name: host, role: "primary", tls_expected: true }],
@@ -2766,6 +2786,7 @@ function missingEnvironmentFixture(
       },
       observed: {
         ingress: {
+          probe_effective: false,
           monitoring_intent: "prelaunch",
           incident_eligible: false,
           failure_code: "",
@@ -2879,6 +2900,17 @@ export function productReviewForFixture(
         ? { ...productReviewDecisionForFixture("accepted", ""), feedback_url: "", head_sha: "b".repeat(40) }
         : scenario === "earlier-decision"
         ? { ...productReviewDecisionForFixture("accepted", ""), head_sha: "b".repeat(40) }
+        : scenario === "carried-decision"
+        ? {
+            ...productReviewDecisionForFixture("accepted", ""),
+            carried_from: {
+              record_id: "fixture-original-acceptance",
+              head_sha: "b".repeat(40),
+              reason: "unchanged_patch_base_update",
+              refresh_record_ids: [],
+              comparison_base_sha: "c".repeat(40),
+            },
+          }
         : scenario === "decided"
         ? productReviewDecisionForFixture("changes_requested", "Please adjust the checkout flow.")
         : null),
@@ -3210,6 +3242,8 @@ export function releaseReviewForFixture(mode: string): import("./generated/opena
     release_on_acceptance: mode === "products" ? "promote_with_rollback_drill" : "held",
     live_site_url: mode === "products" ? "https://www.example.invalid" : "",
     release_run: null,
+    // The operator fixture is the Director: it may ship a temporary hotfix.
+    can_start_temporary_hotfix: mode === "operator", reviewing_temporary_hotfix: false,
     review: {
       required: true, approved: false, checklist_complete: !additionalChanges.length && mode !== "denied", checklist_digest: "a".repeat(64), latest_decision: null, unavailable_reason: null,
       blockers: additionalChanges.length ? additionalChanges : ["Client approval of this release is required."],
@@ -3247,8 +3281,9 @@ export function releaseDecisionForFixture(
 ): import("./generated/openapi.ts").ReleaseReviewResponse {
   const checklist = response.review.checklist;
   if (!checklist) return response;
-  const releaseStart = decision === "accepted" && published && response.release_on_acceptance !== "held"
-    ? response.release_on_acceptance === "director_standing" ? "promote" : response.release_on_acceptance : "";
+  const releaseStart = decision === "temporary_hotfix" && published ? "promote"
+    : decision === "accepted" && published && response.release_on_acceptance !== "held"
+      ? response.release_on_acceptance === "director_standing" ? "promote" : response.release_on_acceptance : "";
   const steps = releaseStart === "promote_with_rollback_drill"
     ? (["backup", "promote", "rollback", "backup", "promote"] as const) : (["backup", "promote"] as const);
   return { ...response, release_run: releaseStart ? {
@@ -3261,8 +3296,8 @@ export function releaseDecisionForFixture(
     latest_decision: {
       record_id: "fixture-release-decision", product: response.product,
       checklist_digest: response.review.checklist_digest, checklist, decision, reason,
-      actor_github_id: decision === "overridden" ? "9002" : "9001",
-      actor_github_login: decision === "overridden" ? "site-operator" : "site-owner",
+      actor_github_id: decision === "overridden" || decision === "temporary_hotfix" ? "9002" : "9001",
+      actor_github_login: decision === "overridden" || decision === "temporary_hotfix" ? "site-operator" : "site-owner",
       decided_at: "2026-09-26T12:00:00Z", release_issue_url: published ? "https://github.com/example/site/issues/43" : "",
       release_start: releaseStart,
       acceptance_source: "client_session",

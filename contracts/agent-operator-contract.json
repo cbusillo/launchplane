@@ -9,7 +9,8 @@
         "authorization_admission_and_landing_are_independent": true,
         "engineering_review_advisory": true,
         "github_projection_role": "routing_and_status_only",
-        "owner_acceptance_authoritative": true
+        "owner_acceptance_authoritative": true,
+        "temporary_hotfix_start": "director_human_session_only"
       },
       "product_lifecycle": {
         "active_automation_states": [
@@ -414,6 +415,39 @@
         ]
       },
       {
+        "idempotency": "plan_and_apply",
+        "identity_dependencies": [
+          "read_write_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "inspect",
+          "plan",
+          "apply"
+        ],
+        "operation_id": "reconcile_legacy_generic_web_preview",
+        "path": "/v1/previews/legacy-generic-web/reconciliation",
+        "purpose": "Inspect, plan or reconcile one provider-absent legacy generic-web preview.",
+        "response_statuses": [
+          "202",
+          "400",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan",
+          "expected_plan_digest",
+          "plan_idempotency_key"
+        ],
+        "schema_fingerprint_sha256": "1a5b6056a5f67987eb4fc7ac9b4f242b3b95a1d306599cb72a74a58bff7371b0",
+        "supported_surfaces": [
+          "agent_helper",
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "always",
         "identity_dependencies": [
           "read_write_identity"
@@ -561,7 +595,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "3945a90c02dc3e029b582e983d65710f02b757ac5cf9896987be92e179a4027f",
+        "schema_fingerprint_sha256": "4025e68804098c2980f30b9a9722dc3f47ef2c9afe6bf30ef8243d4d4ee3a4b3",
         "supported_surfaces": [
           "read_only_service",
           "operator_ui"
@@ -593,8 +627,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "e65563f74ef3424e641ae93f72f4ce397eed0192"
+    "source_commit_sha": "f586bff3113c18a6b02f2fac74f22c46be26c1b1"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "2f1aa1ee9d884af0a59960d458b415c7468463797d991cde09dd7274681b1c04"
+  "semantic_digest_sha256": "dc3c667510deac38fe32ce7d146bbc60ae9b745ba47d4a3f4a40bb8c32998d28"
 }

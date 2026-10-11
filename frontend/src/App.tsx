@@ -42,7 +42,7 @@ import type {
   ProductSiteOverview,
 } from "./generated/openapi.ts";
 
-type Theme = "dark" | "light";
+import type { Theme } from "./theme";
 type AuthState =
   | { status: "checking"; identity: null; error: ""; traceId: "" }
   | { status: "signed_out"; identity: null; error: ""; traceId: "" }
@@ -58,13 +58,12 @@ type AuthState =
       error: string;
       traceId: string;
     };
-const THEME_STORAGE_KEY = "launchplane.theme";
 
 export function App() {
   const route = useAppRoute();
   const fixtureMode = readDevFixtureMode();
   const [theme, setTheme] = useState<Theme>(() =>
-    window.sessionStorage.getItem(THEME_STORAGE_KEY) === "light" ? "light" : "dark",
+    window.launchplaneTheme.get(),
   );
   const [authState, setAuthState] = useState<AuthState>({
     status: "checking",
@@ -86,9 +85,10 @@ export function App() {
     productsResource, () => setInventoryRefreshToken(value => value + 1));
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    window.sessionStorage.setItem(THEME_STORAGE_KEY, theme);
-  }, [theme]);
+    const unsubscribe = window.launchplaneTheme.subscribe(setTheme);
+    setTheme(window.launchplaneTheme.get());
+    return unsubscribe;
+  }, []);
 
   useEffect(() => {
     const normalizedPath = window.location.pathname.replace(/\/+$/, "") || "/";
@@ -288,7 +288,7 @@ export function App() {
         notice={sessionNotice}
         onDismissNotice={() => setSessionNotice("")}
         onLogout={() => void signOut()}
-        onThemeChange={setTheme}
+        onThemeChange={window.launchplaneTheme.set}
         signingOut={signingOut}
         theme={theme}
       >
@@ -306,7 +306,7 @@ export function App() {
         notice={sessionNotice}
         onDismissNotice={() => setSessionNotice("")}
         onLogout={() => void signOut()}
-        onThemeChange={setTheme}
+        onThemeChange={window.launchplaneTheme.set}
         signingOut={signingOut}
         theme={theme}
       >
@@ -325,7 +325,7 @@ export function App() {
       onDismissNotice={() => setSessionNotice("")}
       onLogout={() => void signOut()}
       onRefresh={refreshProducts}
-      onThemeChange={setTheme}
+      onThemeChange={window.launchplaneTheme.set}
       productsResource={productsResource}
       route={route}
       selectedProduct={selectedProduct}

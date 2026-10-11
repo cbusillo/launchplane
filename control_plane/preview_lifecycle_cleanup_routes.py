@@ -4,6 +4,8 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Protocol, cast
 
+import click
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.preview_lifecycle_cleanup_record import (
@@ -238,17 +240,17 @@ def preview_lifecycle_cleanup_driver_id(
 
 def preview_lifecycle_cleanup_profile_settings(
     *, record_store: object, product: str
-) -> tuple[str, str]:
+) -> tuple[str, str, LaunchplaneProductProfileRecord | None]:
     cleanup_driver_id = "verireel" if product == "verireel" else ""
     cleanup_slug_template = "pr-{number}"
     read_profile = getattr(record_store, "read_product_profile_record", None)
     if not callable(read_profile):
-        return cleanup_driver_id, cleanup_slug_template
+        return cleanup_driver_id, cleanup_slug_template, None
     try:
         profile = LaunchplaneProductProfileRecord.model_validate(read_profile(product))
     except FileNotFoundError:
-        return cleanup_driver_id, cleanup_slug_template
-    return preview_lifecycle_cleanup_driver_id(profile), profile.preview.slug_template
+        return cleanup_driver_id, cleanup_slug_template, None
+    return preview_lifecycle_cleanup_driver_id(profile), profile.preview.slug_template, profile
 
 
 def preview_lifecycle_sweep_profiles(
@@ -277,10 +279,15 @@ def build_preview_lifecycle_sweep(
     record_store: PreviewLifecycleSweepStore,
     request: PreviewLifecycleSweepEnvelope,
     denied_actions_by_product: Mapping[str, str] | None = None,
+    requested_profiles: tuple[LaunchplaneProductProfileRecord, ...] | None = None,
 ) -> dict[str, object]:
-    profiles = preview_lifecycle_sweep_profiles(
-        record_store=record_store,
-        product=request.product,
+    profiles = (
+        requested_profiles
+        if requested_profiles is not None
+        else preview_lifecycle_sweep_profiles(
+            record_store=record_store,
+            product=request.product,
+        )
     )
     denied_actions = denied_actions_by_product or {}
     entries: list[dict[str, object]] = []
@@ -315,29 +322,36 @@ def build_preview_lifecycle_sweep(
             )
             entries.append(entry)
             continue
-        if cleanup_driver_id == "verireel":
-            verireel_inventory_result = execute_verireel_preview_inventory(
-                control_plane_root=control_plane_root,
-                request=VeriReelPreviewInventoryRequest(context=profile.preview.context),
-            )
-            inventory_context = verireel_inventory_result.context
-            inventory_source = request.source
-            inventory_slugs = tuple(item.previewSlug for item in verireel_inventory_result.previews)
-        else:
-            generic_web_inventory_result = execute_generic_web_preview_inventory(
-                control_plane_root=control_plane_root,
-                record_store=cast(GenericWebPreviewProfileStore, record_store),
-                request=GenericWebPreviewInventoryRequest(
-                    product=profile.product,
-                    source=request.source,
-                ),
-                profile=profile,
-            )
-            inventory_context = generic_web_inventory_result.context
-            inventory_source = generic_web_inventory_result.source
-            inventory_slugs = tuple(
-                item.previewSlug for item in generic_web_inventory_result.previews
-            )
+        try:
+            if cleanup_driver_id == "verireel":
+                verireel_inventory_result = execute_verireel_preview_inventory(
+                    control_plane_root=control_plane_root,
+                    request=VeriReelPreviewInventoryRequest(context=profile.preview.context),
+                )
+                inventory_context = verireel_inventory_result.context
+                inventory_source = request.source
+                inventory_slugs = tuple(
+                    item.previewSlug for item in verireel_inventory_result.previews
+                )
+            else:
+                generic_web_inventory_result = execute_generic_web_preview_inventory(
+                    control_plane_root=control_plane_root,
+                    record_store=cast(GenericWebPreviewProfileStore, record_store),
+                    request=GenericWebPreviewInventoryRequest(
+                        product=profile.product,
+                        source=request.source,
+                    ),
+                    profile=profile,
+                )
+                inventory_context = generic_web_inventory_result.context
+                inventory_source = generic_web_inventory_result.source
+                inventory_slugs = tuple(
+                    item.previewSlug for item in generic_web_inventory_result.previews
+                )
+        except click.ClickException as exc:
+            entry.update({"status": "fail", "error_message": str(exc)})
+            entries.append(entry)
+            continue
         inventory_scan_id = write_preview_inventory_scan_record(
             record_store=record_store,
             context=inventory_context,
@@ -387,6 +401,7 @@ def build_preview_lifecycle_sweep(
             timeout_seconds=request.timeout_seconds,
             driver_id=cleanup_driver_id,
             preview_slug_template=profile.preview.slug_template,
+            profile=profile,
         )
         cleanup_id = write_preview_lifecycle_sweep_cleanup_record(
             record_store=record_store,

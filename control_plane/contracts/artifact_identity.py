@@ -8,6 +8,7 @@ from control_plane.contracts.artifact_dependency_provenance import (
     normalize_artifact_repository_identity,
     normalize_artifact_sha256_digest,
 )
+from control_plane.contracts.artifact_release_compatibility import ArtifactReleaseCompatibility
 
 ArtifactBaseImageRole = Literal["runtime", "devtools"]
 
@@ -182,6 +183,11 @@ class ArtifactIdentityManifest(BaseModel):
     build_flags: ArtifactBuildFlags = Field(default_factory=ArtifactBuildFlags)
     build_provenance: ArtifactBuildProvenance = Field(default_factory=ArtifactBuildProvenance)
     dependency_provenance: ArtifactDependencyProvenance | None = None
+    release_compatibility: ArtifactReleaseCompatibility | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     image: ArtifactImageReference
     source_build: ArtifactSourceBuild | None = None
 

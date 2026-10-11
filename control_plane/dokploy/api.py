@@ -2,7 +2,7 @@ import json
 import re
 import time
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
@@ -270,6 +270,40 @@ def fetch_dokploy_target_payload(
     return payload_as_object
 
 
+def iter_dokploy_applications(raw_projects: object) -> Iterator[JsonObject]:
+    if not isinstance(raw_projects, list):
+        raise click.ClickException(
+            "Dokploy project inventory returned an invalid response payload."
+        )
+    for raw_project in raw_projects:
+        project = as_json_object(raw_project)
+        if project is None:
+            raise click.ClickException("Dokploy project inventory contains an invalid project.")
+        raw_environments = project.get("environments")
+        if not isinstance(raw_environments, list):
+            raise click.ClickException("Dokploy project inventory has incomplete environments.")
+        for raw_environment in raw_environments:
+            environment = as_json_object(raw_environment)
+            if environment is None:
+                raise click.ClickException(
+                    "Dokploy project inventory contains an invalid environment."
+                )
+            raw_applications = environment.get("applications")
+            if not isinstance(raw_applications, list):
+                raise click.ClickException("Dokploy project inventory has incomplete applications.")
+            for raw_application in raw_applications:
+                application = as_json_object(raw_application)
+                if application is None:
+                    raise click.ClickException(
+                        "Dokploy project inventory contains an invalid application."
+                    )
+                if not str(application.get("name") or "").strip():
+                    raise click.ClickException(
+                        "Dokploy project inventory contains an unnamed application."
+                    )
+                yield application
+
+
 def fetch_dokploy_projects(*, host: str, token: str) -> tuple[JsonObject, ...]:
     payload = dokploy_request(
         host=host,
@@ -356,7 +390,7 @@ def search_dokploy_applications(
 
 
 def fetch_dokploy_application_domains(
-    *, host: str, token: str, application_id: str
+    *, host: str, token: str, application_id: str, strict: bool = False
 ) -> tuple[JsonObject, ...]:
     normalized_application_id = application_id.strip()
     if not normalized_application_id:
@@ -371,7 +405,10 @@ def fetch_dokploy_application_domains(
         raise click.ClickException(
             "Dokploy application domain lookup returned an invalid response."
         )
-    return tuple(domain for item in payload if (domain := as_json_object(item)) is not None)
+    domains = tuple(domain for item in payload if (domain := as_json_object(item)) is not None)
+    if strict and len(domains) != len(payload):
+        raise click.ClickException("Dokploy domain inventory contains malformed entries.")
+    return domains
 
 
 def delete_dokploy_domain(*, host: str, token: str, domain_id: str) -> None:

@@ -14,6 +14,7 @@ from control_plane.storage.product_authority_bundle import ProductAuthorityBundl
 from tests.http_app_test_support import (
     _AsgiResponse,
     _post_product_environment_config_apply,
+    _post_product_config_apply,
     _RejectingVerifier,
 )
 from tests.support.auth import _local_operator_policy
@@ -87,6 +88,225 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
             authorization=_TOKEN,
             idempotency_key=idempotency_key,
         )
+
+    async def _submit_generic(
+        self, *, mode: str, settings: dict[str, str], idempotency_key: str = ""
+    ) -> _AsgiResponse:
+        return await _post_product_config_apply(
+            self.app,
+            {
+                "product": "example-site",
+                "context": "example-site",
+                "instance": "testing",
+                "mode": mode,
+                "reason": "Check shared validation.",
+                "runtime_env": {"env": settings},
+            },
+            authorization=_TOKEN,
+            idempotency_key=idempotency_key,
+        )
+
+    async def test_both_routes_refuse_credential_values_without_persistence(self) -> None:
+        for key, value in (
+            ("SERVICE_URL", "postgres://user:inert-password@db.invalid/site"),
+            ("SERVICE_DSN", "host=db.invalid dbname=site password=inert-password"),
+            ("APP_THEME", "https://site.invalid/?api_key=inert-password"),
+        ):
+            for route in ("generic", "environment"):
+                with self.subTest(key=key, route=route):
+                    response = (
+                        await self._submit_generic(mode="dry-run", settings={key: value})
+                        if route == "generic"
+                        else await self._submit(
+                            {"mode": "dry-run", "runtime_settings": {key: value}}
+                        )
+                    )
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertEqual(response.json()["error"]["code"], "runtime_setting_refused")
+                    self.assertNotIn("inert-password", response.text)
+                    self.assertEqual(
+                        self.store.list_runtime_environment_records(), (_runtime_record(),)
+                    )
+                    self.assertEqual(self.store.list_secret_records(), ())
+
+    async def test_ordinary_declared_names_and_urls_remain_supported_on_both_routes(self) -> None:
+        profile = _profile()
+        requirement = profile.expected_config.runtime_environment_keys[0]
+        profile = profile.model_copy(
+            update={
+                "expected_config": profile.expected_config.model_copy(
+                    update={
+                        "runtime_environment_keys": (
+                            requirement,
+                            requirement.model_copy(update={"key": "KEYCLOAK_URL"}),
+                        )
+                    }
+                )
+            }
+        )
+        self.store.write_product_profile_record(profile)
+        settings = {"KEYCLOAK_URL": "https://login.example.invalid"}
+        for route in ("generic", "environment"):
+            review = (
+                await self._submit_generic(mode="dry-run", settings=settings)
+                if route == "generic"
+                else await self._submit({"mode": "dry-run", "runtime_settings": settings})
+            )
+            self.assertEqual(review.status_code, 202, review.text)
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+
+    async def test_both_routes_preserve_platform_host_refusal(self) -> None:
+        for key in ("DOKPLOY_HOST", "LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST"):
+            settings = {key: "https://dokploy.example.invalid"}
+            for route in ("generic", "environment"):
+                response = (
+                    await self._submit_generic(mode="dry-run", settings=settings)
+                    if route == "generic"
+                    else await self._submit({"mode": "dry-run", "runtime_settings": settings})
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()["error"]["code"], "runtime_setting_refused")
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+
+    async def test_live_context_wide_declared_settings_keep_their_supported_scope(self) -> None:
+        profile = _profile(production_use="live")
+        requirement = profile.expected_config.runtime_environment_keys[0]
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "expected_config": profile.expected_config.model_copy(
+                        update={
+                            "runtime_environment_keys": (
+                                requirement.model_copy(update={"instance": ""}),
+                            )
+                        }
+                    )
+                }
+            )
+        )
+        for key, status in (("APP_MODE", 202), ("SITE_MODE", 403)):
+            response = await _post_product_config_apply(
+                self.app,
+                {
+                    "product": "example-site",
+                    "context": "example-site",
+                    "mode": "dry-run",
+                    "runtime_env": {"env": {key: "public"}},
+                    "reason": "Check context scope.",
+                },
+                authorization=_TOKEN,
+            )
+            self.assertEqual(response.status_code, status, response.text)
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+
+    async def test_generic_route_live_guard_and_supported_declared_setting(self) -> None:
+        self.store.write_product_profile_record(_profile(production_use="live"))
+        for mode in ("dry-run", "apply"):
+            response = await self._submit_generic(
+                mode=mode,
+                settings={"SITE_MODE": "public"},
+                idempotency_key=f"live-undeclared-{mode}",
+            )
+            self.assertEqual(response.status_code, 403, response.text)
+            self.assertEqual(response.json()["error"]["code"], "live_product_requires_operator")
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+        for production_use in ("live", "prelaunch"):
+            self.store.write_product_profile_record(_profile(production_use=production_use))
+            settings = {"APP_MODE" if production_use == "live" else "SITE_MODE": "public"}
+            review = await self._submit_generic(mode="dry-run", settings=settings)
+            self.assertEqual(review.status_code, 202, review.text)
+            applied = await self._submit_generic(
+                mode="apply", settings=settings, idempotency_key=f"supported-{production_use}"
+            )
+            self.assertEqual(applied.status_code, 202, applied.text)
+
+    async def test_generic_route_live_guard_refuses_undeclared_provider_adoption(self) -> None:
+        self.store.write_product_profile_record(_profile(production_use="live"))
+        for alias in ("runtime_env", "runtime_environment"):
+            for mode in ("dry-run", "apply"):
+                response = await _post_product_config_apply(
+                    self.app,
+                    {
+                        "schema_version": 2,
+                        "product": "example-site",
+                        "context": "example-site",
+                        "instance": "testing",
+                        "mode": mode,
+                        "confirmation": "APPLY example-site/testing",
+                        "reason": "Adopt a provider setting.",
+                        alias: {"env": {}, "adopt_provider_keys": ["SITE_MODE"]},
+                    },
+                    authorization=_TOKEN,
+                    idempotency_key=f"adopt-{alias}-{mode}",
+                )
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(response.json()["error"]["code"], "live_product_requires_operator")
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+
+    async def test_live_guard_checks_the_canonical_flat_and_extra_runtime_values(self) -> None:
+        self.store.write_product_profile_record(_profile(production_use="live"))
+        for alias in ("runtime_env", "runtime_environment"):
+            for runtime_input in (
+                {"scope": None, "SITE_MODE": "public"},
+                {"adopt_provider_keys": ["APP_MODE"], "SITE_MODE": "public"},
+            ):
+                for mode in ("dry-run", "apply"):
+                    response = await _post_product_config_apply(
+                        self.app,
+                        {
+                            "schema_version": 2,
+                            "product": "example-site",
+                            "context": "example-site",
+                            "instance": "testing",
+                            "mode": mode,
+                            "reason": "Check canonical settings.",
+                            "confirmation": "APPLY example-site/testing",
+                            alias: runtime_input,
+                        },
+                        authorization=_TOKEN,
+                        idempotency_key=f"extras-{alias}-{mode}",
+                    )
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(
+                        response.json()["error"]["code"], "live_product_requires_operator"
+                    )
+            review = await _post_product_config_apply(
+                self.app,
+                {
+                    "product": "example-site",
+                    "context": "example-site",
+                    "instance": "testing",
+                    "mode": "dry-run",
+                    "reason": "Check supported flat targeting.",
+                    alias: {"context": "example-site", "instance": "testing", "APP_MODE": "public"},
+                },
+                authorization=_TOKEN,
+            )
+            self.assertEqual(review.status_code, 202, review.text)
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+
+    async def test_generic_route_profile_change_at_commit_preserves_concurrent_state(self) -> None:
+        settings = {"SITE_MODE": "public"}
+        review = await self._submit_generic(mode="dry-run", settings=settings)
+        self.assertEqual(review.status_code, 202, review.text)
+        original_write = self.store.write_product_authority_bundle
+
+        def change_then_write(bundle: ProductAuthorityBundle) -> None:
+            self.store.write_product_profile_record(_profile(production_use="live"))
+            original_write(bundle)
+
+        with patch.object(
+            self.store, "write_product_authority_bundle", side_effect=change_then_write
+        ):
+            response = await self._submit_generic(
+                mode="apply", settings=settings, idempotency_key="generic-profile-at-commit"
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "product_profile_conflict")
+        self.assertEqual(
+            self.store.read_product_profile_record("example-site").production_use, "live"
+        )
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
 
     async def test_records_an_undeclared_setting_and_retires_a_provider_key(self) -> None:
         change: dict[str, object] = {

@@ -52,6 +52,9 @@ class _EmptyProductStore:
                 return record
         raise AssertionError(f"test product store has no product profile for {product!r}")
 
+    def list_public_ingress_incident_records(self, **kwargs: object) -> tuple[object, ...]:
+        return ()
+
 
 class _WorkRequestStore:
     def __init__(self, records: tuple[EveryCodeWorkRequestRecord, ...]) -> None:

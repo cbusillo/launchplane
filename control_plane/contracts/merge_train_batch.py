@@ -20,7 +20,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralProvenance,
     MergeTrainStructuralSubject,
 )
-from control_plane.merge_train import MergeTrainDryRunResult
+from control_plane.merge_train import DEPENDENCY_HEAD_HOLD_REASONS, MergeTrainDryRunResult
 
 
 MergeTrainBatchCandidateStatus = Literal[
@@ -60,14 +60,23 @@ class MergeTrainBatchEntry(BaseModel):
         return self
 
 
+# entry_conflict: the head does not merge onto the heads accepted ahead of it.
+# failure_isolation: the head waits while part of a failed batch is retested
+# on the same base to find the pull request that broke it.
+# dependency_not_ready: an automatically admitted dependency head was held for
+# its own checks or mergeability when the candidate was planned. If it settles
+# on the same base, it waits for the next candidate instead of replacing this one.
+MergeTrainHeldOutReason = Literal["entry_conflict", "failure_isolation", "dependency_not_ready"]
+
+
 class MergeTrainBatchHeldOutEntry(BaseModel):
-    """A conflict observation bound to the base and accepted preceding heads."""
+    """A hold bound to the base and, for conflicts, the accepted preceding heads."""
 
     model_config = ConfigDict(extra="forbid")
 
     pull_request_number: int = Field(gt=0)
     head_sha: str
-    reason: Literal["entry_conflict"] = "entry_conflict"
+    reason: MergeTrainHeldOutReason = "entry_conflict"
     # Queued pull requests merged ahead of it; empty when it conflicts with the base.
     conflicts_with: tuple[int, ...] = ()
     probe_base_sha: str = ""
@@ -85,7 +94,42 @@ class MergeTrainBatchHeldOutEntry(BaseModel):
             raise ValueError("conflict probe lineage requires its base")
         if any(not head.strip() for head in self.conflicts_with_head_shas):
             raise ValueError("conflict probe lineage requires nonempty preceding heads")
+        if self.reason != "entry_conflict" and (
+            not self.probe_base_sha or self.conflicts_with or self.conflicts_with_head_shas
+        ):
+            raise ValueError(f"{self.reason} hold requires its base and no conflict lineage")
         return self
+
+
+class MergeTrainReusedCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    app_id: int | None = Field(default=None, ge=1)
+    sources: tuple[Literal["commit_status", "check_run"], ...]
+
+
+class MergeTrainHeadCheckReuse(BaseModel):
+    """Passing required checks read from the exact head used by a single candidate."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pull_request_number: int = Field(gt=0)
+    head_sha: str
+    tree_sha: str
+    base_sha: str
+    candidate_sha: str
+    observed_at: str
+    required_checks: tuple[MergeTrainReusedCheck, ...] = Field(min_length=1)
+
+
+class MergeTrainCheckRetryEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_sha: str = Field(min_length=1)
+    controller_pass_recorded_at: str = Field(min_length=1)
+    required_checks_status: Literal["pass"] = "pass"
+    closed_batch_pull_request_number: int = Field(gt=0)
 
 
 class MergeTrainBatchCandidate(BaseModel):
@@ -105,9 +149,19 @@ class MergeTrainBatchCandidate(BaseModel):
     entries: tuple[MergeTrainBatchEntry, ...]
     held_out: tuple[MergeTrainBatchHeldOutEntry, ...] = ()
     batch_body_retry_of: str = Field(default="", exclude_if=lambda value: not value)
+    # Record id of the failed candidate this one rebuilds after an infrastructure failure.
+    infrastructure_retry_of: str = Field(default="", exclude_if=lambda value: not value)
+    # Failed record whose exact SHA subsequently passed checks before this rebuild.
+    check_retry_of: str = Field(default="", exclude_if=lambda value: not value)
+    check_retry_evidence: MergeTrainCheckRetryEvidence | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     stack_collapse_root: MergeTrainStackCollapseRootProof | None = None
     structural_provenance: MergeTrainStructuralProvenance | None = None
     required_checks_status: Literal["unknown", "pending", "pass", "fail"] = "unknown"
+    head_check_reuse: MergeTrainHeadCheckReuse | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     created_at: str
     updated_at: str
 
@@ -143,6 +197,29 @@ class MergeTrainBatchCandidate(BaseModel):
             self.updated_at, "merge train batch candidate requires updated_at"
         )
         self.entries = _normalize_entries(self.entries)
+        reuse = self.head_check_reuse
+        if reuse is not None:
+            if (
+                len(self.entries) != 1
+                or (
+                    reuse.pull_request_number,
+                    reuse.head_sha,
+                    reuse.tree_sha,
+                    reuse.base_sha,
+                    reuse.candidate_sha,
+                )
+                != (
+                    self.entries[0].pull_request_number,
+                    self.entries[0].head_sha,
+                    self.entries[0].head_tree_sha,
+                    self.base_sha,
+                    self.candidate_sha,
+                )
+                or reuse.tree_sha != self.candidate_tree_sha
+            ):
+                raise ValueError("head-check reuse must bind the exact single-entry candidate tree")
+            if any(not check.name.strip() or not check.sources for check in reuse.required_checks):
+                raise ValueError("head-check reuse requires passing check sources")
         provenance = self.structural_provenance
         if provenance is not None:
             if not provenance.complete and self.status not in {"planned", "building"}:
@@ -509,6 +586,16 @@ def build_merge_train_batch_candidate(
     normalized_base_sha = _normalize_required_value(
         base_sha, "merge train batch candidate builder requires base_sha"
     )
+    if ordinary_job_binding is None:
+        held = {hold.pull_request_number for hold in held_out}
+        held_out = (
+            *held_out,
+            *(
+                hold
+                for hold in dependency_not_ready_holds(dry_run_result, normalized_base_sha)
+                if hold.pull_request_number not in held
+            ),
+        )
     batch_id = build_merge_train_batch_id(
         repository=dry_run_result.repository,
         base_branch=dry_run_result.base_branch,
@@ -539,6 +626,23 @@ def build_merge_train_batch_candidate(
         stack_collapse_root=stack_collapse_root,
         created_at=created_at,
         updated_at=created_at,
+    )
+
+
+def dependency_not_ready_holds(
+    dry_run_result: MergeTrainDryRunResult, base_sha: str
+) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
+    """Hold each dependency head excluded only for its own checks or mergeability."""
+    return tuple(
+        MergeTrainBatchHeldOutEntry(
+            pull_request_number=entry.number,
+            head_sha=entry.head_sha,
+            reason="dependency_not_ready",
+            probe_base_sha=base_sha,
+        )
+        for entry in dry_run_result.queue
+        if len(entry.ineligible_reasons) == 1
+        and entry.ineligible_reasons[0] in DEPENDENCY_HEAD_HOLD_REASONS
     )
 
 

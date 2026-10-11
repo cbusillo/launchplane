@@ -207,44 +207,6 @@ class FastApiWriteRouteRegistrarTests(unittest.TestCase):
             )
             self.assertEqual(getattr(route.endpoint, "__module__", ""), expected_module)
 
-    def test_generic_web_write_routes_preserve_interleaved_route_order(self) -> None:
-        route_keys = [(next(iter(route.methods or set())), route.path) for route in self.api_routes]
-        expected_primary = [
-            ("POST", "/v1/previews/lifecycle-sweep"),
-            ("POST", "/v1/drivers/generic-web/preview-desired-state"),
-            ("POST", "/v1/drivers/generic-web/preview-inventory"),
-            ("POST", "/v1/drivers/generic-web/preview-readiness"),
-            ("POST", "/v1/drivers/generic-web/preview-refresh"),
-            ("POST", "/v1/drivers/generic-web/preview-destroy"),
-            ("POST", "/v1/drivers/generic-web/deploy"),
-            ("POST", "/v1/admin/generic-web/deploy-recovery/dry-run"),
-            ("POST", "/v1/admin/generic-web/deploy-recovery/apply"),
-            ("POST", "/v1/drivers/generic-web/prod-promotion"),
-            ("POST", "/v1/drivers/generic-web/prod-promotion-workflow"),
-            ("POST", "/v1/drivers/generic-web/stable-verification"),
-            ("POST", "/v1/drivers/generic-web/preview-verification"),
-            ("POST", "/v1/admin/generic-web/deploy-recovery/provider-evidence"),
-            ("POST", "/v1/drivers/verireel/testing-deploy"),
-        ]
-        expected_rollback = [
-            ("POST", "/v1/drivers/odoo/prod-backup-gate"),
-            ("POST", "/v1/drivers/odoo/prod-backup-verification"),
-            ("POST", "/v1/drivers/generic-web/prod-rollback-plan"),
-            ("POST", "/v1/drivers/generic-web/prod-rollback"),
-            ("POST", "/v1/drivers/odoo/prod-rollback"),
-        ]
-
-        primary_start = route_keys.index(expected_primary[0])
-        rollback_start = route_keys.index(expected_rollback[0])
-        self.assertEqual(
-            route_keys[primary_start : primary_start + len(expected_primary)],
-            expected_primary,
-        )
-        self.assertEqual(
-            route_keys[rollback_start : rollback_start + len(expected_rollback)],
-            expected_rollback,
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

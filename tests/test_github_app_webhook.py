@@ -193,9 +193,15 @@ class GitHubAppWebhookTests(unittest.TestCase):
             event="pull_request",
             delivery_id="title",
         )
+        self.deliver(
+            {**_pull_request("edited", number=14), "changes": {"body": {"from": ""}}},
+            event="pull_request",
+            delivery_id="notes",
+        )
 
         requests = {r.target_key: r for r in self.store.list_product_reconcile_requests()}
-        self.assertEqual(set(requests), {f"site:preview:{number}" for number in (7, 8, 9, 12)})
+        self.assertEqual(set(requests), {f"site:preview:{number}" for number in (7, 8, 9, 12, 14)})
+        self.assertEqual(requests["site:preview:14"].state, "pending")
         self.assertEqual(requests["site:preview:7"].request_count, 2)
         self.assertEqual(requests["site:preview:7"].pull_request_number, 7)
 

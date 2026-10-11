@@ -87,6 +87,89 @@ class _FakeSnapshotReader:
 
 
 class MergeTrainDryRunTests(unittest.TestCase):
+    def test_remaining_planned_unknown_head_keeps_an_older_unaccepted_feature_out(self) -> None:
+        waiting = _pull_request(1, created_at="2026-05-08T10:00:00Z").model_copy(
+            update={"owner_review_required": True, "required_checks_status": "pending"}
+        )
+        remaining = _pull_request(2, created_at="2026-05-08T11:00:00Z").model_copy(
+            update={"owner_review_required": True, "mergeable": "unknown"}
+        )
+        # After the last accepted feature lands in a rolling batch, a planned
+        # engineering member must retain the same exclusions too.
+        for client_feature in (True, False):
+            with self.subTest(client_feature=client_feature):
+                result = build_merge_train_dry_run_result(
+                    policy=build_test_merge_train_policy(),
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository="cbusillo/sellyouroutboard",
+                        base_branch="main",
+                        pull_requests=(
+                            waiting,
+                            remaining.model_copy(update={"owner_review_required": client_feature}),
+                        ),
+                    ),
+                    batch_landing=True,
+                    planned_dependency_heads=frozenset({(remaining.number, remaining.head_sha)}),
+                )
+                self.assertEqual(result.queue_order, (remaining.number,))
+
+    def test_planned_accepted_head_retains_queue_position_during_unknown_mergeability(self) -> None:
+        features = tuple(
+            _pull_request(number, created_at=f"2026-05-08T10:{number:02}:00Z").model_copy(
+                update={"owner_review_required": True, "mergeable": mergeable}
+            )
+            for number, mergeable in ((1, "mergeable"), (2, "unknown"))
+        )
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main", pull_requests=features
+        )
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(),
+            snapshot=snapshot,
+            batch_landing=True,
+            planned_dependency_heads=frozenset((pr.number, pr.head_sha) for pr in features),
+        )
+        self.assertEqual(result.queue_order, (1, 2))
+
+    def test_batch_selects_only_ready_admitted_client_features(self) -> None:
+        features = tuple(
+            _pull_request(
+                number,
+                created_at=f"2026-05-08T10:{number:02}:00Z",
+                required_checks_status=checks,
+                mergeable=mergeable,
+                labels=labels,
+                branch_update_required=True,
+            ).model_copy(update={"owner_review_required": True})
+            for number, checks, mergeable, labels in (
+                (1, "pending", "mergeable", ("ready-to-merge",)),
+                (2, "fail", "mergeable", ("ready-to-merge",)),
+                (3, "unknown", "mergeable", ("ready-to-merge",)),
+                (4, "pass", "conflicting", ("ready-to-merge",)),
+                (5, "pass", "mergeable", ()),
+                (6, "pass", "mergeable", ("ready-to-merge", "merge-blocked")),
+                (7, "pass", "mergeable", ("ready-to-merge",)),
+                (8, "pass", "mergeable", ("ready-to-merge",)),
+            )
+        )
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main", pull_requests=features
+        )
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(), snapshot=snapshot, batch_landing=True
+        )
+        self.assertEqual(result.queue_order, (7, 8))
+        self.assertEqual(result.intended_next_action, "merge")
+        self.assertEqual(
+            {entry.number for entry in result.queue if not entry.eligible}, {1, 2, 3, 4, 5, 6}
+        )
+        # The single-transition path still refreshes the oldest waiting head;
+        # only the protected combined landing can preserve the accepted heads.
+        single = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(), snapshot=snapshot
+        )
+        self.assertEqual(single.intended_next_action, "update_branch")
+
     def test_cli_merge_train_dry_run_requires_policy_file(self) -> None:
         with TemporaryDirectory() as temp_dir:
             snapshot_file = Path(temp_dir) / "snapshot.json"
@@ -276,6 +359,177 @@ class MergeTrainDryRunTests(unittest.TestCase):
         reasons = {entry.number: entry.ineligible_reasons for entry in result.queue}
         self.assertEqual(reasons[9], ("dependency update needs agent review",))
         self.assertIn("missing ready-to-merge label", reasons[10])
+
+    def test_max_batch_size_caps_a_new_batch_and_leaves_the_rest_queued(self) -> None:
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            pull_requests=tuple(
+                _pull_request(number, created_at=f"2026-05-08T10:0{number}:00Z")
+                for number in (1, 2, 3)
+            ),
+        )
+        policy = _policy_for(snapshot)
+        capped = policy.model_copy(
+            update={"policies": (policy.policies[0].model_copy(update={"max_batch_size": 2}),)}
+        )
+        for name, batch_policy, expected in (
+            ("unset", policy, (1, 2, 3)),
+            ("capped", capped, (1, 2)),
+        ):
+            with self.subTest(name):
+                result = build_merge_train_dry_run_result(
+                    policy=batch_policy, snapshot=snapshot, batch_landing=True
+                )
+                self.assertEqual(result.queue_order, expected)
+                self.assertTrue(all(entry.eligible for entry in result.queue))
+
+    def test_service_dependency_hold_requalifies_current_head_without_clearing_labels(self) -> None:
+        policy = _dependency_update_policy(49699333)
+        repository_policy = policy.policies[0]
+        update = _pull_request(8, labels=(), actor_id=49699333).model_copy(
+            update={"dependency_update_class": "patch_or_minor"}
+        )
+        green = _pull_request(9)
+        for failed_head in (
+            update.model_copy(update={"required_checks_status": "fail"}),
+            update.model_copy(update={"mergeable": "conflicting"}),
+            update.model_copy(update={"mergeable": "unknown"}),
+        ):
+            with self.subTest(failed_head=failed_head.model_dump()):
+                failed = build_merge_train_dry_run_result(
+                    policy=policy,
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository=repository_policy.repository,
+                        base_branch="main",
+                        pull_requests=(failed_head, green),
+                    ),
+                    batch_landing=True,
+                )
+                self.assertEqual(failed.queue_order, (9,))
+                self.assertEqual(failed.queue[0].head_sha, failed_head.head_sha)
+                self.assertTrue(failed.queue[0].ineligible_reasons)
+
+        for checks, expected_action, head_sha in (
+            ("pending", "wait_for_checks", "new-dependency-head"),
+            ("unknown", "wait_for_checks", "new-dependency-head"),
+            ("pass", "merge", "new-dependency-head"),
+            ("pass", "merge", update.head_sha),
+        ):
+            new_head = update.model_copy(
+                update={"head_sha": head_sha, "required_checks_status": checks}
+            )
+            fresh = build_merge_train_dry_run_result(
+                policy=policy,
+                snapshot=MergeTrainDryRunSnapshot(
+                    repository=repository_policy.repository,
+                    base_branch="main",
+                    pull_requests=(new_head,),
+                ),
+                batch_landing=True,
+            )
+            self.assertEqual(fresh.intended_next_action, expected_action)
+            self.assertEqual(fresh.queue_order, (8,))
+            for hold_labels in (
+                (repository_policy.blocked_label,),
+                (repository_policy.blocked_label.upper(),),
+                (repository_policy.enqueue_label, repository_policy.blocked_label),
+            ):
+                held = build_merge_train_dry_run_result(
+                    policy=policy,
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository=repository_policy.repository,
+                        base_branch="main",
+                        pull_requests=(new_head.model_copy(update={"labels": hold_labels}),),
+                    ),
+                    batch_landing=True,
+                )
+                self.assertEqual(held.queue_order, ())
+                self.assertEqual(held.intended_next_action, "idle")
+                self.assertEqual(held.queue[0].labels, hold_labels)
+
+    def test_dependency_check_hold_does_not_change_major_or_legacy_admission(self) -> None:
+        policy = _dependency_update_policy(49699333)
+        update = _pull_request(8, labels=(), actor_id=49699333).model_copy(
+            update={"dependency_update_class": "patch_or_minor", "required_checks_status": "fail"}
+        )
+        snapshot = MergeTrainDryRunSnapshot(
+            repository=policy.policies[0].repository, base_branch="main", pull_requests=(update,)
+        )
+        self.assertEqual(
+            build_merge_train_dry_run_result(policy=policy, snapshot=snapshot).intended_next_action,
+            "block",
+        )
+        invalid_notes = update.model_copy(
+            update={"client_test_notes_error": "Client test notes are missing."}
+        )
+        held = build_merge_train_dry_run_result(
+            policy=policy,
+            snapshot=snapshot.model_copy(update={"pull_requests": (invalid_notes,)}),
+            batch_landing=True,
+        )
+        self.assertEqual(held.queue_order, ())
+        self.assertIn(invalid_notes.client_test_notes_error, held.queue[0].ineligible_reasons)
+        no_label_policy = policy.model_copy(
+            update={
+                "policies": (
+                    policy.policies[0].model_copy(
+                        update={
+                            "enqueue": policy.policies[0].enqueue.model_copy(
+                                update={"label_required": False}
+                            )
+                        }
+                    ),
+                )
+            }
+        )
+        self.assertEqual(
+            build_merge_train_dry_run_result(
+                policy=no_label_policy, snapshot=snapshot, batch_landing=True
+            ).intended_next_action,
+            "block",
+        )
+        for classification in ("needs_review", None):
+            result = build_merge_train_dry_run_result(
+                policy=policy,
+                snapshot=snapshot.model_copy(
+                    update={
+                        "pull_requests": (
+                            update.model_copy(
+                                update={
+                                    "dependency_update_class": classification,
+                                    "required_checks_status": "fail",
+                                }
+                            ),
+                        )
+                    }
+                ),
+                batch_landing=True,
+            )
+            self.assertEqual(result.queue_order, ())
+            self.assertIn(
+                "dependency update needs agent review", result.queue[0].ineligible_reasons
+            )
+
+    def test_closed_dependency_failure_does_not_add_an_active_head_hold(self) -> None:
+        policy = _dependency_update_policy(49699333)
+        update = _pull_request(8, labels=(), actor_id=49699333).model_copy(
+            update={"state": "closed", "dependency_update_class": "patch_or_minor"}
+        )
+        queues = []
+        for checks in ("fail", "pass"):
+            result = build_merge_train_dry_run_result(
+                policy=policy,
+                snapshot=MergeTrainDryRunSnapshot(
+                    repository=policy.policies[0].repository,
+                    base_branch="main",
+                    pull_requests=(update.model_copy(update={"required_checks_status": checks}),),
+                ),
+                batch_landing=True,
+            )
+            self.assertEqual(result.queue_order, ())
+            queues.append(result.queue[0].ineligible_reasons)
+        self.assertEqual(queues[0], queues[1])
 
     def test_dependency_update_identity_without_policy_still_needs_the_label(self) -> None:
         result = build_merge_train_dry_run_result(

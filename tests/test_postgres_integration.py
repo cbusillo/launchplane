@@ -29,6 +29,10 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.preview_generation_record import (
+    PreviewGenerationRecord,
+    PreviewPullRequestSummary,
+)
 from control_plane.odoo_import_overrides import plan_import_override_reconciliation
 from control_plane.workflows.odoo_post_deploy import _write_odoo_instance_override_apply_result
 from tests.test_odoo_import_override_reconciliation import (
@@ -42,6 +46,7 @@ from tests.test_odoo_addon_settings_override import _existing_record as _addon_o
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from tests import test_http_app_product_retirement as retirement_tests
+from tests import test_legacy_preview_reconciliation as legacy_preview_tests
 from tests.http_app_test_support import _asgi_request
 from control_plane import authz_grant_service, authz_policy_activation
 from control_plane.authz_candidate_preparation import (
@@ -950,6 +955,162 @@ def _owner_acceptance_system_event(
     )
 
 
+class RealPostgresLegacyPreviewReconciliationTests(
+    legacy_preview_tests.LegacyPreviewReconciliationTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    async def test_sibling_generation_write_does_not_deadlock_reconciliation(self) -> None:
+        sibling = self.preview.model_copy(update={"preview_id": "sibling", "anchor_pr_number": 7})
+        self.store.write_preview_record(sibling)
+        generation = PreviewGenerationRecord(
+            generation_id="sibling-generation",
+            preview_id=sibling.preview_id,
+            sequence=1,
+            state="ready",
+            requested_reason="fixture",
+            requested_at=sibling.created_at,
+            finished_at=sibling.created_at,
+            resolved_manifest_fingerprint="fixture-manifest",
+            anchor_summary=PreviewPullRequestSummary.model_validate(
+                {
+                    "repo": self.profile.repository,
+                    "pr_number": 7,
+                    "head_sha": "a" * 40,
+                    "pr_url": sibling.anchor_pr_url,
+                }
+            ),
+        )
+        plan = await self.plan()
+        generation_written = threading.Event()
+        release_writer = threading.Event()
+
+        def pause_generation_writer(
+            _connection: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            context: Any,
+            _executemany: bool,
+        ) -> None:
+            if context.isinsert and "launchplane_preview_generations" in statement:
+                generation_written.set()
+                if not release_writer.wait(10):
+                    raise ValueError("fixture writer timed out")
+
+        event.listen(self.store._engine, "after_cursor_execute", pause_generation_writer)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                writer = executor.submit(
+                    lambda: self.store.write_preview_generation_evidence_records(
+                        preview_record=sibling.model_copy(
+                            update={"latest_generation_id": generation.generation_id}
+                        ),
+                        generation_record=generation,
+                    )
+                )
+                try:
+                    self.assertTrue(await asyncio.to_thread(generation_written.wait, 5))
+                    apply = asyncio.create_task(self.apply(plan))
+                    blocked = False
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        with self.store._engine.connect() as connection:
+                            blocked = bool(
+                                connection.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_locks WHERE NOT granted "
+                                        "AND relation = to_regclass(:table_name)"
+                                    ),
+                                    {"table_name": "launchplane_preview_generations"},
+                                )
+                            )
+                        if blocked:
+                            break
+                        await asyncio.sleep(0.01)
+                    self.assertTrue(blocked, "Reconciliation never waited on generation evidence")
+                finally:
+                    release_writer.set()
+                await asyncio.to_thread(lambda: writer.result(timeout=5))
+                response = await asyncio.wait_for(apply, 5)
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(
+                    self.store.read_preview_generation_record(generation.generation_id), generation
+                )
+        finally:
+            release_writer.set()
+            event.remove(self.store._engine, "after_cursor_execute", pause_generation_writer)
+
+    def test_provider_waiters_preserve_record_pool_and_serialize_provider_work(self) -> None:
+        from control_plane.workflows.generic_web_preview import (
+            GenericWebPreviewDestroyRequest,
+            execute_generic_web_preview_destroy,
+            serialize_generic_web_preview_operation,
+        )
+
+        with (
+            ThreadPoolExecutor(max_workers=21) as executor,
+            patch(
+                "control_plane.workflows.generic_web_preview._execute_generic_web_preview_destroy_unserialized"
+            ) as provider,
+        ):
+            with serialize_generic_web_preview_operation(
+                record_store=self.store, profile=self.profile, preview_slug="pr-1"
+            ):
+                futures = [
+                    executor.submit(
+                        execute_generic_web_preview_destroy,
+                        control_plane_root=self.root,
+                        record_store=self.store,
+                        profile=self.profile,
+                        request=GenericWebPreviewDestroyRequest(
+                            product=self.profile.product,
+                            anchor_pr_number=1,
+                            destroy_reason="fixture",
+                        ),
+                    )
+                    for _ in range(20)
+                ]
+                assert self.store._preview_lock_engine is not None
+                deadline = time.monotonic() + 5
+                waiting = 0
+                while time.monotonic() < deadline:
+                    with self.store._preview_lock_engine.connect() as connection:
+                        waiting = connection.scalar(
+                            text(
+                                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                                "AND NOT granted AND database = "
+                                "(SELECT oid FROM pg_database WHERE datname = current_database())"
+                            )
+                        )
+                    if waiting == len(futures):
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(
+                    waiting, len(futures), "Provider calls did not all wait on the lock"
+                )
+                metadata = executor.submit(
+                    self.store.read_product_profile_record, self.profile.product
+                )
+                self.assertEqual(metadata.result(timeout=5), self.profile)
+                provider.assert_not_called()
+            for future in futures:
+                future.result(timeout=5)
+            self.assertEqual(provider.call_count, len(futures))
+
+    async def test_unrelated_preview_lock_does_not_block_plan(self) -> None:
+        from control_plane.workflows.generic_web_preview import (
+            serialize_generic_web_preview_operation,
+        )
+
+        with serialize_generic_web_preview_operation(
+            record_store=self.store, profile=self.profile, preview_slug="pr-7"
+        ):
+            plan = await self.plan()
+            self.assertTrue(plan["apply_eligible"])
+
+
 class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
     async def test_approved_rotation_survives_stale_retirement(self) -> None:
         from tests.test_retirement_approved_rotation import RetirementApprovedRotationTests
@@ -1158,6 +1319,62 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_feedback_recovery_orders_jsonb_receipts_and_supersedes_same_second_failure(
+        self,
+    ) -> None:
+        from email.message import Message
+        from urllib.error import HTTPError
+        from tests.test_merge_train_feedback_retry import _failure, _record
+
+        with _store_for_fresh_head_database() as store:
+            headers = Message()
+            headers["Retry-After"] = "120"
+            error = HTTPError("https://example.test/comment", 429, "quota", headers, None)
+            with patch(
+                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                side_effect=_failure(error),
+            ):
+                failed = _record()
+                superseded = _record(number=8)
+            with patch(
+                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                return_value={"action": "updated_comment", "comment_id": 123, "comment_url": ""},
+            ):
+                newer = _record(number=8, event="waiting")
+            # A delivery lock must leave feedback operations usable with a single
+            # pooled connection, including the legacy/non-ranked latest-status read.
+            from sqlalchemy.pool import QueuePool
+
+            store._engine.dispose()
+            store._engine.pool = QueuePool(
+                store._engine.pool._creator, pool_size=1, max_overflow=0, timeout=0.5
+            )
+            with store.merge_train_feedback_delivery_lock(
+                repository=failed.repository, pull_request_number=failed.pull_request_number
+            ):
+                for record in (failed, superseded, newer):
+                    store.write_merge_train_pr_feedback_record(record)
+                retries = store.list_merge_train_pr_feedback_records(
+                    repository=failed.repository,
+                    base_branch=failed.base_branch,
+                    latest_per_pr=True,
+                    delivery_status="failed",
+                    terminal_retry_candidates=True,
+                    limit=1,
+                )
+                self.assertEqual([record.feedback_id for record in retries], [failed.feedback_id])
+                quota = store.list_merge_train_pr_feedback_records(
+                    repository=failed.repository,
+                    base_branch=failed.base_branch,
+                    latest_per_pr=True,
+                    delivery_status="failed",
+                    provider_backoff_only=True,
+                    limit=1,
+                )
+                self.assertEqual(quota[0].provider_retry_at, failed.provider_retry_at)
+                latest = store.list_merge_train_pr_feedback_records(pr_number=8, limit=1)
+                self.assertEqual(latest[0].feedback_id, newer.feedback_id)
+
     def test_compose_source_completion_holds_ownership_across_provider_update(self) -> None:
         with _store_for_fresh_head_database() as store:
             profile = _public_ingress_profile().model_copy(
@@ -3417,6 +3634,142 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_self_deploy_repair_cannot_overtake_an_active_provider_dispatch(self) -> None:
+        from control_plane.service_deploy_drain import ServiceDeployDispatchBusy, dispatch_lock
+
+        with _head_postgres_database() as url:
+            original = PostgresRecordStore(database_url=url)
+            repair = PostgresRecordStore(database_url=url)
+            try:
+                with dispatch_lock(original):
+                    with self.assertRaises(ServiceDeployDispatchBusy):
+                        with dispatch_lock(repair):
+                            self.fail("Repair overtook the original provider dispatch")
+                with dispatch_lock(repair):
+                    pass  # The process/transaction lock releases when the provider call ends.
+            finally:
+                original.close()
+                repair.close()
+
+    def test_self_deploy_fence_and_release_admission_serialize_in_both_orders(self) -> None:
+        from control_plane.service_deploy_drain import ServiceDeployDraining, prepare
+
+        for admission_kind, admission_first in (
+            ("reservation", True),
+            ("reservation", False),
+            ("backup-claim", True),
+            ("backup-claim", False),
+        ):
+            with (
+                self.subTest(kind=admission_kind, admission_first=admission_first),
+                _head_postgres_database() as url,
+            ):
+                store = PostgresRecordStore(database_url=url)
+                if admission_kind == "backup-claim":
+                    from tests.test_verireel_prod_backup_gate import (
+                        VeriReelProdBackupGateWorkflowTests,
+                    )
+
+                    specimen = VeriReelProdBackupGateWorkflowTests(
+                        methodName="runTest"
+                    )._operation_record()
+                    store.write_verireel_prod_backup_gate_operation_record(specimen)
+                held = threading.Event()
+                release = threading.Event()
+                timestamp = store._database_mutation_timestamp
+
+                def paused_timestamp(session: Any) -> str:
+                    if threading.current_thread().name.startswith("first") and not held.is_set():
+                        held.set()
+                        if not release.wait(10):
+                            raise AssertionError("Fixture never released the admission lock")
+                    return timestamp(session)
+
+                def admit() -> Any:
+                    if admission_kind == "backup-claim":
+                        return store.claim_next_verireel_prod_backup_gate_operation_record(
+                            lease_owner="worker",
+                            lease_expires_at=(
+                                datetime.now(timezone.utc) + timedelta(minutes=1)
+                            ).isoformat(),
+                            claimed_at=datetime.now(timezone.utc).isoformat(),
+                        )
+                    return store.reserve_mutation(
+                        scope="client-release",
+                        route_path="/isolated",
+                        idempotency_key="race",
+                        request_fingerprint="release",
+                        lease_owner="worker",
+                    )
+
+                def drain() -> Any:
+                    return prepare(
+                        store,
+                        request_fingerprint="replace",
+                        target_type="compose",
+                        target_id="isolated",
+                        image_reference="example.invalid/image@sha256:" + "a" * 64,
+                        deployment_marker="replacement",
+                    )
+
+                try:
+                    with (
+                        patch.object(
+                            store, "_database_mutation_timestamp", side_effect=paused_timestamp
+                        ),
+                        ThreadPoolExecutor(max_workers=1, thread_name_prefix="first") as first,
+                        ThreadPoolExecutor(max_workers=1, thread_name_prefix="second") as second,
+                    ):
+                        initial = first.submit(admit if admission_first else drain)
+                        self.assertTrue(held.wait(10))
+                        contender = second.submit(drain if admission_first else admit)
+                        try:
+                            # Observe the real PostgreSQL lock wait, rather than sleep
+                            # and mistake thread starvation for serialization proof.
+                            deadline = time.monotonic() + 10
+                            waiting = False
+                            while time.monotonic() < deadline:
+                                with store._engine.connect() as connection:
+                                    waiting = bool(
+                                        connection.scalar(
+                                            text(
+                                                "select exists(select 1 from pg_locks where locktype = 'advisory' "
+                                                "and not granted and database = (select oid from pg_database "
+                                                "where datname = current_database()))"
+                                            )
+                                        )
+                                    )
+                                if waiting:
+                                    break
+                            self.assertTrue(
+                                waiting, "contender never reached the transaction fence"
+                            )
+                        finally:
+                            release.set()
+                        if admission_first:
+                            reservation = initial.result(10)
+                            record, running, dispatch = contender.result(10)
+                            self.assertEqual(record.state, "draining")
+                            record_id = (
+                                reservation.operation_id
+                                if admission_kind == "backup-claim"
+                                else reservation.record.record_id
+                            )
+                            self.assertEqual(running, (record_id,))
+                            self.assertFalse(dispatch)
+                        else:
+                            _, running, dispatch = initial.result(10)
+                            self.assertTrue(dispatch)
+                            self.assertFalse(running)
+                            if admission_kind == "backup-claim":
+                                self.assertIsNone(contender.result(10))
+                            else:
+                                with self.assertRaises(ServiceDeployDraining):
+                                    contender.result(10)
+                finally:
+                    release.set()
+                    store.close()
+
     def test_expired_delivery_history_allows_approved_native_retirement(self) -> None:
         from tests.test_delivery_administration_retirement import (
             _approve,

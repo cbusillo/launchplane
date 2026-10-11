@@ -166,6 +166,7 @@ class FakeGitHub:
         self.pull_request: dict[str, object] = {
             "state": "open",
             "draft": False,
+            "body": "## Client test notes\nNothing for the Client to test: Build plumbing only.",
             "labels": [],
             "head": {"sha": PR_HEAD},
         }
@@ -1498,6 +1499,16 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
                 self.assertTrue(plan["held"])
                 self.assertEqual(self.deploys.runtime_identities, [])
 
+    def test_legacy_baseline_with_no_successful_builds_reports_no_verified_build(self) -> None:
+        self.record_legacy_baseline()
+        self.request()
+
+        plan = self.reconcile()
+
+        self.assertEqual((plan["action"], plan["reason"]), ("none", "no_verified_build"))
+        self.assertFalse(plan["held"])
+        self.assertEqual(self.deploys.runtime_identities, [])
+
     def test_legacy_baseline_still_requires_first_parent_history_to_reach_it(self) -> None:
         self.record_legacy_baseline()
         self.github.add_run(20, DEPLOYABLE)
@@ -2656,6 +2667,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
 
     def test_removing_any_label_destroys_nothing(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.pull_request["body"] = "## Client test notes\nTry the changed page."
         self.github.pull_request["labels"] = [{"name": "preview"}, {"name": "owner-review"}]
         self.request("preview", 5)
         self.assertEqual(self.reconcile()["action"], "apply")
@@ -3487,6 +3499,11 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         )
         for number, labels, origin, owner_review in cases:
             with self.subTest(number=number):
+                self.github.pull_request["body"] = "## Client test notes\n" + (
+                    "Try the changed page."
+                    if labels
+                    else "Nothing for the Client to test: Build plumbing only."
+                )
                 self.github.pull_request["labels"] = [{"name": label} for label in labels]
                 self.public_origin = origin
                 self.request("preview", number)
@@ -3495,7 +3512,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
 
                 (comment,) = self.comments.on(number)
                 body = cast(str, comment["body"])
-                self.assertIn(f"preview is ready for PR #{number}", body)
+                self.assertEqual(feedback["status"], "ready")
                 self.assertEqual(feedback.get("owner_review"), owner_review)
                 if owner_review == "mentioned":
                     self.assertIn("@site-owner this change is ready for you to look at.", body)
@@ -3508,6 +3525,37 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
                 else:
                     self.assertNotIn("@site-owner", body)
 
+    def test_explicit_review_mark_without_client_explains_the_hold_on_the_preview(self) -> None:
+        self.github.pull_request["body"] = "## Client test notes\nTry the price list."
+        self.github.pull_request["labels"] = [{"name": "owner-review"}]
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["action"], "apply")
+        self.assertIn("no Client is set", self.comment_body())
+        self.assertIn("An admin needs to set one", self.comment_body())
+
+    def test_notes_without_label_invite_client_and_missing_notes_are_visible(self) -> None:
+        payload = _profile()
+        payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.pull_request["body"] = "## Client test notes\nTry the changed price list."
+        self.request("preview", 5)
+        result = self.reconcile()
+        self.assertEqual(result["action"], "apply")
+        self.assertIn("@site-owner", self.comment_body())
+        calls_before_refusal = tuple(self.owner_review_status_calls)
+        self.github.pull_request["body"] = "## Client test notes\n<!-- fill me in -->"
+        self.request("preview", 5)
+        result = self.reconcile()
+        self.assertEqual(result["reason"], "client_test_notes_required")
+        self.assertIn("Client test notes are missing", self.comment_body())
+        self.assertEqual(
+            tuple(self.owner_review_status_calls), calls_before_refusal + (("site", 5),)
+        )
+
     def test_ready_preview_on_an_accepted_head_says_so_instead_of_asking_again(self) -> None:
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
@@ -3515,6 +3563,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             LaunchplaneProductProfileRecord.model_validate(payload)
         )
         self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.pull_request["body"] = "## Client test notes\nTry the changed page."
         self.github.pull_request["labels"] = [{"name": "owner-review"}]
         self.owner_review_status = OwnerReviewStatus(
             state="success",
@@ -3541,6 +3590,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile_preview()["action"], "apply")
         self.assertNotIn("@site-owner", self.comment_body())
 
+        self.github.pull_request["body"] = "## Client test notes\nTry the changed page."
         self.github.pull_request["labels"] = [{"name": "owner-review"}]
         marked = self.reconcile_preview()
 

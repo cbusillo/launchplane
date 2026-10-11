@@ -51,8 +51,9 @@ from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionD
 from control_plane.merge_train_structural_provenance import (
     evaluate_merge_train_structural_candidate,
 )
+from control_plane.merge_train_candidate_failures import classify_candidate_check_failures
 
-from tests.test_merge_train_dependency_updates import INDIRECT_PATCH
+from tests.test_merge_train_dependency_updates import INDIRECT_PATCH, SCOPED_MINOR
 
 
 class _ReadOnlyMergeTrainTransport(RecordingMergeTrainGitHubTransport):
@@ -110,6 +111,9 @@ class _RecordingSemanticEffectExecutor:
 
 class _PermissiveMergeAdmissionGuard:
     def __init__(self) -> None:
+        from control_plane.merge_admission import _utc_now_timestamp
+
+        self.observation_time_provider = _utc_now_timestamp
         self.admit_calls: list[dict[str, object]] = []
         self.landed_calls: list[dict[str, object]] = []
         self.reconcile_required_calls: list[dict[str, object]] = []
@@ -389,6 +393,42 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 repository="example/repo",
                 pull_request_number=11,
                 body_contains="restored annotation",
+            )
+
+    def test_unlanded_batch_proof_does_not_require_current_notes(self) -> None:
+        plan = _landing_plan()
+        entry = plan.entries[0]
+        pull = _landing_pull_request(entry.pull_request_number, base_sha=entry.expected_base_sha)
+        pull["body"] = ""
+        profile = SimpleNamespace(
+            is_active=True,
+            repository=plan.repository,
+            owner=SimpleNamespace(is_set=True, review_label="owner-review"),
+        )
+        client = GitHubMergeTrainClient(
+            transport=RecordingMergeTrainGitHubTransport(responses=(pull, pull)),
+            branch_refresh_store=cast(
+                Any, SimpleNamespace(list_product_profile_records=lambda: (profile,))
+            ),
+        )
+        self.assertFalse(
+            client._validate_open_landing_pull_request(
+                repository_path=plan.repository,
+                entry=entry,
+                expected_base_ref=plan.base_branch,
+                expected_base_sha=entry.expected_base_sha,
+                expected_base_tree_sha="tree-main",
+                require_client_review=False,
+            )
+        )
+        with self.assertRaises(MergeAdmissionDeniedError):
+            client._validate_open_landing_pull_request(
+                repository_path=plan.repository,
+                entry=entry,
+                expected_base_ref=plan.base_branch,
+                expected_base_sha=entry.expected_base_sha,
+                expected_base_tree_sha="tree-main",
+                require_client_review=True,
             )
 
     def test_pull_request_has_label_reads_pr_labels(self) -> None:
@@ -1446,6 +1486,168 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             candidate=_batch_candidate()
         )
         self.assertEqual(built.status, "ready_for_checks")
+
+    def test_base_check_status_reads_exact_base_with_candidate_check_rules(self) -> None:
+        candidate = _batch_candidate().model_copy(update={"candidate_sha": "failed-candidate"})
+        for conclusion, expected in (("success", "pass"), ("failure", "fail"), (None, "pending")):
+            with self.subTest(conclusion=conclusion):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate"),
+                        _combined_status(),
+                        {
+                            "check_runs": [
+                                _required_check_run(
+                                    "ci-gate",
+                                    "queued" if conclusion is None else "completed",
+                                    conclusion,
+                                )
+                            ]
+                        },
+                    )
+                )
+                status = GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                    candidate=candidate, failed_check_names=("ci-gate",)
+                )
+                self.assertEqual(status, expected)
+                self.assertEqual(
+                    [request.path for request in transport.requests],
+                    [
+                        f"/repos/{candidate.repository}/branches/{candidate.base_branch}",
+                        f"/repos/{candidate.repository}/commits/{candidate.base_sha}/status?per_page=100&page=1",
+                        f"/repos/{candidate.repository}/commits/{candidate.base_sha}/check-runs?per_page=100&page=1",
+                    ],
+                )
+                self.assertTrue(all(request.method == "GET" for request in transport.requests))
+
+    def test_base_missing_required_check_is_not_treated_as_green(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _protected_branch_with_checks(),
+                _combined_status(),
+                {"check_runs": [_required_check_run("ci-gate", "completed", "success")]},
+            )
+        )
+        self.assertEqual(
+            GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                candidate=_batch_candidate(), failed_check_names=("ci-gate",)
+            ),
+            "unknown",
+        )
+
+    def test_same_failed_nonrequired_check_on_base_prevents_blame(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _protected_branch_with_checks("ci-gate"),
+                _combined_status(),
+                {
+                    "check_runs": [
+                        _required_check_run("ci-gate", "completed", "success"),
+                        _required_check_run("test_shard (0)", "completed", "failure"),
+                    ]
+                },
+            )
+        )
+        self.assertEqual(
+            GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                candidate=_batch_candidate(), failed_check_names=("test_shard (0)",)
+            ),
+            "fail",
+        )
+
+    def test_unrelated_base_only_checks_do_not_stop_isolation(self) -> None:
+        for status, conclusion in (("completed", "failure"), ("queued", None)):
+            with self.subTest(status=status):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate"),
+                        _combined_status(),
+                        {
+                            "check_runs": [
+                                _required_check_run("ci-gate", "completed", "success"),
+                                _required_check_run("deploy", status, conclusion),
+                            ]
+                        },
+                    )
+                )
+                self.assertEqual(
+                    GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                        candidate=_batch_candidate(), failed_check_names=("test_shard (0)",)
+                    ),
+                    "pass",
+                )
+
+    def test_base_commit_status_only_stops_blame_when_implicated(self) -> None:
+        for context, expected in (("external/gate", "fail"), ("deploy", "pass")):
+            with self.subTest(context=context):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate"),
+                        {"statuses": [{"context": context, "state": "failure"}]},
+                        {"check_runs": [_required_check_run("ci-gate", "completed", "success")]},
+                    )
+                )
+                self.assertEqual(
+                    GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                        candidate=_batch_candidate(), failed_check_names=("external/gate",)
+                    ),
+                    expected,
+                )
+
+    def test_base_without_any_check_evidence_cannot_identify_a_culprit(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _protected_branch_with_checks("ci-gate"),
+                {"statuses": []},
+                {"check_runs": []},
+            )
+        )
+        self.assertEqual(
+            GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                candidate=_batch_candidate(), failed_check_names=("ci-gate",)
+            ),
+            "unknown",
+        )
+
+    def test_base_failure_comparison_uses_provider_names_instead_of_display_names(self) -> None:
+        for source in ("check_run", "commit_status"):
+            for candidate_name, base_name, expected in (
+                ("test_shard  (0)", "test_shard  (0)", "fail"),
+                ("QA & integration", "QA & integration", "fail"),
+                ("QA & integration", "Deploy & monitoring", "pass"),
+            ):
+                with self.subTest(
+                    source=source, candidate_name=candidate_name, base_name=base_name
+                ):
+                    failures = classify_candidate_check_failures(
+                        check_runs=[_required_check_run(candidate_name, "completed", "failure")]
+                        if source == "check_run"
+                        else [],
+                        commit_statuses=[{"context": candidate_name, "state": "failure"}]
+                        if source == "commit_status"
+                        else [],
+                        read_annotations=lambda _: [],
+                    )
+                    runs = [_required_check_run("ci-gate", "completed", "success")]
+                    statuses = _combined_status()
+                    if source == "check_run":
+                        runs.append(_required_check_run(base_name, "completed", "failure"))
+                    else:
+                        statuses = {"statuses": [{"context": base_name, "state": "failure"}]}
+                    transport = RecordingMergeTrainGitHubTransport(
+                        responses=(
+                            _protected_branch_with_checks("ci-gate"),
+                            statuses,
+                            {"check_runs": runs},
+                        )
+                    )
+                    self.assertEqual(
+                        GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                            candidate=_batch_candidate(),
+                            failed_check_names=failures.check_identity_names,
+                        ),
+                        expected,
+                    )
 
     def test_observe_batch_candidate_checks_marks_passed_candidate(self) -> None:
         candidate = _batch_candidate().model_copy(
@@ -2941,11 +3143,17 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             ("owner-review", (_owner_review_check("success", head_sha="older-head"),), "pending"),
             ("missing-app", (_owner_review_check("success"),), "pending"),
             ("client-check", (), "pending"),
+            ("notes-without-label", (), "pending"),
             ("unrelated", (_owner_review_check("failure"),), "pass"),
         )
         for label, checks, expected in cases:
             with self.subTest(label=label, checks=checks):
                 pull = _github_pull_request(42)
+                pull["body"] = "## Client test notes\n" + (
+                    "Nothing for the Client to test: CI only."
+                    if label == "unrelated"
+                    else "Try the changed page."
+                )
                 pull["labels"] = [{"name": "ready-to-merge"}, {"name": label}]
                 transport = RecordingMergeTrainGitHubTransport(
                     responses=(
@@ -2966,7 +3174,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     is_active=True,
                     repository="cbusillo/sellyouroutboard",
                     owner=SimpleNamespace(
-                        review_label=label if label != "unrelated" else "client-check"
+                        is_set=True,
+                        review_label=label
+                        if label not in {"unrelated", "notes-without-label"}
+                        else "client-check",
                     ),
                 )
                 store = SimpleNamespace(
@@ -2980,6 +3191,38 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 ).read_merge_train_snapshot(repository=profile.repository, base_branch="main")
                 self.assertEqual(snapshot.pull_requests[0].required_checks_status, expected)
 
+    def test_explicit_review_override_still_holds_a_product_without_a_client(self) -> None:
+        profile = SimpleNamespace(
+            is_active=True,
+            repository="example/site",
+            owner=SimpleNamespace(is_set=False, review_label="owner-review"),
+        )
+        reader = GitHubMergeTrainSnapshotReader(
+            transport=RecordingMergeTrainGitHubTransport(responses=()),
+            branch_refresh_store=cast(
+                Any, SimpleNamespace(list_product_profile_records=lambda: (profile,))
+            ),
+        )
+        intent = reader.client_review_intent(
+            labels=("owner-review",),
+            repository=profile.repository,
+            body="## Client test notes\nTry the changed prices.",
+        )
+        self.assertTrue(intent.review_required)
+        self.assertFalse(intent.error)
+        self.assertTrue(
+            reader.client_review_intent(
+                labels=("owner-review",),
+                repository=profile.repository,
+                body="## Client test notes\nNothing for the Client to test: CI only.",
+            ).error
+        )
+        self.assertFalse(
+            reader.client_review_intent(
+                labels=(), repository=profile.repository, body=""
+            ).review_required
+        )
+
     def test_review_label_without_matching_active_profile_creates_no_wait(self) -> None:
         for profiles in (
             (),
@@ -2987,14 +3230,14 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 SimpleNamespace(
                     is_active=False,
                     repository="cbusillo/sellyouroutboard",
-                    owner=SimpleNamespace(review_label="owner-review"),
+                    owner=SimpleNamespace(is_set=True, review_label="owner-review"),
                 ),
             ),
             (
                 SimpleNamespace(
                     is_active=True,
                     repository="cbusillo/sellyouroutboard",
-                    owner=SimpleNamespace(review_label="client-check"),
+                    owner=SimpleNamespace(is_set=True, review_label="client-check"),
                 ),
             ),
         ):
@@ -3007,7 +3250,9 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 )
                 self.assertFalse(
                     reader.client_review_required(
-                        labels=("owner-review",), repository="cbusillo/sellyouroutboard"
+                        labels=("unrelated",),
+                        repository="cbusillo/sellyouroutboard",
+                        body="## Client test notes\nNothing for the Client to test: CI only.",
                     )
                 )
 
@@ -3026,7 +3271,6 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
                 _github_pull_request(43, base_ref="feature-root", head_ref="feature-child"),
-                {"permission": "admin"},
                 _label_events(),
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
@@ -3071,7 +3315,6 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 "/repos/cbusillo/sellyouroutboard/commits/head-42/status?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-42/check-runs?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/pulls/43",
-                "/repos/cbusillo/sellyouroutboard/collaborators/cbusillo/permission",
                 "/repos/cbusillo/sellyouroutboard/issues/43/events?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-43/status?per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/commits/head-43/check-runs?per_page=100&page=1",
@@ -3119,6 +3362,12 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             ...,
         ] = (
             ("bot commit", [own], [], "patch_or_minor"),
+            (
+                "quoted scoped dependency name",
+                [_github_commit(49699333, SCOPED_MINOR, sha="head-16")],
+                [],
+                "patch_or_minor",
+            ),
             ("bot rebased itself", [own], bot_push, "patch_or_minor"),
             (
                 "another author added a commit",
@@ -3278,7 +3527,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             responses.extend(
                 [
                     _github_pull_request(number),
-                    {"permission": "admin"},
+                    *([{"permission": "admin"}] if number == 1 else []),
                     _label_events(),
                     _combined_status(),
                     {"check_runs": [_check_run("completed", "success")]},

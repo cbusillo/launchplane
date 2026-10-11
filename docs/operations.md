@@ -26,8 +26,8 @@ against the provider and confirms containment in the target branch. It then
 clears the completed fence with `reason_code=completed_landing_policy_changed`,
 preserving the landing history and retaining the old candidate ref. It never
 re-admits or re-merges the root or repeats a stack collapse. For unfinished
-legacy stack disposition, the same supported controller pass verifies every
-unfinished child head against its PR and confirms containment in the landed
+legacy stack disposition, the same supported controller pass reads every
+unfinished child's current PR head and confirms its recorded head's containment in the landed
 root head before any provider write. Plain merge landings also require child
 containment in the merge commit; squash and rebase rely on the provider's
 exact merged-root head because those methods rewrite commit ancestry. It then resumes the
@@ -35,12 +35,31 @@ checkpointed comment, label and close effects using the current repository
 policy's disposition label; retries observe completed provider effects instead
 of repeating them. Completed non-stack history requires no provider writes.
 Persisted completed child dispositions are skipped, preserving any later work
-on a reopened child. Transient provider failures retain the controller's
+on a reopened child. If an unfinished child's head has moved, verified containment
+of its recorded head resolves only that historical disposition as `preserved`,
+with `preserved_head_sha` and `preserved_state` recording the observed newer head
+and open/closed state. Preservation retains that observed state; a closed moved
+PR is not reopened and its new head is not claimed to be available in the queue.
+The controller checkpoints this preservation before that record's remaining
+child effects. It never
+comments on, labels, closes, retargets or merges the changed PR. Earlier landing
+annotations may remain as history; this recovery does not remove them. New work
+remains subject to ordinary queue discovery and readiness, including its current
+base branch; preservation does not retarget it. Landing and admission records and
+the original collapse progress remain unchanged. Transient provider failures retain the controller's
 retry classification and rate-limit reset evidence.
+
+Preservation records require a reader that understands `preserved` and
+its preservation evidence. Older images reject that evidence; an unchanged stack
+disposition keeps its earlier wire shape. For a source rollback after preservation
+has run, retain the disposition reader and terminal-state handling while reverting
+the recovery writer, or repair by rolling forward. The Supervisor qualifies the
+chosen rollback build against recorded preservation history before deployment;
+this source recovery does not qualify an earlier image as a rollback target.
 
 Missing or incompatible recorded stack history stays fenced with
 `completed_landing_stack_reconciliation_required`. Missing current disposition
-configuration, changed child heads, unavailable child evidence and missing
+configuration, unavailable child evidence and missing
 containment return explicit `completed_landing_stack_*` reasons with the relevant
 record IDs. Conflicting or unavailable root evidence also preserves
 reconciliation. Diagnose through controller/status and resume through the
@@ -1036,14 +1055,7 @@ Client identity directly. Do not introduce new GitHub-secret/workflow grants;
 use the native reviewed policy path for any separately authorized contraction.
 See [Client acceptance](owner-acceptance.md).
 
-The `manager-preview-approval` and `manager-preview-approval-retirement`
-selectors and wrapper jobs are removed, along with the
-`LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` reference,
-after the reviewed `operator.manager-preview-approval` contraction
-and independent empty-set readback recorded on #2006. Source retirement does
-not itself mutate authorization records or delete GitHub secrets. The Director
-deletes the unused managed-set secret by hand after the wiring removal lands.
-Other separately authorized contractions use the current reviewed
+Separately authorized contractions use the current reviewed
 [authorization surface](authorization-authority.md). The signed trusted-maintenance
 webhook and its independent `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`
 remain in use.
@@ -1355,6 +1367,9 @@ reusable workflow accepts only mode, reason, and an idempotency key, preserves a
 30-day request/response artifact, and fails after artifact upload when any target
 requires attention. Production enrollment is a separate change and cannot be
 selected through this endpoint.
+
+The [record contract](records.md) documents the separate remaining-stable
+controller for bindings outside this testing-only slice.
 
 `Odoo Testing Route Binding Refresh` is the clock-only wrapper. It accepts no
 target selectors and calls the reusable worker pinned to an immutable commit.
@@ -2472,10 +2487,8 @@ return a typed blocked result rather than guessing a domain.
   `DOKPLOY_TOKEN`, `DOKPLOY_HOST`, Launchplane's own service and admin
   tokens, and any value shaped like a GitHub token (`ghp_`, `gho_`, `ghs_`,
   `github_pat_` and similar). The error names the key and its source, never
-  the value. The one exception is global- and context-scope records, where
-  Launchplane keeps its own operating credentials such as the preview
-  PR-comment token: those named keys are withheld from the app instead of
-  refused. Live-target runtime sync, ship and promotion, Odoo previews, Odoo
+  the value. Launchplane's own credentials live in the `launchplane_service`
+  secret store, which no app render reads. Live-target runtime sync, ship and promotion, Odoo previews, Odoo
   target replacement, and the Odoo prod backup gate resolve through the site
   environment (`resolve_site_runtime_environment`): no global values, the
   lane's `retired_provider_keys` dropped, and a key the product declares for
@@ -2631,22 +2644,9 @@ context only, and `context_instance` has both context and instance.
   replacement passes, rollback refreshes prod inventory with rollback provenance
   and annotates the current prod promotion record.
 - `POST /v1/drivers/odoo/prod-backup-gate` captures the DB and filestore backup
-  evidence required before Odoo prod promotion. It resolves `ODOO_DB_NAME`,
-  `ODOO_FILESTORE_PATH`, and `ODOO_BACKUP_ROOT` from DB-backed runtime
-  environment records, runs a Dokploy schedule against the compose lane, stops
-  the web service while capturing, and writes the backup-gate record only after
-  the exact schedule deployment emits nonce-, record-, and database-bound
-  completion evidence with non-empty artifact sizes and SHA-256 values. A
-  provider `done` status without that bounded marker fails the gate. A web
-  service stopped for capture must restart successfully and read back as
-  `running`; restart or final status-read failure makes the schedule fail. Recovery
-  on an earlier backup failure still attempts the restart and preserves that
-  original non-zero exit status. Directory
-  preparation accepts only the dedicated `/volumes/data/backups/launchplane`
-  tree and assigns only its exact backup-root/database/record path to the
-  script-runner identity, so stale root-owned directories cannot make `pg_dump`
-  fail after the provider has reported success or broaden ownership changes to
-  unrelated mounted data.
+  evidence required before Odoo prod promotion. See
+  [online Odoo recovery tuples](odoo-online-backups.md) for the capture,
+  consistency, verification and failure contract.
 - Odoo rollback is image/release-tuple rollback, not VM snapshot rollback. Do not
   invent artifact ids, source commits, backup gates, or env-file overlays to make
   a rollback proceed; write or import the real Launchplane records first.

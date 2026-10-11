@@ -49,6 +49,50 @@ If no active record exists, service routes fail closed with
 new DB-backed policy record, not by relying on checked-in config files,
 service-host env, or generic service-code conditionals.
 
+## GitHub Read Cost
+
+Controller snapshots retain the base-rooted open-PR graph, but read details,
+checks, label actors, conversations and CODEOWNERS routing only for potential
+queue members. The active policy's enqueue label and label-free dependency-update
+identities decide that enrichment; policies without a required label still read
+every non-draft PR. Unqueued and draft entries carry unknown readiness and cannot
+justify a landing. A newly applied label is observed on the next list read.
+
+Authenticated REST GETs retain response bodies and ETags in a bounded process-local
+cache separated by credential and API origin. Native controller token resolution
+reuses an already issued exact-repository App token until five minutes before its
+provider expiry. The cache is process-local and bounded; the managed key is still
+resolved each pass, and an App, repository or key change starts cold. Minting keeps
+its existing exact-repository and permission validation. This avoids changing the
+Authorization representation on every pass, which can change GitHub's ETag even
+when the resource has not changed. Other credentials stay isolated by token.
+Paths include revision identifiers
+where the provider exposes them, including CODEOWNERS' base SHA and check results'
+head SHA. Successfully read commit-pinned contents are reused by that immutable
+revision; a moved base reads its own ownership file. Author permissions are shared
+by login only within the snapshot. Every mutable observation revalidates with GitHub; a terminal check can
+still be rerun or superseded. A 304 supplies the previously observed body and quota
+headers without charging primary quota. A restart or managed-key rotation starts
+cold. Grant validation runs when minting; a conclusive 401 authentication
+failure discards the issued token so the next pass mints and validates again. A
+denied or failed read never supplies a cached answer.
+
+A dry-run controller invocation reuses its snapshot within that invocation and
+releases it on success or failure. Mutating controllers retain their existing fresh
+reads at effect and reconciliation boundaries. Every controller tally logs request
+attempts, not-modified responses and non-304 attempts
+for instrumented clients, including short idle passes. Separate admission evidence
+clients are not included in that tally; provider counters remain the authority for
+total quota use. GraphQL attempts count as requests, not measured GraphQL point costs.
+
+Measure cold and immediately repeated idle dry runs with an isolated record store
+and the same authenticated provider transport. Compare response-header quota-used
+counters as well as per-pass attempts/304s; other users of a shared installation
+can increase its counter during the measurement. The HTTP fixture in
+`tests/test_merge_train_read_cost.py` exercises the controller with fifteen unqueued
+PRs. An isolated read proof does not establish a whole night's installation-wide
+budget; correlate deployed pass tallies with hourly counter peaks after landing.
+
 ## Preparing An Ordinary-Agent Target
 
 > Ordinary-agent delegated delivery is retired under
@@ -218,8 +262,33 @@ HTTP 429 and HTTP 403 with `retry-after` or `x-ratelimit-remaining: 0` use
 `retryable:github_rate_limited`; a valid numeric `x-ratelimit-reset` is recorded
 as `reset_at` (Unix seconds for GitHub's primary quota window). A valid numeric
 `retry-after` is recorded separately as `retry_after_seconds`; secondary limits
-can have a different retry delay from the primary reset time. Neither field
-schedules an automatic retry. Refusals without these rate-limit headers remain
+can have a different retry delay from the primary reset time. Automatic admission
+honors the applicable recorded deadline before resolving a token or calling the
+provider, even without Level 1 history. Retry-After starts at the persisted
+failure timestamp; repeated wakes and status reads do not extend it. Quota
+failures without usable timing metadata wait at least one minute. Admission and
+controller/status report `github_rate_limit_pending` and `next_allowed_at`.
+The existing sweep or a wake after that time resumes ordinary admission and
+lease/reconciliation checks; expiry supplies no merge authority.
+New failure evidence records `primary_exhausted` from the bounded numeric
+remaining header. When primary quota remains, its routine reset header does
+not prolong a secondary Retry-After wait. When primary quota is exhausted, or
+older evidence lacks this distinction, admission honors the later recorded
+deadline. Manual controller and phase routes do not enforce scheduler admission;
+callers read admission before invoking them. Acquiring unfinished state through
+those routes can replace the quota detail with resume evidence; automatic
+deferral applies while the original quota failure remains recorded.
+
+Targets using the same configured App on the same repository account share an
+installation quota even when their tokens restrict different repository IDs.
+Current-policy failure evidence defers those targets together. Other Apps and
+accounts remain independent; stale policy bindings and retired token sources
+cannot establish a shared scope. A train pass needs both REST and GraphQL reads,
+so a recorded refusal in either bucket defers the whole pass on that scope.
+This uses stored records, not a new provider probe or credential fallback. See
+[GitHub's quota scope and retry guidance](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+
+Refusals without rate-limit evidence remain
 admin-required, even when a provider body might describe a secondary limit. This diagnosis
 does not retry a write in place: the next controller pass re-observes the stored
 phase through the existing reconciliation path.
@@ -236,11 +305,10 @@ terminal records from the previous policy cannot authorize or suppress it.
 Candidate refs remain as recovery evidence; a rebuild reuses one only when its
 base and heads still identify the same batch.
 The same retirement applies when landing admission is denied with
-`landing_lineage_changed` before any entry has merged, for example when an
-older pull request is labelled after the plan and now sorts ahead of it. Such a
-plan can never match the live queue again, so the controller retires it instead
-of blocking on every pass, and the next pass plans a candidate from the live
-queue.
+`landing_lineage_changed` before any entry has merged, for example when a
+planned pull request's head moves or it leaves the queue. Such a plan can never
+match its members again, so the controller retires it instead of blocking on
+every pass, and the next pass plans a candidate from the live queue.
 An interrupted retirement resumes from its persisted evidence. Partial landings,
 collapsed stacks, retired ordinary-agent jobs, and unreadable or conflicting
 provider evidence still require explicit reconciliation.
@@ -266,6 +334,10 @@ Each repository policy contains:
   for stack child disposition and must differ from `enqueue_label` and
   `blocked_label`.
 - `merge_method`: GitHub merge strategy, one of `merge`, `squash`, or `rebase`.
+- `max_batch_size`: Optional cap on how many pull requests a new batch candidate
+  takes, in queue order; the rest wait for the next candidate. Unset leaves
+  batches unbounded. A repository whose accepted Client features must land
+  together leaves it unset or above the number it expects to batch.
 - `engineering_review_mode`: Advisory review evidence only (`advisory`, the
   default). New policy imports and target preparation reject `required`, which
   is retired by the overall DIRECTION.md. Historical policy records retain
@@ -328,6 +400,17 @@ review on the head it is about to merge and treats a changed decision as a
 stale head.
 Successful review still requires all other current-head checks.
 
+When an admitted Client feature is ready on its current head, batch planning
+selects it together with the other ready admitted features for that repository
+and base. Client features with pending, failed or unknown checks, or conflicts, stay visible
+in the queue but outside that candidate; they do not delay accepted siblings.
+The existing CODEOWNERS individual-landing boundary still applies. Combined
+merge-commit candidates preserve member heads without a branch refresh between them.
+Admission keeps these exclusions for a ready remaining planned head, including
+an engineering member after the last feature in a rolling landing has merged.
+The release invitation expands the recorded landing's members as described in
+[release review](release-review.md).
+
 Only an actor allowed to enqueue may put a pull request in the train: a trusted
 automation identity, or an actor whose role is in `allowed_actor_roles` (by
 default the repository owner and its admins). Pull-request write access
@@ -351,8 +434,9 @@ pull request head the train read, and every dependency the update names stays
 within one major version. Transitive lockfile changes are not classified; the
 pull request's required checks still gate them. The adapter derives that from Dependabot's
 `updated-dependencies` commit trailer and the "from X to Y" lines, because the
-trailer often omits `update-type`. A major version, a `0.x` minor bump, a
-changed version suffix, a non-version reference such as a commit SHA, an
+trailer often omits `update-type`. Balanced single- or double-quoted dependency
+names match the unquoted names in those version lines. A major version, a `0.x`
+minor bump, a changed version suffix, a non-version reference such as a commit SHA, an
 unparseable message, or a commit by anyone else leaves the pull request
 ineligible with `dependency update needs agent review`. The label still
 enqueues any trusted pull request as before. An empty list, the default, changes
@@ -398,6 +482,40 @@ queue selection,
 including label-free dependency updates, so the next controller pass can select
 other eligible work. Remove the block label after resolving the failure to admit
 that PR again. Applied-block PR feedback explains the failure and how to rejoin.
+
+Within-major dependency updates admitted through the required-label exception use
+current-head check and mergeability evidence for holds, rather than acquiring a
+persistent block
+label. Controller and dry-run queue entries report the observed head and its
+refusal reason; GitHub's current checks also remain visible. The service excludes
+the update while checks fail or mergeability is conflicting/unknown and can plan
+other eligible PRs immediately.
+Every fresh snapshot requalifies the update under the existing dependency admission
+and required-check gates; a new head with pending or unknown checks still cannot
+land. A passing rerun on the same head or a base change resolving conflicts can
+also requalify it. An explicit enqueue label uses the normal block path above.
+A service candidate records each update excluded only for that reason as a
+`held_out` entry with reason `dependency_not_ready`, bound to its head and the
+candidate's base. If the update settles while the candidate builds, checks or
+lands, it waits for the next candidate instead of replacing this one and
+rerunning its checks. Landing admission checks only the plan's members. A new
+head or a moved base releases the hold; a new head still waits until the active
+candidate finishes under the admission rule below. The hold posts no PR feedback.
+Every existing block label remains a hold,
+including labels applied by earlier controller versions: no actor or historical
+record is used to guess that a generic hold may be cleared. Those PRs retain the
+supported remove-label path. The single-transition worker and retained bound-job
+controller compatibility path are unchanged.
+
+Landing admission allows transient unknown mergeability only for exact PR/head
+pairs already in its verified plan; unplanned unknown heads remain held out. The
+base, recorded head/tree, policy and technical gates still apply. If an included dependency head
+starts failing or conflicting after candidate planning, its changed eligibility
+invalidates that landing lineage. A wholly unlanded plan can be retired/replanned;
+a partially landed plan retains its merged progress and blocks for requalification
+or the existing reconciliation path. Passing candidate checks do not override a
+constituent's current failure.
+
 The GitHub adapter creates a missing policy label when label
 application is refused because it does not exist; other provider errors remain
 fail-closed.
@@ -427,6 +545,26 @@ A batch candidate represents:
 base branch + queued PR #1 + queued PR #2 + ... + queued PR #N
 ```
 
+Pull requests are admitted only between candidates. A planned, building,
+checking, passed or landing candidate stands while the base is unchanged and its
+own members, rebuilt alone under every batch rule, still form the same batch at
+the same heads. A pull request that becomes eligible meanwhile, wherever it
+sorts, waits for the next candidate. A failed candidate keeps the whole-queue
+comparison described under Blocker Isolation. `max_batch_size` caps each new
+candidate.
+
+While Launchplane runs a release its Client accepted, the repositories that
+release was built from (the product repository, the checklist's shared sources,
+and unchanged sources and selectors in the accepted candidate artifact) are
+held: a controller pass there plans, builds, observes and lands
+nothing and reports `release_hold` with `blocking_reason.code`
+`product_release_in_progress`. The hold is read from the product's latest
+release decision on every pass; nobody sets or clears it. It applies while that
+release's steps are running, or waiting with the testing lane still on the
+accepted candidate, and ends when the release passes, stops, or can no longer
+run. A landing already under way finishes. A release of one product never holds
+another repository, including Launchplane.
+
 The candidate is built in deterministic queue order on a temporary
 `launchplane/construct/<digest>` branch. The digest is the SHA-256 of the
 canonical candidate ref, so retries use the same construction branch. Only
@@ -434,7 +572,26 @@ after every entry's rolling commit and tree are verified does the native
 GitHub adapter publish `launchplane/train/**` at the completed candidate SHA.
 Base and intermediate construction pushes therefore do not start required
 workflows. The canonical candidate ref, persisted candidate identity, and
-rolling provenance remain the inputs to checks and landing.
+rolling provenance remain the inputs to checks and landing. The single-entry
+reuse below keeps its completed candidate on the construction ref instead.
+
+For one PR, Launchplane can avoid that publication only when the constructed
+candidate tree equals the recorded PR head tree, the protected base is unchanged
+and contained in that head, and fresh reads prove every current required check
+passed on the exact head with the required App bindings. PR identity/head/base
+and the base branch are confirmed after those reads. Missing, pending, failed,
+stale or unreadable evidence selects the normal publication and candidate CI;
+multiple queued PRs always take that path, even if a tree happens to match.
+PRs with recorded retargets or base force pushes also run full candidate CI:
+their historical head checks may have tested another merge-ref tree. Incomplete
+or unreadable timeline history cannot qualify reuse. The filtered
+[GitHub timeline query](https://docs.github.com/en/graphql/reference/pulls#pullrequesttimelineitemsitemtype)
+includes manual and automatic base changes and base force pushes.
+`head_check_reuse` in the candidate record binds the source PR/head/tree, base,
+constructed candidate commit, observation time, required check names/App ids and
+passing evidence sources. Rolling merge-commit provenance remains intact.
+The reused candidate stays reachable on its construction ref, which becomes
+the recorded candidate ref and is removed by ordinary post-landing cleanup.
 
 Publication has a bounded exact-SHA readback, including temporary 404s while a
 new branch becomes visible. A failed or interrupted publication never returns
@@ -465,6 +622,19 @@ screening evidence, but they do not prove the combined tree is safe to land.
 Launchplane must fail closed when candidate check evidence is missing, pending,
 failed, stale, or attached to a different commit SHA.
 
+The single-entry tree-identity proof above is the only exception. Before planning
+its landing, the controller calls observation, which
+re-reads its head checks and live required-check policy rather than treating the
+recorded pass as current authority. If reuse stops being provable, it publishes
+the same completed candidate to the canonical train ref, clears the active reuse
+proof and waits for full candidate CI. Live landing admission repeats the reuse
+proof, reads fresh technical checks on the source head, and keeps that source
+SHA visible in readiness. The exact tree binding connects those checks to the
+constructed effect; loss of reuse retires an unlanded native plan so the next
+pass rebuilds with full CI. Landing uses fresh structural admission evidence
+and the protected expected-head merge; no
+checks are copied to a new SHA and no provider requirement is changed.
+
 Repositories using batch candidates must run their required workflows for
 pushes to `launchplane/train/**` and exclude `launchplane/construct/**` from
 those triggers. A workflow matching every branch would still run intermediate
@@ -473,6 +643,19 @@ Aggregate required-check jobs must also run on those push events and treat the
 candidate as same-repository work when no pull
 request payload exists. Otherwise the candidate has no exact-SHA check evidence
 and remains fail-closed in `ready_for_checks`.
+
+Launchplane's own CI runs its full validation on that candidate push once. A
+same-repository PR headed by `launchplane/train/**`, when routing succeeds, skips the validation jobs
+and reports only `candidate-ci-delegated`, identifying its head SHA and branch.
+That routing check supplies no validation evidence and never publishes a
+`ci-gate`, even when the push is missing, pending or failed. The push remains
+the only producer of the candidate's required `ci-gate`; an informational PR
+check cannot satisfy or supersede it. Observation and protected landing still
+require the actual candidate's required checks. A new candidate SHA requires
+its own push validation. Ordinary PRs, including forks using the same branch
+spelling, keep their full CI path. Security, CodeQL and the required-check policy
+are unchanged. Actions still records two workflow events for a batch candidate,
+but only the push executes the full CI suite.
 
 Candidate observation reads the target branch's live required-status-check
 policy and requires every named check, including any pinned GitHub App id, to be
@@ -540,14 +723,18 @@ A changed member or base reflows to a
 new candidate without retaining a reconciliation fence. Landing rechecks member
 identity before waiting on checks, so a pending or failed check cannot hide a
 new source head. A manually closed batch PR is not automatically reopened.
-Change or remove the queued source entries to build a replacement; an unchanged
-failed candidate remains visibly failed rather than being rebuilt in a loop.
 A candidate that failed on check evidence may be re-read at its recorded SHA,
 so re-running the failed check lets it continue once the re-run is no longer
-failing. A multi-entry batch whose batch PR was closed is never reopened. It
-has one narrow rebuild exception: a changed generated batch body, confirmed
-closed and unmerged binding, and a persisted unused retry budget, as described
-under `candidate_failed` below.
+failing. A multi-entry batch whose batch PR was closed is never reopened. A
+changed generated batch body, confirmed closed and unmerged binding, and a
+persisted unused retry budget allow one rebuild of the same members, as
+described under `candidate_failed` below. Fresh passing required checks at the
+failed candidate's exact SHA also allow one audited rebuild of a bound closed,
+unmerged batch, even when its generated body is unchanged. The replacement
+records `check_retry_of` and uses a separate `-check-retry` ref; it receives its
+own checks and normal landing admission. Otherwise an unchanged failed
+candidate moves on through [blocker isolation](#blocker-isolation) rather than
+being rebuilt in a loop.
 
 The landing plan binds `candidate_pull_request_number` into its immutable
 digest. The controller evaluates every constituent before appending the first
@@ -645,17 +832,63 @@ SHA and the root passes required checks from the protected base branch.
 
 ### Blocker Isolation
 
-When the combined candidate fails checks, Launchplane must not assume all queued
-entries are bad. The first implementation may split the batch or fall back to
-smaller batches/one-at-a-time validation to identify the blocking PR. Once a
-blocker is identified, Launchplane applies `blocked_label` and either pauses or
-reflows later entries according to `failure_policy`.
+When the combined candidate fails checks, Launchplane does not assume all queued
+entries are bad. On the next pass over an unchanged queue and base, after the
+batch-body rebuild above when it applies, the controller reads the failed
+candidate's check runs, commit statuses and the annotations of failed runs:
 
-A failed candidate remains a stop state while the current eligible queue and
-base SHA still match that candidate. If the eligible queue changes, for example
-because a new queued PR repairs train validation, the controller may supersede
-the failed candidate batch lineage and plan a replacement candidate from the
-fresh snapshot.
+- **Infrastructure failure.** GitHub's runner-loss annotation on any failed or
+  cancelled run (lost communication, a shutdown signal, or a job never acquired
+  by a runner) marks the failure as infrastructure; jobs that depend on the lost
+  job fail with a generic exit-code annotation, so they do not count against it.
+  Runs that were cancelled, went stale or failed to start count only when no
+  run failed outright, because fail-fast also cancels the siblings of a real
+  failure. A named failed test or a failing commit status always rules
+  infrastructure out. The controller rebuilds the same members once on a new
+  `-infrastructure-retry` candidate ref, recording `infrastructure_retry_of`;
+  nobody is blamed. If the retry fails on infrastructure again, the candidate
+  stays stopped with `reason_code: infrastructure_retry_used` until the queue or
+  base changes, so a runner outage never blocks a pull request. A retry that
+  fails on a real check is isolated as below.
+- **Base checks.** Before splitting or blaming a pull request, the controller
+  reads the base's required checks and the checks that failed on the candidate,
+  on the candidate's exact base commit. Unrelated base-only checks do not stop
+  isolation. If a candidate check fails there too, or the base's required checks are pending,
+  missing or unreadable, it stays stopped with `reason_code: base_checks_not_green`
+  and a reason naming the base branch. No pull request gets `blocked_label`, and
+  the failed candidate stays active for fresh reads on the next pass. A rerun
+  passing on the same base allows isolation to resume; a changed base or eligible
+  queue uses the existing replacement path.
+  Feedback names the base failure or missing evidence as needing attention;
+  pending checks are reported as waiting. A repository without required-check
+  evidence on its base stays stopped without blame; evidence must be supplied
+  before isolation can identify a culprit.
+- **Failure isolation.** On a verified green base, a failed candidate with several members is
+  split: the first half is retested on the same base, and the rest wait as
+  `held_out` entries with reason `failure_isolation`. A hold lasts only while
+  the base and its head are unchanged and every member of the candidate
+  retesting without it is still queued at its recorded head; if one leaves
+  the queue, the holds are released and the next pass replans. If the half
+  passes, it lands and the base moves, so the rest replan together on the next
+  pass; if it fails, it is split again.
+- **Culprit.** When a candidate with one member fails and its base checks pass,
+  the controller retires the failed lineage, applies
+  `blocked_label` to it, and the next pass plans the rest of the queue. The
+  result reports `reason_code: candidate_failure_isolated`, and its `details`
+  carry the failing check names, check-run links and failed tests. PR feedback
+  names them. A test is named when its CI job writes a GitHub annotation
+  titled `Failed test` whose message is the dotted test id; Launchplane's
+  `unittest-shard run` does this under GitHub Actions.
+
+A batch with two broken pull requests isolates and blocks each in turn. When the
+failure evidence cannot be read, shows no failed run, or a check on the
+candidate is still running (for example a manual re-run), the failed candidate
+stays stopped and the next pass reads it again. The retired ordinary-agent job path keeps its
+earlier stop behavior.
+
+If the eligible queue changes, for example because a new queued PR repairs
+train validation, the controller may supersede the failed candidate batch
+lineage and plan a replacement candidate from the fresh snapshot.
 
 Candidate construction can fail before required checks run when GitHub rejects
 one rolling merge entry as stale or conflicting. Its partial state is retained
@@ -1144,7 +1377,9 @@ Controller actions have these retry/stop semantics:
   completed history cannot revive older execution. The existing supported
   resumption requires the original policy digest to be current again and all
   current head/readiness checks to pass; it merges only remaining children.
-  Alternatively, pushing a new commit to the root makes the old proof
+  For a carried change requiring its original PR review, follow
+  [original review recovery](#original-review-recovery) instead. Otherwise,
+  pushing a new commit to the root makes the old proof
   inapplicable and resumes current-policy discovery with fresh head/readiness
   proof. Closing and reopening at the same checkpointed head keeps the policy
   block. Uncheckpointed execution and moved roots retain their existing retirement
@@ -1204,13 +1439,14 @@ Controller actions have these retry/stop semantics:
   then call again.
 - `build_candidate`: A stored candidate still matches the fresh queue and base
   and needs its train ref built or refreshed. Planned or interrupted-building
-  candidates are rechecked before any candidate-ref write. If their head, queue,
-  or base has changed, dry-run reports the replacement action; mutate supersedes
+  candidates are rechecked before any candidate-ref write. If a member's head,
+  eligibility or order, or the base has changed, dry-run reports the replacement
+  action; mutate supersedes
   the stale records under the controller lease and replans. An empty queue
   returns `idle`, without building the obsolete ref.
   Mutate once, then call again.
 - `observe_candidate`: A built candidate needs check observation. First compare
-  its queue, PR heads, and base with a fresh snapshot. Drift supersedes the old
+  its members, their heads, and the base with a fresh snapshot. Drift supersedes the old
   records under the controller lease and replans, even when the old checks never
   started. An unchanged candidate keeps waiting for its real checks; transient
   readiness changes alone do not replace it. Mutate or dry-run later until
@@ -1222,10 +1458,29 @@ Controller actions have these retry/stop semantics:
   no recorded candidate SHA never reached checks, so the controller may also
   supersede and replan it against the unchanged queue after a transient build
   failure is repaired. Failed candidates with a recorded candidate SHA are not
-  rebuilt until the queue or base changes. If one failed on check evidence and a
+  rebuilt with the same members until the queue or base changes, except for the
+  single batch-body, infrastructure, and recovered-check retries; a check failure otherwise moves
+  through [blocker isolation](#blocker-isolation), returning `plan_candidate`
+  with `reason_code: failure_isolation` or `infrastructure_retry`, or `block`
+  for the isolated pull request. Other candidate shapes keep their existing
+  reread path: if one failed on check evidence and a
   re-run of the failed check at that SHA is now pending or passing, the controller
   returns `observe_candidate`, retires the failed record, and continues from the
-  re-read evidence. A multi-entry merge batch whose service PR is closed and
+  re-read evidence. For a multi-entry merge batch, fresh passing required checks
+  at its recorded SHA return `plan_candidate` with
+  `reason_code: candidate_checks_recovered`, provided its service PR is exactly
+  bound, closed and confirmed unmerged. The new record's `check_retry_of` points
+  to the failed record, preserving its SHA and failure history.
+  `check_retry_evidence` durably records the observed SHA, controller-pass timestamp,
+  passing status and closed batch PR. The response exposes the same observation.
+  The same ordered
+  heads/base may use this rebuild only once, across restarts and replay of the
+  original failed record. A spent budget reports `candidate_check_retry_used`
+  without blaming a member. Pending, missing or unreadable check evidence does
+  not authorize this retry. Dry runs report the plan without consuming a budget
+  or changing a ref, record, PR or label. A replacement that fails real checks
+  still goes through blocker isolation. The batch-body and infrastructure
+  budgets remain separate. A multi-entry merge batch whose service PR is closed and
   confirmed unmerged may be rebuilt once for the same ordered heads and base,
   only when the body Launchplane would generate now differs from that bound
   failed PR's body. The replacement uses a separate candidate ref and persists
@@ -1235,8 +1490,9 @@ Controller actions have these retry/stop semantics:
   cannot authorize recovery. Ambiguous provider-effect evidence still requires
   reconciliation rather than being treated as an ordinary failed check.
   The replacement still passes current checks,
-  constituent validation, and every admission gate. Otherwise the controller
-  reports the failed candidate and its recovery reason.
+  constituent validation, and every admission gate. When none of these
+  recoveries applies, for example because the failure evidence is unreadable,
+  the controller reports the failed candidate and its recovery reason.
   When the current queue head waits for checks, both read-only and mutating
   passes report `wait_for_checks` with that PR and its dry-run reason, retaining
   the failure and retry budget until the wait resolves.
@@ -1277,6 +1533,21 @@ call also writes a `launchplane_merge_train_pr_feedback` record so delivery
 status, rendered markdown, and GitHub comment identity remain auditable. Callers
 must keep the message public-safe: no tokens, raw headers, private API base URLs,
 local paths, or unchecked provider responses.
+
+The in-service controller scheduler also recovers the latest failed terminal
+feedback (`completed` or `stale_policy`) after the controller advances to idle
+or other work. It selects a bounded set of current retry candidates per target, after
+superseding older status for each PR; successful recent comments cannot hide an
+older unresolved terminal delivery. Recovery sends the stored rendered body
+with the existing policy credential, without another merge or admission.
+The delivery receipt retains its identity and original evidence timestamp while
+attempt count and delivery result are updated. New receipts retain precise
+creation time to order same-second status changes; ambiguous legacy ties remain
+unqualified for recovery. Transient transport failures use bounded exponential
+backoff; quota refusals preserve Retry-After and exhausted
+primary-quota reset deadlines and defer that target's other comment attempts.
+Permission refusals do not retry. Dry-runs never recover or send comments, and an
+identical managed comment is observed without another PATCH.
 
 The batch-landing service endpoint
 `POST /v1/work-graph/merge-train/batch-landing/run-once` owns
@@ -1359,9 +1630,25 @@ includes a compact queue summary with the intended next action, selected PR,
 eligible count, queued count, and visible ineligible reasons from the persisted
 dry-run payload. Stored controller records only influence the advertised
 controller action when their policy key and digest match the active repository
-policy; stale records remain visible in the summaries with a stale reason. It is
+policy; stale records remain visible in the summaries with a stale reason. The
+read model qualifies each lineage's `historical` flag with the controller's stored
+progress selector, before current-policy filtering. Completed/retired history is
+distinct from unfinished old-policy evidence requiring attention. Completion
+qualification reads each candidate's stored batch lineage even when its landing
+has fallen outside the recent-record display window. The workbench uses
+that qualification and active controller references for current attention.
+An idle, reconciled train does not
+become blocked solely because old-policy history remains visible; those rows are
+labeled historical. A stale active record, policy-digest mismatch or
+unresolved reconciliation still requires attention. It is
 also store-only, so it can power dashboards and status summaries without
 consuming GitHub API capacity or advancing the train.
+
+The workbench's landing fraction uses the stored PR-entry identities as its total;
+`planned_count` is the remaining planned partition, alongside merged, blocked,
+stale and skipped counts. Remaining entries are shown as in progress. Candidate
+rows do not claim a landing fraction; collapse rows report mutated child entries
+as collapsed without treating the root as another mutation.
 
 For an unresolved `land_batch` controller fence, `reconciliation_diagnostics`
 adds bounded stored admission/outcome classifications for entries in the active
@@ -1436,8 +1723,10 @@ Controller-mode mutate runs and manually dispatched batch-candidate,
 stack-collapse, or batch-landing phases render conservative PR feedback payloads
 from their worker responses and post them through the managed feedback endpoint,
 so queued PRs get one evolving Launchplane status comment as the train builds,
-waits, blocks, or completes. A pull request awaiting current-head Client review
-hears so even before any candidate exists. Controller-mode dry-runs do not
+waits, blocks, or completes. Ordinary check/mergeability waits and branch refreshes
+report the selected PR even before any candidate exists, as do current-head Client
+review waits. Refresh feedback distinguishes an applied branch update from a
+requested refresh and does not claim a candidate or label mutation. Controller-mode dry-runs do not
 deliver feedback comments. Manual-phase feedback binds repository and base-branch identity to the
 phase response's candidate, landing-plan, or stack-collapse-plan record and fails
 closed if another identity-bearing phase result disagrees. When batch-candidate
@@ -1537,3 +1826,86 @@ fresh current-policy controller discovery: current Git ancestry prevents another
 an already-contained child, and the fresh collapse owns disposition of its
 remaining open children. A carried child GitHub already merged indirectly stays
 closed; this recovery does not restore its Launchplane landing annotations.
+
+Terminal feedback recovery and current feedback delivery serialize the managed
+comment for each repository/PR through the record-store lock. Recovery rechecks
+the latest stored status while holding that lock; a newer status cannot be
+overwritten by a concurrent replay. PostgreSQL uses the same held session for
+feedback reads and writes, so delivery does not require a second pooled connection.
+The lock affects comment delivery only, and does not replace merge authority or
+the controller lease.
+
+## Original review recovery
+
+A historical carry is branch history, not approval on its child's original PR.
+The service-owned legacy controller checks each collapse's latest progress across active and retired
+history. A stack is held when a current parent requiring individual landing
+contains a recorded child's exact head, the current base does not contain that
+head, and the recorded child diff requires individual landing under the base's
+current CODEOWNERS. This also detects a successful branch merge whose progress
+write was interrupted. A new parent commit or changed policy cannot release
+this hold. A child already contained in the current base is not an unlanded
+carried change. An exact original child PR merged by squash or rebase also
+qualifies when its provider-reported merge commit is contained in that base.
+Three-dot comparison can conservatively include base updates made by a child;
+this may require original-PR recovery even if those owned paths are already in
+the base. It never supplies native approval.
+
+This qualification does not cover ordinary-agent delegated delivery, which
+[DIRECTION.md](../DIRECTION.md#retired) retires and #2437 owns. This change adds
+no history grant or ancestry capability to that retired path.
+
+Run-once reports `merge_train_original_review_recovery_required` with original
+PR numbers and heads. Selection excludes the affected stack and dependent base
+refs while unrelated eligible PRs continue. A saved landing with all entries
+still planned, no provider-dispatch checkpoint and fresh no-effect proof is
+retired through the existing retirement/resumption path, retaining its history
+and permitting fresh selection. Only this no-dispatch recovery can accept
+moved PR heads: current PRs must remain open and unmerged on the protected
+base, the old candidate must be absent from that base, and fresh repeated
+head/base reads must agree. Stored head trees remain immutable proof; this
+never authorizes merging the moved heads. Partial landings, an in-flight dispatch or
+unavailable no-effect proof retain reconciliation. No affected entry is merged
+and no existing admin reconciliation fence is cleared. Dry runs leave collapse history unchanged.
+Selection holds a stack on missing or stale commit/comparison evidence;
+an active landing requires positive ancestry evidence before retiring artifacts. Authentication
+failures and shared provider cooldowns retain their normal failure handling.
+When policy and original-review holds coexist, `details.policy_changed` retains
+the separate obsolete-policy inventory.
+GitHub still decides current-head approvals and protected merge admission.
+Incomplete provider evidence cannot justify carrying approval to another PR;
+comparison file lists at GitHub's [300-file limit](https://docs.github.com/en/enterprise-cloud%40latest/rest/commits/commits#compare-two-commits)
+are treated conservatively.
+
+The agent responsible for the branch, or one with a supported ownership handoff, can recover
+through the original PRs:
+
+1. Read the complete [review history](service-boundary.md#original-review-history)
+   and current provider heads, ancestry, open/merged state, and review state.
+   Preserve the saved plans and an archive of the current branch head before
+   changing branch history. Missing historical inventory means unknown.
+2. Restore the parent's own changes without the unlanded child carry, using
+   the recorded original parent head as the reconstruction starting point.
+   Restore every carrying parent in a deeper stack before landing any member.
+   Preserve subsequent parent work and the child's original head. Use an exact
+   expected-current-head lease for any necessary task-branch rewrite, so a
+   concurrent writer is not overwritten. A merge revert leaves child ancestry
+   present and cannot release this hold. No controller endpoint performs this
+   branch rewrite.
+3. Let the original parent PR pass its current-head checks, review and native
+   merge admission. Retarget the original child PR to the protected base and
+   let it pass its own current-head checks, review and native merge admission.
+   The original child is not closed or credited as landed through the parent.
+   Repeat for each original child in a deeper stack.
+
+If GitHub already marked a carried child PR merged indirectly, preserve that
+original review history; it cannot be reopened or treated as current approval.
+A replacement PR for remaining changes requires its own review and admission.
+This recovery does not reland changes already in the protected base, rewrite
+that base, waive approval, grant access, or retire stored evidence.
+
+An original child PR merged at a different head does not prove that the saved
+version landed through its own review. A hold in that case describes the
+unqualified saved version, rather than claiming that the PR is still open.
+Active landing diagnostics name its old policy record; selection diagnostics
+retain the complete separate obsolete-policy inventory.

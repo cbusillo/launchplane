@@ -28,6 +28,10 @@ from control_plane.contracts.merge_train_stack_collapse import (
     build_merge_train_stack_collapse_plan_record,
     execute_merge_train_stack_collapse_plan,
 )
+from control_plane.merge_train_candidate_failures import (
+    CandidateCheckFailure,
+    CandidateCheckFailures,
+)
 from control_plane.merge_train import (
     MergeTrainLabelActor,
     MergeTrainCheckStatus,
@@ -76,11 +80,17 @@ class _FakeMergeTrainGitHubClient:
         self.transport = transport
         self.branch_refresh_recorder = branch_refresh_recorder
         self._branch_refresh_store = branch_refresh_store
+        self._snapshot_policy = None
+        self._reuse_snapshots = False
+        self._snapshots: dict[tuple[str, str], MergeTrainDryRunSnapshot] = {}
         self.semantic_effect_executor = (
             effect_executor
             if effect_executor is not None
             else LegacyMergeTrainEffectExecutor(client=cast(GitHubMergeTrainClient, self))
         )
+
+    begin_snapshot_pass = GitHubMergeTrainClient.begin_snapshot_pass
+    end_snapshot_pass = GitHubMergeTrainClient.end_snapshot_pass
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -302,10 +312,36 @@ class _FakeMergeTrainGitHubClient:
 
 
 class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
+    labels_added: list[tuple[int, str]] = []
+
+    def read_base_check_status(
+        self, *, candidate: MergeTrainBatchCandidate, failed_check_names: tuple[str, ...]
+    ) -> str:
+        return "pass"
+
     def observe_batch_candidate_checks(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainBatchCandidate:
         return candidate.model_copy(update={"required_checks_status": "fail", "status": "failed"})
+
+    def read_candidate_check_failures(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> CandidateCheckFailures:
+        return CandidateCheckFailures(
+            checks=(
+                CandidateCheckFailure(
+                    name="test_shard (0)",
+                    conclusion="failure",
+                    url="https://github.com/cbusillo/sellyouroutboard/actions/runs/1/job/2",
+                    failed_tests=("tests.test_widget.WidgetTests.test_renders",),
+                ),
+            )
+        )
+
+    def add_pull_request_label(
+        self, *, repository: str, pull_request_number: int, label: str
+    ) -> None:
+        self.labels_added.append((pull_request_number, label))
 
 
 class _StaleCandidateMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
@@ -562,7 +598,13 @@ class _NoopMergeTrainGitHubClient:
 
 
 class _FakeMergeTrainSnapshotReader:
-    def __init__(self, *, transport: object, branch_refresh_store: object | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        transport: object,
+        branch_refresh_store: object | None = None,
+        repository_policy: object | None = None,
+    ) -> None:
         self.transport = transport
 
     def read_merge_train_snapshot(
@@ -628,7 +670,13 @@ class _FakeExpandedMergeTrainSnapshotReader(_FakeMergeTrainSnapshotReader):
 
 
 class _FakeEmptyMergeTrainSnapshotReader:
-    def __init__(self, *, transport: object, branch_refresh_store: object | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        transport: object,
+        branch_refresh_store: object | None = None,
+        repository_policy: object | None = None,
+    ) -> None:
         self.transport = transport
 
     def read_merge_train_snapshot(
@@ -643,7 +691,13 @@ class _FakeEmptyMergeTrainSnapshotReader:
 
 
 class _FakeStackedMergeTrainSnapshotReader:
-    def __init__(self, *, transport: object, branch_refresh_store: object | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        transport: object,
+        branch_refresh_store: object | None = None,
+        repository_policy: object | None = None,
+    ) -> None:
         self.transport = transport
 
     def read_merge_train_snapshot(

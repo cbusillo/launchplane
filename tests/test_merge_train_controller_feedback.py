@@ -110,6 +110,67 @@ class MergeTrainControllerFeedbackTests(TestCase):
                 self.assertIn("review", message)
                 self.assertNotIn(dry_run_result.blocked_label, message)
 
+    def test_invalid_shared_notes_block_the_member_before_building_and_explain_why(self) -> None:
+        snapshot = _FakeExpandedMergeTrainSnapshotReader(
+            transport=object()
+        ).read_merge_train_snapshot(repository="cbusillo/sellyouroutboard", base_branch="main")
+        bad = snapshot.pull_requests[1].model_copy(
+            update={
+                "owner_review_required": False,
+                "required_checks_status": "fail",
+                "client_test_notes_error": "Client test notes are missing.",
+            }
+        )
+        snapshot = snapshot.model_copy(update={"pull_requests": (snapshot.pull_requests[0], bad)})
+        dry_run = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(), snapshot=snapshot, batch_landing=True
+        )
+        self.assertEqual(dry_run.intended_next_action, "block")
+        assert dry_run.selected_pr is not None
+        self.assertEqual(dry_run.selected_pr.number, bad.number)
+        for applied in (False, True):
+            payloads = feedback.build_feedback_payloads(
+                response={
+                    "result": {
+                        "repository": dry_run.repository,
+                        "base_branch": dry_run.base_branch,
+                        "mode": "dry-run",
+                        "controller_action": "block",
+                        "dry_run_result": dry_run.model_dump(mode="json"),
+                        "block_result": {"status": "blocked"} if applied else {},
+                    },
+                    "records": {},
+                }
+            )
+            self.assertEqual(payloads[0]["pull_request_number"], bad.number)
+            self.assertIn(bad.client_test_notes_error, cast(str, payloads[0]["message"]))
+        blocked = bad.model_copy(update={"labels": (*bad.labels, dry_run.blocked_label)})
+        next_run = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(),
+            snapshot=snapshot.model_copy(
+                update={"pull_requests": (snapshot.pull_requests[0], blocked)}
+            ),
+            batch_landing=True,
+        )
+        self.assertEqual(next_run.queue_order, (snapshot.pull_requests[0].number,))
+        self.assertEqual(next_run.intended_next_action, "merge")
+
+    def test_controller_refresh_without_a_receipt_does_not_claim_an_update(self) -> None:
+        payloads = feedback.build_feedback_payloads(
+            response={
+                "result": {
+                    "repository": "example/repo",
+                    "base_branch": "main",
+                    "controller_action": "update_branch",
+                    "dry_run_result": {"selected_pr": {"number": 7}},
+                },
+                "records": {},
+            }
+        )
+        self.assertEqual([7], [payload["pull_request_number"] for payload in payloads])
+        self.assertIn("refresh", cast(str, payloads[0]["message"]))
+        self.assertNotIn("updated", cast(str, payloads[0]["message"]))
+
     def test_build_feedback_payloads_marks_pending_checks_waiting(self) -> None:
         response: dict[str, Any] = {
             "result": {
@@ -129,7 +190,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
 
         self.assertEqual(1, len(payloads))
         self.assertEqual("waiting", payloads[0]["event"])
-        self.assertIn("waiting", str(payloads[0]["message"]))
+        self.assertIn("waiting", cast(str, payloads[0]["message"]))
 
     def test_build_feedback_payloads_marks_merged_landing_plan_completed(self) -> None:
         response: dict[str, Any] = {
@@ -173,7 +234,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
 
         self.assertEqual([7, 8], [payload["pull_request_number"] for payload in payloads])
         self.assertEqual({"stale_policy"}, {payload["event"] for payload in payloads})
-        self.assertIn("stale", str(payloads[0]["message"]))
+        self.assertIn("stale", cast(str, payloads[0]["message"]))
 
     def test_completed_batch_feedback_links_every_original_to_the_shared_pr(self) -> None:
         payloads = feedback.build_feedback_payloads(
@@ -196,7 +257,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
         self.assertEqual([payload["pull_request_number"] for payload in payloads], [7, 8])
         self.assertTrue(all(payload["event"] == "completed" for payload in payloads))
         self.assertTrue(
-            all("protected batch PR #99" in str(payload["message"]) for payload in payloads)
+            all("protected batch PR #99" in cast(str, payload["message"]) for payload in payloads)
         )
 
     def test_build_feedback_payloads_reports_admission_block_detail(self) -> None:
@@ -220,7 +281,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
 
         self.assertEqual(1, len(payloads))
         self.assertEqual("blocked", payloads[0]["event"])
-        self.assertIn("Fresh merge readiness evidence", str(payloads[0]["message"]))
+        self.assertIn("Fresh merge readiness evidence", cast(str, payloads[0]["message"]))
 
     def test_build_feedback_payloads_skips_actions_without_pr_numbers(self) -> None:
         response: dict[str, Any] = {

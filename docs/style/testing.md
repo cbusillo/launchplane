@@ -129,17 +129,20 @@ merge context; conflicting pending or failed gates veto reuse. This avoids full
 work when an all-no-op batch publishes the already-tested base, without trusting
 a fork or retargeted PR's merge-ref checks. Native construction uses
 `launchplane/construct/**`, outside the required workflows' push filters, and
-publishes the canonical train ref only after every entry is verified. New
-completed candidate commits still run full CI.
+publishes the canonical train ref only after every entry is verified. The
+controller's narrow single-entry exception is defined in
+[candidate construction](../merge-train-policy.md#candidate-construction).
 
 Main retains its existing PR-tree reuse, tightened to require that the base is
 an ancestor of the PR head as well as matching trees and a successful gate.
-The train does not extend that shortcut: a historical PR gate alone cannot
-identify the merge-ref tree tested before a retarget. PR events, unrelated
+The workflow does not extend that shortcut: a historical PR gate alone cannot
+identify the merge-ref tree tested before a retarget. Ordinary PR events, unrelated
 branches, and missing API evidence run the full suite. Construction branches
 must remain outside required workflow triggers. Concurrency and required checks
 are unchanged, and every published final candidate SHA still receives its own
-gate.
+gate. Generated same-repository train PRs delegate to that exact candidate's
+push CI rather than running a second suite; the evidence and failure contract
+is owned by [candidate validation](../merge-train-policy.md#candidate-validation).
 
 The `ci-gate` job reports the run's wall time against a 10-minute pull-request
 budget in the job summary and raises a warning annotation when a run exceeds
@@ -233,9 +236,29 @@ or runtime mutation reaches a deployed Launchplane service. Journeys cover the
 rendered authentication prompt, honest empty and error product inventories,
 product workspace, recent activity, environment diagnostics, blocked and
 dry-run action boundaries, plus mixed, ready, unsupported, denied, failed,
-empty, and loading operational-readiness states. Each journey runs at desktop
-and narrow widths, checks route-heading and keyboard focus behavior, rejects
-duplicate document IDs and horizontal overflow, and fails on unexpected
+empty, and loading operational-readiness states. Desktop runs every test; narrow
+width runs only tests explicitly tagged `@layout` or `@responsive`. Mark tests
+whose purpose includes layout, overflow, touch-target spacing, or responsive
+behavior using Playwright test details, for example:
+
+```typescript
+test("readiness controls fit the viewport", { tag: "@layout" }, async ({ page }) => {
+  // Exercise the controls and assert the layout behavior.
+});
+```
+
+Use `@responsive` for behavior that changes with viewport size. Tagging is an
+explicit coverage choice: a screenshot or an incidental overflow guard alone
+does not require tagging every functional journey. The screenshot journeys
+required by `frontend/scripts/assert-browser-smoke-artifacts.mjs` are retained
+as representative layout tests, alongside focused responsive and spacing cases.
+Unmarked journeys retain desktop coverage; narrow-width defects in those
+journeys are an accepted coverage tradeoff (Q175, #3384). Check actual selection with
+`pnpm --dir frontend exec playwright test --list --project=desktop` and
+`pnpm --dir frontend exec playwright test --list --project=narrow`.
+
+The core admin journeys check route-heading and keyboard focus behavior, reject
+duplicate document IDs and horizontal overflow, and fail on unexpected
 mutation requests, console errors, uncaught page errors, failed requests, or
 HTTP error responses.
 

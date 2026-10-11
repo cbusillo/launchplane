@@ -3,6 +3,58 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // This blocking head script applies the preference before styles or React render.
+      (() => {
+        const storageKey = "launchplane.theme";
+        const listeners = new Set();
+
+        function readSavedTheme() {
+          try {
+            return window.localStorage.getItem(storageKey) === "light" ? "light" : "dark";
+          } catch {
+            return "dark";
+          }
+        }
+
+        let theme = readSavedTheme();
+
+        function apply(nextTheme) {
+          theme = nextTheme;
+          document.documentElement.dataset.theme = theme;
+          for (const listener of listeners) listener(theme);
+        }
+
+        window.launchplaneTheme = {
+          get: () => theme,
+          set(nextTheme) {
+            if (nextTheme !== "light" && nextTheme !== "dark") return;
+            try {
+              window.localStorage.setItem(storageKey, nextTheme);
+            } catch {
+              // Theme controls still work when the browser refuses persistent storage.
+            }
+            apply(nextTheme);
+          },
+          subscribe(listener) {
+            listeners.add(listener);
+            return () => { listeners.delete(listener); };
+          },
+        };
+
+        window.addEventListener("storage", (event) => {
+          try {
+            if (event.storageArea === window.localStorage &&
+                (event.key === storageKey || event.key === null)) {
+              apply(readSavedTheme());
+            }
+          } catch {
+            // Storage may also become unavailable after the page loads.
+          }
+        });
+        apply(theme);
+      })();
+    </script>
     <link
       rel="icon"
       type="image/svg+xml"

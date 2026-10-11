@@ -313,6 +313,58 @@ def _github_repository_user_owner_login(*, owner: str, repo: str, token: str) ->
     return login.strip()
 
 
+def pull_request_client_review(
+    *,
+    control_plane_root: Path,
+    context: str,
+    anchor_pr_url: str,
+    label: str,
+    record_store: object = None,
+    client_set: bool = True,
+) -> bool:
+    from control_plane.client_test_notes import ClientTestNotesRequired, change_client_review
+    from control_plane.client_release_repositories import recorded_train_candidate
+
+    reference = github_pull_request_reference(pr_url=anchor_pr_url)
+    if reference is None:
+        raise ValueError("Client review requires a pull request reference.")
+    repository = f"{reference['owner']}/{reference['repo']}"
+    with launchplane_github_token(
+        token_resolver=resolve_launchplane_github_token,
+        api_request=github_api_request,
+        control_plane_root=control_plane_root,
+        context_name=context,
+        repository=repository,
+        purpose="repository_read",
+    ) as token:
+        payload = github_api_request(
+            path=f"/repos/{repository}/pulls/{reference['pr_number']}", token=token
+        )
+    if not isinstance(payload, dict):
+        raise ValueError("Client review notes could not be read.")
+    labels = tuple(
+        str(item.get("name") or "") for item in payload.get("labels", ()) if isinstance(item, dict)
+    )
+    if not client_set:
+        return label.strip().casefold() in {value.casefold() for value in labels}
+    intent = change_client_review(
+        body=str(payload.get("body") or ""),
+        labels=labels,
+        review_label=label,
+    )
+    base = payload.get("base")
+    if not intent.explicit_override and recorded_train_candidate(
+        store=record_store,
+        repository=repository,
+        head=payload.get("head"),
+        base_branch=str(base.get("ref") or "") if isinstance(base, dict) else "",
+    ):
+        return False
+    if intent.error:
+        raise ClientTestNotesRequired(intent.error)
+    return intent.review_required
+
+
 def pull_request_has_label(
     *, control_plane_root: Path, context: str, anchor_pr_url: str, label: str
 ) -> bool:
@@ -794,8 +846,8 @@ def _render_preview_pr_feedback_markdown(
         lines.extend(
             [
                 (
-                    f"Launchplane preview is ready for PR #{anchor_pr_number} — "
-                    "Client review requested."
+                    f"**Change review (preview)** for PR #{anchor_pr_number} — "
+                    "is this one change exactly right?"
                     if owner_review_requested and not owner_review_accepted
                     else f"Launchplane preview is ready for PR #{anchor_pr_number}."
                 ),
@@ -892,6 +944,7 @@ def _render_preview_pr_feedback_markdown(
                     "the test notes in the pull request description.",
                     f"2. Record **Accept** or **Request changes** in Launchplane: {owner_review_url}",
                     "",
+                    "Accept approves this one change; nothing goes live yet. "
                     "Your decision does not merge or deploy anything. A GitHub approval or comment "
                     "does not record it.",
                 ]

@@ -5351,6 +5351,81 @@ class GenericWebHttpTests(unittest.TestCase):
         self.assertEqual(kwargs["profile"].preview.context, "sellyouroutboard-testing")
         self.assertEqual(kwargs["request"].preview_slug, "pr-42")
 
+    def test_destroy_route_keeps_active_preview_when_inventory_is_incomplete(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            preview = PreviewRecord(
+                preview_id="preview-incomplete-inventory",
+                context="sellyouroutboard-testing",
+                anchor_repo="sellyouroutboard",
+                anchor_pr_number=42,
+                anchor_pr_url="https://github.com/example/site/pull/42",
+                preview_label="preview",
+                canonical_url="https://pr-42.site.invalid",
+                state="active",
+                created_at="2026-05-03T15:55:00Z",
+                updated_at="2026-05-03T15:56:00Z",
+                eligible_at="2026-05-03T15:55:00Z",
+            )
+            store.write_preview_record(preview)
+            workflow_ref = "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                control_plane_root_path=root,
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/sellyouroutboard", workflow_ref=workflow_ref)
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/sellyouroutboard",
+                                "workflow_refs": [workflow_ref],
+                                "event_names": ["pull_request"],
+                                "products": ["sellyouroutboard"],
+                                "contexts": ["sellyouroutboard-testing"],
+                                "actions": ["preview_destroy.execute"],
+                            }
+                        ]
+                    }
+                ),
+            )
+            with (
+                patch(
+                    "control_plane.workflows.generic_web_preview.dokploy_source.read_dokploy_config",
+                    return_value=("https://provider.invalid", "inert-token"),
+                ),
+                patch(
+                    "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request",
+                    return_value=[{"environments": [{"applications": "malformed"}]}],
+                ) as provider,
+            ):
+                status, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-destroy",
+                    payload={
+                        "product": "sellyouroutboard",
+                        "destroy": {
+                            "product": "sellyouroutboard",
+                            "preview_slug": "pr-42",
+                            "destroy_reason": "test",
+                        },
+                    },
+                    headers={"Idempotency-Key": "incomplete-inventory"},
+                )
+            self.assertEqual(status, 202, payload)
+            self.assertEqual(payload["result"]["destroy_status"], "fail")
+            self.assertEqual(payload["result"]["destroy_outcome"], "failed")
+            self.assertEqual(store.read_preview_record(preview.preview_id), preview)
+            self.assertEqual(
+                [call.kwargs["path"] for call in provider.call_args_list], ["/api/project.all"]
+            )
+
     def test_generic_web_preview_destroy_replays_when_only_reason_changes(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

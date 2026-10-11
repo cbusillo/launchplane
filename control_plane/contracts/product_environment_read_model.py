@@ -22,8 +22,17 @@ from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
-from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_record import PreviewRecord, PreviewState
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
+from control_plane.contracts.product_health_monitoring_migration import (
+    canonical_health_check_record_token,
+)
+from control_plane.contracts.product_incident_read_model import (
+    ProductIncidentEnvironmentScope,
+    ProductIncidentSummary,
+    build_product_incident_summary,
+    sort_open_incidents,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneHealthCheckKind,
@@ -42,6 +51,7 @@ from control_plane.contracts.production_backup_authority import (
 from control_plane.contracts.product_topology_read_model import (
     ProductEnvironmentTopology,
     build_product_environment_topology,
+    select_public_probe_observations,
 )
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentEventKind,
@@ -385,7 +395,7 @@ class ProductHealthMonitoringSummary(BaseModel):
     monitoring_intent: ProductLaneMonitoringIntent
     public_incident_eligible: bool
     checks: tuple[ProductHealthMonitoringCheckSummary, ...] = ()
-    trust_state: FreshnessStatus = "recorded"
+    open_incidents: tuple[ProductIncidentSummary, ...] = ()
     provenance: DataProvenance
 
 
@@ -431,6 +441,19 @@ class ProductEnvironmentSummary(BaseModel):
     available_actions: tuple[ProductActionAvailability, ...] = ()
 
 
+PRODUCT_PREVIEW_REFERENCE_LIMIT = 50
+
+
+class ProductPreviewReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preview_id: str
+    change_number: int = Field(ge=1)
+    change_url: str
+    recorded_state: PreviewState
+    updated_at: str
+
+
 class ProductPreviewSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -439,6 +462,9 @@ class ProductPreviewSummary(BaseModel):
     slug_template: str = ""
     active_count: int = Field(default=0, ge=0)
     latest_preview_id: str = ""
+    records_status: Literal["available", "authorization_denied", "unsupported"] = "unsupported"
+    records: tuple[ProductPreviewReference, ...] = ()
+    records_truncated: bool = False
     trust_state: FreshnessStatus = "unsupported"
     provenance: DataProvenance = DataProvenance(
         source_kind="unsupported",
@@ -633,7 +659,9 @@ def build_product_site_overview(
         )
         for lane in profile.lanes
     )
-    preview_summary = _build_preview_summary(record_store=record_store, profile=profile)
+    preview_summary = _build_preview_summary(
+        record_store=record_store, profile=profile, action_allowed=action_allowed
+    )
     available_actions = _action_availability(
         descriptor=descriptor,
         profile=profile,
@@ -699,7 +727,11 @@ def build_product_environment_detail(
         warning
         for warning in (
             descriptor_warning,
-            *(topology_warning.detail for topology_warning in topology.warnings),
+            *(
+                topology_warning.detail
+                for topology_warning in topology.warnings
+                if topology_warning.severity != "info"
+            ),
         )
         if warning
     )
@@ -2012,7 +2044,9 @@ def _build_environment_summary(
             fallback=provenance.freshness_status,
         ),
         provenance=provenance,
-        warnings=tuple(warning.detail for warning in topology.warnings),
+        warnings=tuple(
+            warning.detail for warning in topology.warnings if warning.severity != "info"
+        ),
         available_actions=_action_availability(
             descriptor=descriptor,
             profile=profile,
@@ -2052,7 +2086,10 @@ def _missing_lane_provenance(lane: ProductLaneProfile) -> DataProvenance:
 
 
 def _build_preview_summary(
-    *, record_store: object, profile: LaunchplaneProductProfileRecord
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    action_allowed: ActionAllowed,
 ) -> ProductPreviewSummary:
     if not profile.preview.enabled:
         return ProductPreviewSummary(enabled=False)
@@ -2111,12 +2148,42 @@ def _build_preview_summary(
                 detail="Launchplane preview identity record.",
             )
         latest_preview_id = preview.preview_id
+    # Match the existing preview/history read grant exactly; product-read access
+    # alone does not authorize these additional individual identities.
+    records_allowed = action_allowed("preview.read", "launchplane", profile.preview.context, ())
+    records_status: Literal["available", "authorization_denied", "unsupported"] = (
+        "authorization_denied"
+        if not records_allowed
+        else "available"
+        if callable(list_preview_summaries) or callable(list_preview_records)
+        else "unsupported"
+    )
+    records = (
+        tuple(
+            ProductPreviewReference(
+                preview_id=preview.preview_id,
+                change_number=preview.anchor_pr_number,
+                change_url=preview.anchor_pr_url,
+                recorded_state=preview.state,
+                updated_at=preview.updated_at,
+            )
+            for summary in summaries[:PRODUCT_PREVIEW_REFERENCE_LIMIT]
+            for preview in (
+                summary.preview if isinstance(summary, LaunchplanePreviewSummary) else summary,
+            )
+        )
+        if records_allowed
+        else ()
+    )
     return ProductPreviewSummary(
         enabled=True,
         context=profile.preview.context,
         slug_template=profile.preview.slug_template,
         active_count=len(summaries),
         latest_preview_id=latest_preview_id,
+        records_status=records_status,
+        records=records,
+        records_truncated=records_allowed and len(summaries) > len(records),
         trust_state=provenance.freshness_status,
         provenance=provenance,
     )
@@ -2128,6 +2195,47 @@ def _health_monitoring_summary(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
 ) -> ProductHealthMonitoringSummary:
+    incidents = sort_open_incidents(
+        tuple(
+            incident
+            for incident in _required_records(
+                record_store,
+                "list_public_ingress_incident_records",
+                product=profile.product,
+                context_name=lane.context,
+                instance_name=lane.instance,
+                status="open",
+                limit=None,
+            )
+            if isinstance(incident, PublicIngressIncidentRecord)
+        )
+    )
+    incident_scope = ProductIncidentEnvironmentScope(
+        product=profile.product,
+        display_name=profile.display_name,
+        environment=lane.instance,
+        context=lane.context,
+        instance=lane.instance,
+        recorded_at=profile.updated_at,
+    )
+    open_incident_summaries = tuple(
+        build_product_incident_summary(
+            reminder_states=tuple(
+                state
+                for state in _required_records(
+                    record_store,
+                    "list_public_ingress_incident_reminder_state_records",
+                    incident_id=incident.incident_id,
+                    limit=100,
+                )
+                if isinstance(state, PublicIngressIncidentReminderStateRecord)
+            ),
+            scope=incident_scope,
+            incident=incident,
+        )
+        for incident in incidents
+    )
+    summaries_by_id = {summary.incident_id: summary for summary in open_incident_summaries}
     check_summaries: list[ProductHealthMonitoringCheckSummary] = []
     for check in lane.health_monitoring.checks:
         probe_effective = check.enabled and product_lane_monitoring_probe_effective(
@@ -2159,29 +2267,19 @@ def _health_monitoring_summary(
                 ),
                 None,
             )
-        incidents = _required_records(
-            record_store,
-            "list_public_ingress_incident_records",
-            product=profile.product,
-            context_name=lane.context,
-            instance_name=lane.instance,
-            check_name=check.name,
-            check_kind=check.kind,
-            status="open",
-            limit=1,
-        )
         open_incident = next(
             (
                 incident
                 for incident in incidents
-                if isinstance(incident, PublicIngressIncidentRecord)
+                if canonical_health_check_record_token(incident.check_name)
+                == canonical_health_check_record_token(check.name)
+                and incident.check_kind == check.kind
             ),
             None,
         )
-        next_reminder_at, last_reminded_at = _incident_reminder_times(
-            record_store=record_store,
-            incident_id=open_incident.incident_id if open_incident is not None else "",
-        )
+        incident_summary = summaries_by_id[open_incident.incident_id] if open_incident else None
+        next_reminder_at = incident_summary.next_reminder_at if incident_summary else ""
+        last_reminded_at = incident_summary.last_reminded_at if incident_summary else ""
         status: str
         if latest is not None:
             provenance = monitor_observation_provenance(latest)
@@ -2248,6 +2346,7 @@ def _health_monitoring_summary(
         monitoring_intent=lane.health_monitoring.monitoring_intent,
         public_incident_eligible=lane.health_monitoring.monitoring_intent == "public",
         checks=tuple(check_summaries),
+        open_incidents=open_incident_summaries,
         provenance=_monitoring_intent_provenance(profile=profile, lane=lane),
     )
 
@@ -2294,14 +2393,7 @@ def _public_ingress_summary(
         check_kind="public_http",
         limit=50,
     )
-    latest = next(
-        (
-            record
-            for record in records
-            if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
-        ),
-        None,
-    )
+    latest, _ = select_public_probe_observations(lane=lane, records=records)
     if latest is None or not isinstance(latest, PublicIngressObservationRecord):
         return ProductPublicIngressSummary(
             monitoring_intent=monitoring_intent,
@@ -2313,6 +2405,7 @@ def _public_ingress_summary(
         product=profile.product,
         context_name=lane.context,
         instance_name=lane.instance,
+        check_name=latest.check_name,
         check_kind="public_http",
         status="open",
         limit=1,

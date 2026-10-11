@@ -4,7 +4,7 @@ from hashlib import sha256
 import logging
 import re
 from time import sleep
-from typing import TYPE_CHECKING, Callable, Literal, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Callable, Literal, Protocol, TypeVar, cast, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -15,6 +15,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainHeadCheckReuse,
+    MergeTrainReusedCheck,
+    build_merge_train_batch_candidate_ref,
+)
 from control_plane.contracts.merge_train_branch_refresh_record import MergeTrainBranchRefreshRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchHeldOutEntry
@@ -46,13 +51,28 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralEntryBinding,
     MergeTrainStructuralProvenance,
 )
+from control_plane.client_test_notes import ClientTestNotes, change_client_review
+from control_plane.release_review_shared import repository_key
+from control_plane.client_release_repositories import (
+    ClientReleaseRepositoryStore,
+    client_release_profiles,
+    recorded_train_candidate,
+)
 from control_plane.github_payload import json_object
 from control_plane.github_payload import required_positive_int
 from control_plane.github_payload import required_string_text
 from control_plane.github_response_headers import GitHubResponseHeadersObserver
 from control_plane.github_response_headers import notify_github_quota_response_headers
-from control_plane.github_request_timing import timed_github_request
-from control_plane.merge_train_codeowners import individual_landing_snapshots
+from control_plane.github_response_headers import normalized_github_quota_response_headers
+from control_plane.github_request_timing import timed_github_request, record_github_response
+from control_plane.github_read_cache import GitHubReadCache, MERGE_TRAIN_READ_CACHE
+from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
+from control_plane.merge_train_candidate_failures import CandidateCheckFailures
+from control_plane.merge_train_candidate_failures import classify_candidate_check_failures
+from control_plane.merge_train_codeowners import (
+    individual_landing_snapshots,
+    carried_change_requires_individual_landing,
+)
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
 from control_plane.source_control_change import change_fingerprint
@@ -114,6 +134,7 @@ class MergeTrainGitHubError(RuntimeError):
         rate_limited: bool = False,
         rate_limit_reset: int | None = None,
         retry_after_seconds: int | None = None,
+        primary_quota_exhausted: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -121,6 +142,7 @@ class MergeTrainGitHubError(RuntimeError):
         self.rate_limited = rate_limited
         self.rate_limit_reset = rate_limit_reset
         self.retry_after_seconds = retry_after_seconds
+        self.primary_quota_exhausted = primary_quota_exhausted
 
 
 class MergeTrainGitHubStaleHeadError(MergeTrainGitHubError):
@@ -210,6 +232,18 @@ class MergeTrainGitHubTransport(Protocol):
     ) -> object: ...
 
 
+class _GitHubQuotaResponse(dict[str, object]):
+    """Response-bound numeric timing; mapping/JSON consumers retain the same payload."""
+
+    def __init__(
+        self,
+        payload: dict[str, object],
+        quota_timing: tuple[int | None, int | None, bool | None],
+    ) -> None:
+        super().__init__(payload)
+        self.quota_timing = quota_timing
+
+
 class UrllibMergeTrainGitHubTransport:
     def __init__(
         self,
@@ -217,12 +251,15 @@ class UrllibMergeTrainGitHubTransport:
         token: str,
         api_base_url: str = "https://api.github.com",
         response_headers_observer: GitHubResponseHeadersObserver | None = None,
+        read_cache: GitHubReadCache | None = None,
     ) -> None:
         self.token = _required_value(token, "GitHub token is required.")
         self.api_base_url = _required_value(
             api_base_url, "GitHub API base URL is required."
         ).rstrip("/")
         self.response_headers_observer = response_headers_observer
+        self._read_cache = read_cache if read_cache is not None else MERGE_TRAIN_READ_CACHE
+        self._cache_namespace = sha256(f"{self.api_base_url}\0{self.token}".encode()).hexdigest()
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         request_body = None
@@ -234,6 +271,15 @@ class UrllibMergeTrainGitHubTransport:
         if body is not None:
             request_body = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
+        cached = self._read_cache.get(self._cache_namespace, path) if method == "GET" else None
+        immutable_contents = bool(
+            method == "GET"
+            and re.fullmatch(r"/repos/[^/]+/[^/]+/contents/[^?]+\?ref=[0-9a-fA-F]{40}", path)
+        )
+        if cached is not None and immutable_contents:
+            return cached.payload
+        if cached is not None and cached.etag:
+            headers["If-None-Match"] = cached.etag
         request = Request(
             url=f"{self.api_base_url}{path}",
             method=method,
@@ -250,11 +296,36 @@ class UrllibMergeTrainGitHubTransport:
                     self.response_headers_observer,
                     getattr(response, "headers", None),
                 )
-                return json.loads(response_text) if response_text.strip() else None
+                payload = json.loads(response_text) if response_text.strip() else None
+                record_github_response(getattr(response, "status", 200))
+                if method == "GET":
+                    etag = str(response.headers.get("ETag") or "")
+                    if etag or immutable_contents:
+                        self._read_cache.put(
+                            self._cache_namespace, path, etag=etag, payload=payload
+                        )
+                    else:
+                        self._read_cache.discard(self._cache_namespace, path)
+                if path == "/graphql" and isinstance(payload, dict):
+                    return _GitHubQuotaResponse(
+                        payload, _github_quota_timing(getattr(response, "headers", None))
+                    )
+                return payload
         except HTTPError as error:
-            raise _github_http_error(
+            record_github_response(error.code)
+            if error.code == 304 and cached is not None and method == "GET":
+                notify_github_quota_response_headers(self.response_headers_observer, error.headers)
+                return cached.payload
+            provider_error = _github_http_error(
                 method=method, path=path, status_code=error.code, error=error
-            ) from error
+            )
+            if error.code == 401:
+                from control_plane.merge_train_github_token import (
+                    invalidate_cached_merge_train_github_token,
+                )
+
+                invalidate_cached_merge_train_github_token(self.token)
+            raise provider_error from error
         except (URLError, OSError) as error:
             raise MergeTrainGitHubError(f"GitHub API request failed for {path}: {error}") from error
         except json.JSONDecodeError as error:
@@ -278,14 +349,35 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self._branch_refresh_recorder = branch_refresh_recorder
         self._branch_refresh_store = branch_refresh_store
         self._wait = wait
+        self._snapshot_policy: MergeTrainRepositoryPolicy | None = None
+        self._reuse_snapshots = False
+        self._snapshots: dict[tuple[str, str], MergeTrainDryRunSnapshot] = {}
+
+    def begin_snapshot_pass(self, *, policy: MergeTrainRepositoryPolicy, read_only: bool) -> None:
+        self._snapshot_policy = policy
+        self._reuse_snapshots = read_only
+        self._snapshots.clear()
+
+    def end_snapshot_pass(self) -> None:
+        self._snapshot_policy = None
+        self._reuse_snapshots = False
+        self._snapshots.clear()
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
     ) -> MergeTrainDryRunSnapshot:
         """Read planning evidence through the client-owned provider boundary."""
-        return GitHubMergeTrainSnapshotReader(
-            transport=self.transport, branch_refresh_store=self._branch_refresh_store
+        key = (repository, base_branch)
+        if self._reuse_snapshots and key in self._snapshots:
+            return self._snapshots[key].model_copy(deep=True)
+        snapshot = GitHubMergeTrainSnapshotReader(
+            transport=self.transport,
+            branch_refresh_store=self._branch_refresh_store,
+            repository_policy=self._snapshot_policy,
         ).read_merge_train_snapshot(repository=repository, base_branch=base_branch)
+        if self._reuse_snapshots:
+            self._snapshots[key] = snapshot.model_copy(deep=True)
+        return snapshot
 
     def read_pull_request_snapshot(
         self, *, repository: str, pull_request_number: int
@@ -651,6 +743,20 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     f"candidate_entry_merged:{entry_index}",
                 )
             candidate = progress_candidate
+        reuse = self.read_head_check_reuse(candidate=candidate)
+        if reuse is not None:
+            # Construction refs do not trigger candidate CI. Keep the verified
+            # merge commit reachable there until the ordinary landing cleanup.
+            candidate = _validated_model_update(
+                candidate,
+                candidate_ref=construction_ref,
+                head_check_reuse=reuse,
+                required_checks_status="pass",
+                status="passed",
+            )
+            if checkpoint is not None:
+                checkpoint(candidate, None, "head_checks_reused")
+            return candidate
         if checkpoint is not None:
             checkpoint(candidate, None, "publish_candidate_ref")
         resolved_effect_executor.prepare_candidate_ref(
@@ -780,6 +886,56 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     def observe_batch_candidate_checks(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainBatchCandidate:
+        if candidate.head_check_reuse is not None:
+            reuse = self.read_head_check_reuse(candidate=candidate)
+            if reuse is not None:
+                return _validated_model_update(
+                    candidate,
+                    head_check_reuse=reuse,
+                    required_checks_status="pass",
+                    status="passed",
+                )
+            # Reuse is no longer provable. Publish the same completed candidate
+            # through the normal path so it receives its own required checks.
+            canonical_ref = build_merge_train_batch_candidate_ref(
+                repository=candidate.repository,
+                base_branch=candidate.base_branch,
+                batch_id=candidate.batch_id,
+            )
+            self.semantic_effect_executor.prepare_candidate_ref(
+                CandidateRefPrepareEffect(
+                    lineage=MergeTrainEffectLineage(
+                        repository=candidate.repository,
+                        base_branch=candidate.base_branch,
+                        batch_id=candidate.batch_id,
+                    ),
+                    candidate_ref=canonical_ref,
+                    base_sha=candidate.candidate_sha,
+                )
+            )
+            _verify_candidate_publication(
+                transport=self.transport,
+                repository_path=_repository_path(candidate.repository),
+                candidate_ref=canonical_ref,
+                expected_sha=candidate.candidate_sha,
+            )
+            self.semantic_effect_executor.delete_candidate_ref(
+                CandidateRefDeleteEffect(
+                    lineage=MergeTrainEffectLineage(
+                        repository=candidate.repository,
+                        base_branch=candidate.base_branch,
+                        batch_id=candidate.batch_id,
+                    ),
+                    candidate_ref=candidate.candidate_ref,
+                )
+            )
+            return _validated_model_update(
+                candidate,
+                candidate_ref=canonical_ref,
+                head_check_reuse=None,
+                required_checks_status="pending",
+                status="ready_for_checks",
+            )
         repository_path = _repository_path(candidate.repository)
         candidate_sha = _required_value(
             candidate.candidate_sha,
@@ -801,6 +957,302 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             required_checks_status=check_status,
             status=candidate_status,
         )
+
+    def read_base_check_status(
+        self, *, candidate: MergeTrainBatchCandidate, failed_check_names: tuple[str, ...]
+    ) -> MergeTrainCheckStatus:
+        """Verify required base checks and checks implicated by the failed candidate."""
+        repository_path = _repository_path(candidate.repository)
+        required_checks = _required_branch_checks(
+            transport=self.transport,
+            repository_path=repository_path,
+            base_branch=candidate.base_branch,
+        )
+        encoded_sha = quote(
+            _required_value(candidate.base_sha, "Merge train candidate base SHA is required."),
+            safe="",
+        )
+        statuses = _list_commit_statuses(
+            transport=self.transport, repository_path=repository_path, encoded_head_sha=encoded_sha
+        )
+        check_runs = _list_check_runs(
+            transport=self.transport, repository_path=repository_path, encoded_head_sha=encoded_sha
+        )
+        required_status, missing = _required_check_evidence_status(
+            required_checks=required_checks, status_payload=statuses, check_runs_payload=check_runs
+        )
+        implicated = {name.casefold() for name in failed_check_names}
+        matching_statuses: dict[str, object] = {
+            "statuses": [
+                item
+                for item in cast(list[dict[str, object]], statuses["statuses"])
+                if cast(str, item["context"]).casefold() in implicated
+            ]
+        }
+        matching_runs: dict[str, object] = {
+            "check_runs": [
+                item
+                for item in cast(list[dict[str, object]], check_runs["check_runs"])
+                if cast(str, item["name"]).casefold() in implicated
+            ]
+        }
+        status = _combine_check_statuses(
+            required_status,
+            _combined_status_state(matching_statuses),
+            _check_runs_status(matching_runs),
+        )
+        return "unknown" if missing and status != "fail" else status
+
+    def read_candidate_check_failures(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> CandidateCheckFailures:
+        """Read which checks failed on the candidate commit and whether runners caused it."""
+        repository_path = _repository_path(candidate.repository)
+        encoded_sha = quote(
+            _required_value(
+                candidate.candidate_sha,
+                "Merge train batch candidate SHA is required before reading failures.",
+            ),
+            safe="",
+        )
+        check_runs = _list_check_runs(
+            transport=self.transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_sha,
+        )["check_runs"]
+        statuses = _list_commit_statuses(
+            transport=self.transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_sha,
+        )["statuses"]
+
+        def read_annotations(check_run_id: int) -> list[dict[str, object]]:
+            payload = self.transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/check-runs/{check_run_id}/annotations?per_page=50",
+            )
+            if not isinstance(payload, list):
+                raise MergeTrainGitHubError("GitHub check run annotations response must be a list.")
+            return [_json_object(item, "GitHub check run annotation") for item in payload]
+
+        return classify_candidate_check_failures(
+            check_runs=[
+                _json_object(item, "GitHub check run") for item in cast(list[object], check_runs)
+            ],
+            commit_statuses=[
+                _json_object(item, "GitHub commit status") for item in cast(list[object], statuses)
+            ],
+            read_annotations=read_annotations,
+        )
+
+    def read_head_check_reuse(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> MergeTrainHeadCheckReuse | None:
+        if len(candidate.entries) != 1:
+            return None
+        canonical_ref = build_merge_train_batch_candidate_ref(
+            repository=candidate.repository,
+            base_branch=candidate.base_branch,
+            batch_id=candidate.batch_id,
+        )
+        if candidate.candidate_ref not in {
+            canonical_ref,
+            merge_train_construction_ref(canonical_ref),
+        }:
+            return None
+        entry = candidate.entries[0]
+        if not entry.head_tree_sha or entry.head_tree_sha != candidate.candidate_tree_sha:
+            return None
+        from control_plane.tenant_admission_controller import TenantAdmissionControllerError
+
+        repository_path = _repository_path(candidate.repository)
+        try:
+            if (
+                _base_branch_sha(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    base_branch=candidate.base_branch,
+                )
+                != candidate.base_sha
+            ):
+                return None
+            pull = _json_object(
+                self.transport.request(
+                    method="GET", path=f"/repos/{repository_path}/pulls/{entry.pull_request_number}"
+                ),
+                "GitHub pull request for head-check reuse",
+            )
+            head = _json_object(pull.get("head"), "GitHub pull request head")
+            base = _json_object(pull.get("base"), "GitHub pull request base")
+            base_repo = _json_object(base.get("repo"), "GitHub pull request base repository")
+            if (
+                pull.get("number") != entry.pull_request_number
+                or pull.get("state") != "open"
+                or pull.get("merged") is not False
+                or pull.get("draft") is not False
+                or head.get("sha") != entry.head_sha
+                or base.get("sha") != candidate.base_sha
+                or base.get("ref") != candidate.base_branch
+                or base_repo.get("full_name") != candidate.repository
+            ):
+                return None
+            if (
+                _git_commit_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    commit_sha=entry.head_sha,
+                )[1]
+                != candidate.candidate_tree_sha
+            ):
+                return None
+            if (
+                _git_commit_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    commit_sha=candidate.candidate_sha,
+                )[1]
+                != candidate.candidate_tree_sha
+            ):
+                return None
+            observed_at = datetime.now(timezone.utc).isoformat()
+            checks = self.read_technical_checks(
+                repository=candidate.repository,
+                base_branch=candidate.base_branch,
+                base_sha=candidate.base_sha,
+                head_sha=entry.head_sha,
+                evaluated_at=observed_at,
+            )
+            if checks.status != "pass":
+                return None
+            # Preserve the candidate path's complete required-check policy and
+            # vetoes, including requirements excluded from technical admission.
+            if (
+                _candidate_required_checks_status(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    base_branch=candidate.base_branch,
+                    encoded_head_sha=quote(entry.head_sha, safe=""),
+                )
+                != "pass"
+            ):
+                return None
+            if _required_branch_checks(
+                transport=self.transport,
+                repository_path=repository_path,
+                base_branch=candidate.base_branch,
+            ) != tuple((check.name, check.app_id) for check in checks.required_checks):
+                return None
+            # Confirm mutable head/base facts after reading the check evidence.
+            confirmed = _json_object(
+                self.transport.request(
+                    method="GET", path=f"/repos/{repository_path}/pulls/{entry.pull_request_number}"
+                ),
+                "GitHub pull request confirmation for head-check reuse",
+            )
+            confirmed_head = _json_object(confirmed.get("head"), "GitHub confirmed head")
+            confirmed_base = _json_object(confirmed.get("base"), "GitHub confirmed base")
+            confirmed_repo = _json_object(confirmed_base.get("repo"), "GitHub confirmed repository")
+            if (
+                confirmed.get("number") != entry.pull_request_number
+                or confirmed.get("state") != "open"
+                or confirmed.get("merged") is not False
+                or confirmed.get("draft") is not False
+                or confirmed_head.get("sha") != entry.head_sha
+                or confirmed_base.get("sha") != candidate.base_sha
+                or confirmed_base.get("ref") != candidate.base_branch
+                or confirmed_repo.get("full_name") != candidate.repository
+            ):
+                return None
+            if not self._head_check_reuse_base_history_is_unchanged(
+                repository_path=repository_path, pull_request_number=entry.pull_request_number
+            ):
+                return None
+            if (
+                _base_branch_sha(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    base_branch=candidate.base_branch,
+                )
+                != candidate.base_sha
+            ):
+                return None
+        except (MergeTrainGitHubError, TenantAdmissionControllerError, ValueError) as error:
+            if isinstance(error, MergeTrainGitHubError) and error.rate_limited:
+                raise
+            # Missing/unreadable evidence selects full CI, never a reusable pass.
+            return None
+        return MergeTrainHeadCheckReuse(
+            pull_request_number=entry.pull_request_number,
+            head_sha=entry.head_sha,
+            tree_sha=entry.head_tree_sha,
+            base_sha=candidate.base_sha,
+            candidate_sha=candidate.candidate_sha,
+            observed_at=observed_at,
+            required_checks=tuple(
+                MergeTrainReusedCheck(
+                    name=required.name,
+                    app_id=required.app_id,
+                    sources=cast(
+                        tuple[Literal["commit_status", "check_run"], ...],
+                        tuple(
+                            sorted(
+                                {
+                                    signal.source
+                                    for signal in checks.signals
+                                    if signal.name.casefold() == required.name.casefold()
+                                    and (
+                                        required.app_id is None or signal.app_id == required.app_id
+                                    )
+                                    and signal.state == "pass"
+                                }
+                            )
+                        ),
+                    ),
+                )
+                for required in checks.required_checks
+            ),
+        )
+
+    def _head_check_reuse_base_history_is_unchanged(
+        self, *, repository_path: str, pull_request_number: int
+    ) -> bool:
+        # Historical PR checks can test a merge-ref tree from a former base.
+        owner, repository = repository_path.split("/", 1)
+        payload = _json_object(
+            self.transport.request(
+                method="POST",
+                path="/graphql",
+                body={
+                    "query": """
+                    query($owner: String!, $name: String!, $number: Int!) {
+                      repository(owner: $owner, name: $name) {
+                        pullRequest(number: $number) {
+                          timelineItems(first: 1, itemTypes: [BASE_REF_CHANGED_EVENT,
+                            BASE_REF_FORCE_PUSHED_EVENT, AUTOMATIC_BASE_CHANGE_SUCCEEDED_EVENT]) {
+                            nodes { __typename }
+                            pageInfo { hasNextPage }
+                          }
+                        }
+                      }
+                    }
+                    """,
+                    "variables": {
+                        "owner": owner,
+                        "name": repository,
+                        "number": pull_request_number,
+                    },
+                },
+            ),
+            "GitHub base-history response",
+        )
+        if payload.get("errors"):
+            return False
+        data = _json_object(payload.get("data"), "GitHub base-history data")
+        repo = _json_object(data.get("repository"), "GitHub base-history repository")
+        pull = _json_object(repo.get("pullRequest"), "GitHub base-history pull request")
+        timeline = _json_object(pull.get("timelineItems"), "GitHub base-history timeline")
+        page = _json_object(timeline.get("pageInfo"), "GitHub base-history page info")
+        return timeline.get("nodes") == [] and page.get("hasNextPage") is False
 
     def read_technical_checks(
         self,
@@ -843,7 +1295,12 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
 
     def verify_unlanded_batch(
-        self, *, landing_plan: MergeTrainBatchLandingPlan, allow_changed_base: bool = False
+        self,
+        *,
+        landing_plan: MergeTrainBatchLandingPlan,
+        allow_changed_base: bool = False,
+        allow_moved_heads: bool = False,
+        observed_pr_heads: dict[int, tuple[str, str]] | None = None,
     ) -> tuple[str, str]:
         """Prove that a changed-policy plan can be retired without losing a landing."""
         if any(entry.status not in {"planned", "merging"} for entry in landing_plan.entries):
@@ -869,6 +1326,19 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             raise MergeTrainGitHubStaleHeadError(
                 "Policy-change recovery cannot prove the base is unchanged.", status_code=409
             )
+        if allow_moved_heads:
+            if any(
+                entry.status != "planned" for entry in landing_plan.entries
+            ) or self.branch_contains_commit(
+                repository=landing_plan.repository,
+                branch_ref=observed_base[0],
+                commit_sha=landing_plan.candidate_sha,
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "Retirement cannot discard completed or uncertain candidate effects.",
+                    status_code=409,
+                )
+        observed_heads: dict[int, str] = {}
         for entry in landing_plan.entries:
             head_sha, head_tree_sha = _git_commit_identity(
                 transport=self.transport,
@@ -879,13 +1349,21 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 raise MergeTrainGitHubStaleHeadError(
                     "Policy-change recovery cannot prove the recorded head tree.", status_code=409
                 )
-            self._validate_open_landing_pull_request(
-                repository_path=repository_path,
-                entry=entry,
-                expected_base_ref=landing_plan.base_branch,
-                expected_base_sha=observed_base[0],
-                expected_base_tree_sha=observed_base[1],
-            )
+            if allow_moved_heads:
+                observed_heads[entry.pull_request_number] = self._open_head_for_retirement(
+                    repository=landing_plan.repository,
+                    pull_request_number=entry.pull_request_number,
+                    base_ref=landing_plan.base_branch,
+                    base_sha=observed_base[0],
+                )
+            else:
+                self._validate_open_landing_pull_request(
+                    repository_path=repository_path,
+                    entry=entry,
+                    expected_base_ref=landing_plan.base_branch,
+                    expected_base_sha=observed_base[0],
+                    expected_base_tree_sha=observed_base[1],
+                )
         if (
             _base_branch_identity(
                 transport=self.transport,
@@ -897,7 +1375,64 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             raise MergeTrainGitHubStaleHeadError(
                 "Base branch moved during policy-change recovery.", status_code=409
             )
+        for number, head in observed_heads.items():
+            if (
+                self._open_head_for_retirement(
+                    repository=landing_plan.repository,
+                    pull_request_number=number,
+                    base_ref=landing_plan.base_branch,
+                    base_sha=observed_base[0],
+                )
+                != head
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "Pull request moved during no-effect retirement proof.", status_code=409
+                )
+        if observed_pr_heads is not None:
+            for number, head in observed_heads.items():
+                observed_pr_heads[number] = _git_commit_identity(
+                    transport=self.transport, repository_path=repository_path, commit_sha=head
+                )
         return observed_base
+
+    def _open_head_for_retirement(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        base_ref: str,
+        base_sha: str,
+    ) -> str:
+        detail = self._pull_request_detail(
+            repository=repository, pull_request_number=pull_request_number
+        )
+        if (
+            _required_text(detail.get("state"), "Retirement requires PR state.") != "open"
+            or detail.get("merged") is not False
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Retirement requires a confirmed open, unmerged PR.", status_code=409
+            )
+        base = _json_object(detail.get("base"), "Retirement PR base")
+        if base.get("ref") != base_ref:
+            raise MergeTrainGitHubStaleHeadError(
+                "Retirement requires the current protected base binding.", status_code=409
+            )
+        projected_sha = _required_text(base.get("sha"), "Retirement requires base projection SHA.")
+        if (
+            projected_sha != base_sha
+            and _base_branch_sha(
+                transport=self.transport,
+                repository_path=_repository_path(repository),
+                base_branch=base_ref,
+            )
+            != base_sha
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Protected base moved during retirement.", status_code=409
+            )
+        head = _json_object(detail.get("head"), "Retirement PR head")
+        return _required_text(head.get("sha"), "Retirement requires current PR head.")
 
     def land_batch_candidate(
         self,
@@ -1010,7 +1545,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     observed_base_sha=current_base_sha,
                     observed_base_tree_sha=current_base_tree_sha,
                     provider_effect_attempted=True,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 expected_base_sha = recovered_entry.merge_commit_sha
                 expected_base_tree_sha = recovered_entry.merge_commit_tree_sha
@@ -1052,7 +1587,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     observed_base_tree_sha=current_base_tree_sha,
                     base_contains_merge_commit=True,
                     provider_effect_attempted=False,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 landed_entries.append(skipped_entry)
                 progress_plan = _validated_model_update(
@@ -1088,7 +1623,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     observed_base_sha=current_base_sha,
                     observed_base_tree_sha=current_base_tree_sha,
                     provider_effect_attempted=True,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 expected_base_sha = already_merged_entry.merge_commit_sha
                 expected_base_tree_sha = already_merged_entry.merge_commit_tree_sha
@@ -1126,7 +1661,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 observed_head_sha=landed_head_sha,
                 observed_head_tree_sha=landed_head_tree_sha,
                 observed_pull_request_state="open",
-                observed_at=recorded_at,
+                observed_at=admission_guard.observation_time_provider(),
             )
             if head_behind_base:
                 raise MergeAdmissionDeniedError(
@@ -1177,7 +1712,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 admission_guard.record_provider_failure(
                     admission=admission,
                     error=error,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 raise
             try:
@@ -1199,7 +1734,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     admission=admission,
                     reason="landing_evidence_incomplete",
                     message=str(error).strip(),
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 raise
             base_contains_merge_commit = observed_base_sha == merge_commit_sha or (
@@ -1215,7 +1750,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     admission=admission,
                     reason="landing_evidence_contradicted",
                     message=message,
-                    observed_at=recorded_at,
+                    observed_at=admission_guard.observation_time_provider(),
                 )
                 raise MergeTrainGitHubStaleHeadError(message, status_code=409)
             merged_entry = _validated_model_update(
@@ -1236,7 +1771,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 observed_base_tree_sha=observed_base_tree_sha,
                 base_contains_merge_commit=base_contains_merge_commit,
                 provider_effect_attempted=True,
-                observed_at=recorded_at,
+                observed_at=admission_guard.observation_time_provider(),
             )
             expected_base_sha = merge_commit_sha
             expected_base_tree_sha = merge_commit_tree_sha
@@ -1310,6 +1845,20 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             if str(label_payload.get("name") or "").strip() == normalized_label:
                 return True
         return False
+
+    def read_pull_request_head(
+        self, *, repository: str, pull_request_number: int
+    ) -> tuple[str, MergeTrainPullRequestState]:
+        pull_request = self._pull_request_detail(
+            repository=repository, pull_request_number=pull_request_number
+        )
+        head = _json_object(pull_request.get("head"), "GitHub pull request head")
+        return (
+            _required_text(head.get("sha"), "GitHub pull request head requires sha."),
+            _pull_request_state(
+                _required_text(pull_request.get("state"), "GitHub pull request requires state.")
+            ),
+        )
 
     def pull_request_is_closed(
         self, *, repository: str, pull_request_number: int, expected_head_sha: str
@@ -1651,9 +2200,18 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         review_reader = GitHubMergeTrainSnapshotReader(
             transport=self.transport, branch_refresh_store=self._branch_refresh_store
         )
-        if require_client_review and review_reader.client_review_required(
-            labels=_labels(pull_request.get("labels")), repository=repository_path
-        ):
+        intent = (
+            review_reader.client_review_intent(
+                labels=_labels(pull_request.get("labels")),
+                repository=repository_path,
+                body=str(pull_request.get("body") or ""),
+            )
+            if require_client_review
+            else ClientTestNotes(False)
+        )
+        if intent.error:
+            raise MergeAdmissionDeniedError(intent.error, reason_code="client_test_notes_required")
+        if require_client_review and intent.review_required:
             review_status = _owner_review_status(
                 _list_check_runs(
                     transport=self.transport,
@@ -1830,9 +2388,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         review_reader = GitHubMergeTrainSnapshotReader(
             transport=self.transport, branch_refresh_store=self._branch_refresh_store
         )
-        if not review_reader.client_review_required(
-            labels=_labels(pull_request.get("labels")), repository=repository_path
-        ):
+        intent = review_reader.client_review_intent(
+            labels=_labels(pull_request.get("labels")),
+            repository=repository_path,
+            body=str(pull_request.get("body") or ""),
+        )
+        if intent.error:
+            raise MergeTrainGitHubStaleHeadError(intent.error, status_code=409)
+        if not intent.review_required:
             return
         review_status = _owner_review_status(
             _list_check_runs(
@@ -1848,6 +2411,22 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 f"Pull request #{pull_request_number} no longer has current-head Client review.",
                 status_code=409,
             )
+
+    def carried_change_requires_individual_landing(
+        self,
+        *,
+        repository: str,
+        base_sha: str,
+        parent_head_sha: str,
+        child_head_sha: str,
+    ) -> bool:
+        return carried_change_requires_individual_landing(
+            transport=self.transport,
+            repository_path=_repository_path(repository),
+            base_sha=base_sha,
+            parent_head_sha=parent_head_sha,
+            child_head_sha=child_head_sha,
+        )
 
     def merge_pull_request(
         self,
@@ -2225,14 +2804,21 @@ class GitHubMergeTrainSnapshotReader:
         *,
         transport: MergeTrainGitHubTransport,
         branch_refresh_store: MergeTrainBranchRefreshReadStore | None = None,
+        repository_policy: MergeTrainRepositoryPolicy | None = None,
     ) -> None:
         self.transport = transport
         self._branch_refresh_store = branch_refresh_store
+        self._repository_policy = repository_policy
         self._actor_roles: dict[tuple[str, str], str] = {}
+        self._author_roles: dict[tuple[str, str], str] = {}
+        self._dependency_classes: dict[tuple[str, int, str, str], DependencyUpdateClass] = {}
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
     ) -> MergeTrainDryRunSnapshot:
+        self._actor_roles.clear()
+        self._author_roles.clear()
+        self._dependency_classes.clear()
         repository_path = _repository_path(repository)
         normalized_base_branch = _required_value(
             base_branch, "GitHub pull request base branch is required."
@@ -2246,16 +2832,13 @@ class GitHubMergeTrainSnapshotReader:
             repository=repository,
             base_branch=normalized_base_branch,
         )
+        enriched = tuple(pr for pr in relevant_pull_requests if self._needs_enrichment(pr))
         pull_requests = self._with_review_conversations(
             repository_path=repository_path,
             base_branch=normalized_base_branch,
             pull_requests=tuple(
-                self._pull_request_snapshot(
-                    repository=repository,
-                    repository_path=repository_path,
-                    pull_request=pull_request,
-                )
-                for pull_request in relevant_pull_requests
+                self._pull_request_snapshot(repository_path=repository_path, pull_request=pr)
+                for pr in enriched
             ),
         )
         pull_requests = individual_landing_snapshots(
@@ -2264,6 +2847,16 @@ class GitHubMergeTrainSnapshotReader:
             base_sha=base_sha,
             pull_requests=pull_requests,
         )
+        by_number = {pr.number: pr for pr in pull_requests}
+        pull_requests = tuple(
+            by_number.get(_required_int(pr["number"], "GitHub pull request entry requires number."))
+            or self._pull_request_snapshot(
+                repository_path=repository_path,
+                pull_request=pr,
+                enrich=False,
+            )
+            for pr in relevant_pull_requests
+        )
         return MergeTrainDryRunSnapshot(
             repository=repository,
             base_branch=normalized_base_branch,
@@ -2271,12 +2864,48 @@ class GitHubMergeTrainSnapshotReader:
             pull_requests=pull_requests,
         )
 
+    def _needs_enrichment(self, pull_request: dict[str, object]) -> bool:
+        policy = self._repository_policy
+        if policy is None:
+            return True
+        if pull_request.get("draft"):
+            return False
+        user = _json_object(pull_request.get("user"), "GitHub pull request user")
+        head = _json_object(pull_request.get("head"), "GitHub pull request head")
+        if (
+            not policy.enqueue.label_required
+            or policy.enqueue_label in _labels(pull_request.get("labels"))
+            or str(head.get("ref") or "").startswith("launchplane/train/")
+        ):
+            return True
+        if (
+            user.get("id") not in policy.enqueue.dependency_update_github_user_ids
+            or user.get("type") != "Bot"
+        ):
+            return False
+        base = _json_object(pull_request.get("base"), "GitHub pull request base")
+        return (
+            self._safe_dependency_update_class(
+                repository_path=_repository_path(policy.repository),
+                pull_request_number=_required_int(
+                    pull_request.get("number"), "GitHub pull request requires number."
+                ),
+                author_id=_required_int(user.get("id"), "GitHub pull request user requires id."),
+                head_sha=_required_text(head.get("sha"), "GitHub pull request head requires sha."),
+                base_branch=str(base.get("ref") or ""),
+                base_sha=str(base.get("sha") or ""),
+            )
+            == "patch_or_minor"
+        )
+
     def read_pull_request_snapshot(
         self, *, repository: str, pull_request_number: int
     ) -> MergeTrainPullRequestSnapshot:
+        self._actor_roles.clear()
+        self._author_roles.clear()
+        self._dependency_classes.clear()
         repository_path = _repository_path(repository)
         snapshot = self._pull_request_snapshot(
-            repository=repository,
             repository_path=repository_path,
             pull_request={"number": pull_request_number},
         )
@@ -2362,16 +2991,24 @@ class GitHubMergeTrainSnapshotReader:
             page += 1
 
     def _pull_request_snapshot(
-        self, *, repository: str, repository_path: str, pull_request: dict[str, object]
+        self,
+        *,
+        repository_path: str,
+        pull_request: dict[str, object],
+        enrich: bool = True,
     ) -> MergeTrainPullRequestSnapshot:
         pull_request_number = _required_int(
             pull_request.get("number"), "GitHub pull request entry requires number."
         )
-        detail = _json_object(
-            self.transport.request(
-                method="GET", path=f"/repos/{repository_path}/pulls/{pull_request_number}"
-            ),
-            "GitHub pull request detail response",
+        detail = (
+            _json_object(
+                self.transport.request(
+                    method="GET", path=f"/repos/{repository_path}/pulls/{pull_request_number}"
+                ),
+                "GitHub pull request detail response",
+            )
+            if enrich
+            else {}
         )
         source = pull_request | detail
         head = _json_object(source.get("head"), "GitHub pull request head")
@@ -2381,10 +3018,20 @@ class GitHubMergeTrainSnapshotReader:
         base_repository = _repository_full_name(base.get("repo"), "GitHub pull request base repo")
         user = _json_object(source.get("user"), "GitHub pull request user")
         actor_id = _required_int(user.get("id"), "GitHub pull request user requires id.")
-        actor_role = self._actor_role_for_pull_request(
-            repository_path=repository_path,
-            username=_required_text(user.get("login"), "GitHub pull request user requires login."),
-            author_association=str(source.get("author_association") or ""),
+        actor_role = (
+            self._actor_role_for_pull_request(
+                repository_path=repository_path,
+                username=_required_text(
+                    user.get("login"), "GitHub pull request user requires login."
+                ),
+                author_association=str(source.get("author_association") or ""),
+            )
+            if enrich
+            else (
+                "repo_owner"
+                if str(source.get("author_association") or "").upper() == "OWNER"
+                else "unknown"
+            )
         )
         labels = _labels(source.get("labels"))
         label_actors = (
@@ -2393,7 +3040,7 @@ class GitHubMergeTrainSnapshotReader:
                 pull_request_number=pull_request_number,
                 labels=labels,
             )
-            if labels
+            if labels and enrich
             else ()
         )
         dependency_update_class = (
@@ -2406,13 +3053,27 @@ class GitHubMergeTrainSnapshotReader:
                 base_sha=str(base.get("sha") or ""),
             )
             if str(user.get("type") or "") == "Bot"
+            and (
+                enrich
+                or (repository_path, pull_request_number, head_sha, str(base.get("sha") or ""))
+                in self._dependency_classes
+            )
             else None
         )
-        owner_review_required = self.client_review_required(
-            labels=labels, repository=base_repository
+        review_intent = self.client_review_intent(
+            labels=labels, repository=base_repository, body=str(source.get("body") or "")
         )
+        if not review_intent.explicit_override and recorded_train_candidate(
+            store=self._branch_refresh_store,
+            repository=base_repository,
+            head=head,
+            base_branch=str(base.get("ref") or ""),
+        ):
+            review_intent = ClientTestNotes(False)
+        owner_review_required = review_intent.review_required
         return MergeTrainPullRequestSnapshot(
             owner_review_required=owner_review_required,
+            client_test_notes_error=review_intent.error,
             number=pull_request_number,
             url=str(source.get("html_url") or "").strip(),
             title=str(source.get("title") or "").strip(),
@@ -2431,12 +3092,16 @@ class GitHubMergeTrainSnapshotReader:
             base_sha=str(base.get("sha") or "").strip(),
             base_ref=_required_text(base.get("ref"), "GitHub pull request base requires ref."),
             base_repository=base_repository,
-            mergeable=_mergeable_state(source),
-            required_checks_status=self._required_checks_status(
+            mergeable=_mergeable_state(source) if enrich else "unknown",
+            required_checks_status="fail"
+            if review_intent.error
+            else self._required_checks_status(
                 repository_path=repository_path,
                 head_sha=head_sha,
                 owner_review_required=owner_review_required,
-            ),
+            )
+            if enrich
+            else "unknown",
             branch_update_required=_branch_update_required(source),
             dependency_update_class=dependency_update_class,
         )
@@ -2451,9 +3116,13 @@ class GitHubMergeTrainSnapshotReader:
         base_branch: str,
         base_sha: str,
     ) -> DependencyUpdateClass:
-        # A read failure only withholds label-free admission; it must not stop the train.
+        # Ordinary read failures withhold label-free admission. Quota failures
+        # retain their controller backoff evidence and stop this pass.
+        key = (repository_path, pull_request_number, head_sha, base_sha)
+        if key in self._dependency_classes:
+            return self._dependency_classes[key]
         try:
-            return self._dependency_update_class(
+            result = self._dependency_update_class(
                 repository_path=repository_path,
                 pull_request_number=pull_request_number,
                 author_id=author_id,
@@ -2461,8 +3130,12 @@ class GitHubMergeTrainSnapshotReader:
                 base_branch=base_branch,
                 base_sha=base_sha,
             )
-        except MergeTrainGitHubError:
-            return "needs_review"
+        except MergeTrainGitHubError as error:
+            if error.rate_limited:
+                raise
+            result = "needs_review"
+        self._dependency_classes[key] = result
+        return result
 
     def _dependency_update_class(
         self,
@@ -2512,13 +3185,16 @@ class GitHubMergeTrainSnapshotReader:
             if not isinstance(author, dict) or author.get("id") != author_id:
                 return "needs_review"
             messages.append(str(detail.get("message") or ""))
+        update_class = classify_dependency_update(messages)
+        if update_class != "patch_or_minor":
+            return update_class
         if self._force_pushed_by_other(
             repository_path=repository_path,
             pull_request_number=pull_request_number,
             author_id=author_id,
         ):
             return "needs_review"
-        return classify_dependency_update(messages)
+        return update_class
 
     def _recorded_base_refresh(
         self,
@@ -2680,7 +3356,12 @@ class GitHubMergeTrainSnapshotReader:
     ) -> str:
         if author_association.upper() == "OWNER":
             return "repo_owner"
-        return self._collaborator_role(repository_path=repository_path, username=username)
+        key = (repository_path, username.casefold())
+        if key not in self._author_roles:
+            self._author_roles[key] = self._collaborator_role(
+                repository_path=repository_path, username=username
+            )
+        return self._author_roles[key]
 
     def _collaborator_role(self, *, repository_path: str, username: str) -> str:
         try:
@@ -2697,16 +3378,48 @@ class GitHubMergeTrainSnapshotReader:
             raise
         return "repo_admin" if str(payload.get("permission") or "") == "admin" else "unknown"
 
-    def client_review_required(self, *, labels: tuple[str, ...], repository: str) -> bool:
-        review_labels: set[str] = set()
-        list_profiles = getattr(self._branch_refresh_store, "list_product_profile_records", None)
-        if callable(list_profiles):
-            review_labels.update(
-                profile.owner.review_label.strip().casefold()
-                for profile in list_profiles()
-                if profile.is_active and profile.repository.casefold() == repository.casefold()
-            )
-        return bool(review_labels.intersection(label.casefold() for label in labels))
+    def client_review_intent(
+        self, *, labels: tuple[str, ...], repository: str, body: str
+    ) -> ClientTestNotes:
+        if not callable(getattr(self._branch_refresh_store, "list_product_profile_records", None)):
+            return ClientTestNotes(False)
+        profiles = client_release_profiles(
+            store=cast(ClientReleaseRepositoryStore, self._branch_refresh_store),
+            repository=repository,
+        )
+        # Preserve the explicit override even before a product has a Client:
+        # a missing Client cannot make a marked change engineering-only.
+        profiles += tuple(
+            profile
+            for profile in cast(
+                ClientReleaseRepositoryStore, self._branch_refresh_store
+            ).list_product_profile_records()
+            if profile.is_active
+            and not profile.owner.is_set
+            and repository_key(profile.repository) == repository_key(repository)
+            and profile.owner.review_label.strip().casefold()
+            in {label.casefold() for label in labels}
+        )
+        intents = tuple(
+            change_client_review(body=body, labels=labels, review_label=profile.owner.review_label)
+            for profile in profiles
+        )
+        return ClientTestNotes(
+            any(
+                intent.review_required
+                for profile, intent in zip(profiles, intents, strict=True)
+                if repository_key(profile.repository) == repository_key(repository)
+            ),
+            next((intent.error for intent in intents if intent.error), ""),
+            any(intent.explicit_override for intent in intents),
+        )
+
+    def client_review_required(
+        self, *, labels: tuple[str, ...], repository: str, body: str = ""
+    ) -> bool:
+        return self.client_review_intent(
+            labels=labels, repository=repository, body=body
+        ).review_required
 
     def _required_checks_status(
         self, *, repository_path: str, head_sha: str, owner_review_required: bool = False
@@ -3481,13 +4194,11 @@ def _graphql_repository(
     )
     errors = payload.get("errors")
     if errors:
-        rate_limited = isinstance(errors, list) and all(
-            isinstance(error, dict) and error.get("type") == "RATE_LIMITED" for error in errors
-        )
-        raise MergeTrainGitHubError(
-            "GitHub GraphQL request returned errors.",
-            rate_limited=rate_limited,
-            request_description="POST /graphql" if rate_limited else "",
+        raise _github_graphql_error(
+            errors,
+            quota_timing=payload.quota_timing
+            if isinstance(payload, _GitHubQuotaResponse)
+            else (None, None, None),
         )
     data = _json_object(payload.get("data"), "GitHub GraphQL data")
     return _json_object(data.get("repository"), "GitHub GraphQL repository")
@@ -3947,6 +4658,37 @@ def _github_request_route_template(path: str) -> str:
     return "/{unknown_route}"
 
 
+def _github_quota_timing(headers: object) -> tuple[int | None, int | None, bool | None]:
+    quota_headers = normalized_github_quota_response_headers(headers)
+    values = []
+    for name in ("x-ratelimit-reset", "retry-after", "x-ratelimit-remaining"):
+        value = quota_headers.get(name, "")
+        values.append(int(value) if re.fullmatch(r"[0-9]{1,12}", value) else None)
+    reset, retry_after, remaining = values
+    return reset, retry_after, remaining == 0 if remaining is not None else None
+
+
+def _github_graphql_error(
+    errors: object,
+    *,
+    quota_timing: tuple[int | None, int | None, bool | None] = (None, None, None),
+) -> MergeTrainGitHubError:
+    rate_limited = (
+        isinstance(errors, list)
+        and bool(errors)
+        and all(isinstance(error, dict) and error.get("type") == "RATE_LIMITED" for error in errors)
+    )
+    reset, retry_after, primary_exhausted = quota_timing
+    return MergeTrainGitHubError(
+        "GitHub GraphQL request returned errors.",
+        rate_limited=rate_limited,
+        request_description="POST /graphql" if rate_limited else "",
+        rate_limit_reset=reset if rate_limited else None,
+        retry_after_seconds=retry_after if rate_limited else None,
+        primary_quota_exhausted=primary_exhausted if rate_limited else None,
+    )
+
+
 def _github_http_error(
     *, method: str, path: str, status_code: int, error: HTTPError
 ) -> MergeTrainGitHubError:
@@ -3965,10 +4707,7 @@ def _github_http_error(
             or headers.get("x-ratelimit-remaining", "").strip() == "0"
         )
     )
-    reset = headers.get("x-ratelimit-reset", "").strip() if headers is not None else ""
-    reset_time = int(reset) if re.fullmatch(r"[0-9]{1,12}", reset) else None
-    retry_after = headers.get("retry-after", "").strip() if headers is not None else ""
-    retry_seconds = int(retry_after) if re.fullmatch(r"[0-9]{1,12}", retry_after) else None
+    reset_time, retry_seconds, primary_exhausted = _github_quota_timing(headers)
     error_type = MergeTrainGitHubStaleHeadError if status_code == 409 else MergeTrainGitHubError
     return error_type(
         f"GitHub API request failed: {description}",
@@ -3977,4 +4716,5 @@ def _github_http_error(
         rate_limited=rate_limited,
         rate_limit_reset=reset_time if rate_limited else None,
         retry_after_seconds=retry_seconds if rate_limited else None,
+        primary_quota_exhausted=primary_exhausted if rate_limited else None,
     )

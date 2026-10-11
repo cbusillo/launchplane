@@ -221,6 +221,8 @@ governed expectation, custody and currentness contract.
     boundary, and compare-and-completes the parent response after the child loop.
     Dry-run is stateless. Apply requires an `Idempotency-Key` and exact
     confirmation text.
+  - The separate [remaining-stable controller contract](records.md) covers
+    active bindings outside the testing controller's slice.
   - `POST /v1/route-bindings/external/reconcile`, requiring exclusively
     instance-scoped `route_binding.external.plan` for `dry-run` and
     `route_binding.external.apply` for `apply`. The request supplies only the
@@ -405,6 +407,49 @@ governed expectation, custody and currentness contract.
     administration GETs above. It does not return raw rule selectors or secret
     values. Read grants do not authorize policy reconciliation, Client decisions,
     or provider changes.
+  - `POST /v1/authz-policies/retirement-evidence` is a scoped, inert read using
+    that same administration-read authority, nonrenewing identity resolution,
+    and fresh active-DB checks. Browser callers supply the POST Origin/CSRF proof.
+    Supply `policy_record_id`, `policy_revision`, `policy_sha256`, and up to 25
+    exact `managed_set_ids` and/or `workflows` comparison candidates. Each
+    workflow candidate names its exact caller `repository`, a full
+    `owner/repo/.github/workflows/file.yml` `workflow_path` without a ref, and
+    `binding` (`workflow_ref`, or `job_workflow_ref` for a reusable worker).
+    These are comparison inputs, never runtime authority. Empty, wildcard,
+    duplicate or malformed scope is refused; caller workflow paths must belong
+    to the selected repository (reusable worker paths may name another one).
+    Policy-binding drift returns 409;
+    authority/storage gaps retain their existing explicit refusals. The route
+    is `no-store`, including errors, and writes no denial record or session.
+  - Results use input indexes, policy provenance, bounded history coverage,
+    exact-set presence and verified maintenance observations. Observations
+    require consecutive snapshots, a real set change, and an apply audit bound
+    to both records/digests and the exact set. Only the caller type is returned;
+    audit text, identities and selectors stay private. The latest 50 revisions
+    are examined; missing baseline, truncation, ambiguity, gaps or excessive
+    rule volume remain explicit. Unbound set changes stay flagged even when
+    other changes have verified observations; baseline presence is also named.
+    A bounded observation proves the recorded
+    transition only. The current audit schema attests neither secret input
+    origin nor maintenance independence, so both remain `unknown`, even for a
+    human/local caller or an absent set. No historical origin is invented.
+  - Unmanaged workflow results classify the active policy's exact repository
+    and selected workflow binding across refs. Matching path patterns and
+    unrestricted bindings return `potential_dependency` with opaque rule
+    hashes using the existing reconcile/diagnostic hash contract. Unclassifiable
+    selectors (including path globs that might consume a ref separator) or the
+    2,000-rule evidence limit return `unknown`; hashes for confirmed matches
+    may remain alongside that incomplete coverage. `no_matching_rule` means
+    only that no unmanaged rule matches that
+    requested path/binding in this policy. Other bindings, repositories,
+    managed rules, secret existence and actual delivery use are separate facts.
+    Comparisons follow the runtime's case-sensitive repository/path matching;
+    case-only differences remain unknown rather than establishing absence.
+    Query both bindings to cover a file used as both caller and reusable worker.
+    This conservative structural evidence does not prove executable access or
+    authorize any grant, migration, revocation or deletion. It supports #2521's
+    disposition preparation; its retirement and live acceptance boundaries
+    remain on that issue.
 
 - Every Code local automation work-request routes (Every Code is retired; see
   `DIRECTION.md`. These routes and the Every Code sections below remain only
@@ -1185,6 +1230,27 @@ for controller execution and reconciliation errors. It does not grant access
 to the broader Client or engineering governance facets. It reads persisted
 records only, with no provider requests, record mutation, fence release or
 change in authority.
+
+### Original review history
+
+`GET /v1/service/merge-train/review-history` reads each saved collapse's latest
+progress across active and retired history for the requested `repository` and
+`base_branch`. It uses the existing controller-status diagnostic authorization
+under the current repository policy. It exposes only record/collapse identifiers,
+original PR numbers, branch refs, original parent/child heads, recorded carry
+commit and status. It makes no provider requests or configuration/plan writes;
+normal authentication and denial audit behavior still applies.
+
+Pages default to 50 entries, with `limit` from 1 to 200 and `next_cursor` naming
+the last collapse identifier. Continue until `truncated` is false. Every page
+includes the digest of the complete scoped history; if that digest changes
+between pages, restart the read. The active-only capped controller-status
+summary is not a complete historical inventory. Missing service capability or
+an incomplete page set means unknown, rather than no affected stacks.
+
+History is diagnostic evidence, not current ancestry, review, admission or
+permission to rewrite branches. See [original review recovery](merge-train-policy.md#original-review-recovery)
+for the supported recovery through the original PRs.
 
 `POST /v1/work-graph/merge-train/controller/run-once` is the admin-facing
 one-action controller for the full batch train. Request payloads name
@@ -2823,6 +2889,9 @@ original teardown request. Lifecycle cleanup can dispatch to
 this generic path only after a passing plan and a matching stored preview record
 are present. The descriptor routes remain discoverable.
 
+For reviewed reconciliation of provider-absent legacy preview history, see
+[legacy preview reconciliation](legacy-preview-reconciliation.md).
+
 ### Admin read endpoints
 
 - `GET /v1/products` (native FastAPI for bearer-token and human-session
@@ -2977,6 +3046,9 @@ while more than 12 hours remain, refreshes service/backfill-owned evidence at
 half-life or when source versions change, and reports an explicit conflict if
 provider target, domains, ingress, TLS ownership, lifecycle status, admin
 ownership, or the expected-current digest differs.
+
+The [record contract](records.md) owns the separate remaining-stable controller's
+scope, request, authorization and refresh-only behavior.
 
 Product/site reads use action `product_environment.read`. They are native
 FastAPI routes backed by DB-owned product environment read-model composition.
@@ -4193,6 +4265,12 @@ Launchplane's fixed description, the kind of fix (`code`, `grant`,
 `owner_approval`, `client_acceptance`, `by_hand` or `wait`) and the record ids
 it read. `testing` checks the lane, the staff-testing hold and the last
 reconcile attempt, naming the `deploy_blocked.*` or other code that stopped it.
+A completed `already_deployed` no-op is clear when the recorded current and
+desired artifact ids, commit SHAs and immutable image digests all match and the
+plan is not held. It cites the artifact id without inventing a deploy operation.
+Missing or inconsistent provenance, or a request that is not done, stays unknown.
+This cites saved reconciliation evidence, not a fresh provider observation;
+a later manual deployment requires reconciliation before this evidence is current.
 `promote` checks the caller's own promotion grant, Client acceptance, the prod
 lane's backup authority and the last promotion's failure. A step whose evidence
 cannot be read is `unknown`, never `clear`, and the response never carries

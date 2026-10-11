@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from typing import Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
@@ -65,6 +66,13 @@ class MergeTrainLabelActor(BaseModel):
 
 # GitHub's code-scanning App opens review threads for its findings.
 CODE_SCANNING_REVIEW_AUTHOR = "github-advanced-security"
+DEPENDENCY_HEAD_CONFLICTS = "dependency update current-head merge conflicts"
+DEPENDENCY_HEAD_MERGEABILITY_UNKNOWN = "dependency update current-head mergeability unknown"
+DEPENDENCY_HEAD_CHECKS_FAILED = "dependency update current-head checks failed"
+# The current-head holds an automatically admitted dependency update requalifies from.
+DEPENDENCY_HEAD_HOLD_REASONS = frozenset(
+    {DEPENDENCY_HEAD_CONFLICTS, DEPENDENCY_HEAD_MERGEABILITY_UNKNOWN, DEPENDENCY_HEAD_CHECKS_FAILED}
+)
 
 
 class MergeTrainReviewConversations(BaseModel):
@@ -121,6 +129,7 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     mergeable: MergeTrainMergeableState = "unknown"
     requires_individual_landing: bool = Field(default=False, exclude_if=lambda value: not value)
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
+    client_test_notes_error: str = Field(default="", exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus = "unknown"
     branch_update_required: bool = False
     # Set only for bot-authored pull requests; see merge_train_dependency_updates.
@@ -186,6 +195,7 @@ class MergeTrainQueueEntry(BaseModel):
     mergeable: MergeTrainMergeableState
     requires_individual_landing: bool = Field(default=False, exclude_if=lambda value: not value)
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
+    client_test_notes_error: str = Field(default="", exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus
     branch_update_required: bool
     eligible: bool
@@ -299,6 +309,7 @@ def build_merge_train_dry_run_result(
     policy: MergeTrainPolicy,
     snapshot: MergeTrainDryRunSnapshot,
     batch_landing: bool = False,
+    planned_dependency_heads: frozenset[tuple[int, str]] = frozenset(),
 ) -> MergeTrainDryRunResult:
     repository_policy = policy.find_repository_policy(
         repository=snapshot.repository, base_branch=snapshot.base_branch
@@ -309,15 +320,52 @@ def build_merge_train_dry_run_result(
         if _targets_merge_train_base(pull_request=pull_request, base_branch=snapshot.base_branch)
     )
     queue = tuple(
-        _build_queue_entry(repository_policy, pull_request, skip_blocked=batch_landing)
+        _build_queue_entry(
+            repository_policy,
+            pull_request,
+            skip_blocked=batch_landing,
+            allow_unknown_mergeability=(pull_request.number, pull_request.head_sha)
+            in planned_dependency_heads,
+        )
         for pull_request in sorted(
             base_pull_requests, key=lambda item: (item.created_at, item.number)
         )
     )
     eligible_entries = tuple(entry for entry in queue if entry.eligible)
     if batch_landing:
+        # Accepted features start a batch; remaining planned heads keep its
+        # exclusions stable after earlier members land. Client heads needing
+        # review or repair stay visible, but outside this landing candidate.
+        if any(
+            (
+                entry.owner_review_required
+                or (entry.number, entry.head_sha) in planned_dependency_heads
+            )
+            and entry.required_checks_status == "pass"
+            and entry.mergeable != "conflicting"
+            for entry in eligible_entries
+        ):
+            queue = tuple(
+                entry.model_copy(
+                    update={
+                        "eligible": False,
+                        "ineligible_reasons": (
+                            *entry.ineligible_reasons,
+                            "Client feature is not ready on its current head",
+                        ),
+                    }
+                )
+                if entry.eligible
+                and entry.owner_review_required
+                and (entry.required_checks_status != "pass" or entry.mergeable == "conflicting")
+                else entry
+                for entry in queue
+            )
+            eligible_entries = tuple(entry for entry in queue if entry.eligible)
         batch_entries: list[MergeTrainQueueEntry] = []
         for entry in eligible_entries:
+            if len(batch_entries) == repository_policy.max_batch_size:
+                break
             if entry.requires_individual_landing:
                 if not batch_entries:
                     batch_entries.append(entry)
@@ -341,7 +389,8 @@ def build_merge_train_dry_run_result(
             (
                 entry
                 for entry in eligible_entries
-                if entry.owner_review_required and entry.required_checks_status != "pass"
+                if entry.client_test_notes_error
+                or (entry.owner_review_required and entry.required_checks_status != "pass")
             ),
             None,
         )
@@ -363,6 +412,27 @@ def build_merge_train_dry_run_result(
         selected_pr=selected_pr,
         intended_next_action=intended_next_action,
         next_action_detail=next_action_detail,
+    )
+
+
+def merge_train_snapshot_of(
+    snapshot: MergeTrainDryRunSnapshot, pull_request_numbers: Collection[int]
+) -> MergeTrainDryRunSnapshot:
+    """The snapshot as if only these pull requests were open against the base.
+
+    Rebuilding a planned batch from its own members applies every batch rule to
+    them while other eligible pull requests, wherever they sort, wait for the
+    next candidate.
+    """
+    numbers = frozenset(pull_request_numbers)
+    return snapshot.model_copy(
+        update={
+            "pull_requests": tuple(
+                pull_request
+                for pull_request in snapshot.pull_requests
+                if pull_request.number in numbers
+            )
+        }
     )
 
 
@@ -637,6 +707,7 @@ def _build_queue_entry(
     pull_request: MergeTrainPullRequestSnapshot,
     *,
     skip_blocked: bool = False,
+    allow_unknown_mergeability: bool = False,
 ) -> MergeTrainQueueEntry:
     ineligible_reasons: list[str] = []
     is_trusted_automation = (
@@ -658,6 +729,31 @@ def _build_queue_entry(
         and pull_request.actor_id in repository_policy.enqueue.dependency_update_github_user_ids
     )
     label_refusal = _enqueue_label_refusal(repository_policy, pull_request)
+    if (
+        skip_blocked
+        and pull_request.state == "open"
+        and repository_policy.enqueue.label_required
+        and is_dependency_update
+        and pull_request.dependency_update_class == "patch_or_minor"
+        and label_refusal
+        and (
+            pull_request.required_checks_status == "fail"
+            or pull_request.mergeable == "conflicting"
+            or (pull_request.mergeable == "unknown" and not allow_unknown_mergeability)
+        )
+    ):
+        # A failed automatically admitted head is a current-check hold, not a
+        # persistent label. The next snapshot requalifies it without clearing
+        # any manual hold or guessing who applied an existing block label.
+        ineligible_reasons.append(
+            pull_request.client_test_notes_error
+            if pull_request.client_test_notes_error
+            else DEPENDENCY_HEAD_CONFLICTS
+            if pull_request.mergeable == "conflicting"
+            else DEPENDENCY_HEAD_MERGEABILITY_UNKNOWN
+            if pull_request.mergeable == "unknown"
+            else DEPENDENCY_HEAD_CHECKS_FAILED
+        )
     if repository_policy.enqueue.label_required and label_refusal:
         if not is_dependency_update:
             ineligible_reasons.append(label_refusal)
@@ -666,6 +762,12 @@ def _build_queue_entry(
     if (
         not is_trusted_automation
         and actor_role not in repository_policy.enqueue.allowed_actor_roles
+        and not (
+            actor_role == "unknown"
+            and repository_policy.enqueue.label_required
+            and repository_policy.enqueue_label not in pull_request.labels
+            and pull_request.dependency_update_class != "patch_or_minor"
+        )
     ):
         ineligible_reasons.append("actor role is not allowed to enqueue")
     if pull_request.review_conversations is not None:
@@ -681,6 +783,7 @@ def _build_queue_entry(
         mergeable=pull_request.mergeable,
         requires_individual_landing=pull_request.requires_individual_landing,
         owner_review_required=pull_request.owner_review_required,
+        client_test_notes_error=pull_request.client_test_notes_error,
         required_checks_status=pull_request.required_checks_status,
         branch_update_required=pull_request.branch_update_required,
         eligible=not ineligible_reasons,
@@ -824,6 +927,8 @@ def _next_action_for_selected_pr(
 ) -> tuple[MergeTrainDryRunAction, str]:
     if selected_pr is None:
         return "idle", "No eligible pull requests are queued."
+    if selected_pr.client_test_notes_error:
+        return "block", f"Pull request #{selected_pr.number}: {selected_pr.client_test_notes_error}"
     if selected_pr.mergeable == "conflicting":
         return (
             "block",

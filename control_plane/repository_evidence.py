@@ -59,6 +59,7 @@ class GitHubRepositoryEvidenceProvider:
         max_file_pages: int = 30,
         max_commit_pages: int = 10,
         github_token_scope: Callable[..., AbstractContextManager[str]] = launchplane_github_token,
+        reuse_commit_trees: bool = False,
     ) -> None:
         if max_file_pages < 1:
             raise ValueError("GitHub evidence provider requires at least one file page")
@@ -71,6 +72,7 @@ class GitHubRepositoryEvidenceProvider:
         self._token_context = token_context.strip()
         self._max_file_pages = max_file_pages
         self._max_commit_pages = max_commit_pages
+        self._commit_trees: dict[tuple[str, str], str] | None = {} if reuse_commit_trees else None
         if not self._token_context:
             raise ValueError("GitHub evidence provider requires a token context")
 
@@ -161,11 +163,11 @@ class GitHubRepositoryEvidenceProvider:
                 base_ref = _pull_request_base_ref(pull_request)
                 merge_commit_sha = _pull_request_merge_commit_sha(pull_request)
                 updated_at = _required_string(pull_request, "updated_at")
-                tree_sha = _git_commit_tree_sha(
-                    self._github_api(
-                        path=f"/repos/{repository_path}/git/commits/{head_sha}",
-                        token=token,
-                    )
+                tree_sha = self._commit_tree(
+                    repository_path=repository_path,
+                    repository_id=repository_id,
+                    head_sha=head_sha,
+                    token=token,
                 )
                 changed_files = self._changed_files(
                     repository_path=repository_path,
@@ -218,6 +220,24 @@ class GitHubRepositoryEvidenceProvider:
             raise RepositoryEvidenceError(
                 "Launchplane could not resolve authoritative GitHub repository evidence."
             ) from error
+
+    def _commit_tree(
+        self, *, repository_path: str, repository_id: str, head_sha: str, token: str
+    ) -> str:
+        # Only this content-addressed value is reusable. Repository identity,
+        # PR metadata, files, authorship and final PR confirmation remain fresh.
+        key = (repository_id, head_sha)
+        cache = self._commit_trees
+        if cache is not None and key in cache:
+            return cache[key]
+        tree_sha = _git_commit_tree_sha(
+            self._github_api(path=f"/repos/{repository_path}/git/commits/{head_sha}", token=token)
+        )
+        if cache is not None:
+            if len(cache) >= 128:
+                del cache[next(iter(cache))]
+            cache[key] = tree_sha
+        return tree_sha
 
     @contextmanager
     def _token(self, repository: str) -> Iterator[str]:

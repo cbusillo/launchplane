@@ -14,7 +14,9 @@ for (const environmentView of [false, true]) {
         incidents: module.incidentsForFixture("products", product.product, "testing") };
     });
     const start = Date.parse(fixtures.detail.provenance.stale_after) - 1000;
-    await page.clock.install({ time: new Date(start) });
+    // Pause one second before expiry so page load cannot spend the fresh window.
+    await page.clock.install({ time: new Date(start - 1000) });
+    await page.clock.pauseAt(new Date(start));
     let responseMode: "old" | "delay" | "fail" | "unverified" | "fresh" = "old";
     let reads = 0;
     let inventoryReads = 0;
@@ -122,7 +124,7 @@ for (const environmentView of [false, true]) {
     await expect(signal).not.toContainText("Stale");
     // Inventory has its own read lifecycle, including the rail's lane evidence.
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
-    await expect(page.locator('.rail-product-link[data-active="true"] [data-lane="testing"]')).toHaveAttribute("data-trust", "verified");
+    await expect(page.locator('.rail-product-link[data-active="true"] [data-lane="testing"]')).toHaveAttribute("data-tone", "verified");
     await page.screenshot({ path: `../tmp/browser-smoke/open-${environmentView ? "environment" : "workspace"}-recovered-${testInfo.project.name}.png`, fullPage: true });
     delayInventory = true;
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS);

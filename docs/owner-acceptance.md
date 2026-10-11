@@ -5,8 +5,29 @@ title: Client Review and Retired Acceptance History
 ## Current Client review
 
 The Client named on the product profile reviews a preview at `/ui/owner-review`.
+Launchplane requests review when a pull request has real `Client test notes`
+(`Owner test notes` remains a supported heading). No label is needed. The
+product's review label remains an explicit override requiring real test notes.
+`Nothing for the Client to test: <reason>` with a nonempty reason marks an
+engineering-only change; it cannot be used with the review label. Missing notes,
+empty template comments, or a malformed engineering-only declaration visibly
+refuse preview readiness and merge admission for repositories feeding a Client
+release. Shared inputs are resolved from recorded production/testing artifacts,
+not a checked-in repository list. Shared inputs require valid notes and remain
+covered by the consuming product's release review; they do not gain a separate
+preview check on a repository without a product preview. Open PRs using the
+older role word still require a reason (a colon or sentence separator is
+supported) and cannot override a review label. Compatibility for already-merged
+notes is described in [release-review.md](release-review.md).
+Editing the PR body re-plans its preview and review intent without needing a
+push or label change.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
 Launchplane accepts a product-review decision.
+
+A preview invitation's first visible line names **Change review (preview)** and
+asks whether this one change is exactly right. It links that change's preview
+and explains that Accept approves the change while nothing goes live yet.
+The separate release invitation is described in [release-review.md](release-review.md).
 
 A Client does not need an authorization policy role to sign in. When GitHub
 sign-in finds no policy role but the user is the named Client of an active
@@ -46,42 +67,49 @@ The form explains that new decisions and feedback are shared on the pull request
 
 ## Carried acceptance
 
-The Client accepts a change, seen on its preview. When the merge train only
-merges the base branch into the pull request, the change is the same, so
-Launchplane carries the acceptance to the new head instead of asking again. It
-carries only when all of these hold:
+The Client accepts a feature, seen on its preview. A base update or rebase may
+change its commit without changing the feature. Launchplane carries the
+acceptance to that new head instead of asking again, whether the update was
+made by the train, an agent, or another source-control flow. It carries only
+when all of these hold:
 
-- Every commit from the accepted head to the new head is exactly the merge commit
-  the train's own refresh made. After asking GitHub to refresh, the train reads
-  the pull request's new head back, keeps it only if it is a two-parent merge
-  whose first parent is the head it refreshed from, and records that commit, the
-  previous head, the base commit it merged, and the base branch
-  (`launchplane_merge_train_branch_refreshes`). Another merge of the same parents,
-  however it was made, matches no record. Commit dates and committer names are
-  not used.
-- The merged base commit is on the pull request's current base branch, and that
-  branch is the base the acceptance was given on. A decision keeps the pull
+- The pull request still targets the base branch the acceptance was given on.
+  A decision keeps the pull
   request's base branch from the first time Launchplane shows it on the pull
   request; a decision without one does not carry.
 - The pull request's change against its base is the same at both heads: every
   changed file has the same name, status, and added and removed lines, in order,
-  in GitHub's comparison from the newest merged base commit. Hunk positions and
-  context lines are not compared, so a base edit that moves or surrounds the
-  change in a file the pull request also changes still carries; any difference in
-  a line the pull request adds or removes does not. A file without a patch
+  in source-control comparisons from the same immutable base commit. A recorded
+  train refresh supplies its merged base commit after branch membership is
+  verified; otherwise Launchplane pins the current base branch's commit before
+  comparing either head. Hunk positions are ignored. Outside a recorded train
+  refresh, surrounding context, hunk boundaries and section names must also
+  match: moving identical added lines into a different function needs a fresh
+  Accept. Complete source-control tree evidence must also show the same file
+  modes, so changing an executable bit or symlink does not carry. Train-recorded
+  refreshes can incorporate base context changes without
+  asking again. Any difference in a line the feature adds or removes prevents
+  either kind of carry. A file without a patch
   (binary or too large) or a list of 300 files or more cannot be compared and
   does not carry.
 - The newest decision is that acceptance, made by the product's current Client,
   with its feedback delivered.
+- Outside the train, hunk positions must move only by the base's own line shifts.
+  Both merge bases and their complete comparison must be readable. Overlapping
+  base edits or relocating a hunk to an identical-looking XML block needs a new
+  Accept. Tree modes are read only after the text and position proofs match.
 
-Anything else, including a new commit by anyone, a conflict resolution, or a
-different base, leaves the new head waiting for the Client. A carried acceptance
+Changed feature patches, including conflict resolutions that change added or
+removed lines, require a new Accept. Missing base evidence or incomplete
+comparisons leave the new head waiting for the Client. A carried acceptance
 also stops applying if the pull request is later retargeted to another base, even
 without a new commit. The carry is saved
 as a new decision record with `carried_from` naming the decision and head it came
-from, the reason, and the train's refresh records, so it reads as carried, not
+from, the reason, the immutable comparison base, and any train refresh records,
+so it reads as carried, not
 re-decided. The `launchplane/owner-review` check on the new head says
-"Accepted by @client (carried from `<short head>` after a base-only refresh)",
+which earlier acceptance was carried and whether it was a train refresh or an
+unchanged-feature base update;
 the review page shows which version it was carried from, and the ready preview
 comment says the change is accepted rather than asking the Client again. The
 carry is checked when the status is next written: on the ready preview comment

@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 import hashlib
+import logging
 import secrets
 from threading import local
 from typing import (
@@ -53,6 +54,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_column, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
@@ -134,6 +136,7 @@ from control_plane.contracts.provider_delivery_readiness import (
 )
 
 if TYPE_CHECKING:
+    from control_plane.legacy_preview_reconciliation import LegacyPreviewReconciliationRequest
     from control_plane.product_retirement import BoundProductRetirement
     from control_plane.contracts.merge_train_historical_completion import (
         MergeTrainHistoricalCompletionProviderEvidence,
@@ -161,7 +164,10 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecordChanged,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
+from control_plane.contracts.durable_operation_authorization import (
+    RELEASE_DECISION_GRANTS,
+    DurableOperationAuthorization,
+)
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
@@ -1126,6 +1132,13 @@ def _payload_from_row(row: object) -> PayloadDict:
 
 class Base(DeclarativeBase):
     pass
+
+
+class LaunchplaneServiceDeployDrainRow(Base):
+    __tablename__ = "launchplane_service_deploy_drains"
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
 class LaunchplaneBackupGateRow(Base):
@@ -5697,8 +5710,11 @@ def _build_engine(
     connection_factory: ConnectionFactory | None = None,
     postgres_connect_timeout_seconds: int | None = None,
     postgres_statement_timeout_milliseconds: int | None = None,
+    unpooled: bool = False,
 ) -> Engine:
     engine_kwargs: dict[str, Any] = {}
+    if unpooled:
+        engine_kwargs["poolclass"] = NullPool
     if connection_factory is not None:
         engine_kwargs["creator"] = connection_factory
     connect_args = _engine_connect_args(
@@ -5799,8 +5815,18 @@ class PostgresRecordStore(HumanSessionStore):
             postgres_statement_timeout_milliseconds=postgres_statement_timeout_milliseconds,
         )
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
+        self._preview_lock_engine: Engine | None = None
+        if self._engine.dialect.name == "postgresql":
+            self._preview_lock_engine = _build_engine(
+                database_url,
+                connection_factory=connection_factory,
+                postgres_connect_timeout_seconds=postgres_connect_timeout_seconds,
+                postgres_statement_timeout_milliseconds=postgres_statement_timeout_milliseconds,
+                unpooled=True,
+            )
         self._provider_evidence_context = local()
         self._release_review_publication_context = local()
+        self._merge_train_feedback_context = local()
 
     @property
     def backend_name(self) -> str:
@@ -5897,6 +5923,8 @@ class PostgresRecordStore(HumanSessionStore):
 
     def close(self) -> None:
         self._engine.dispose()
+        if self._preview_lock_engine is not None:
+            self._preview_lock_engine.dispose()
 
     def __del__(self) -> None:
         with suppress(Exception):
@@ -8032,6 +8060,17 @@ class PostgresRecordStore(HumanSessionStore):
         try:
             with self._session_factory() as session:
                 self._begin_serialized_write(session)
+                if normalized_scope == "client-release":
+                    from control_plane.service_deploy_drain import (
+                        ServiceDeployDraining,
+                        admission_allowed,
+                        lock,
+                    )
+
+                    if not self.database_url.startswith("sqlite"):
+                        lock(self, session)
+                    if not admission_allowed(session, self._database_mutation_timestamp(session)):
+                        raise ServiceDeployDraining("Launchplane is draining release effects.")
                 observed_at = self._database_mutation_timestamp(session)
                 reservation = build_launchplane_mutation_reservation(
                     scope=scope,
@@ -8055,6 +8094,17 @@ class PostgresRecordStore(HumanSessionStore):
 
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if normalized_scope == "client-release":
+                from control_plane.service_deploy_drain import (
+                    ServiceDeployDraining,
+                    admission_allowed,
+                    lock,
+                )
+
+                if not self.database_url.startswith("sqlite"):
+                    lock(self, session)
+                if not admission_allowed(session, self._database_mutation_timestamp(session)):
+                    raise ServiceDeployDraining("Launchplane is draining release effects.")
             row = session.scalar(
                 self._idempotency_statement(
                     scope=normalized_scope,
@@ -10587,8 +10637,14 @@ class PostgresRecordStore(HumanSessionStore):
         if not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update(skip_locked=True)
         with self._session_factory() as session:
-            if self.database_url.startswith("sqlite"):
-                self._lock_odoo_stable_lane(session, product="", context="", instance="")
+            from control_plane.service_deploy_drain import admission_allowed, lock
+
+            lock(self, session)
+            if not admission_allowed(session, self._database_mutation_timestamp(session)):
+                logging.getLogger(__name__).debug(
+                    "Odoo release claims paused for Launchplane replacement: %s", operation_kind
+                )
+                return None
             for row in cast(list[Any], session.scalars(statement).all()):
                 record = self._read_payload(model_type=model_type, payload=row.payload)
                 if not source_read_retry_ready(record, claimed_at):
@@ -10988,7 +11044,7 @@ class PostgresRecordStore(HumanSessionStore):
         recovery = build_odoo_release_recovery(self, record)
         if (
             record.status == "fail"
-            and record.authorization.grant == "client_release_acceptance"
+            and record.authorization.grant in RELEASE_DECISION_GRANTS
             and odoo_release_wrote_production(record)
             and recovery is None
         ):
@@ -11878,6 +11934,14 @@ class PostgresRecordStore(HumanSessionStore):
         if not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update(skip_locked=True)
         with self._session_factory() as session:
+            from control_plane.service_deploy_drain import admission_allowed, lock
+
+            lock(self, session)
+            if not admission_allowed(session, self._database_mutation_timestamp(session)):
+                logging.getLogger(__name__).debug(
+                    "Production backup claims paused for Launchplane replacement"
+                )
+                return None
             row = session.scalar(statement)
             if row is None:
                 return None
@@ -12554,14 +12618,20 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
 
     @contextmanager
-    def serialize_preview_refresh(self, *, preview_id: str) -> Iterator[None]:
+    def serialize_preview_refresh(
+        self, *, preview_id: str, dedicated: bool = False
+    ) -> Iterator[None]:
         normalized_preview_id = preview_id.strip()
         if not normalized_preview_id:
             raise ValueError("Preview refresh serialization requires preview_id.")
         if self._engine.dialect.name != "postgresql":
             yield
             return
-        with self._session_factory() as session:
+        factory = self._session_factory
+        if dedicated:
+            assert self._preview_lock_engine is not None
+            factory = sessionmaker(self._preview_lock_engine, expire_on_commit=False)
+        with factory() as session:
             session.execute(
                 text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
                 {"lock_name": f"launchplane-preview-refresh:{normalized_preview_id}"},
@@ -18279,19 +18349,38 @@ class PostgresRecordStore(HumanSessionStore):
             idempotency_record=stored_completion,
         )
 
-    def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> None:
-        self._write_row(
-            LaunchplaneMergeTrainPrFeedbackRow(
-                feedback_id=record.feedback_id,
-                repository=record.repository,
-                base_branch=record.base_branch,
-                pull_request_number=record.pull_request_number,
-                event=record.event,
-                delivery_status=record.delivery_status,
-                recorded_at=record.recorded_at,
-                payload=self._payload_dict(record),
+    @contextmanager
+    def merge_train_feedback_delivery_lock(
+        self, *, repository: str, pull_request_number: int
+    ) -> Iterator[None]:
+        with self._session_factory() as session, session.begin():
+            self._lock_landing_authority(
+                session,
+                f"merge-train-feedback-delivery:{repository.casefold()}#{pull_request_number}",
             )
+            self._merge_train_feedback_context.session = session
+            try:
+                yield
+            finally:
+                self._merge_train_feedback_context.session = None
+
+    def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> None:
+        row = LaunchplaneMergeTrainPrFeedbackRow(
+            feedback_id=record.feedback_id,
+            repository=record.repository,
+            base_branch=record.base_branch,
+            pull_request_number=record.pull_request_number,
+            event=record.event,
+            delivery_status=record.delivery_status,
+            recorded_at=record.recorded_at,
+            payload=self._payload_dict(record),
         )
+        session = getattr(self._merge_train_feedback_context, "session", None)
+        if session is not None:
+            session.merge(row)
+            session.flush()
+        else:
+            self._write_row(row)
 
     def list_merge_train_pr_feedback_records(
         self,
@@ -18300,24 +18389,85 @@ class PostgresRecordStore(HumanSessionStore):
         base_branch: str = "",
         pr_number: int | None = None,
         limit: int | None = None,
+        latest_per_pr: bool = False,
+        delivery_status: str = "",
+        terminal_retry_candidates: bool = False,
+        provider_backoff_only: bool = False,
     ) -> tuple[MergeTrainPrFeedbackRecord, ...]:
-        filters: list[object] = []
+        filters: list[Any] = []
         if repository:
             filters.append(LaunchplaneMergeTrainPrFeedbackRow.repository == repository)
         if base_branch:
             filters.append(LaunchplaneMergeTrainPrFeedbackRow.base_branch == base_branch)
         if pr_number is not None:
             filters.append(LaunchplaneMergeTrainPrFeedbackRow.pull_request_number == pr_number)
-        return self._list_models(
-            model_type=MergeTrainPrFeedbackRecord,
-            orm_model=LaunchplaneMergeTrainPrFeedbackRow,
-            filters=filters,
-            order_by=(
-                LaunchplaneMergeTrainPrFeedbackRow.recorded_at.desc(),
-                LaunchplaneMergeTrainPrFeedbackRow.feedback_id.desc(),
-            ),
-            limit=limit,
+        row = LaunchplaneMergeTrainPrFeedbackRow
+        created_order = func.coalesce(
+            sql_cast(row.payload["created_at_ns"].as_string(), BigInteger), 0
         )
+        if latest_per_pr:
+            ranked = (
+                select(
+                    row.payload,
+                    row.delivery_status,
+                    row.recorded_at,
+                    row.feedback_id,
+                    row.event,
+                    func.row_number()
+                    .over(
+                        partition_by=(row.repository, row.base_branch, row.pull_request_number),
+                        order_by=(
+                            row.recorded_at.desc(),
+                            created_order.desc(),
+                            row.feedback_id.desc(),
+                        ),
+                    )
+                    .label("feedback_rank"),
+                )
+                .where(*filters)
+                .subquery()
+            )
+            query = select(ranked.c.payload).where(ranked.c.feedback_rank == 1)
+            if delivery_status:
+                query = query.where(ranked.c.delivery_status == delivery_status)
+            if terminal_retry_candidates:
+                query = query.where(
+                    ranked.c.event.in_(("completed", "stale_policy")),
+                    func.coalesce(ranked.c.payload["retryable"].as_boolean(), True),
+                )
+            query = query.order_by(
+                func.coalesce(ranked.c.payload["retry_at"].as_string(), "").asc(),
+                ranked.c.recorded_at.asc(),
+                ranked.c.feedback_id.asc(),
+            )
+            if provider_backoff_only:
+                query = (
+                    query.where(ranked.c.payload["provider_retry_at"].as_string() != "")
+                    .order_by(None)
+                    .order_by(ranked.c.payload["provider_retry_at"].as_string().desc())
+                )
+            if limit is not None:
+                query = query.limit(limit)
+        else:
+            if delivery_status:
+                filters.append(row.delivery_status == delivery_status)
+            query = (
+                select(row.payload)
+                .where(*filters)
+                .order_by(row.recorded_at.desc(), created_order.desc(), row.feedback_id.desc())
+            )
+            if limit is not None:
+                query = query.limit(limit)
+        held_session = getattr(self._merge_train_feedback_context, "session", None)
+        with (
+            nullcontext(held_session)
+            if held_session is not None
+            else self._session_factory() as session
+        ):
+            return tuple(
+                MergeTrainPrFeedbackRecord.model_validate(payload)
+                for payload in session.scalars(query)
+            )
 
     @staticmethod
     def _ordinary_agent_active_progress(
@@ -19024,6 +19174,7 @@ class PostgresRecordStore(HumanSessionStore):
         status: str = "",
         record_id: str = "",
         limit: int | None = None,
+        batch_id: str = "",
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
         filters: list[object] = []
         if repository:
@@ -19037,6 +19188,8 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.status == status)
         if record_id:
             filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.record_id == record_id)
+        if batch_id:
+            filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.batch_id == batch_id)
         return self._list_models(
             model_type=MergeTrainBatchLandingPlanRecord,
             orm_model=LaunchplaneMergeTrainBatchLandingPlanRow,
@@ -20077,16 +20230,21 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
-    def notify_merge_train(self) -> None:
-        """Publish a wake hint through the existing pool, separate from record writes."""
+    def notify_merge_train(self, target_keys: tuple[str, ...] = ()) -> None:
+        """Publish a wake hint through the existing pool, separate from record writes.
+
+        Each payload names one train's controller key; an empty payload wakes them all.
+        """
         from control_plane.merge_train_events import MERGE_TRAIN_EVENT_CHANNEL
 
         if self.database_dialect_name != "postgresql":
             raise ValueError("Merge train notifications require PostgreSQL.")
         with self._engine.begin() as connection:
-            connection.execute(
-                text("SELECT pg_notify(:channel, '')"), {"channel": MERGE_TRAIN_EVENT_CHANNEL}
-            )
+            for target_key in target_keys or ("",):
+                connection.execute(
+                    text("SELECT pg_notify(:channel, :payload)"),
+                    {"channel": MERGE_TRAIN_EVENT_CHANNEL, "payload": target_key},
+                )
 
     def record_github_app_webhook_delivery(
         self,
@@ -35624,6 +35782,83 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             rows = session.scalars(statement).all()
             return tuple(self._read_product_profile_payload(row.payload) for row in rows)
+
+    def write_legacy_preview_plan(self, completion: LaunchplaneIdempotencyRecord) -> None:
+        """Never replace a reviewed plan when concurrent callers reuse its key."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            existing = session.scalar(
+                self._idempotency_statement(
+                    scope=completion.scope,
+                    route_path=completion.route_path,
+                    idempotency_key=completion.idempotency_key,
+                )
+            )
+            if existing is not None:
+                stored = LaunchplaneIdempotencyRecord.model_validate(existing.payload)
+                if (
+                    stored.request_fingerprint != completion.request_fingerprint
+                    or stored.response_payload.get("result")
+                    != completion.response_payload.get("result")
+                ):
+                    raise ValueError(
+                        "Legacy preview plan key is already bound to different evidence."
+                    )
+                return
+            session.add(self._idempotency_row(completion))
+            session.commit()
+
+    def commit_legacy_preview_reconciliation(
+        self,
+        *,
+        reconciliation: LegacyPreviewReconciliationRequest,
+        expected_authority_digest: str,
+        destroyed_at: str,
+        completion: LaunchplaneIdempotencyRecord,
+    ) -> None:
+        """Recheck authority and atomically close exactly one preview with its replay receipt."""
+        from control_plane.legacy_preview_reconciliation import bind_legacy_preview
+        from control_plane.workflows.launchplane import apply_preview_destroyed_transition
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_preview_authority_write(
+                session, preview=self.read_preview_record(reconciliation.preview_id)
+            )
+            if self._engine.dialect.name == "postgresql":
+                # Generation evidence flushes before its preview; the real race test guards this order.
+                tables = ", ".join(
+                    model.__tablename__
+                    for model in (
+                        LaunchplaneProductProfileRow,
+                        LaunchplaneProviderTargetRow,
+                        LaunchplaneDokployTargetIdRow,
+                        LaunchplaneDokployTargetRow,
+                        LaunchplanePreviewGenerationRow,
+                        LaunchplanePreviewRow,
+                        LaunchplaneProductReconcileRequestRow,
+                        LaunchplaneDeploymentRow,
+                    )
+                )
+                session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
+            current = bind_legacy_preview(self, reconciliation)
+            if current.digest != expected_authority_digest:
+                raise ValueError("Legacy preview authority changed before completion.")
+            closed = apply_preview_destroyed_transition(
+                preview=current.preview,
+                destroyed_at=destroyed_at,
+                destroy_reason=reconciliation.reason,
+            )
+            row = session.get(LaunchplanePreviewRow, closed.preview_id)
+            if row is None:
+                raise ValueError("Preview disappeared before completion.")
+            row.state = closed.state
+            row.updated_at = closed.updated_at
+            row.payload = self._payload_dict(closed)
+            session.add(self._idempotency_row(completion))
+            session.commit()
 
     def commit_no_target_retirement(
         self,

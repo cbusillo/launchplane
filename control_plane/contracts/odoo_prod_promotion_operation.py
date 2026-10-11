@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.durable_operation_authorization import (
+    RELEASE_DECISION_GRANTS,
     DurableOperationAuthorization,
     DurableOperationCancellation,
 )
@@ -214,7 +215,7 @@ class OdooProdPromotionOperationRecord(BaseModel):
             or self.authorization.instances != (self.instance,)
         ):
             raise ValueError("Odoo prod promotion authorization target must match operation.")
-        if self.authorization.grant not in {"policy_administrator", "client_release_acceptance"}:
+        if self.authorization.grant not in {"policy_administrator", *RELEASE_DECISION_GRANTS}:
             raise ValueError(
                 "Only the admin or a Client's release may queue an Odoo prod promotion."
             )

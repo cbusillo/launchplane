@@ -1,14 +1,19 @@
 import unittest
+from collections.abc import Mapping
 from typing import cast
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from contextlib import ExitStack
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_reconcile import (
+    ProductReconcileRequestRecord,
+    ProductReconcileTarget,
+)
 from control_plane.contracts.production_backup_authority import (
     ProductionBackupAuthorityReadModel,
 )
@@ -29,6 +34,7 @@ from control_plane.contracts.artifact_identity import (
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_path_check import (
     PathCheckInputs,
+    ProductPathCheck,
     Unread,
     _latest_promotion,
     build_product_path_check,
@@ -88,7 +94,161 @@ def _steps(check: object) -> dict[str, tuple[str, str, str]]:
     return {step.step_id: (step.state, step.code, step.fix) for step in getattr(check, "steps")}
 
 
+def _completed_noop_plan() -> dict[str, JsonValue]:
+    return {
+        "reconcile_state": "done",
+        "action": "none",
+        "reason": "already_deployed",
+        "held": False,
+        "current_artifact_id": "artifact-example-site-run-37499907206-1",
+        "desired_artifact_id": "artifact-example-site-run-37499907206-1",
+        "current_commit": "a" * 40,
+        "desired_commit": "a" * 40,
+        "current_image_digest": "sha256:" + "b" * 64,
+        "desired_image_digest": "sha256:" + "b" * 64,
+    }
+
+
 class ProductPathCheckTests(unittest.TestCase):
+    @staticmethod
+    def _testing_check(plan: Mapping[str, object]) -> ProductPathCheck:
+        return build_product_path_check(
+            product="example-site",
+            path="testing",
+            inputs=PathCheckInputs(profile=_profile(), testing_reconcile_plan=dict(plan)),
+        )
+
+    def test_completed_testing_noop_is_clear_without_operation_id(self) -> None:
+        plan = _completed_noop_plan()
+        check = self._testing_check(plan)
+        self.assertEqual(_steps(check)["testing_deploy"], ("clear", "already_deployed", "none"))
+        step = check.steps[-1]
+        self.assertEqual(step.record_ids, (plan["current_artifact_id"],))
+
+    def test_testing_noop_requires_complete_consistent_provenance(self) -> None:
+        plan = _completed_noop_plan()
+        for field in (
+            "reconcile_state",
+            "action",
+            "reason",
+            "held",
+            "current_artifact_id",
+            "desired_artifact_id",
+            "current_commit",
+            "desired_commit",
+            "current_image_digest",
+            "desired_image_digest",
+        ):
+            for value in (None, "", "inconsistent", True):
+                with self.subTest(field=field, value=value):
+                    self.assertEqual(
+                        _steps(self._testing_check({**plan, field: value}))["testing_deploy"][0],
+                        "unknown",
+                    )
+
+    def test_testing_noop_does_not_hide_pending_operation_or_failure(self) -> None:
+        for field in ("queued_operation_id", "last_failed_operation_id"):
+            with self.subTest(field=field):
+                self.assertEqual(
+                    _steps(self._testing_check({**_completed_noop_plan(), field: "operation-1"}))[
+                        "testing_deploy"
+                    ][0],
+                    "blocked",
+                )
+
+    def test_testing_reader_preserves_only_valid_matching_artifact_provenance(self) -> None:
+        odoo_id = _completed_noop_plan()["current_artifact_id"]
+        assert isinstance(odoo_id, str)
+        image_id = "ghcr.io/example/example-site@sha256:" + "b" * 64
+        for current, desired, expected in (
+            (odoo_id, odoo_id, "clear"),
+            (image_id, image_id, "clear"),
+            (odoo_id, odoo_id.replace("37499907206", "37499907207"), "unknown"),
+            (image_id, image_id.replace("example-site", "other-site"), "unknown"),
+            ("[redacted-secret]", "[redacted-secret]", "unknown"),
+            ("provider-password-" + "x" * 40, "provider-password-" + "x" * 40, "unknown"),
+        ):
+            with (
+                self.subTest(current=current, desired=desired),
+                patch(
+                    "control_plane.product_path_check.read_staff_testing_hold", return_value=None
+                ),
+            ):
+                record = ProductReconcileRequestRecord(
+                    target_key="example-site:testing",
+                    product="example-site",
+                    target_kind="testing",
+                    state="done",
+                    requested_at="2026-10-09T00:00:00Z",
+                    updated_at="2026-10-09T00:00:00Z",
+                    request_count=1,
+                    last_plan={
+                        **_completed_noop_plan(),
+                        "current_artifact_id": current,
+                        "desired_artifact_id": desired,
+                    },
+                )
+                store = Mock()
+                store.list_product_reconcile_requests.return_value = (record,)
+                inputs = read_path_check_inputs(
+                    path="testing",
+                    profile=_profile(),
+                    record_store=store,
+                    action_allowed=Mock(),
+                    caller_is_admin=lambda: False,
+                    read_release_review=Mock(),
+                    generated_at=record.updated_at,
+                )
+                check = build_product_path_check(
+                    product="example-site", path="testing", inputs=inputs
+                )
+                self.assertEqual(check.steps[-1].state, expected)
+                if expected == "clear":
+                    self.assertEqual(check.steps[-1].record_ids, (current,))
+                else:
+                    self.assertEqual(check.steps[-1].record_ids, ())
+
+    def test_testing_reader_uses_request_state_instead_of_saved_plan_state(self) -> None:
+        record = ProductReconcileRequestRecord(
+            target_key="example-site:testing",
+            product="example-site",
+            target_kind="testing",
+            state="pending",
+            requested_at="2026-10-09T00:00:00Z",
+            updated_at="2026-10-09T00:00:00Z",
+            request_count=2,
+            last_plan=_completed_noop_plan(),
+        )
+        store = Mock()
+        for state, expected in (
+            ("done", "clear"),
+            ("pending", "unknown"),
+            ("running", "unknown"),
+            ("failed", "unknown"),
+        ):
+            with (
+                self.subTest(state=state),
+                patch(
+                    "control_plane.product_path_check.read_staff_testing_hold", return_value=None
+                ),
+            ):
+                store.list_product_reconcile_requests.return_value = (
+                    record.model_copy(update={"state": state}),
+                )
+                inputs = read_path_check_inputs(
+                    path="testing",
+                    profile=_profile(),
+                    record_store=store,
+                    action_allowed=Mock(),
+                    caller_is_admin=lambda: False,
+                    read_release_review=Mock(),
+                    generated_at=record.updated_at,
+                )
+                check = build_product_path_check(
+                    product="example-site", path="testing", inputs=inputs
+                )
+                self.assertEqual(_steps(check)["testing_deploy"][0], expected)
+
     def test_promote_reports_every_blocker_at_once(self) -> None:
         # 2026-09-27: no usable grant (occurrence 3) and no backup policy
         # (occurrence 6) surfaced one at a time; one check names both.
@@ -659,6 +819,28 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
                 "GET",
                 "/v1/products/example-site/path-check?path=rollback",
                 headers=headers,
+            )
+            store.request_product_reconcile(
+                ProductReconcileTarget(product="example-site", target_kind="testing"),
+                "2026-10-09T00:00:00Z",
+            )
+            claimed = store.claim_next_product_reconcile_request("test-worker", 60)
+            assert claimed is not None
+            completed = store.complete_product_reconcile_request(
+                claimed.target_key, "test-worker", "done", dict(_completed_noop_plan())
+            )
+            reconciled = await _asgi_request(
+                app_with(("product_environment.read",)), "GET", route, headers=headers
+            )
+            self.assertEqual(reconciled.status_code, 200, reconciled.text)
+            reconciled_check = reconciled.json()["check"]
+            self.assertEqual(reconciled_check["state"], "clear")
+            self.assertEqual(
+                reconciled_check["steps"][-1]["record_ids"],
+                [completed.last_plan["current_artifact_id"]],
+            )
+            self.assertEqual(
+                store.list_product_reconcile_requests(product="example-site"), (completed,)
             )
             store.close()
 

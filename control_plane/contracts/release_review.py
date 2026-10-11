@@ -3,6 +3,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.artifact_release_compatibility import ReleaseDatabaseCompatibility
 
 
 class ReleaseVersion(BaseModel):
@@ -23,6 +24,11 @@ class ReleaseReviewItem(BaseModel):
     merge_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     owner_test_notes: str
     already_reviewed: bool = False
+    client_test_notes_error: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     preview_era_notes: bool = Field(
         default=False,
         exclude_if=lambda value: not value,
@@ -58,11 +64,31 @@ class ReleaseChecklist(BaseModel):
         exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
+    database_compatibility: ReleaseDatabaseCompatibility | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+
+    @model_validator(mode="after")
+    def validate_database_compatibility(self) -> "ReleaseChecklist":
+        compatibility = self.database_compatibility
+        if compatibility is not None and (
+            compatibility.production_artifact_id != self.production.artifact_id
+            or compatibility.candidate_artifact_id != self.candidate.artifact_id
+        ):
+            raise ValueError("release compatibility must identify the checklist artifact tuple")
+        return self
 
 
-ReleaseDecision = Literal["accepted", "changes_requested", "overridden"]
-# How an accepted release runs, fixed when the Client accepts it: "" starts nothing.
-ReleaseStart = Literal["", "promote", "promote_with_rollback_drill"]
+# "temporary_hotfix": the Director ships a fix for live breakage before the Client
+# accepts it; the Client then reviews that exact candidate like any release.
+ReleaseDecision = Literal["accepted", "changes_requested", "overridden", "temporary_hotfix"]
+# What a decision runs, fixed when it is recorded: "" starts nothing. "rollback" is the
+# Client's request for changes to a live temporary hotfix, which returns production to
+# their last accepted release.
+AcceptanceReleaseStart = Literal["", "promote", "promote_with_rollback_drill"]
+ReleaseStart = Literal[AcceptanceReleaseStart, "rollback"]
 
 
 class ReleaseReviewDecisionRecord(BaseModel):
@@ -92,11 +118,24 @@ class ReleaseReviewDecisionRecord(BaseModel):
             raise ValueError("Release decision and checklist products must match.")
         if self.decision != "accepted" and not self.reason.strip():
             raise ValueError("Requesting changes or overriding requires a reason.")
-        if self.decision != "overridden" and self.actor_github_id != self.checklist.owner_github_id:
+        if (
+            self.decision not in ("overridden", "temporary_hotfix")
+            and self.actor_github_id != self.checklist.owner_github_id
+        ):
             raise ValueError("Only the product's Client can accept or request changes.")
+        if self.decision == "temporary_hotfix" and (
+            self.actor_github_id == self.checklist.owner_github_id
+            or self.release_start != "promote"
+        ):
+            raise ValueError("A temporary hotfix is the Director's promotion, never the Client's.")
         if self.acceptance_source == "director_standing" and self.decision != "accepted":
             raise ValueError("Standing acceptance can only record acceptance.")
-        if self.release_start and self.decision != "accepted":
+        if self.release_start == "rollback" and self.decision != "changes_requested":
+            raise ValueError("Only the Client's request for changes rolls back a hotfix.")
+        if self.release_start not in ("", "rollback") and self.decision not in (
+            "accepted",
+            "temporary_hotfix",
+        ):
             raise ValueError("Only the Client's acceptance starts a release.")
         return self
 

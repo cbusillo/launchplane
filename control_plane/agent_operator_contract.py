@@ -18,6 +18,7 @@ from control_plane.openapi_export import (
     build_deterministic_export_app,
     canonical_openapi_document,
 )
+from control_plane.legacy_preview_reconciliation import LEGACY_PREVIEW_RECONCILIATION_ROUTE
 
 
 SCHEMA_VERSION = 1
@@ -208,6 +209,15 @@ OPERATION_SPECS = (
     ),
     OperationSpec(
         "POST",
+        LEGACY_PREVIEW_RECONCILIATION_ROUTE,
+        "Inspect, plan or reconcile one provider-absent legacy generic-web preview.",
+        ("agent_helper", "service_api"),
+        ("inspect", "plan", "apply"),
+        "plan_and_apply",
+        ("reviewed_plan", "expected_plan_digest", "plan_idempotency_key"),
+    ),
+    OperationSpec(
+        "POST",
         "/v1/product-retirement",
         "Plan or apply protected product retirement.",
         ("protected_workflow", "operator_ui", "service_api"),
@@ -304,6 +314,8 @@ INVARIANTS = {
         "github_projection_role": "routing_and_status_only",
         "engineering_review_advisory": True,
         "authorization_admission_and_landing_are_independent": True,
+        # Only the Director's signed-in session starts one; never an agent or a Client.
+        "temporary_hotfix_start": "director_human_session_only",
     },
     "protected_workflow_policy": {
         "dispatch_and_watch_helper": "github_workflow_babysit.py",

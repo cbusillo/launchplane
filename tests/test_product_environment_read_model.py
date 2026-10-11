@@ -24,13 +24,16 @@ from control_plane.contracts.product_health_monitoring_migration import (
 )
 from control_plane.contracts.product_environment_read_model import (
     ACTION_AUTHZ_BY_ROUTE,
+    PRODUCT_PREVIEW_REFERENCE_LIMIT,
     ProductEnvironmentReadModelCapabilityError,
     build_product_activity_read_model,
     build_product_environment_config_status,
     build_product_environment_detail,
     build_product_site_overview,
+    _public_ingress_summary,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import (
@@ -182,6 +185,19 @@ class _PreviewRecordStore:
         if product != self._profile.product:
             raise FileNotFoundError(product)
         return self._profile
+
+    def list_public_ingress_incident_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentRecord, ...]:
+        return ()
 
     def list_product_profile_records(
         self, *, driver_id: str = ""
@@ -652,6 +668,40 @@ class _HistoricalActivityRecordStore(_PreviewRecordStore):
 
 
 class ProductEnvironmentReadModelTest(unittest.TestCase):
+    def test_generated_incident_without_reminder_capability_fails_closed(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False)
+        )
+        lane = profile.lanes[1]
+        incident = PublicIngressIncidentRecord(
+            incident_id="generated-fence",
+            product=profile.product,
+            context=lane.context,
+            instance=lane.instance,
+            check_name="launchplane-deploy-fence",
+            check_kind="provider",
+            status="open",
+            opened_at="2026-10-09T20:00:00Z",
+            opened_observation_id="fence-observation",
+            latest_observation_id="fence-observation",
+            latest_observed_at="2026-10-09T20:00:00Z",
+            failure_code="deploy_fence_held",
+            severity="warning",
+            summary="Held fence",
+        )
+        store = _PublicIngressReadModelStore(profile, (), (incident,))
+        with patch.object(store, "list_public_ingress_incident_reminder_state_records", None):
+            with self.assertRaisesRegex(
+                ProductEnvironmentReadModelCapabilityError,
+                "list_public_ingress_incident_reminder_state_records",
+            ):
+                build_product_environment_detail(
+                    record_store=store,
+                    product=profile.product,
+                    environment=lane.instance,
+                    action_allowed=lambda *_: False,
+                )
+
     def test_action_authz_map_matches_live_service_handlers(self) -> None:
         self.assertEqual(
             ACTION_AUTHZ_BY_ROUTE["/v1/drivers/odoo/artifact-publish"],
@@ -807,6 +857,46 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertIn(("shared-preview", "example-site"), store.preview_record_calls)
         self.assertEqual(overview.preview.active_count, 1)
         self.assertEqual(overview.preview.latest_preview_id, "example-site-active")
+        self.assertEqual(overview.preview.records_status, "authorization_denied")
+        self.assertEqual(overview.preview.records, ())
+
+        allowed = build_product_site_overview(
+            record_store=store,
+            product=profile.product,
+            action_allowed=lambda action, product, context, instances: (
+                action == "preview.read"
+                and product == "launchplane"
+                and context == profile.preview.context
+                and instances == ()
+            ),
+        )
+        self.assertEqual(allowed.preview.records_status, "available")
+        self.assertEqual(
+            [record.preview_id for record in allowed.preview.records], ["example-site-active"]
+        )
+        self.assertEqual(allowed.preview.records[0].recorded_state, "active")
+        self.assertEqual(allowed.preview.trust_state, overview.preview.trust_state)
+
+    def test_preview_references_keep_full_count_when_display_is_bounded(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
+        previews = tuple(
+            _preview_record(
+                preview_id=f"preview-{index}",
+                context=profile.preview.context,
+                anchor_repo="example-site",
+                state="pending",
+                updated_at=profile.updated_at,
+            )
+            for index in range(PRODUCT_PREVIEW_REFERENCE_LIMIT + 2)
+        )
+        overview = build_product_site_overview(
+            record_store=_PreviewRecordStore(profile, previews),
+            product=profile.product,
+            action_allowed=lambda *_: True,
+        )
+        self.assertEqual(overview.preview.active_count, len(previews))
+        self.assertLess(len(overview.preview.records), len(previews))
+        self.assertTrue(overview.preview.records_truncated)
 
     def test_product_site_overview_uses_canonical_prod_context_for_prod_actions(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
@@ -1263,6 +1353,64 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertTrue(detail_odoo.requires_restore_proof)
         self.assertTrue(detail_odoo.requires_runtime_identity)
 
+    def test_public_summary_and_topology_choose_replacement_check_and_its_incident(self) -> None:
+        from tests.test_product_topology_read_model import (
+            _http_observation,
+            _profile,
+            _NOW,
+        )
+
+        payload = _profile().model_dump(mode="json")
+        payload["lanes"][0]["health_monitoring"] = {
+            "monitoring_intent": "public",
+            "checks": [
+                {"name": "public-ingress", "kind": "public_http", "enabled": False},
+                {"name": "replacement", "kind": "public_http", "enabled": True},
+            ],
+        }
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        history = _http_observation(runtime_identity_status="unverifiable")
+        replacement = _http_observation(runtime_identity_status="unchecked").model_copy(
+            update={
+                "record_id": "replacement-observation",
+                "check_name": "replacement",
+                "observed_at": "2026-07-14T10:59:00Z",
+            }
+        )
+        incident = PublicIngressIncidentRecord(
+            incident_id="disabled-check-incident",
+            product=history.product,
+            context=history.context,
+            instance=history.instance,
+            check_name=history.check_name,
+            check_kind=history.check_kind,
+            status="open",
+            opened_at=history.observed_at,
+            opened_observation_id=history.record_id,
+            latest_observation_id=history.record_id,
+            latest_observed_at=history.observed_at,
+            failure_code=history.failure_code or "http_error",
+            state_version=1,
+            severity="critical",
+            summary=history.summary,
+        )
+        store = _PublicIngressReadModelStore(profile, (history, replacement), (incident,))
+        summary = _public_ingress_summary(
+            record_store=store, profile=profile, lane=profile.lanes[0]
+        )
+        from control_plane.contracts.product_topology_read_model import (
+            build_product_environment_topology,
+        )
+
+        topology = build_product_environment_topology(
+            record_store=store, profile=profile, lane=profile.lanes[0], lane_summary=None, now=_NOW
+        )
+        self.assertEqual(summary.record_id, replacement.record_id)
+        self.assertEqual(topology.observed.ingress.provenance.source_record_id, summary.record_id)
+        self.assertEqual(summary.status, replacement.status)
+        self.assertEqual(summary.incident_id, "")
+        self.assertTrue(topology.observed.ingress.probe_effective)
+
     def test_product_read_model_exposes_public_ingress_observation(self) -> None:
         profile_payload = _site_profile_payload(preview_enabled=False)
         lanes = cast(tuple[dict[str, object], ...], profile_payload["lanes"])
@@ -1653,9 +1801,12 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         )
         store = _PublicIngressObservationsOnlyStore(profile, (observation,))
 
-        with self.assertRaisesRegex(
-            ProductEnvironmentReadModelCapabilityError,
-            r"missing store method\(s\): list_public_ingress_incident_records",
+        with (
+            self.assertRaisesRegex(
+                ProductEnvironmentReadModelCapabilityError,
+                r"missing store method\(s\): list_public_ingress_incident_records",
+            ),
+            patch.object(store, "list_public_ingress_incident_records", None),
         ):
             build_product_environment_detail(
                 record_store=store,
@@ -1830,6 +1981,129 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                 self.assertEqual(detail.topology.provider_recorded.tls.trust_state, "missing")
                 self.assertNotIn(target.target_id, detail.model_dump_json())
                 self.assertNotIn("private-host-id", detail.model_dump_json())
+
+    def test_declared_no_website_projects_current_private_proof_without_blocking_warnings(
+        self,
+    ) -> None:
+        payload = _site_profile_payload(preview_enabled=False, preview_context="")
+        lane = cast(tuple[dict[str, object], ...], payload["lanes"])[1]
+        lane.update(
+            {
+                "base_url": "",
+                "health_url": "",
+                "health_monitoring": {
+                    "monitoring_intent": "private",
+                    "checks": [
+                        {
+                            "name": "private-runtime",
+                            "kind": "private_http",
+                            "private_endpoint_key": "private-runtime",
+                            "require_runtime_identity": True,
+                        }
+                    ],
+                },
+            }
+        )
+        payload["lanes"] = (lane,)
+        checked = datetime.now(timezone.utc)
+        old = (checked - timedelta(days=7)).isoformat()
+        identity = RuntimeIdentity(
+            context="example-site-prod",
+            instance="prod",
+            deployment_record_id="deployment-prod-1",
+            artifact_id="artifact-1",
+            source_git_ref="abc123",
+        )
+        summary = LaunchplaneLaneSummary(
+            context=identity.context,
+            instance=identity.instance,
+            provider_target=ProviderTargetRecord(
+                context=identity.context,
+                instance=identity.instance,
+                provider_id="dokploy",
+                target_category="application",
+                target_id="private-id",
+                display_name="example-service",
+                provider_target_type="application",
+                updated_at=old,
+            ),
+            inventory=EnvironmentInventory(
+                context=identity.context,
+                instance=identity.instance,
+                runtime_identity=identity,
+                deployment_record_id=identity.deployment_record_id,
+                updated_at=old,
+                source_git_ref=identity.source_git_ref,
+                deploy=DeploymentEvidence(
+                    target_name="example-service",
+                    target_type="application",
+                    deploy_mode="image",
+                    status="pass",
+                ),
+            ),
+        )
+        observation = PublicIngressObservationRecord(
+            record_id="private-current",
+            product="example-site",
+            context=identity.context,
+            instance=identity.instance,
+            check_name="private-runtime",
+            check_kind="private_http",
+            monitoring_intent="private",
+            observed_at=checked.isoformat(),
+            status="pass",
+            summary="Connected",
+            expected_runtime_identity=identity,
+            targets=(
+                PublicIngressTargetObservation(
+                    target="private_health_url",
+                    url="private-endpoint://private-runtime",
+                    status="pass",
+                    runtime_identity_status="match",
+                    observed_runtime_identity=identity,
+                    summary="Verified",
+                ),
+            ),
+        )
+        endpoint = PrivateHealthEndpointRecord(
+            endpoint_key="private-runtime",
+            product="example-site",
+            context=identity.context,
+            instance=identity.instance,
+            url="http://127.0.0.1:3000/health",
+            updated_at=old,
+        )
+        for declaration in ("required", "none"):
+            payload["public_website"] = declaration
+            profile = LaunchplaneProductProfileRecord.model_validate(payload)
+            store = _ContinuouslyVerifiedLaneStore(profile, summary, (observation,))
+            with patch.object(
+                store, "read_private_health_endpoint_record", return_value=endpoint, create=True
+            ):
+                detail = build_product_environment_detail(
+                    record_store=store,
+                    product=profile.product,
+                    environment="prod",
+                    action_allowed=lambda *_: False,
+                )
+                overview = build_product_site_overview(
+                    record_store=store, product=profile.product, action_allowed=lambda *_: False
+                )
+            for projected in (detail, overview.environments[0]):
+                self.assertEqual(projected.provenance.freshness_status, "verified")
+                self.assertEqual(projected.health_monitoring.checks[0].status, "pass")
+                self.assertEqual(
+                    projected.topology.observed.placement.runtime_identity_status, "match"
+                )
+                self.assertEqual(
+                    projected.trust_state, "recorded" if declaration == "none" else "missing"
+                )
+                self.assertEqual(bool(projected.warnings), declaration != "none")
+                if declaration == "none":
+                    self.assertTrue(projected.topology.warnings)
+                    self.assertTrue(
+                        all(warning.severity == "info" for warning in projected.topology.warnings)
+                    )
 
     def test_product_environment_detail_exposes_physical_provider_target(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
