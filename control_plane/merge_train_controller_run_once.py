@@ -514,6 +514,29 @@ def _execute_merge_train_controller_with_client(
             history = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
                 repository=request.repository, base_branch=request.base_branch
             )
+            # Completed landing cleanup resumes from its exact stored proof;
+            # it does not perform fresh queue discovery.
+            if history and lease.record.active_action == "land_batch":
+                landing = _merge_train_landing_record_by_id(
+                    record_store=landing_store,
+                    repository=request.repository,
+                    base_branch=request.base_branch,
+                    record_id=lease.record.active_record_id,
+                )
+                if (
+                    landing is not None
+                    and latest_completed_merge_train_batch_landing_plan_record(
+                        record_store=landing_store,
+                        repository=request.repository,
+                        base_branch=request.base_branch,
+                        batch_id=landing.landing_plan.batch_id,
+                        candidate_sha=landing.landing_plan.candidate_sha,
+                        policy_sha256=landing.landing_plan.policy_sha256,
+                        include_lineage_retirements=True,
+                    )
+                    is not None
+                ):
+                    history = ()
             if history:
                 snapshot = github_client.read_merge_train_snapshot(
                     repository=request.repository, base_branch=request.base_branch

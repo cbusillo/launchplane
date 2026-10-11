@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from control_plane.github_app_identity import GitHubAppInstallationToken
@@ -362,17 +363,29 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient", Client
                 ),
             ):
+                clock = datetime.now(timezone.utc)
 
                 async def run(mutate: bool = True) -> Any:
-                    return await _post_merge_train_controller_run_once(
-                        app,
-                        {
-                            "schema_version": 1,
-                            "repository": "cbusillo/sellyouroutboard",
-                            "base_branch": "main",
-                            "mutate": mutate,
-                        },
+                    nonlocal clock
+                    clock += timedelta(seconds=1)
+                    clock_scope = (
+                        patch(
+                            "control_plane.storage.filesystem._utc_now_timestamp",
+                            return_value=clock.isoformat(),
+                        )
+                        if preserve_original_review
+                        else nullcontext()
                     )
+                    with clock_scope:
+                        return await _post_merge_train_controller_run_once(
+                            app,
+                            {
+                                "schema_version": 1,
+                                "repository": "cbusillo/sellyouroutboard",
+                                "base_branch": "main",
+                                "mutate": mutate,
+                            },
+                        )
 
                 first = await run()
                 self.assertEqual(first.status_code, 202 if checkpointed else 502, first.text)
