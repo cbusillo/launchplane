@@ -5,7 +5,7 @@ from unittest import TestCase
 from unittest.mock import MagicMock, patch
 from typing import cast
 
-from control_plane import merge_train_scheduler
+from control_plane import merge_train_events, merge_train_scheduler
 from control_plane.merge_train import (
     MergeTrainBranchClient,
     apply_merge_train_branch_update_intent,
@@ -18,6 +18,7 @@ from control_plane.contracts.merge_train_controller_state import (
 )
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
+    MergeTrainRepositoryPolicy,
     MergeTrainSchedulerPolicy,
     parse_merge_train_policy_toml,
 )
@@ -107,6 +108,21 @@ class MergeTrainSchedulerPassTests(TestCase):
             control_plane_root=_ROOT,
             now=lambda: "2026-10-01T06:00:00Z",
         )
+
+    def test_a_pass_for_named_trains_runs_only_those_targets(self) -> None:
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
+            ("cbusillo/beta", MergeTrainSchedulerPolicy(enabled=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "deferred", "poll_interval"
+        )
+        results = run_merge_train_scheduler_pass(
+            record_store=self.record_store,
+            control_plane_root=_ROOT,
+            target_keys=frozenset({"merge-train-controller:cbusillo:beta:main"}),
+        )
+        self.assertEqual([result.repository for result in results], ["cbusillo/beta"])
 
     def test_no_policy_record_is_an_empty_pass(self) -> None:
         self.mocks[
@@ -542,7 +558,7 @@ class MergeTrainSchedulerLoopTests(TestCase):
     def test_event_wait_starts_a_fresh_pass_without_waiting_for_the_sweep(self) -> None:
         stop_event = MagicMock(spec=Event)
         stop_event.is_set.return_value = False
-        event_wait = MagicMock()
+        event_wait = MagicMock(return_value=None)
         with patch.object(
             merge_train_scheduler, "run_merge_train_scheduler_pass", return_value=()
         ) as run:
@@ -585,3 +601,87 @@ class MergeTrainSchedulerLoopTests(TestCase):
         self.assertEqual(passes, [(), ()])
         # The first pass took 40 seconds, so the next one starts 260 seconds later.
         self.assertEqual(waits, [260.0])
+
+
+class MergeTrainSteadyArrivalTests(TestCase):
+    """Signed hints arrive one at a time while the worker runs, as on a busy night."""
+
+    def test_unrelated_completions_run_no_train_and_sweeps_keep_their_interval(self) -> None:
+        policy = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
+            ("cbusillo/beta", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
+        )
+        hinted: list[str] = []
+        store = SimpleNamespace(notify_merge_train=hinted.extend)
+        inventory = SimpleNamespace(
+            current_record=SimpleNamespace(inventory_state="tracked", repository="cbusillo/alpha")
+        )
+        unrelated = {"pull_requests": [], "check_suite": {"head_branch": "feature"}}
+        queued_pr = {"pull_requests": [{"number": 7, "base": {"ref": "main"}}]}
+        clock = [0.0]
+        # In alpha's repository a check completes every 10 seconds; every fifth
+        # is a PR into main, the rest are pushes with no PR.
+        arrivals = [10.0 * n for n in range(1, 200)]
+        passes: list[tuple[float, tuple[str, ...]]] = []
+        started: list[float] = []
+
+        def run_target(**kwargs: object) -> MergeTrainScheduledTargetResult:
+            if not started or started[-1] != clock[0]:
+                started.append(clock[0])
+            repository_policy = kwargs["repository_policy"]
+            assert isinstance(repository_policy, MergeTrainRepositoryPolicy)
+            return merge_train_scheduler._target_result(repository_policy, status="ran")
+
+        def record_pass(results: tuple[MergeTrainScheduledTargetResult, ...]) -> None:
+            passes.append((started[-1], tuple(result.repository for result in results)))
+            clock[0] += 5
+
+        def wait(timeout: float, _stop: Event) -> frozenset[str] | None:
+            deadline = clock[0] + timeout
+            while arrivals and arrivals[0] <= deadline:
+                clock[0] = max(clock[0], arrivals.pop(0))
+                run = queued_pr if clock[0] % 50 == 0 else unrelated
+                merge_train_events.wake_merge_train_for_event(
+                    store,
+                    "check_run",
+                    {"repository": {"id": 42}, "action": "completed", "check_run": run},
+                )
+                if hinted:
+                    woken = frozenset(hinted)
+                    hinted.clear()
+                    return woken
+            clock[0] = deadline
+            return None
+
+        with (
+            patch.object(
+                merge_train_events, "resolve_merge_train_policy_record", return_value=policy
+            ),
+            patch.object(
+                merge_train_events, "get_repository_inventory_read_model", return_value=inventory
+            ),
+            patch.object(
+                merge_train_scheduler, "resolve_merge_train_policy_record", return_value=policy
+            ),
+            patch.object(merge_train_scheduler, "_run_scheduled_target", side_effect=run_target),
+        ):
+            run_merge_train_scheduler_loop(
+                record_store=object(),
+                control_plane_root=_ROOT,
+                interval_seconds=300,
+                monotonic=lambda: clock[0],
+                pass_callback=record_pass,
+                wait_for_event=wait,
+                max_passes=30,
+            )
+
+        sweeps = [at for at, ran in passes if ran == ("cbusillo/alpha", "cbusillo/beta")]
+        event_passes = [at for at, ran in passes if ran == ("cbusillo/alpha",)]
+        self.assertEqual(len(sweeps) + len(event_passes), len(passes))
+        # beta's repository sent nothing, so it runs only on sweeps, which start
+        # every 300 seconds however many hints arrive in between.
+        self.assertEqual(sweeps, [300.0 * n for n in range(len(sweeps))])
+        # Each alpha-only pass follows the PR's completion; the four unrelated
+        # completions after it start nothing.
+        self.assertEqual(event_passes, [at for at in event_passes if at % 50 == 0])
+        self.assertGreaterEqual(len(event_passes), 20)

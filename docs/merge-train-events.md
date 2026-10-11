@@ -9,14 +9,28 @@ and their scheduler mutate and runner-mode settings still govern each action.
 
 The existing signed `POST /v1/github/app-webhook` receiver wakes the worker
 through PostgreSQL LISTEN/NOTIFY when an enabled, inventoried repository adds
-its policy enqueue label, changes a PR head, opens or reopens a PR, completes a
-check run, check suite or workflow, or reports a terminal commit status. Check
-events include commits on `launchplane/train/**` refs and need no associated
-PR number. The event body is only a wake hint: the worker re-reads the live
-queue and all gates, using the DB policy and its own credential. Duplicate
-hints add no authority; notifications missed during disconnect or restart are
-recovered by the existing five-minute sweep. A notification failure does not
-block product reconciliation. Existing poll/backoff admission still applies.
+or removes its policy enqueue label, changes a PR head, or opens, reopens or
+closes a PR into a train's base, or when a check run, check suite or workflow
+completes, or a commit status turns terminal, on a head that train may wait on:
+a PR into its base, one of its own `launchplane/train/**` candidate refs, or
+its base branch. Check payloads carry no labels, so every PR into the base
+still wakes its train. Completions on other branches or bases wake nothing;
+a head GitHub cannot associate with a PR, such as a fork PR, is left to the
+sweep. A commit status names no PR, so a status on any non-candidate branch
+still wakes the repository's trains.
+
+Each hint names the trains it concerns by controller key, and the worker runs
+only those trains, folding hints that queued during a pass into the next one.
+Every target still runs on the five-minute sweep, which keeps its own clock:
+event passes between sweeps never postpone it, and a due sweep drops queued
+hints because it rereads every train after they arrived. A hint that names
+no train, a listener failure and a timeout all run the full sweep.
+
+The event body is only a wake hint: the worker re-reads the live queue and all
+gates, using the DB policy and its own credential. Duplicate hints add no
+authority; notifications missed during disconnect or restart are recovered by
+the sweep. A notification failure does not block product reconciliation.
+Existing poll/backoff admission still applies.
 
 A controller mutation pass continues through candidate planning, construction,
 and already-passed checks to landing planning and execution. Observing pending
