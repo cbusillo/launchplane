@@ -30,8 +30,10 @@ or credential is created. The worker uses Launchplane's own bootstrap
 per unchanged profile and lane versions until delivery. After a confirmed receipt,
 the worker remembers delivery in memory until the reminder is due or the candidate
 changes; a replica restart reads the durable receipt again. Once the single
-reminder is delivered, unchanged candidates need no further GitHub reads. Settled versions also need no
-GitHub read. This cache never supplies acceptance or bypasses release checks.
+reminder is delivered, unchanged candidates need no further GitHub reads. A decision on unchanged
+lane versions is settled only while its checklist digest matches the current checklist; each worker
+rechecks that at most every 30 minutes, and edited test notes that change the checklist send the
+Client a fresh request. This cache never supplies acceptance or bypasses release checks.
 
 The product repository keeps one issue for these requests. Launchplane finds it
 by a standalone `release_request_issue_marker(product)` line in the issue body;
@@ -342,7 +344,8 @@ checklist. No agent receives a promotion grant and no product workflow calls
 Launchplane. Enabling this setting is a production-release activation; prepare
 and verify the Client, testing lane and backup policy before applying it.
 Changing unrelated profile metadata does not re-accept or retry that checklist.
-Settled decisions on unchanged lane versions require no background GitHub read.
+Settled decisions on unchanged lane versions are rechecked against the current checklist at most
+every 30 minutes on each worker.
 Incomplete standing reviews back off for five minutes on each worker; changing
 the profile or lane versions triggers a fresh review. This timer never supplies
 acceptance or replaces the checks immediately before a release effect.
