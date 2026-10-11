@@ -925,6 +925,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - runner_pool
       - repository_pins
       - audit_policy
       - verified_tree
@@ -987,6 +988,7 @@ jobs:
 
       - name: Require successful CI path
         env:
+          RUNNER_POOL_RESULT: ${{ needs.runner_pool.result }}
           BASE_REPOSITORY: ${{ github.repository }}
           HEAD_REPOSITORY: >-
             ${{ github.event.pull_request.head.repo.full_name || github.repository }}
@@ -1005,6 +1007,10 @@ jobs:
           VERIFIED_TREE: ${{ needs.verified_tree.outputs.verified }}
         run: |
           set -euo pipefail
+          if [ "${RUNNER_POOL_RESULT}" != "success" ]; then
+            echo "runner_pool concluded with: ${RUNNER_POOL_RESULT}" >&2
+            exit 1
+          fi
           if [ "${AUDIT_POLICY_RESULT}" != "success" ]; then
             echo "audit_policy concluded with: ${AUDIT_POLICY_RESULT}" >&2
             exit 1

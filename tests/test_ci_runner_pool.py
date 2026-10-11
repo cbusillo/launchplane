@@ -5,6 +5,8 @@ import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 
+from tests.support.workflows import load_workflow
+
 
 class CIRunnerPoolTests(unittest.TestCase):
     def select(self, **overrides: str) -> subprocess.CompletedProcess[str]:
@@ -77,6 +79,25 @@ class CIRunnerPoolTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not configured", result.stderr)
         self.assert_pool(["ubuntu-latest"], HEAD_REF="launchplane/train/batch", RUNNER_LABEL="")
+
+    def test_selector_failure_is_reported_by_both_summary_gates(self) -> None:
+        for workflow, job, name in [
+            ("ci.yml", "ci_gate", "Require successful CI path"),
+            ("security.yml", "security_gate", "Require successful security path"),
+        ]:
+            step = load_workflow(Path(".github/workflows") / workflow).step_named(job, name)
+            assert step is not None
+            for status in ["failure", "skipped", "cancelled"]:
+                with self.subTest(workflow=workflow, status=status):
+                    result = subprocess.run(
+                        ["bash", "-c", step.run],
+                        env=os.environ | {"RUNNER_POOL_RESULT": status},
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"runner_pool concluded with: {status}", result.stderr)
 
     def test_runner_label_is_json_encoded(self) -> None:
         label = 'lane"with\\characters'

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Candidate checks use public hosted capacity rather than the PR runner queue.
-# Forks never reach a self-hosted lane, even if their branch looks like a train ref.
+# Job-level same-repository guards enforce trust; a fork can edit this script.
 if [[ "${EVENT_NAME}" == pull_request && "${HEAD_REPOSITORY}" != "${REPOSITORY}" ]]; then
   runner='["ubuntu-latest"]'
 elif [[ "${REPOSITORY_VISIBILITY}" == public ]] && \
