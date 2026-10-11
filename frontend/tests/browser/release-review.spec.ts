@@ -271,7 +271,7 @@ test("A stopped release stops refreshing and a newer decision discards an older 
     steps: [{ step: "promote-1", kind: "promote", status, operation_id: "promote-operation",
       failure: status === "fail" ? { code: "post_deploy_check_failed", reason: "The live site did not answer its checks.", record_id: "promotion-record", recorded_at: "2026-10-11T04:00:00Z", trace_id: "promotion-trace" } : null }],
   });
-  let current: object = { ...accepted, release_run: run("running", "running") };
+  const current = { ...accepted, release_run: run("running", "running") };
   let reads = 0;
   let holdRead: Promise<void> | undefined;
   let releaseHeldRead: (() => void) | undefined;
@@ -279,9 +279,8 @@ test("A stopped release stops refreshing and a newer decision discards an older 
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
   await page.route("**/v1/release-review?*", async route => {
     reads++;
-    const body = current;
     if (holdRead) await holdRead;
-    await route.fulfill({ json: body }).catch(() => undefined);
+    await route.fulfill({ json: current }).catch(() => undefined);
   });
   await page.route("**/v1/release-review/decisions", route => route.fulfill({ json: { ...changesRequested, release_run: run("stopped", "fail") } }));
   await page.goto("/ui/owner-review?product=example-site");

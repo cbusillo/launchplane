@@ -108,17 +108,15 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   useEffect(() => {
     if (!releaseRunActive) return;
     const controller = new AbortController();
-    const timer = window.setTimeout(() => {
-      void readReleaseReview(product, controller.signal).then(value => {
-        if (controller.signal.aborted) return;
-        setRefreshFailed(false);
-        setResponse(value);
-      }).catch(() => {
-        if (controller.signal.aborted) return;
-        setRefreshFailed(true);
-        setRefreshAttempt(attempt => attempt + 1);
-      });
-    }, RELEASE_PROGRESS_REFRESH_MS);
+    const timer = window.setTimeout(() => void readReleaseReview(product, controller.signal).then(value => {
+      if (controller.signal.aborted) return;
+      setRefreshFailed(false);
+      setResponse(value);
+    }).catch(() => {
+      if (controller.signal.aborted) return;
+      setRefreshFailed(true);
+      setRefreshAttempt(attempt => attempt + 1);
+    }), RELEASE_PROGRESS_REFRESH_MS);
     return () => {
       window.clearTimeout(timer);
       controller.abort();
