@@ -1395,16 +1395,18 @@ Controller actions have these retry/stop semantics:
   single batch-body, infrastructure, and recovered-check retries; a check failure otherwise moves
   through [blocker isolation](#blocker-isolation), returning `plan_candidate`
   with `reason_code: failure_isolation` or `infrastructure_retry`, or `block`
-  for the isolated pull request. For a single-entry candidate or squash/rebase
-  landing, if one failed on check evidence and a
+  for the isolated pull request. Other candidate shapes keep their existing
+  reread path: if one failed on check evidence and a
   re-run of the failed check at that SHA is now pending or passing, the controller
   returns `observe_candidate`, retires the failed record, and continues from the
   re-read evidence. For a multi-entry merge batch, fresh passing required checks
   at its recorded SHA return `plan_candidate` with
   `reason_code: candidate_checks_recovered`, provided its service PR is exactly
   bound, closed and confirmed unmerged. The new record's `check_retry_of` points
-  to the failed record, preserving its SHA and failure history; the response
-  names the observed SHA, passing status and closed batch PR. The same ordered
+  to the failed record, preserving its SHA and failure history.
+  `check_retry_evidence` durably records the observed SHA, observation time,
+  passing status and closed batch PR. The response exposes the same observation.
+  The same ordered
   heads/base may use this rebuild only once, across restarts and replay of the
   original failed record. A spent budget reports `candidate_check_retry_used`
   without blaming a member. Pending, missing or unreadable check evidence does

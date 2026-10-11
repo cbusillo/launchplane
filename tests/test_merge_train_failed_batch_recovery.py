@@ -102,9 +102,10 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         client.probe_batch_entry_conflicts.return_value = conflicts
         if not observe_checks:
             client.observe_batch_candidate_checks.return_value = candidate
-        client.read_candidate_check_failures.return_value = CandidateCheckFailures(
-            checks=(CandidateCheckFailure(name="ci-gate", conclusion="failure", url=""),)
-        )
+        if not observe_checks:
+            client.read_candidate_check_failures.return_value = CandidateCheckFailures(
+                checks=(CandidateCheckFailure(name="ci-gate", conclusion="failure", url=""),)
+            )
         self.reflow_client = client
         result = try_reflow_failed_merge_train_candidate(
             candidate_store=store,
@@ -177,6 +178,12 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 [result["merge_train_batch_candidate_record_id"]],
             )
             self.assertEqual(active[0].candidate.check_retry_of, replacement.check_retry_of)
+            evidence = active[0].candidate.check_retry_evidence
+            assert evidence is not None
+            self.assertEqual(evidence.candidate_sha, self.candidate.candidate_sha)
+            self.assertEqual(evidence.required_checks_status, "pass")
+            self.assertEqual(evidence.closed_batch_pull_request_number, self.provider.number)
+            self.assertEqual(evidence.observed_at, active[0].updated_at)
             # The rebuild uses ordinary batch creation and must receive its own CI.
             built = replacement.model_copy(
                 update={"candidate_sha": "rebuilt-sha", "status": "ready_for_checks"}
@@ -209,6 +216,38 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             )
             self.reflow_client.add_pull_request_label.assert_not_called()
 
+    def test_spent_check_retry_does_not_suppress_unused_body_retry(self) -> None:
+        self.provider.checks_failed = False
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            self._reflow(store, self.candidate, observe_checks=True)
+            self.provider.body = self.provider.body.split("## Owner test notes")[0]
+            result = self._reflow(store, self.candidate, observe_checks=True)
+            replacement = MergeTrainBatchCandidate.model_validate(result["candidate"])
+            self.assertEqual(result["controller_action"], "plan_candidate")
+            self.assertTrue(replacement.batch_body_retry_of)
+            self.assertFalse(replacement.check_retry_of)
+            self.assertEqual(replacement.entries, self.candidate.entries)
+
+    def test_rebuilt_candidate_real_failure_still_isolates_members(self) -> None:
+        self.provider.checks_failed = False
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            result = self._reflow(store, self.candidate, observe_checks=True)
+            replacement = MergeTrainBatchCandidate.model_validate(result["candidate"])
+            failed_retry = replacement.model_copy(
+                update={
+                    "candidate_sha": "retry-failed-sha",
+                    "status": "failed",
+                    "required_checks_status": "fail",
+                }
+            )
+            isolated = self._reflow(store, failed_retry)
+            self.assertEqual(isolated["reason_code"], "failure_isolation")
+            retest = MergeTrainBatchCandidate.model_validate(isolated["candidate"])
+            self.assertLess(len(retest.entries), len(failed_retry.entries))
+            self.assertTrue(any(entry.reason == "failure_isolation" for entry in retest.held_out))
+
     def test_pending_or_missing_checks_do_not_authorize_check_retry(self) -> None:
         self.provider.checks_failed = False
         self.provider.checks_pass = False
@@ -218,7 +257,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 self.candidate,
                 observe_checks=True,
             )
-            self.assertNotEqual(result.get("reason_code"), "candidate_checks_recovered")
+            self.assertEqual(result["controller_action"], "candidate_failed")
+            self.reflow_client.add_pull_request_label.assert_not_called()
         self.provider.checks_missing = True
         with TemporaryDirectory() as directory:
             result = self._reflow(
@@ -226,7 +266,8 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 self.candidate,
                 observe_checks=True,
             )
-            self.assertNotEqual(result.get("reason_code"), "candidate_checks_recovered")
+            self.assertEqual(result["controller_action"], "candidate_failed")
+            self.reflow_client.add_pull_request_label.assert_not_called()
 
     def test_passing_checks_cannot_retry_missing_open_merged_or_unbound_batch(self) -> None:
         from control_plane.merge_admission import MergeAdmissionReconciliationRequiredError

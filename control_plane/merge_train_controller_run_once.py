@@ -4373,6 +4373,7 @@ def _retry_closed_candidate_after_passing_checks(
         return None
     details: dict[str, object] = {
         "observed_candidate_sha": failed.candidate_sha,
+        "observed_at": recorded_at,
         "required_checks_status": observed.required_checks_status,
         "closed_batch_pull_request_number": closed["number"],
     }
@@ -4386,6 +4387,12 @@ def _retry_closed_candidate_after_passing_checks(
         )
     )
     if retry_used:
+        # This budget cannot suppress a still-unused generated-body retry.
+        try:
+            if changed_closed_batch_body(client=github_client, candidate=failed):
+                return None
+        except (MergeTrainGitHubError, MergeAdmissionDeniedError):
+            pass
         return {
             "repository": repository,
             "base_branch": base_branch,
@@ -4606,6 +4613,20 @@ def _plan_failed_candidate_replacement(
                 ),
                 "check_retry_of" if check_retry else "infrastructure_retry_of": (
                     active_candidate_record.record_id
+                ),
+                **(
+                    {
+                        "check_retry_evidence": {
+                            "candidate_sha": details["observed_candidate_sha"],
+                            "observed_at": details["observed_at"],
+                            "required_checks_status": details["required_checks_status"],
+                            "closed_batch_pull_request_number": details[
+                                "closed_batch_pull_request_number"
+                            ],
+                        }
+                    }
+                    if check_retry
+                    else {}
                 ),
             }
         )
