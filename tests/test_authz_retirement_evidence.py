@@ -197,7 +197,8 @@ class RetirementEvidenceTests(unittest.TestCase):
                 else:
                     self.assertEqual(observations, ())
         self.assertNotIn("private-subject", evidence.model_dump_json())
-        for malformed_caller in ([], {}, 1, True):
+        malformed_callers: tuple[object, ...] = ([], {}, 1, True)
+        for malformed_caller in malformed_callers:
             with self.subTest(caller=malformed_caller):
                 current.audit = {**audit, "operator": {"type": malformed_caller}}
                 result = build_retirement_evidence(
