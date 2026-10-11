@@ -306,11 +306,10 @@ terminal records from the previous policy cannot authorize or suppress it.
 Candidate refs remain as recovery evidence; a rebuild reuses one only when its
 base and heads still identify the same batch.
 The same retirement applies when landing admission is denied with
-`landing_lineage_changed` before any entry has merged, for example when an
-older pull request is labelled after the plan and now sorts ahead of it. Such a
-plan can never match the live queue again, so the controller retires it instead
-of blocking on every pass, and the next pass plans a candidate from the live
-queue.
+`landing_lineage_changed` before any entry has merged, for example when a
+planned pull request's head moves or it leaves the queue. Such a plan can never
+match its members again, so the controller retires it instead of blocking on
+every pass, and the next pass plans a candidate from the live queue.
 An interrupted retirement resumes from its persisted evidence. Partial landings,
 collapsed stacks, retired ordinary-agent jobs, and unreadable or conflicting
 provider evidence still require explicit reconciliation.
@@ -336,6 +335,10 @@ Each repository policy contains:
   for stack child disposition and must differ from `enqueue_label` and
   `blocked_label`.
 - `merge_method`: GitHub merge strategy, one of `merge`, `squash`, or `rebase`.
+- `max_batch_size`: Optional cap on how many pull requests a new batch candidate
+  takes, in queue order; the rest wait for the next candidate. Unset leaves
+  batches unbounded. A repository whose accepted Client features must land
+  together leaves it unset or above the number it expects to batch.
 - `engineering_review_mode`: Advisory review evidence only (`advisory`, the
   default). New policy imports and target preparation reject `required`, which
   is retired by the overall DIRECTION.md. Historical policy records retain
@@ -496,8 +499,9 @@ A service candidate records each update excluded only for that reason as a
 `held_out` entry with reason `dependency_not_ready`, bound to its head and the
 candidate's base. If the update settles while the candidate builds, checks or
 lands, it waits for the next candidate instead of replacing this one and
-rerunning its checks; landing admission already excludes held-out PR/head pairs.
-A new head or a moved base releases the hold, and the hold posts no PR feedback.
+rerunning its checks. Landing admission checks only the plan's members. A new
+head or a moved base releases the hold; a new head still waits until the active
+candidate finishes under the admission rule below. The hold posts no PR feedback.
 Every existing block label remains a hold,
 including labels applied by earlier controller versions: no actor or historical
 record is used to guess that a generic hold may be cleared. Those PRs retain the
@@ -541,6 +545,26 @@ A batch candidate represents:
 ```text
 base branch + queued PR #1 + queued PR #2 + ... + queued PR #N
 ```
+
+Pull requests are admitted only between candidates. A planned, building,
+checking, passed or landing candidate stands while the base is unchanged and its
+own members, rebuilt alone under every batch rule, still form the same batch at
+the same heads. A pull request that becomes eligible meanwhile, wherever it
+sorts, waits for the next candidate. A failed candidate keeps the whole-queue
+comparison described under Blocker Isolation. `max_batch_size` caps each new
+candidate.
+
+While Launchplane runs a release its Client accepted, the repositories that
+release was built from (the product repository, the checklist's shared sources,
+and unchanged sources and selectors in the accepted candidate artifact) are
+held: a controller pass there plans, builds, observes and lands
+nothing and reports `release_hold` with `blocking_reason.code`
+`product_release_in_progress`. The hold is read from the product's latest
+release decision on every pass; nobody sets or clears it. It applies while that
+release's steps are running, or waiting with the testing lane still on the
+accepted candidate, and ends when the release passes, stops, or can no longer
+run. A landing already under way finishes. A release of one product never holds
+another repository, including Launchplane.
 
 The candidate is built in deterministic queue order on a temporary
 `launchplane/construct/<digest>` branch. The digest is the SHA-256 of the
@@ -1395,13 +1419,14 @@ Controller actions have these retry/stop semantics:
   then call again.
 - `build_candidate`: A stored candidate still matches the fresh queue and base
   and needs its train ref built or refreshed. Planned or interrupted-building
-  candidates are rechecked before any candidate-ref write. If their head, queue,
-  or base has changed, dry-run reports the replacement action; mutate supersedes
+  candidates are rechecked before any candidate-ref write. If a member's head,
+  eligibility or order, or the base has changed, dry-run reports the replacement
+  action; mutate supersedes
   the stale records under the controller lease and replans. An empty queue
   returns `idle`, without building the obsolete ref.
   Mutate once, then call again.
 - `observe_candidate`: A built candidate needs check observation. First compare
-  its queue, PR heads, and base with a fresh snapshot. Drift supersedes the old
+  its members, their heads, and the base with a fresh snapshot. Drift supersedes the old
   records under the controller lease and replans, even when the old checks never
   started. An unchanged candidate keeps waiting for its real checks; transient
   readiness changes alone do not replace it. Mutate or dry-run later until

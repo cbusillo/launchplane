@@ -8,10 +8,13 @@ from unittest.mock import patch
 
 from fastapi import FastAPI
 
-from control_plane.contracts.merge_train_batch import MergeTrainBatchHeldOutEntry
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchHeldOutEntry,
+    dependency_not_ready_holds,
+)
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train import MergeTrainDryRunSnapshot, build_merge_train_dry_run_result
 from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_controller_run_once import _surviving_held_out_entries
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -32,13 +35,41 @@ from tests.support.merge_train import (
 class DependencyRequalificationTests(unittest.IsolatedAsyncioTestCase):
     """An older dependency head that settles mid-candidate waits for the next base (#3259)."""
 
+    def test_client_notes_refusal_is_not_a_transient_dependency_hold(self) -> None:
+        snapshot = _FakeExpandedMergeTrainSnapshotReader(
+            transport=object()
+        ).read_merge_train_snapshot(repository="cbusillo/sellyouroutboard", base_branch="main")
+        dependency, green = snapshot.pull_requests
+        notes_error = "Client test notes are missing"
+        for mergeable in ("mergeable", "unknown", "conflicting"):
+            with self.subTest(mergeable=mergeable):
+                refused = dependency.model_copy(
+                    update={
+                        "labels": (),
+                        "label_actors": (),
+                        "actor_id": 42,
+                        "actor_role": "trusted_automation",
+                        "dependency_update_class": "patch_or_minor",
+                        "mergeable": mergeable,
+                        "required_checks_status": "fail",
+                        "client_test_notes_error": notes_error,
+                    }
+                )
+                result = build_merge_train_dry_run_result(
+                    policy=_dependency_policy_record().policy,
+                    snapshot=snapshot.model_copy(update={"pull_requests": (refused, green)}),
+                    batch_landing=True,
+                )
+                self.assertEqual(result.queue[0].ineligible_reasons, (notes_error,))
+                self.assertEqual(dependency_not_ready_holds(result, snapshot.base_sha), ())
+
     async def test_settled_dependency_waits_instead_of_replacing_the_candidate(self) -> None:
         for settled in ("mergeable", "rerun_passed"):
             for position in ("ahead", "behind"):
                 with self.subTest(settled=settled, position=position):
                     await self._assert_candidate_kept(settled=settled, position=position)
 
-    async def test_changed_dependency_head_still_replaces_the_candidate(self) -> None:
+    async def test_changed_dependency_head_waits_for_the_next_candidate_without_a_hold(self) -> None:
         state = _DependencyState(mergeable="unknown")
         async with _controller(state) as (app, store, request):
             planned = await _post(app, request, "plan_candidate")
@@ -47,9 +78,14 @@ class DependencyRequalificationTests(unittest.IsolatedAsyncioTestCase):
 
             state.mergeable = "mergeable"
             state.head_sha = "dependency-head-2"
-            replaced = await _post(app, request, "plan_candidate")
-            self.assertEqual(_entries(replaced), [1, 2])
-            self.assertEqual(len(_batch_ids(store)), 2)
+            for action in ("observe_candidate", "plan_landing", "land_batch"):
+                await _post(app, request, action)
+            self.assertEqual(len(_batch_ids(store)), 1)
+
+            state.landed = True
+            reentered = await _post(app, request, "plan_candidate")
+            self.assertEqual(_entries(reentered), [1])
+            self.assertEqual(reentered["candidate"]["held_out"], [])
 
     async def test_conflicting_dependency_stays_out_and_the_batch_lands(self) -> None:
         state = _DependencyState(mergeable="unknown")

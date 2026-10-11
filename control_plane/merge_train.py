@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from typing import Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
@@ -363,6 +364,8 @@ def build_merge_train_dry_run_result(
             eligible_entries = tuple(entry for entry in queue if entry.eligible)
         batch_entries: list[MergeTrainQueueEntry] = []
         for entry in eligible_entries:
+            if len(batch_entries) == repository_policy.max_batch_size:
+                break
             if entry.requires_individual_landing:
                 if not batch_entries:
                     batch_entries.append(entry)
@@ -409,6 +412,27 @@ def build_merge_train_dry_run_result(
         selected_pr=selected_pr,
         intended_next_action=intended_next_action,
         next_action_detail=next_action_detail,
+    )
+
+
+def merge_train_snapshot_of(
+    snapshot: MergeTrainDryRunSnapshot, pull_request_numbers: Collection[int]
+) -> MergeTrainDryRunSnapshot:
+    """The snapshot as if only these pull requests were open against the base.
+
+    Rebuilding a planned batch from its own members applies every batch rule to
+    them while other eligible pull requests, wherever they sort, wait for the
+    next candidate.
+    """
+    numbers = frozenset(pull_request_numbers)
+    return snapshot.model_copy(
+        update={
+            "pull_requests": tuple(
+                pull_request
+                for pull_request in snapshot.pull_requests
+                if pull_request.number in numbers
+            )
+        }
     )
 
 
