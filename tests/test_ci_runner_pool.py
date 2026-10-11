@@ -98,34 +98,6 @@ class CIRunnerPoolTests(unittest.TestCase):
         self.assertEqual(candidate.returncode, 0, candidate.stderr)
         self.assertIn("self-hosted", json.loads(candidate.stdout))
 
-    def test_browser_install_only_manages_system_packages_on_hosted_runners(self) -> None:
-        step = load_workflow(".github/workflows/ci.yml").step_named(
-            "frontend_browser_smoke", "Install Chromium"
-        )
-        assert step is not None
-        with TemporaryDirectory() as directory:
-            command = Path(directory) / "pnpm"
-            command.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$RECORDED_ARGS"\n')
-            command.chmod(0o755)
-            for environment in ["github-hosted", "self-hosted"]:
-                with self.subTest(environment=environment):
-                    recorded = Path(directory) / "args"
-                    result = subprocess.run(
-                        ["bash", "-c", step.run],
-                        env=os.environ
-                        | {
-                            "PATH": directory + os.pathsep + os.environ["PATH"],
-                            "RUNNER_ENVIRONMENT": environment,
-                            "RECORDED_ARGS": str(recorded),
-                        },
-                        capture_output=True,
-                        text=True,
-                    )
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    arguments = recorded.read_text().splitlines()
-                    self.assertIn("chromium", arguments)
-                    self.assertEqual("--with-deps" in arguments, environment == "github-hosted")
-
     def test_selector_failure_is_reported_by_both_summary_gates(self) -> None:
         for workflow, job, name in [
             ("ci.yml", "ci_gate", "Require successful CI path"),

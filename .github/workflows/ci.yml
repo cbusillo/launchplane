@@ -12,6 +12,7 @@ name: CI
 
 env:
   LAUNCHPLANE_CI_POSTGRES_IMAGE: &postgres_test_image postgres:17@sha256:0af65001d05296a2ead57ac4a6412433d8913d1bb5d0c88435a7d1e1ee5cb04b
+  BROWSER_SMOKE_IMAGE: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
 
 permissions:
   contents: read
@@ -626,14 +627,6 @@ jobs:
       (github.event_name == 'pull_request' && startsWith(github.head_ref, 'launchplane/train/'))) &&
       '["self-hosted","launchplane-candidate"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 15
-    # Vite and Chromium share this job's namespace, isolated from sibling
-    # runner jobs creating/removing Docker bridges on the host.
-    container:
-      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
-      options: --init --shm-size=1g
-    defaults:
-      run:
-        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -664,18 +657,8 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
 
-      - name: Install Chromium
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: |
-          if [[ "${RUNNER_ENVIRONMENT}" == github-hosted ]]; then
-            pnpm --dir frontend exec playwright install --with-deps chromium
-          else
-            pnpm --dir frontend exec playwright install chromium
-          fi
-
       - name: Run browser smoke
-        run: pnpm --dir frontend test:browser
+        run: bash scripts/run-browser-smoke-container.sh
 
       - name: Upload browser evidence
         if: always()

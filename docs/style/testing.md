@@ -174,10 +174,8 @@ Forks stay hosted. The shared selector in `scripts/select-ci-runner.sh` fails
 closed when ordinary self-hosted work has no configured label. Dynamic jobs
 retain independent same-repository guards because a fork controls its checkout;
 bootstrap and summary runner expressions enforce that boundary before checkout.
-Every existing gate still runs. Self-hosted browser jobs install Chromium into
-the runner cache and use preinstalled system libraries; only hosted jobs run
-Playwright's system-package installation. CodeQL retains its separate hosted
-workflow.
+Every existing gate still runs. Browser isolation is described in
+[Browser smoke](#browser-smoke). CodeQL retains its separate hosted workflow.
 Existing PR-number concurrency cancels superseded PR runs; candidate creation
 and reset pushes retain the SHA-isolated concurrency documented in
 [merge-train policy](../merge-train-policy.md#candidate-construction).
@@ -283,13 +281,17 @@ narrow screenshot set before passing. These screenshots are review evidence
 rather than pixel-diff baselines, so intentional visual changes do not require
 snapshot churn.
 
-The browser job runs Vite and Chromium together inside an Actions job container
+The browser job runs Vite and Chromium together inside a per-job Docker container
 on both hosted and self-hosted runners. Its private network namespace prevents
 sibling jobs' Docker bridge lifecycle from reaching Chromium's network-change
 observer; OS-assigned Vite ports still isolate overlapping suite processes.
 The digest-pinned Playwright image supplies browser system libraries. Browser
-installation and every smoke step run inside the container, with private shared
-memory, while Actions owns the job network and container teardown. Match the
+execution runs inside the container, with private shared memory and the job's
+actual UID/GID so artifacts remain writable by subsequent runner jobs. The host
+installs frontend dependencies; the container uses the job's Node executable
+and the image's Chromium. The wrapper verifies that its namespace differs from
+the host and removes only its captured container ID, including after failures.
+The workflow owns the image pin. Match the
 image's Playwright version to the frontend dependency when updating it. Preserve
 the same suite, diagnostics, timeouts and zero retries when qualifying changes
 under normal sibling CI load.
