@@ -3,6 +3,7 @@ from pathlib import Path
 from dataclasses import replace
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -11,7 +12,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import PostgresRecordStore, ProductProfileCompareWriteResult
 from tests.http_app_test_support import (
     _browser_mutation_headers,
     _github_human_identity,
@@ -74,6 +75,15 @@ class SignedInProductSetupTests(unittest.IsolatedAsyncioTestCase):
             session = manager.issue(_github_human_identity())
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
+                    "terminal_agents": [
+                        {
+                            "subjects": ["read-only-agent"],
+                            "token_labels": ["context-read"],
+                            "products": ["*"],
+                            "contexts": ["*"],
+                            "actions": [],
+                        }
+                    ],
                     "github_humans": [
                         {
                             "github_ids": [123],
@@ -82,7 +92,7 @@ class SignedInProductSetupTests(unittest.IsolatedAsyncioTestCase):
                             "contexts": ["launchplane"],
                             "actions": ["authz_policy_grant.write"],
                         }
-                    ]
+                    ],
                 }
             )
             app = create_launchplane_fastapi_app(
@@ -90,7 +100,13 @@ class SignedInProductSetupTests(unittest.IsolatedAsyncioTestCase):
                 authz_policy=policy,
                 record_store_factory=lambda: store,
                 human_session_manager=manager,
-                bearer_identity_config=_local_operator_bearer_config(),
+                bearer_identity_config=_local_operator_bearer_config().model_copy(
+                    update={
+                        "terminal_agent_token": "read-token",
+                        "terminal_agent_subject": "read-only-agent",
+                        "terminal_agent_token_label": "context-read",
+                    }
+                ),
             )
             environment = {
                 "schema_version": 1,
@@ -126,6 +142,22 @@ class SignedInProductSetupTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
             self.assertEqual(apply.status_code, 202, apply.json())
+            replay = await request(
+                app,
+                "POST",
+                route,
+                payload={
+                    **environment,
+                    "mode": "apply",
+                    "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
+                },
+                headers={
+                    **_browser_mutation_headers(manager, session),
+                    "Idempotency-Key": "setup-environment",
+                },
+            )
+            self.assertEqual(replay.status_code, 202, replay.json())
+            self.assertTrue(replay.json()["replayed"])
             with_lane = store.read_product_profile_record(original.product)
             self.assertEqual(with_lane.lanes[0], original.lanes[0])
             self.assertEqual(with_lane.release_on_acceptance, original.release_on_acceptance)
@@ -192,6 +224,7 @@ class SignedInProductSetupTests(unittest.IsolatedAsyncioTestCase):
                 for headers in (
                     {"Cookie": manager.session_cookie_header(session)},
                     {"Authorization": "Bearer local-operator-token"},
+                    {"Authorization": "Bearer read-token"},
                 ):
                     denied = await request(app, "POST", route, payload=payload, headers=headers)
                     self.assertEqual(denied.status_code, 403, denied.json())
@@ -207,4 +240,43 @@ class SignedInProductSetupTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(denied.status_code, 403, denied.json())
                 self.assertEqual(store.read_product_profile_record(original.product), stored)
+            concurrent = stored.model_copy(update={"display_name": "Concurrent profile edit"})
+            compare = store.compare_and_write_product_profile_record
+
+            def concurrent_write(
+                *,
+                expected_record: LaunchplaneProductProfileRecord,
+                replacement_record: LaunchplaneProductProfileRecord,
+            ) -> ProductProfileCompareWriteResult:
+                store.write_product_profile_record(concurrent)
+                return compare(
+                    expected_record=expected_record, replacement_record=replacement_record
+                )
+
+            with patch.object(
+                store, "compare_and_write_product_profile_record", side_effect=concurrent_write
+            ):
+                refused = await request(
+                    app,
+                    "POST",
+                    "/v1/product-profiles/expected-config/apply",
+                    payload={
+                        **declarations,
+                        "mode": "apply",
+                        "managed_secret_bindings": [
+                            {
+                                "binding_key": "ANOTHER_TOKEN",
+                                "integration": "runtime_environment",
+                                "context": target.context,
+                                "instance": target.instance,
+                            }
+                        ],
+                    },
+                    headers={
+                        **_browser_mutation_headers(manager, session),
+                        "Idempotency-Key": "raced-declaration",
+                    },
+                )
+            self.assertEqual(refused.status_code, 409, refused.json())
+            self.assertEqual(store.read_product_profile_record(original.product), concurrent)
             store.close()

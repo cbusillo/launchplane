@@ -12412,7 +12412,7 @@ def create_launchplane_fastapi_app(
 
     async def apply_product_expected_config(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -12540,7 +12540,20 @@ def create_launchplane_fastapi_app(
                     code="database_storage_required",
                     message=str(error),
                 ) from error
-            profile_write_store.write_product_profile_record(merged_profile)
+            if isinstance(profile_write_store, PostgresRecordStore):
+                write_result = profile_write_store.compare_and_write_product_profile_record(
+                    expected_record=profile,
+                    replacement_record=merged_profile,
+                )
+                if write_result.status != "written":
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="stale",
+                        message="Product profile changed while declaring configuration. Review again.",
+                    )
+            else:
+                profile_write_store.write_product_profile_record(merged_profile)
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={"product_profile": expected_config_request.product},
@@ -14525,7 +14538,7 @@ def create_launchplane_fastapi_app(
 
     async def apply_product_stable_lane_repair(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:

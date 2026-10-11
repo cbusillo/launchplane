@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { applyProductExpectedConfig, applyProductStableLaneRepair, readProductProfile } from "./api";
+import { applyProductExpectedConfig, applyProductStableLaneRepair, readProductProfile, LaunchplaneApiError } from "./api";
 import { recoverBrowserOperationState } from "./browser-operation";
 import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
 import { InlineFormError, isOperationBusy, OperationNotice } from "./ProductConfigForms";
@@ -9,6 +9,8 @@ import { declarationSetupRequest, environmentSetupRequest, reviewedSetupApply, v
 import type { AcceptedEvidenceResponse, LaunchplaneProductProfileRecord } from "./generated/openapi.ts";
 
 export function ProductSetupPanel({ product, onApplied }: { product: string; onApplied: () => void }) {
+  const [environmentOpen, setEnvironmentOpen] = useState(() => recoverBrowserOperationState(`${product}:setup:environment:apply`).requiresIdempotencyContinuity);
+  const [declarationsOpen, setDeclarationsOpen] = useState(() => recoverBrowserOperationState(`${product}:setup:declarations:apply`).requiresIdempotencyContinuity);
   const [profile, setProfile] = useState<LaunchplaneProductProfileRecord | null>(null);
   const [error, setError] = useState("");
   const [refresh, setRefresh] = useState(0);
@@ -30,6 +32,7 @@ export function ProductSetupPanel({ product, onApplied }: { product: string; onA
     return () => controller.abort();
   }, [product, refresh]);
   function applied(lane: string) {
+    setDeclarationsOpen(true);
     setSavedLane(lane);
     setSelectedLane(lane);
     setRefresh(value => value + 1);
@@ -45,7 +48,7 @@ export function ProductSetupPanel({ product, onApplied }: { product: string; onA
     {error ? <InlineFormError message={error} /> : null}
     {!profile && !error ? <p role="status">Loading product setup…</p> : null}
     {profile ? <>
-      <details>
+      <details open={environmentOpen} onToggle={event => setEnvironmentOpen(event.currentTarget.open)}>
         <summary>Add environment</summary>
         <p>The target records and HTTPS origin must already be prepared by engineering. The service verifies them before adding the environment.</p>
         <SetupChange key={`${product}:environment`} product={product} kind="environment" makeRequest={() => environmentSetupRequest(product, context, instance, baseUrl, environmentReason)} onApplied={request => { if ("instance" in request) applied(request.instance); }}>
@@ -55,7 +58,7 @@ export function ProductSetupPanel({ product, onApplied }: { product: string; onA
           <label>Reason<input value={environmentReason} onChange={event => setEnvironmentReason(event.target.value)} required /></label>
         </SetupChange>
       </details>
-      <details open={Boolean(lane)}>
+      <details open={declarationsOpen} onToggle={event => setDeclarationsOpen(event.currentTarget.open)}>
         <summary>Declare managed-secret fields</summary>
         <p>Declarations contain binding names and scope only. Enter values later on the environment's Managed secrets screen.</p>
         {!lanes.length ? <p role="status">Add a non-production environment before declaring its fields.</p> : <SetupChange key={`${product}:declarations`} product={product} kind="declarations" makeRequest={() => { if (!lane) throw new Error("Select a non-production environment."); return declarationSetupRequest(product, lane, bindings, declarationReason); }} onApplied={request => { const requirement = "managed_secret_bindings" in request ? request.managed_secret_bindings?.[0] : null; if (requirement?.instance) applied(requirement.instance); }}>
@@ -94,15 +97,27 @@ function SetupChange({ product, kind, makeRequest, onApplied, children }: { prod
         : null;
     if (!response) throw new Error("The saved setup request does not match this operation.");
     if (request.mode === "apply") {
-      const readback = await readProductProfile(product, options.signal);
-      verifySetupReadback(kind, request, readback.profile);
+      try {
+        const readback = await readProductProfile(product, options.signal);
+        verifySetupReadback(kind, request, readback.profile);
+      } catch (cause) {
+        // The POST was accepted; a GET refusal cannot prove the write failed.
+        throw new Error(`Apply accepted (${response.trace_id}); read-back could not verify it: ${cause instanceof Error ? cause.message : "unavailable"}`);
+      }
     }
     return response;
   };
   const planOperation = useBrowserOperationController({ scope: `${scope}:plan`, execute, failureCertainty: productConfigFailureCertainty, failureFor: productConfigOperationFailure, readOnly: true });
-  const applyOperation = useBrowserOperationController({ scope, execute, failureCertainty: productConfigFailureCertainty, failureFor: productConfigOperationFailure });
+  const applyOperation = useBrowserOperationController({ scope, execute, failureCertainty: (cause, dispatched) => {
+    // This route replays its atomic receipt before comparing the plan, so stale
+    // proves this exact request did not commit. A fresh auth denial cannot.
+    if (kind === "environment" && cause instanceof LaunchplaneApiError && cause.statusCode === 409 && cause.code === "stale") return "settled";
+    return productConfigFailureCertainty(cause, dispatched);
+  }, failureFor: productConfigOperationFailure });
   const busy = isOperationBusy(planOperation.state) || isOperationBusy(applyOperation.state);
   const uncertain = applyOperation.state.requiresIdempotencyContinuity;
+  let reviewMatchesDraft = false;
+  try { reviewMatchesDraft = Boolean(reviewed && JSON.stringify(makeRequest()) === JSON.stringify(reviewed.request)); } catch { /* An incomplete edited draft invalidates review. */ }
   async function plan() {
     setError(""); setReviewed(null); setConfirmed(false);
     try {
@@ -137,7 +152,7 @@ function SetupChange({ product, kind, makeRequest, onApplied, children }: { prod
     <OperationNotice state={planOperation.state} label="Setup dry-run" />
     <OperationNotice state={applyOperation.state} label="Setup apply" />
     <button className="button" type="button" disabled={busy || uncertain} onClick={() => void plan()}>Run dry-run</button>
-    {reviewed ? <div className="setup-review"><h3>Exact service diff</h3>{kind === "declarations" ? <div className="setup-diff-table"><table><thead><tr><th>Change</th><th>Binding key</th><th>Integration</th><th>Context / instance</th></tr></thead><tbody>{setupDeclarationDiff(reviewed.response).map(row => <tr key={`${row.binding_key}:${row.integration}`}><td>{row.change}</td><td>{row.binding_key}</td><td>{row.integration}</td><td>{row.context} / {row.instance}</td></tr>)}</tbody></table></div> : <p>Add <strong>{"instance" in reviewed.request ? reviewed.request.instance : ""}</strong> at {"base_url" in reviewed.request ? reviewed.request.base_url : ""}. The service result lists the existing environments it preserves.</p>}<details><summary>Full service evidence</summary><pre>{JSON.stringify(reviewed.response.result, null, 2)}</pre></details><p>Trace: <code>{reviewed.response.trace_id}</code></p><label className="setup-confirmation"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />I reviewed this environment and the exact metadata changes.</label><button className="button button-primary" type="button" disabled={!confirmed || busy} onClick={() => void apply()}>Apply reviewed change</button></div> : null}
+    {reviewed && reviewMatchesDraft ? <div className="setup-review"><h3>Exact service diff</h3>{kind === "declarations" ? <div className="setup-diff-table"><table><thead><tr><th>Change</th><th>Binding key</th><th>Integration</th><th>Context / instance</th></tr></thead><tbody>{setupDeclarationDiff(reviewed.response).map(row => <tr key={`${row.binding_key}:${row.integration}`}><td>{row.change}</td><td>{row.binding_key}</td><td>{row.integration}</td><td>{row.context} / {row.instance}</td></tr>)}</tbody></table></div> : <p>Add <strong>{"instance" in reviewed.request ? reviewed.request.instance : ""}</strong> at {"base_url" in reviewed.request ? reviewed.request.base_url : ""}. The service result lists the existing environments it preserves.</p>}<details><summary>Full service evidence</summary><pre>{JSON.stringify(reviewed.response.result, null, 2)}</pre></details><p>Trace: <code>{reviewed.response.trace_id}</code></p><label className="setup-confirmation"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />I reviewed this environment and the exact metadata changes.</label><button className="button button-primary" type="button" disabled={!confirmed || busy} onClick={() => void apply()}>Apply reviewed change</button></div> : null}
     {uncertain ? <div role="alert"><p>The apply outcome is uncertain. Keep this request and its original operation key until it settles.</p>{pending ? <><pre>{JSON.stringify(pending, null, 2)}</pre><button className="button" type="button" disabled={busy} onClick={() => void apply(true)}>Retry original apply</button></> : <p>The original request is unavailable. Ask engineering to reconcile the operation before continuing.</p>}</div> : null}
   </div>;
 }
