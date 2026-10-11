@@ -80,9 +80,19 @@ export function recoverBrowserOperationState(
   if (!storage) {
     return createBrowserOperationState();
   }
-  const key = browserOperationStorageKey(scope);
+  let key = browserOperationStorageKey(scope);
   try {
-    const value = storage.getItem(key);
+    let value = storage.getItem(key);
+    if (value) {
+      const stored = JSON.parse(value) as Partial<StoredBrowserOperationState>;
+      if (stored.scope !== scope) {
+        storage.removeItem(key);
+        return createBrowserOperationState();
+      }
+    } else {
+      key = legacyBrowserOperationStorageKey(scope);
+      value = storage.getItem(key);
+    }
     if (!value) {
       return createBrowserOperationState();
     }
@@ -138,18 +148,54 @@ export function persistBrowserOperationState(
       state.identity &&
       (state.phase === "submitting" || state.requiresIdempotencyContinuity)
     ) {
-      storage.setItem(key, JSON.stringify(state));
+      const stored: StoredBrowserOperationState = { ...state, scope };
+      storage.setItem(key, JSON.stringify(stored));
     } else {
       storage.removeItem(key);
     }
+    removeCarriedLegacyRecord(scope, state, storage);
   } catch {
     return;
   }
 }
 
+// Recovery checks the stored scope, so distinct scopes never share a record.
+interface StoredBrowserOperationState extends BrowserOperationState {
+  scope: string;
+}
+
 function browserOperationStorageKey(scope: string): string {
+  return `launchplane.browser-operation.v2.${encodeURIComponent(scope)}`;
+}
+
+// Records saved before scopes were exact live under this lossy key, which punctuation-
+// distinct scopes share, and hold no scope. They are still recovered so an uncertain
+// operation from before the upgrade keeps its guard against a duplicate apply.
+function legacyBrowserOperationStorageKey(scope: string): string {
   const normalizedScope = scope.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
   return `launchplane.browser-operation.${normalizedScope || "operation"}`;
+}
+
+// Once this scope carries or settles the pre-upgrade operation, its old copy is removed.
+function removeCarriedLegacyRecord(
+  scope: string,
+  state: BrowserOperationState,
+  storage: BrowserOperationStorage,
+): void {
+  const key = legacyBrowserOperationStorageKey(scope);
+  const value = storage.getItem(key);
+  if (!value || !state.identity) {
+    return;
+  }
+  try {
+    const legacy = JSON.parse(value) as Partial<BrowserOperationState>;
+    if (legacy.identity?.idempotencyKey !== state.identity.idempotencyKey) {
+      return;
+    }
+  } catch {
+    return;
+  }
+  storage.removeItem(key);
 }
 
 export async function browserOperationIdentity(
