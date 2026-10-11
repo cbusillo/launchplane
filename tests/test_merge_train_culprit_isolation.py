@@ -260,7 +260,9 @@ class CulpritIsolationTests(unittest.TestCase):
         feedback = build_feedback_payloads(response={"result": train.stopped})
         self.assertEqual({payload["pull_request_number"] for payload in feedback}, {1, 2, 3, 4})
         self.assertTrue(all(payload["event"] == "blocked" for payload in feedback))
-        self.assertTrue(all("base branch main" in str(payload["message"]) for payload in feedback))
+        self.assertTrue(
+            all("base branch main" in cast(str, payload["message"]) for payload in feedback)
+        )
 
     def test_lone_member_is_not_blamed_until_base_checks_pass(self) -> None:
         from control_plane.merge_train_github import MergeTrainGitHubError
@@ -278,9 +280,9 @@ class CulpritIsolationTests(unittest.TestCase):
                 self.assertEqual(
                     feedback[0]["event"], "waiting" if status == "pending" else "blocked"
                 )
-                self.assertIn("base branch main", str(feedback[0]["message"]))
+                self.assertIn("base branch main", cast(str, feedback[0]["message"]))
                 # Reobserve a rerun passing on the same base, without changing the queue.
-                train.run(culprits={1}, base_status="pass")
+                train.run(culprits={1})
                 self.assertEqual(train.blocked, [1])
 
     def test_single_culprit_is_blocked_and_the_rest_land(self) -> None:

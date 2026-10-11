@@ -976,14 +976,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             "statuses": [
                 item
                 for item in cast(list[dict[str, object]], statuses["statuses"])
-                if str(item.get("context") or "").casefold() in implicated
+                if cast(str, item["context"]).casefold() in implicated
             ]
         }
         matching_runs: dict[str, object] = {
             "check_runs": [
                 item
                 for item in cast(list[dict[str, object]], check_runs["check_runs"])
-                if str(item.get("name") or "").casefold() in implicated
+                if cast(str, item["name"]).casefold() in implicated
             ]
         }
         status = _combine_check_statuses(
