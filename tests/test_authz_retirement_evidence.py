@@ -197,6 +197,21 @@ class RetirementEvidenceTests(unittest.TestCase):
                 else:
                     self.assertEqual(observations, ())
         self.assertNotIn("private-subject", evidence.model_dump_json())
+        for malformed_caller in ([], {}, 1, True):
+            with self.subTest(caller=malformed_caller):
+                current.audit = {**audit, "operator": {"type": malformed_caller}}
+                result = build_retirement_evidence(
+                    active=current,
+                    records=(current, previous),
+                    request=_request(current),
+                    trace_id="trace",
+                )
+                self.assertEqual(result.managed_sets[0].observations[0].caller_type, "unknown")
+        current.audit = {**audit, "previous_revision": True}
+        result = build_retirement_evidence(
+            active=current, records=(current, previous), request=_request(current), trace_id="trace"
+        )
+        self.assertEqual(result.managed_sets[0].observations, ())
 
     def test_incomplete_ambiguous_and_truncated_history_stays_explicit(self) -> None:
         current = _record(policy=_workflow_policy(managed=True), revision=4)

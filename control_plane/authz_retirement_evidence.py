@@ -61,9 +61,11 @@ def _maintenance(
         or audit.get("managed_set_id") != set_id
         or audit.get("source") != current.source
         or audit.get("previous_policy_record_id") != previous.record_id
+        or type(audit.get("previous_revision")) is not int
         or audit.get("previous_revision") != previous.revision
         or audit.get("previous_policy_sha256") != previous.policy_sha256
         or audit.get("new_policy_record_id") != current.record_id
+        or type(audit.get("new_revision")) is not int
         or audit.get("new_revision") != current.revision
         or audit.get("new_policy_sha256") != current.policy_sha256
     ):
@@ -78,7 +80,8 @@ def _maintenance(
         "revision": current.revision,
         "policy_sha256": current.policy_sha256,
         "caller_type": caller
-        if caller
+        if isinstance(caller, str)
+        and caller
         in {"github_actions", "github_human", "terminal_agent", "local_operator", "local_admin"}
         else "unknown",
         "introduced": not before and bool(after),
