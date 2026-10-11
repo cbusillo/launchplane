@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import unittest
 from datetime import (
     datetime,
@@ -1230,9 +1229,11 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                     root,
                 )
                 self.assertNotEqual(result.returncode, 0)
-                rendered_json = re.search(r"```json\n(.*?)\n```", summary.read_text(), re.DOTALL)
-                assert rendered_json is not None
-                self.assertEqual(json.loads(rendered_json.group(1))["records"], repair_inputs)
+                summary_text = summary.read_text()
+                rendered_response, _ = json.JSONDecoder().raw_decode(
+                    summary_text, summary_text.index("{")
+                )
+                self.assertEqual(rendered_response["records"], repair_inputs)
                 result = workflow._run_step(
                     "deploy",
                     "Resolve deploy inputs",
@@ -1311,6 +1312,15 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                         app, normal, idempotency_key="next-normal-deploy"
                     )
                     self.assertEqual(response.status_code, 202, response.text)
+                    normal_deploy["oauth_env"]["LAUNCHPLANE_DEPLOYMENT_MARKER"] = "later-deploy"
+                    response = await _post_launchplane_self_deploy(
+                        app, normal, idempotency_key="later-deploy"
+                    )
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertNotEqual(
+                        response.json()["records"]["self_deploy_idempotency_key"],
+                        repair_inputs["self_deploy_idempotency_key"],
+                    )
 
     async def test_uncertain_self_deploy_requires_bound_repair_and_dispatches_repair_once(
         self,
