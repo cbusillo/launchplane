@@ -155,7 +155,6 @@ class SiteRuntimeEnvironment:
     secret_keys: frozenset[str]
     retired_keys: frozenset[str] = frozenset()
     site_keys: frozenset[str] = frozenset()
-    withheld_launchplane_keys: tuple[str, ...] = ()
 
 
 _SITE_SHARED_AND_LANE_SECRET_SCOPES: frozenset[SecretScope] = frozenset(
@@ -185,11 +184,9 @@ def resolve_site_runtime_environment(
 
     Every path that writes a site's app runtime from Launchplane records uses this
     resolver, so the lane's ``retired_provider_keys`` are dropped and the
-    platform-credential policy applies the same way: named platform-credential keys
-    from a context-scope record or secret (Launchplane's own, such as the preview
-    PR-comment token) are withheld; any other platform credential, or a GitHub token
-    value under any key, refuses the render and names the key and its source.
-    ``site_keys`` holds the key names before retirement and withholding.
+    platform-credential policy applies the same way: a platform credential, or a
+    GitHub token value under any key, refuses the render and names the key and its
+    source. ``site_keys`` holds the key names before retirement.
     """
     definition = load_runtime_environment_definition(
         control_plane_root=control_plane_root,
@@ -224,7 +221,6 @@ def resolve_site_runtime_environment(
         context_name=context_name, instance_name=instance_name, database_url=database_url
     )
     values = {key: value for key, value in values.items() if key not in retired_keys}
-    withheld: tuple[str, ...] = ()
     if runtime_platform_credentials.find_platform_credentials(values):
         try:
             sources = _runtime_value_sources(
@@ -236,10 +232,9 @@ def resolve_site_runtime_environment(
                 secret_scopes=site_secret_scopes(instance_name),
             )
         except click.ClickException:
-            # Without attribution nothing can be withheld as Launchplane's own, so
-            # every finding refuses.
+            # The refusal still names each key, without its source.
             sources = {}
-        values, withheld = _apply_platform_credential_policy(
+        _refuse_platform_credentials(
             values=values, sources=sources, target=f"{context_name}/{instance_name}"
         )
     return SiteRuntimeEnvironment(
@@ -247,15 +242,13 @@ def resolve_site_runtime_environment(
         secret_keys=frozenset(key for key in secret_values if key in values),
         retired_keys=retired_keys,
         site_keys=site_keys,
-        withheld_launchplane_keys=withheld,
     )
 
 
 def site_application_keys(site_keys: frozenset[str] | set[str]) -> set[str]:
     """Site keys that count as application settings for retirement checks.
 
-    Platform-credential names are never application settings: the app either
-    never receives them (withheld Launchplane credentials) or the render refuses.
+    Platform-credential names are never application settings: the render refuses them.
     """
 
     return set(site_keys) - runtime_platform_credentials.PLATFORM_CREDENTIAL_KEYS
@@ -264,7 +257,6 @@ def site_application_keys(site_keys: frozenset[str] | set[str]) -> set[str]:
 @dataclass(frozen=True)
 class _RuntimeValueSource:
     label: str
-    launchplane_scope: bool
 
 
 def resolve_app_values_from_definition(
@@ -278,7 +270,7 @@ def resolve_app_values_from_definition(
     """Record-and-target app values for a lane, under the same credential policy.
 
     For store-backed drivers that resolve records without the managed-secret
-    overlay. Same withholding and refusal as ``resolve_site_runtime_environment``.
+    overlay. Same refusal as ``resolve_site_runtime_environment``.
     """
 
     layers = _record_layers(
@@ -294,10 +286,10 @@ def resolve_app_values_from_definition(
             values[key] = str(value)
             sources[key] = source
     values = {key: value for key, value in values.items() if key not in retired_keys}
-    app_values, _withheld_keys = _apply_platform_credential_policy(
+    _refuse_platform_credentials(
         values=values, sources=sources, target=f"{context_name}/{instance_name}"
     )
-    return app_values
+    return values
 
 
 def merge_provider_environment(
@@ -313,35 +305,25 @@ def merge_provider_environment(
     return merged
 
 
-def _apply_platform_credential_policy(
+def _refuse_platform_credentials(
     *, values: dict[str, str], sources: dict[str, _RuntimeValueSource], target: str
-) -> tuple[dict[str, str], tuple[str, ...]]:
-    withheld_keys: list[str] = []
-    refused: list[runtime_platform_credentials.PlatformCredentialFinding] = []
-    for finding in runtime_platform_credentials.find_platform_credentials(values):
-        source = sources.get(finding.key)
-        if (
-            finding.reason == "platform_credential_key"
-            and source is not None
-            and source.launchplane_scope
-        ):
-            withheld_keys.append(finding.key)
-            continue
-        refused.append(
-            runtime_platform_credentials.PlatformCredentialFinding(
-                key=finding.key,
-                reason=finding.reason,
-                source=source.label if source is not None else "an unattributed runtime value",
-            )
+) -> None:
+    findings = tuple(
+        runtime_platform_credentials.PlatformCredentialFinding(
+            key=finding.key,
+            reason=finding.reason,
+            source=(
+                sources[finding.key].label
+                if finding.key in sources
+                else "an unattributed runtime value"
+            ),
         )
-    if refused:
-        raise runtime_platform_credentials.PlatformCredentialRefusedError(
-            target=target, findings=tuple(refused)
-        )
-    return (
-        {key: value for key, value in values.items() if key not in withheld_keys},
-        tuple(withheld_keys),
+        for finding in runtime_platform_credentials.find_platform_credentials(values)
     )
+    if findings:
+        raise runtime_platform_credentials.PlatformCredentialRefusedError(
+            target=target, findings=findings
+        )
 
 
 def retired_provider_keys_for_lane(
@@ -379,7 +361,7 @@ def _record_layers(
         layers.append(
             (
                 definition.shared_env,
-                _RuntimeValueSource("the global runtime-environment record", True),
+                _RuntimeValueSource("the global runtime-environment record"),
             )
         )
     context_definition = definition.contexts.get(context_name)
@@ -387,7 +369,7 @@ def _record_layers(
         layers.append(
             (
                 context_definition.shared_env,
-                _RuntimeValueSource(f"the {context_name} context runtime-environment record", True),
+                _RuntimeValueSource(f"the {context_name} context runtime-environment record"),
             )
         )
         instance_definition = context_definition.instances.get(instance_name)
@@ -396,8 +378,7 @@ def _record_layers(
                 (
                     instance_definition.env,
                     _RuntimeValueSource(
-                        f"the {context_name}/{instance_name} instance runtime-environment record",
-                        False,
+                        f"the {context_name}/{instance_name} instance runtime-environment record"
                     ),
                 )
             )
@@ -405,7 +386,7 @@ def _record_layers(
         (
             target_env,
             _RuntimeValueSource(
-                f"the {context_name}/{instance_name} tracked Dokploy target record", False
+                f"the {context_name}/{instance_name} tracked Dokploy target record"
             ),
         )
     )
@@ -468,8 +449,7 @@ def _runtime_value_sources(
     }
     for key, (_value, scope) in scoped_secrets.items():
         sources[key] = _RuntimeValueSource(
-            f"{scope_labels[scope]} runtime-environment managed secret",
-            scope in {"global", "context"},
+            f"{scope_labels[scope]} runtime-environment managed secret"
         )
     return sources
 

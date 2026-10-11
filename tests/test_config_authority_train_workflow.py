@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -22,17 +23,41 @@ def _git(root: Path, *args: str) -> str:
 
 
 class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
+    _cache_root: Path
+    _repositories: dict[tuple[bool, bool, str, bool], tuple[Path, str, str, str]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Scenarios share repository histories; each one gets its own copy below.
+        directory = TemporaryDirectory()
+        cls.addClassCleanup(directory.cleanup)
+        cls._cache_root = Path(directory.name)
+        cls._repositories = {}
+
+    @classmethod
+    def _repository_history(
+        cls, *, batch: bool, rejected: bool, target_movement: str, reconstructed: bool
+    ) -> tuple[Path, str, str, str]:
+        key = (batch, rejected, target_movement, reconstructed)
+        if key not in cls._repositories:
+            root = cls._cache_root / str(len(cls._repositories))
+            root.mkdir()
+            cls._repositories[key] = (
+                root,
+                *cls._build_repository_history(
+                    root,
+                    batch=batch,
+                    rejected=rejected,
+                    target_movement=target_movement,
+                    reconstructed=reconstructed,
+                ),
+            )
+        return cls._repositories[key]
+
     @staticmethod
-    def _exercise(
-        root: Path,
-        *,
-        batch: bool = False,
-        rejected: bool = False,
-        target_movement: str = "",
-        repository: str = "example/product",
-        reconstructed: bool = False,
-        overrides: dict[str, str] | None = None,
-    ) -> tuple[subprocess.CompletedProcess[str], Path, str, str]:
+    def _build_repository_history(
+        root: Path, *, batch: bool, rejected: bool, target_movement: str, reconstructed: bool
+    ) -> tuple[str, str, str]:
         product = root / "product-repo"
         product.mkdir()
         _git(product, "init", "-b", "trunk")
@@ -98,12 +123,34 @@ class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
                 _git(product, "add", ".")
                 _git(product, "commit", "-m", "target advanced")
             _git(product, "checkout", "candidate")
-        remote = root / "origin.git"
         subprocess.run(
-            ["git", "clone", "--bare", str(product), str(remote)],
+            ["git", "clone", "--bare", str(product), str(root / "origin.git")],
             check=True,
             capture_output=True,
         )
+        return base, head, before
+
+    def _exercise(
+        self,
+        root: Path,
+        *,
+        batch: bool = False,
+        rejected: bool = False,
+        target_movement: str = "",
+        repository: str = "example/product",
+        reconstructed: bool = False,
+        overrides: dict[str, str] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], Path, str, str]:
+        history, base, head, before = self._repository_history(
+            batch=batch,
+            rejected=rejected,
+            target_movement=target_movement,
+            reconstructed=reconstructed,
+        )
+        product = root / "product-repo"
+        remote = root / "origin.git"
+        shutil.copytree(history / "product-repo", product, symlinks=True)
+        shutil.copytree(history / "origin.git", remote, symlinks=True)
         _git(product, "remote", "add", "origin", str(remote))
         if target_movement == "shallow":
             (product / ".git/shallow").write_text(head + "\n")

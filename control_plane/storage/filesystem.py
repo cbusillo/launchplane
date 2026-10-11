@@ -175,7 +175,10 @@ from control_plane.contracts.product_monitoring_intent_migration import (
 from control_plane.contracts.product_profile_lifecycle_migration import (
     migrate_product_profile_lifecycle_payload,
 )
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductProfileChangedError,
+)
 from control_plane.contracts.production_backup_authority import (
     ProductionBackupPolicyRecord,
     ProductionBackupTargetRecord,
@@ -4760,7 +4763,9 @@ class FilesystemRecordStore:
             record_path = self._record_path("launchplane_product_profiles", expected_record.product)
             current_record = self._read_product_profile_record_path(record_path)
             if current_record != expected_record:
-                raise ValueError("Product profile changed before compare-and-write.")
+                raise ProductProfileChangedError(
+                    "Product profile changed before compare-and-write."
+                )
             self._write_model_locked(
                 "launchplane_product_profiles",
                 replacement_record.product,

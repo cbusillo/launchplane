@@ -472,8 +472,8 @@ def require_declared_runtime_keys_present(
 ) -> None:
     """Fail closed when a declared runtime key would be missing from what the app gets."""
 
-    # A declared platform-credential name can never reach the app (it is withheld
-    # or refused), so it is not a missing application key.
+    # A declared platform-credential name can never reach the app (the render
+    # refuses it), so it is not a missing application key.
     missing_keys = sorted(
         declared_keys - available_keys - runtime_platform_credentials.PLATFORM_CREDENTIAL_KEYS
     )
