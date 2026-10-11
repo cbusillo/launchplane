@@ -1,3 +1,8 @@
+from control_plane.contracts.updater_proposal import (
+    UPDATER_PROPOSAL_ROUTE,
+    UPDATER_PROPOSAL_MAX_BODY_BYTES,
+)
+from control_plane.http_routes.updater_proposal import register_updater_proposal_route
 import asyncio
 import hashlib
 import json
@@ -1045,6 +1050,7 @@ _PRODUCT_OWNER_SETTING_ROUTE = "/v1/product-profiles/{product}/owner"
 _PRODUCT_PRODUCTION_USE_SETTING_ROUTE = "/v1/product-profiles/{product}/production-use"
 _PRODUCT_IMAGE_REPOSITORY_SETTING_ROUTE = "/v1/product-profiles/{product}/image-repository"
 _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
+    UPDATER_PROPOSAL_ROUTE: ("Updater proposal", UPDATER_PROPOSAL_MAX_BODY_BYTES, True, False),
     **{
         route: ("Evidence ingress", _EVIDENCE_INGRESS_MAX_BODY_BYTES, True, False)
         for route in _EVIDENCE_INGRESS_ROUTES
@@ -5118,6 +5124,15 @@ def create_launchplane_fastapi_app(
         if not isinstance(oidc_identity, GitHubActionsIdentity):
             raise _authentication_required_error("Mutation routes require GitHub Actions OIDC.")
         return oidc_identity
+
+    register_updater_proposal_route(
+        app,
+        read_write_identity=read_write_identity,
+        policy_reader=lambda: resolved_authz_policy_runtime.policy,
+        control_plane_root=resolved_control_plane_root,
+        http_error=_launchplane_http_error,
+        next_trace_id=next_trace_id,
+    )
 
     read_route_dependencies = ReadRouteDependencies(
         read_identity=read_identity,

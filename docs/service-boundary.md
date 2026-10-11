@@ -4401,3 +4401,51 @@ Responses and stored records follow the redaction contract in
 
 **Preserved history:** the Phase 1 planning-only API description predates the
 supervised Phase 2 worker and is not current operating guidance.
+
+## Updater source proposals
+
+`POST /v1/source-control/updater-proposals` lets an approved updater submit a
+new source change through the existing `launchplane-request` action. This is
+source maintenance, not a product build or deployment handoff. Product artifacts
+still follow the event-driven build contract.
+
+The request has `repository`, `base_sha`, `title`, optional `body`, and `files`.
+Each file has a relative `path`, UTF-8 `content` (or `null` to delete), and optional
+`mode` (`100644` or `100755`). It accepts at most 32 files, 256 KiB of old-plus-new changed
+content (including deletions), and a 512 KiB JSON body. It rejects workflow-file edits, unsafe paths,
+duplicate/overlapping paths, and caller-selected branches, labels, PR numbers,
+or merge settings. The base must match both the verified OIDC `sha` and the
+current default-branch head. A stale updater reruns against the new base.
+
+The allow-list is part of the active DB-backed `LaunchplaneAuthzPolicyRecord`,
+using existing `github_actions` rules and the supported managed-rule-set
+reconcile dry-run/apply flow. Each updater needs an exact repository name,
+immutable `repository_id` and `repository_owner_id`, one exact `workflow_refs`
+entry, one exact `refs` entry, and the explicit action `updater_proposal.create`
+for product/context `launchplane`. For example, an updater workflow ref is
+`example-org/example-repo/.github/workflows/update.yml@refs/heads/main` with
+ref `refs/heads/main`; the route also checks GitHub's current default branch.
+Broad wildcard grants cannot enable this capability. Only `schedule`, `push`,
+and `workflow_dispatch` callers qualify; PR and PR-target runs are refused.
+The OIDC token must have a verified signature, issuer, audience and unexpired
+expiry. An empty allow-list refuses every caller. Changing the live policy is
+an access grant and retains the Director's existing stop boundary.
+
+The service resolves its existing delivery App identity and managed private-key
+binding. It mints a fresh token for exactly the verified repository with only
+contents and pull-request write (plus GitHub's implicit metadata read), and
+revokes it on success or failure. No token or App key is returned to the caller.
+It creates Git objects, a fresh `launchplane/updater/<request-digest>` branch, and a
+new PR; it never updates a branch, edits an existing PR, changes labels, or
+merges. The 201 response contains repository, branch, head SHA, PR number and
+URL. Ordinary CI, review, Client acceptance where applicable, and train
+admission still apply.
+
+Identical requests use the same new-branch name, so transport retries cannot
+create duplicate proposal branches. An existing branch is never updated.
+A provider failure returns a redacted 503. If a branch or PR was created before
+the failure, inspect the repository before retrying: the route deliberately
+has no existing-PR editing or branch-cleanup authority. A disconnected request
+finishes its worker and token revocation. The three updater workflow cutovers
+and real-run qualification follow this route's landing and deployment; they
+are not activated by adding the route.
