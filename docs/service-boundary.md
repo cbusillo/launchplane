@@ -441,6 +441,8 @@ governed expectation, custody and currentness contract.
     only that no unmanaged rule matches that
     requested path/binding in this policy. Other bindings, repositories,
     managed rules, secret existence and actual delivery use are separate facts.
+    Comparisons follow the runtime's case-sensitive repository/path matching.
+    Query both bindings to cover a file used as both caller and reusable worker.
     This conservative structural evidence does not prove executable access or
     authorize any grant, migration, revocation or deletion. It supports #2521's
     disposition preparation; its retirement and live acceptance boundaries

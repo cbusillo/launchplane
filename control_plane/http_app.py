@@ -18829,7 +18829,7 @@ def create_launchplane_fastapi_app(
             ),
         )
 
-    async def read_authz_retirement_evidence(
+    def read_authz_retirement_evidence(
         payload: AuthzRetirementEvidenceRequest,
         response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(read_nonpersisting_sensitive_identity)],
