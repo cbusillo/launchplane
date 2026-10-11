@@ -47,6 +47,9 @@ but those jobs must have separate navigation:
   testing site for the Client's product. It allows only accept or request
   changes with feedback; it exposes no source,
   configuration, deploy, merge, secret, or access-administration action.
+  The Director alone also sees **Temporary hotfix** there, to put a fix for
+  live breakage on the gated path before the Client accepts it; see
+  [Temporary hotfix](release-review.md#temporary-hotfix).
 
 Product Ops is the default surface. Delivery Governance may reuse the same
 session, theme, and API transport, but it must not become a general issue

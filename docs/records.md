@@ -2016,9 +2016,18 @@ backfill or authorization change.
   product must also be Odoo, not `prelaunch`, with `release_on_acceptance` not
   `held`. Otherwise the operation fails with
   `operation_authorization_client_release_refused`. Every other guard refuses it.
-- A release decision's `release_start` (`promote` or
-  `promote_with_rollback_drill`, omitted when empty) records whether the Client's
-  acceptance starts the release. It is fixed when the decision is recorded. A
+  The same grant, from the Client's request for changes to a live temporary
+  hotfix (`release_start: rollback`), covers only the rollback to their last
+  accepted release, even while releases are held.
+  A `temporary_hotfix` grant has the same shape with the Director as its GitHub
+  human caller, role `admin`, naming the Director's temporary hotfix decision.
+  The workers accept it only while that decision is still the product's newest
+  and published, and the active policy still names the caller as administrator;
+  otherwise the operation fails with the same code. See
+  [Temporary hotfix](release-review.md#temporary-hotfix).
+- A release decision's `release_start` (`promote`,
+  `promote_with_rollback_drill`, or `rollback`, omitted when empty) records whether
+  the decision starts the release, or rolls back a rejected temporary hotfix. It is fixed when the decision is recorded. A
   product profile's `release_on_acceptance` is omitted while `held`. The step
   operations of an accepted release take ids derived from the decision, so the
   release needs no record of its own; see
