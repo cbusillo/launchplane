@@ -30,6 +30,7 @@ from control_plane.workflows.public_ingress_monitor import (
 MONITOR_INTERVAL_SECONDS = PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS
 MONITOR_COMPLETION_GRACE_SECONDS = 5 * 60
 MONITOR_POLL_SECONDS = 30
+MONITOR_RECEIPT_FINGERPRINT = "health-monitor-scheduler-v1"
 _SCOPE = "launchplane:health-monitor-scheduler"
 _ROUTE = "service:health-monitor-scheduler"
 _LOGGER = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ class HealthMonitorScheduler:
                 scope=_SCOPE,
                 route_path=_ROUTE,
                 idempotency_key=key,
-                request_fingerprint="health-monitor-scheduler-v1",
+                request_fingerprint=MONITOR_RECEIPT_FINGERPRINT,
                 response_status_code=200,
                 response_trace_id=f"health-monitor:{key}",
                 recorded_at=_timestamp(now),
@@ -89,7 +90,7 @@ class HealthMonitorScheduler:
             scope=_SCOPE,
             route_path=_ROUTE,
             idempotency_key="enabled",
-            request_fingerprint="health-monitor-scheduler-v1",
+            request_fingerprint=MONITOR_RECEIPT_FINGERPRINT,
             lease_owner=self._owner,
         )
         if result.status == "acquired":
@@ -141,7 +142,7 @@ class HealthMonitorScheduler:
             scope=_SCOPE,
             route_path=_ROUTE,
             idempotency_key=key,
-            request_fingerprint="health-monitor-scheduler-v1",
+            request_fingerprint=MONITOR_RECEIPT_FINGERPRINT,
             lease_owner=self._owner,
             lease_seconds=MONITOR_POLL_SECONDS * 4,
         )

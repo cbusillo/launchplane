@@ -11758,6 +11758,77 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HealthMonitorStatus": {
+        "properties": {
+          "activation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitorCompletionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completion_grace_seconds": {
+            "title": "Completion Grace Seconds",
+            "type": "integer"
+          },
+          "interval_seconds": {
+            "title": "Interval Seconds",
+            "type": "integer"
+          },
+          "next_end_slot": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next End Slot"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/MonitorSlotEvidence"
+            },
+            "title": "Slots",
+            "type": "array"
+          }
+        },
+        "required": [
+          "observed_at",
+          "interval_seconds",
+          "completion_grace_seconds",
+          "activation",
+          "slots",
+          "next_end_slot"
+        ],
+        "title": "HealthMonitorStatus",
+        "type": "object"
+      },
+      "HealthMonitorStatusResponse": {
+        "properties": {
+          "monitor": {
+            "$ref": "#/components/schemas/HealthMonitorStatus"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "monitor"
+        ],
+        "title": "HealthMonitorStatusResponse",
+        "type": "object"
+      },
       "HealthResponse": {
         "additionalProperties": false,
         "properties": {
@@ -18464,6 +18535,92 @@
           "reason_codes"
         ],
         "title": "MergeTrainStructuralCandidateResult",
+        "type": "object"
+      },
+      "MonitorCompletionReceipt": {
+        "properties": {
+          "completed_at": {
+            "title": "Completed At",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "completed_at"
+        ],
+        "title": "MonitorCompletionReceipt",
+        "type": "object"
+      },
+      "MonitorSlotEvidence": {
+        "properties": {
+          "completed_on_time": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed On Time"
+          },
+          "completion": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitorCompletionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completion_deadline_at": {
+            "title": "Completion Deadline At",
+            "type": "string"
+          },
+          "healthy_report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitorCompletionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "missed_report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitorCompletionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scheduled_at": {
+            "title": "Scheduled At",
+            "type": "string"
+          },
+          "slot": {
+            "title": "Slot",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "slot",
+          "scheduled_at",
+          "completion_deadline_at",
+          "completion",
+          "completed_on_time",
+          "missed_report",
+          "healthy_report"
+        ],
+        "title": "MonitorSlotEvidence",
         "type": "object"
       },
       "NpmplusIngressApplyEnvelope": {
@@ -88274,6 +88431,95 @@
           }
         },
         "summary": "Disable individually selected obsolete service GITHUB_TOKEN records"
+      }
+    },
+    "/v1/service/health-monitor/status": {
+      "get": {
+        "operationId": "read_health_monitor_receipts",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "slots",
+            "required": false,
+            "schema": {
+              "default": 6,
+              "maximum": 48,
+              "minimum": 1,
+              "title": "Slots",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_slot",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Slot"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthMonitorStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read persisted health-monitor scheduler and watchdog receipts"
       }
     },
     "/v1/service/odoo-workers/reconcile": {

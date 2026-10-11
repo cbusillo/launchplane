@@ -840,6 +840,10 @@ from control_plane.storage.product_authority_bundle import (
     RuntimeEnvironmentConflictError,
 )
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
+from control_plane.health_monitor_status import (
+    HealthMonitorStatusResponse,
+    read_health_monitor_status,
+)
 from control_plane.storage.postgres import (
     DbOnlyMutationPreflightResult,
     DbOnlyMutationRequest,
@@ -5265,6 +5269,37 @@ def create_launchplane_fastapi_app(
             confirm_startup(record_store)
             runtime.release_drain = read_status(record_store)
         return LaunchplaneRuntimeResponse(trace_id=trace_id, runtime=runtime)
+
+    def read_health_monitor_receipts(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        slots: Annotated[int, Query(ge=1, le=48)] = 6,
+        end_slot: Annotated[int | None, Query(ge=0)] = None,
+    ) -> HealthMonitorStatusResponse:
+        trace_id = next_trace_id()
+        require_launchplane_service_read_authorization(identity=identity, trace_id=trace_id)
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Scheduler receipts require database-backed storage.",
+            )
+        try:
+            monitor = read_health_monitor_status(
+                record_store,
+                now=datetime.now(timezone.utc).timestamp(),
+                slots=slots,
+                end_slot=end_slot,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="scheduler_evidence_conflict",
+                message="Scheduler receipt evidence or the requested slot range is invalid.",
+            ) from error
+        return HealthMonitorStatusResponse(trace_id=trace_id, monitor=monitor)
 
     def read_odoo_stable_operation_worker_status(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
@@ -24919,6 +24954,15 @@ def create_launchplane_fastapi_app(
         response_model=DeliveryGitHubAppConfigurationResponse,
         operation_id="configure_launchplane_github_delivery",
         summary="Configure the existing service Delivery App",
+    )
+
+    app.add_api_route(
+        "/v1/service/health-monitor/status",
+        read_health_monitor_receipts,
+        methods=["GET"],
+        response_model=HealthMonitorStatusResponse,
+        operation_id="read_health_monitor_receipts",
+        summary="Read persisted health-monitor scheduler and watchdog receipts",
     )
 
     app.add_api_route(
