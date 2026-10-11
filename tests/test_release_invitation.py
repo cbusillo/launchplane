@@ -64,6 +64,9 @@ class ReleaseInvitationTests(unittest.TestCase):
             patcher = patch(f"control_plane.release_invitation.{target}", replacement)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The seeded change is Client-facing; engineering-only tests remove it.
+        assert self.review.checklist is not None
+        self.record_client_evidence(self.review.checklist.items[0])
 
     def add_client_change(self, number: int, *, request_only: bool = False) -> None:
         assert self.review.checklist is not None
@@ -82,6 +85,12 @@ class ReleaseInvitationTests(unittest.TestCase):
                 )
             }
         )
+        self.record_client_evidence(item, request_only=request_only)
+
+    def record_client_evidence(
+        self, item: ReleaseReviewItem, *, request_only: bool = False
+    ) -> None:
+        number = item.pull_request_number
         if request_only:
             self.store.write_preview_pr_feedback_record(
                 PreviewPrFeedbackRecord(
@@ -240,7 +249,7 @@ class ReleaseInvitationTests(unittest.TestCase):
                     status="merged",
                     merge_commit_sha=batch.merge_commit,
                 )
-                for position, number in enumerate((42, 43), start=1)
+                for position, number in enumerate((41, 43), start=1)
             ),
         )
         self.store.write_merge_train_batch_landing_plan_record(
@@ -288,7 +297,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertNotIn("No manual check needed", self.comments[-1]["body"])
         self.assertNotIn("pull/99", self.comments[-1]["body"])
         broken = batch.model_copy(
-            update={"owner_test_notes": "### #42 Engineering\n\nNo manual check needed."}
+            update={"owner_test_notes": "### #41 Engineering\n\nNo manual check needed."}
         )
         assert self.review.checklist is not None
         self.review = self.review.model_copy(
@@ -337,6 +346,80 @@ class ReleaseInvitationTests(unittest.TestCase):
             self.publish()
         self.assertEqual(len(self.comments), 1)
 
+    def make_engineering_only(self) -> None:
+        assert self.review.checklist is not None
+        item = self.review.checklist.items[0].model_copy(
+            update={
+                "pull_request_number": 50,
+                "url": "https://github.com/example/site/pull/50",
+                "title": "Engineering title 50",
+                "owner_test_notes": "Nothing for the Client to test.",
+            }
+        )
+        self.review = self.review.model_copy(
+            update={"checklist": self.review.checklist.model_copy(update={"items": (item,)})}
+        )
+
+    def test_engineering_only_candidate_opens_no_review_and_sends_nothing(self) -> None:
+        self.make_engineering_only()
+        for backoff in (None, ReleaseInvitationBackoff()):
+            self.assertFalse(self.publish(backoff))
+        self.assertEqual((self.issues, self.posts, self.edits), ([], [], []))
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product="example-site"), ()
+        )
+
+    def test_engineering_only_after_decision_waits_then_rides_with_client_release(self) -> None:
+        self.assertTrue(self.publish())
+        assert self.review.checklist is not None
+        self.store.write_release_review_decision_record(
+            decision(self.store, outcome="accepted", date=self.now.isoformat()).model_copy(
+                update={"checklist": self.review.checklist}
+            )
+        )
+        decided = self.comments[0]["body"]
+        self.now += timedelta(seconds=1)
+        self.make_engineering_only()
+        self.change_candidate(source_commit="e" * 40)
+        self.assertFalse(self.publish())
+        self.assertEqual(len(self.comments), 1)
+        self.assertEqual(self.comments[0]["body"], decided)
+        posts = len(self.posts)
+        # A later Client-facing change opens the next review; the waiting
+        # engineering change ships under that same single acceptance.
+        self.add_client_change(43)
+        self.change_candidate(source_commit="f" * 40)
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.posts), posts + 1)
+        current = self.comments[-1]["body"]
+        self.assertIn("@site-owner", current)
+        self.assertIn("change 43", current)
+        self.assertNotIn("Engineering title 50", current)
+        self.assertIn("lists every included change", current)
+
+    def test_urgent_opening_states_reason_and_still_needs_client_acceptance(self) -> None:
+        self.make_engineering_only()
+        self.assertTrue(
+            self.publish(urgent_reason="Fixes a login security problem.\nPing @someone")
+        )
+        self.assertEqual(len(self.comments), 1)
+        body = self.comments[0]["body"]
+        self.assertIn("Hi @site-owner,", body)
+        self.assertIn(
+            "**Why now:** Fixes a login security problem. Ping @\u200bsomeone", body.splitlines()
+        )
+        self.assertIn("there is nothing new to test", body)
+        self.assertIn("Accepting starts the release", body)
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product="example-site"), ()
+        )
+        # Later engineering updates keep the reason, without another mention.
+        self.change_candidate(source_commit="e" * 40)
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.comments), 1)
+        self.assertEqual(sum("@site-owner" in post.get("body", "") for post in self.posts), 1)
+        self.assertIn("**Why now:** Fixes a login security problem.", self.comments[0]["body"])
+
     def read_review(self, **_kwargs: Any) -> ReleaseReviewStatus:
         self.read_count += 1
         return self.review
@@ -370,12 +453,15 @@ class ReleaseInvitationTests(unittest.TestCase):
             return issue
         return self.comments.copy() if "/comments?" in path else self.issues.copy()
 
-    def publish(self, backoff: ReleaseInvitationBackoff | None = None) -> None:
-        publish_release_invitation(
+    def publish(
+        self, backoff: ReleaseInvitationBackoff | None = None, *, urgent_reason: str = ""
+    ) -> bool:
+        return publish_release_invitation(
             store=cast(ReleaseReviewStore, self.store),
             control_plane_root=self.root,
             profile=self.profile,
             backoff=backoff,
+            urgent_reason=urgent_reason,
         )
 
     def change_candidate(self, **update: str) -> None:
@@ -413,7 +499,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         )
         self.assertIn("Accepting starts the release", body)
         self.assertIn("verified backup", body)
-        self.assertIn("there is nothing new to test", body)
+        self.assertIn("check the changes on the testing site", body)
         self.assertEqual(
             self.store.list_release_review_decision_records(product="example-site"), ()
         )
@@ -602,7 +688,7 @@ class ReleaseInvitationTests(unittest.TestCase):
                     self.profile.product,
                     candidate.model_copy(update={"source_commit": str(index) * 40}),
                 )
-                + "\n\n@site-owner old request",
+                + "\n\n@site-owner old request https://github.com/example/site/pull/42",
             }
             for index in range(3)
         ]

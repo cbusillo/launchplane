@@ -18,13 +18,25 @@ changes the digest and requires review of the displayed checklist. Unaffected
 items omit the false marker, preserving historical digests. Prior preview
 acceptance annotations still do not change the digest.
 
-When the checklist is complete and only the Client's approval remains, the
+When the checklist is complete, only the Client's approval remains, and the
+candidate contains a Client-facing change, the
 stable worker posts a release-review request mentioning the recorded Client,
 through the existing Launchplane Delivery App's release-record access. It links
 the Client review page and explains whether Accept starts the gated production
 release or records approval while releases are held. Incomplete or unavailable
 checklists, prelaunch/retired products, standing Director acceptance and candidates
-with a recorded decision receive no request. Missing access is reported; no grant
+with a recorded decision receive no request. An engineering-only candidate (no
+included change has Client-facing evidence, defined below) never opens a request,
+creates the requests issue, or notifies the Client: it waits on testing and ships
+with the next release that contains a Client-facing change, under that release's
+single acceptance. When an engineering-only release must reach production sooner,
+such as a security or reliability fix, an admin opens it deliberately from the
+review page's **Ask the Client now** section
+(`POST /v1/release-review/urgent-openings`, `product_profile.write`, bound to the
+checklist digest) with a plain-language reason. The invitation shows that reason
+on a **Why now:** line, kept through later silent updates, and the Client accepts
+it like any other release. Opening records no decision and starts nothing; an
+already open request is left as it is. Missing access is reported; no grant
 or credential is created. The worker uses Launchplane's own bootstrap
 `LAUNCHPLANE_PUBLIC_URL` for the review link and checks at most every five minutes
 per unchanged profile and lane versions until delivery. After a confirmed receipt,
@@ -74,11 +86,12 @@ For a batch landing, the stored landing plan binds the batch PR and merge commit
 to its constituent PRs; each constituent uses its own review evidence and its
 section of the batch's Client test notes.
 Durable `release-client-change` receipts record which PRs have been announced in
-this open review. Engineering-only candidates update the current invitation
+this open review. Engineering-only candidates update an already open invitation
 silently, with no new comment or mention. Notes edits and already-announced changes
 do not notify again. The `release-request` marker binds the open review to the
 product, repository, Client identity and latest Client decision. A new candidate
-after acceptance or a request for changes opens a new review and mentions the Client.
+with a Client-facing change after acceptance or a request for changes opens a new
+review and mentions the Client.
 The worker adopts the newest legacy candidate-marked request created after that
 decision (or the newest one if there has been no decision). Legacy PR links,
 including batch links bound to their constituents, seed the announcement history.
@@ -124,7 +137,7 @@ uv run python -m control_plane.release_invitation --product example-site --candi
 
 It prints the issue and comment markers and makes no service or GitHub request.
 
-The review leads with the product, the viewer's Client or admin role, the
+The review leads with the product, the viewer's role, the
 testing-site link, and **What to test**. Pull requests with identical
 `Client test notes` appear as one check listing each change it covers, and a change missing
 notes appears as its own check. Changes whose notes begin with
@@ -133,7 +146,10 @@ is display only: the checklist, its digest, and blockers remain per pull request
 section identifies the **Current production version** and **Proposed production
 version** (currently in testing). Accepting records approval for that proposed
 version to become production; requesting changes replaces earlier approval or
-an admin override. The latest decision and its written feedback appear above
+an admin override. A viewer who is not the Client first reads who the Client is
+and that only the Client's Accept starts (or, while held, approves) the release;
+an admin also reads that their decision is recorded as an override and does not
+start it. The latest decision and its written feedback appear above
 the checklist. Admins get a separate **Admin Approval Override** section
 and approval-justification field explaining that their decision supplies
 approval under their own identity and replaces an earlier

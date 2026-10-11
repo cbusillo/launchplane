@@ -47,6 +47,9 @@ class ReleaseReviewRouteDependencies:
     publish_decision: Callable[
         [ReleaseReviewStore, LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord], str
     ]
+    # Opens the Client's release request for an engineering-only release, with
+    # the admin's reason; returns whether a request is open afterwards.
+    open_urgent_review: Callable[[ReleaseReviewStore, LaunchplaneProductProfileRecord, str], bool]
 
 
 class ReleaseReviewResponse(BaseModel):
@@ -79,6 +82,23 @@ class ReleaseReviewDecisionEnvelope(BaseModel):
         self.reason = self.reason.strip()
         if self.decision != "accepted" and not self.reason:
             raise ValueError("Requesting changes or overriding requires a reason.")
+        return self
+
+
+class UrgentReleaseReviewEnvelope(BaseModel):
+    """An admin's request to ask the Client about an engineering-only release now."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    product: str = Field(min_length=1, max_length=256)
+    checklist_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_reason(self) -> "UrgentReleaseReviewEnvelope":
+        self.reason = self.reason.strip()
+        if not self.reason:
+            raise ValueError("Opening an urgent release review requires a reason.")
         return self
 
 
@@ -302,6 +322,46 @@ def register_release_review_routes(
             }
         )
 
+    def open_urgent_release_review(
+        envelope: UrgentReleaseReviewEnvelope,
+        identity: Annotated[
+            GitHubHumanIdentity, Depends(dependencies.read_github_human_browser_mutation_identity)
+        ],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> ReleaseReviewResponse:
+        """Ask the Client now; their acceptance is still what starts the release."""
+        trace_id = common.next_trace_id()
+        profile = profile_for_viewer(record_store, envelope.product, identity, trace_id)
+        if not can_override(profile, identity):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="release_review_open_denied",
+                message="Only an admin can open an urgent release review.",
+            )
+        current = response(record_store, profile, identity, trace_id)
+        if current.review.checklist_digest != envelope.checklist_digest:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="release_checklist_changed",
+                message="The release checklist changed or is unavailable. Reload it before deciding.",
+            )
+        try:
+            opened = dependencies.open_urgent_review(
+                cast(ReleaseReviewStore, record_store), profile, envelope.reason
+            )
+        except (FileNotFoundError, StopIteration, ValueError, click.ClickException):
+            opened = False
+        if not opened:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="release_review_not_opened",
+                message="The Client was not asked. The release must be complete, undecided and waiting only for the Client; reload and try again.",
+            )
+        return current
+
     for path, endpoint, method, operation in (
         ("/v1/release-review", read_release_review, "GET", "read_release_review"),
         (
@@ -309,6 +369,12 @@ def register_release_review_routes(
             write_release_review_decision,
             "POST",
             "write_release_review_decision",
+        ),
+        (
+            "/v1/release-review/urgent-openings",
+            open_urgent_release_review,
+            "POST",
+            "open_urgent_release_review",
         ),
     ):
         app.add_api_route(

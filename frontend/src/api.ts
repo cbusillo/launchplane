@@ -88,6 +88,7 @@ import type {
   RetryProductReviewFeedbackData,
   ReleaseReviewResponse,
   ReleaseReviewDecisionEnvelope,
+  UrgentReleaseReviewEnvelope,
   ReadProductionBackupGateOperationData,
   ReadProductionBackupGateOperationResponse,
   ReadOdooProdPromotionOperationData,
@@ -825,6 +826,10 @@ export function readReleaseReview(product: string, signal?: AbortSignal): Promis
 
 export function writeReleaseReviewDecision(payload: ReleaseReviewDecisionEnvelope): Promise<ReleaseReviewResponse> {
   return requestJson<ReleaseReviewResponse>(BROWSER_WRITE_ROUTES.releaseReviewDecision, "POST", payload);
+}
+
+export function openUrgentReleaseReview(payload: UrgentReleaseReviewEnvelope): Promise<ReleaseReviewResponse> {
+  return requestJson<ReleaseReviewResponse>(BROWSER_WRITE_ROUTES.releaseReviewUrgentOpening, "POST", payload);
 }
 
 export function writeProductReviewDecision(
