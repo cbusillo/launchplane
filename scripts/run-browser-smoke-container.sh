@@ -26,7 +26,9 @@ container_id="$(docker create --init --shm-size=1g \
   --env PATH=/usr/local/bin:/usr/bin:/bin \
   --env "BROWSER_SMOKE_HOST_NETNS=$host_network_namespace" \
   "$BROWSER_SMOKE_IMAGE" bash -euc '
-    mkdir -p "$HOME"
+    mkdir -p "$HOME/bin"
+    corepack enable --install-directory "$HOME/bin"
+    export PATH="$HOME/bin:$PATH"
     namespace="$(readlink /proc/self/ns/net)"
     if [[ "$namespace" == "$BROWSER_SMOKE_HOST_NETNS" ]]; then
       echo "Browser smoke must not share the host network namespace" >&2
