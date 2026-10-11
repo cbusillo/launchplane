@@ -1,8 +1,3 @@
-from control_plane.contracts.updater_proposal import (
-    UPDATER_PROPOSAL_ROUTE,
-    UPDATER_PROPOSAL_MAX_BODY_BYTES,
-)
-from control_plane.http_routes.updater_proposal import register_updater_proposal_route
 import asyncio
 import hashlib
 import json
@@ -26,6 +21,11 @@ import fastapi.exceptions as fastapi_exceptions
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.datastructures import DefaultPlaceholder
 from fastapi.concurrency import run_in_threadpool
+from control_plane.contracts.updater_proposal import (
+    UPDATER_PROPOSAL_ROUTE,
+    UPDATER_PROPOSAL_MAX_BODY_BYTES,
+)
+from control_plane.http_routes.updater_proposal import register_updater_proposal_route
 from control_plane.http_route_preparation import PreparedAPIRoute
 from control_plane.http_routes.support import run_in_worker_thread
 from fastapi.exceptions import RequestValidationError

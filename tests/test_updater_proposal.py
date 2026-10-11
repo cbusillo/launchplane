@@ -4,6 +4,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.error import HTTPError
+from email.message import Message
+from urllib.parse import unquote
 from unittest.mock import Mock, patch
 
 import jwt
@@ -30,6 +33,7 @@ from control_plane.service_auth import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.updater_proposal import (
     UpdaterProposalRefused,
+    UpdaterProposalConflict,
     authorize_updater_proposal,
     open_updater_proposal,
 )
@@ -113,6 +117,8 @@ class UpdaterAuthorizationTests(unittest.TestCase):
             {"refs": ("*",)},
             {"actions": ("*",)},
             {"repository_id": "", "repository_owner_id": ""},
+            {"products": ("*",)},
+            {"contexts": ("*",)},
         ):
             with self.subTest(changes=changes), self.assertRaises(UpdaterProposalRefused):
                 authorize_updater_proposal(
@@ -190,6 +196,10 @@ class FakeGitHub:
         self.base_file_size = 12
         self.truncated = False
         self.created_refs: set[str] = set()
+        self.prs: list[dict[str, Any]] = []
+        self.base_mode = "100644"
+        self.lose_pr_response = False
+        self.lose_ref_response = False
 
     def __call__(self, **kwargs: Any) -> object:
         self.calls.append(kwargs)
@@ -197,7 +207,7 @@ class FakeGitHub:
         if path == self.fail_path:
             raise ValueError("private provider response installation-token-secret")
         if path == "/app":
-            return {"id": 42}
+            return {"id": 42, "slug": "approved-app"}
         if path.endswith("/installation"):
             return {
                 "id": 77,
@@ -216,6 +226,10 @@ class FakeGitHub:
                 },
                 "repositories": [{"id": 1001, "full_name": REPOSITORY}],
             }
+        if path == "/users/approved-app%5Bbot%5D":
+            return {"id": 5001}
+        if "/pulls?state=open" in path:
+            return self.prs
         if path == "/installation/token":
             return None
         if path == "/repos/" + REPOSITORY:
@@ -226,14 +240,26 @@ class FakeGitHub:
                 "default_branch": self.default_branch,
             }
         if "/git/ref/heads/" in path:
-            return {"object": {"sha": self.base_sha}}
+            branch = unquote(path.split("/git/ref/heads/", 1)[1])
+            if branch == "main":
+                return {"object": {"sha": self.base_sha}}
+            if "refs/heads/" + branch in self.created_refs:
+                return {"object": {"sha": HEAD_SHA}}
+            raise HTTPError(path, 404, "Missing ref", Message(), None)
+        if path.endswith("/git/commits/" + HEAD_SHA):
+            return {"tree": {"sha": self.tree_sha}, "parents": [{"sha": BASE_SHA}]}
         if path.endswith("/git/commits/" + BASE_SHA):
             return {"tree": {"sha": TREE_SHA}}
         if path.endswith("?recursive=1"):
             return {
                 "truncated": self.truncated,
                 "tree": [
-                    {"path": "requirements.txt", "type": "blob", "size": self.base_file_size},
+                    {
+                        "path": "requirements.txt",
+                        "type": "blob",
+                        "size": self.base_file_size,
+                        "mode": self.base_mode,
+                    },
                     {"path": "sources", "type": "tree"},
                 ],
             }
@@ -246,9 +272,21 @@ class FakeGitHub:
             if ref in self.created_refs:
                 raise ValueError("Ref already exists")
             self.created_refs.add(ref)
+            if self.lose_ref_response:
+                raise ValueError("Ref response lost")
             return {"ref": ref}
         if path.endswith("/pulls"):
-            return {"number": 17, "html_url": "https://github.com/" + REPOSITORY + "/pull/17"}
+            result = {
+                "number": 17,
+                "html_url": "https://github.com/" + REPOSITORY + "/pull/17",
+                "head": {"ref": kwargs["body"]["head"], "sha": HEAD_SHA, "repo": {"id": 1001}},
+                "user": {"id": 5001},
+                "base": {"ref": kwargs["body"]["base"]},
+            }
+            self.prs.append(result)
+            if self.lose_pr_response:
+                raise ValueError("PR response lost installation-token-secret")
+            return result
         raise AssertionError(path)
 
 
@@ -312,11 +350,85 @@ class UpdaterProviderTests(unittest.TestCase):
         api = FakeGitHub()
         api.tree_sha = "d" * 40
         first = self.invoke(api)
-        with self.assertRaisesRegex(ValueError, "Ref already exists"):
-            self.invoke(api)
+        replay = self.invoke(api)
+        self.assertEqual(replay.disposition, "replayed")
+        self.assertEqual(replay.pull_request_number, first.pull_request_number)
         self.assertEqual(api.created_refs, {"refs/heads/" + first.branch})
         self.assertEqual(sum(call["path"].endswith("/pulls") for call in api.calls), 1)
         self.assertEqual(api.calls[-1]["method"], "DELETE")
+
+    def test_pending_proposal_survives_a_moved_default_branch_without_duplication(self) -> None:
+        api = FakeGitHub()
+        api.tree_sha = "d" * 40
+        first = self.invoke(api)
+        api.base_sha = HEAD_SHA
+        with patch(
+            "control_plane.updater_proposal.resolve_delivery_github_app_identity",
+            return_value=GitHubAppIdentity(app_id=42, private_key=self.key),
+        ):
+            pending = open_updater_proposal(
+                identity=replace(updater_identity(), sha=HEAD_SHA),
+                request=UpdaterProposalRequest.model_validate(
+                    {**proposal_payload(), "base_sha": HEAD_SHA}
+                ),
+                control_plane_root=Path("."),
+                api_request=api,
+            )
+        self.assertEqual(pending.disposition, "pending")
+        self.assertEqual(pending.pull_request_number, first.pull_request_number)
+        self.assertEqual(len(api.prs), 1)
+
+    def test_recovers_a_created_branch_and_a_lost_pr_response(self) -> None:
+        api = FakeGitHub()
+        api.tree_sha = "d" * 40
+        api.fail_path = "/repos/" + REPOSITORY + "/pulls"
+        with self.assertRaises(ValueError):
+            self.invoke(api)
+        api.fail_path = ""
+        api.base_sha = "e" * 40
+        recovered = self.invoke(api)
+        self.assertEqual(recovered.pull_request_number, 17)
+        self.assertEqual(sum(call["path"].endswith("/git/refs") for call in api.calls), 1)
+        lost = FakeGitHub()
+        lost.tree_sha = "d" * 40
+        lost.lose_pr_response = True
+        self.assertEqual(self.invoke(lost).disposition, "replayed")
+        self.assertEqual(len(lost.prs), 1)
+        lost_ref = FakeGitHub()
+        lost_ref.tree_sha = "d" * 40
+        lost_ref.lose_ref_response = True
+        self.assertEqual(self.invoke(lost_ref).pull_request_number, 17)
+        self.assertEqual(len(lost_ref.created_refs), 1)
+
+    def test_preserves_executable_mode_and_refuses_symlinks_and_wrong_app_author(self) -> None:
+        api = FakeGitHub()
+        api.tree_sha = "d" * 40
+        api.base_mode = "100755"
+        self.invoke(api)
+        tree_write = next(call for call in api.calls if call["path"].endswith("/git/trees"))
+        self.assertEqual(tree_write["body"]["tree"][0]["mode"], "100755")
+        api.prs[0]["user"]["id"] = 5002
+        with self.assertRaises(UpdaterProposalConflict):
+            self.invoke(api)
+        symlink = FakeGitHub()
+        symlink.base_mode = "120000"
+        with self.assertRaises(UpdaterProposalRefused):
+            self.invoke(symlink)
+        self.assertFalse(
+            any(
+                call.get("method") == "POST" and call["path"].startswith("/repos/")
+                for call in symlink.calls
+            )
+        )
+
+    def test_revocation_failure_keeps_the_confirmed_pr_and_logs_no_secret(self) -> None:
+        api = FakeGitHub()
+        api.tree_sha = "d" * 40
+        api.fail_path = "/installation/token"
+        with self.assertLogs("control_plane.updater_proposal", level="WARNING") as captured:
+            result = self.invoke(api)
+        self.assertEqual(result.pull_request_number, 17)
+        self.assertNotIn("installation-token-secret", "".join(captured.output))
 
     def test_refuses_directory_replacement_and_missing_file_deletion(self) -> None:
         for change in (
@@ -354,7 +466,10 @@ class UpdaterProviderTests(unittest.TestCase):
             api.tree_sha = "d" * 40
             for key, value in change.items():
                 setattr(api, key, value)
-            with self.subTest(change=change), self.assertRaises(UpdaterProposalRefused):
+            with (
+                self.subTest(change=change),
+                self.assertRaises((UpdaterProposalRefused, UpdaterProposalConflict)),
+            ):
                 self.invoke(api)
             self.assertFalse(
                 any(call["path"].endswith(("/git/refs", "/pulls")) for call in api.calls)
@@ -365,11 +480,18 @@ class UpdaterProviderTests(unittest.TestCase):
         for overgrant in (False, True):
             api = FakeGitHub()
             api.tree_sha = "d" * 40
-            api.fail_path = "/repos/" + REPOSITORY + "/pulls"
+            api.fail_path = "" if overgrant else "/repos/" + REPOSITORY + "/pulls"
             api.overgrant = overgrant
             with self.subTest(overgrant=overgrant), self.assertRaises(ValueError):
                 self.invoke(api)
             self.assertEqual(api.calls[-1]["method"], "DELETE")
+            if overgrant:
+                self.assertFalse(
+                    any(
+                        call.get("method") == "POST" and call["path"].startswith("/repos/")
+                        for call in api.calls
+                    )
+                )
 
 
 class UpdaterHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -419,13 +541,13 @@ class UpdaterHttpTests(unittest.IsolatedAsyncioTestCase):
         }
         claims.pop("raw_claims")
         cases = [
-            (other, claims),
-            (key, {**claims, "exp": 1}),
-            (key, {name: value for name, value in claims.items() if name != "exp"}),
-            (key, {**claims, "iss": "https://untrusted.example"}),
-            (key, {**claims, "aud": "other"}),
+            (other, claims, 401),
+            (key, {**claims, "exp": 1}, 401),
+            (key, {name: value for name, value in claims.items() if name != "exp"}, 403),
+            (key, {**claims, "iss": "https://untrusted.example"}, 401),
+            (key, {**claims, "aud": "other"}, 401),
         ]
-        for signing_key, payload in cases:
+        for signing_key, payload, expected_status in cases:
             token = jwt.encode(payload, signing_key, algorithm="RS256")
             with (
                 self.subTest(claims=payload),
@@ -440,8 +562,23 @@ class UpdaterHttpTests(unittest.IsolatedAsyncioTestCase):
                     headers={"Authorization": "Bearer " + token},
                     payload=proposal_payload(),
                 )
-                self.assertIn(response.status_code, (401, 403))
+                self.assertEqual(response.status_code, expected_status)
                 provider.assert_not_called()
+
+    async def test_stale_base_is_a_conflict_instead_of_an_authorization_denial(self) -> None:
+        with patch(
+            "control_plane.http_routes.updater_proposal.open_updater_proposal",
+            side_effect=UpdaterProposalConflict("Base changed; rerun"),
+        ):
+            response = await http_request(
+                self.app(_StubVerifier(updater_identity())),
+                "POST",
+                UPDATER_PROPOSAL_ROUTE,
+                headers={"Authorization": "Bearer valid-token"},
+                payload=proposal_payload(),
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "updater_proposal_conflict")
 
     async def test_provider_error_is_redacted_and_body_is_bounded(self) -> None:
         with patch(

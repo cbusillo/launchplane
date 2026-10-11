@@ -21,6 +21,7 @@ from control_plane.service_auth import (
 )
 from control_plane.updater_proposal import (
     UpdaterProposalRefused,
+    UpdaterProposalConflict,
     authorize_updater_proposal,
     open_updater_proposal,
 )
@@ -51,6 +52,13 @@ def register_updater_proposal_route(
                     control_plane_root=control_plane_root,
                 )
             )
+        except UpdaterProposalConflict as error:
+            raise http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="updater_proposal_conflict",
+                message=str(error),
+            ) from error
         except UpdaterProposalRefused as error:
             raise http_error(
                 status_code=403,

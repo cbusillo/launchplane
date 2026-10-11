@@ -4411,11 +4411,17 @@ still follow the event-driven build contract.
 
 The request has `repository`, `base_sha`, `title`, optional `body`, and `files`.
 Each file has a relative `path`, UTF-8 `content` (or `null` to delete), and optional
-`mode` (`100644` or `100755`). It accepts at most 32 files, 256 KiB of old-plus-new changed
-content (including deletions), and a 512 KiB JSON body. It rejects workflow-file edits, unsafe paths,
+`mode` (`100644` or `100755`). An omitted mode preserves an existing regular
+file's mode and defaults to `100644` for a new file; symlinks are refused.
+It accepts at most 32 files, 512 KiB of old-plus-new changed content (including
+deletions), and a 1 MiB JSON body. It rejects workflow-file edits, unsafe paths,
 duplicate/overlapping paths, and caller-selected branches, labels, PR numbers,
-or merge settings. The base must match both the verified OIDC `sha` and the
-current default-branch head. A stale updater reruns against the new base.
+or merge settings. The base must match the verified OIDC `sha`. A new branch
+also requires the
+current default-branch head; a stale new proposal receives 409
+`updater_proposal_conflict` and reruns against the new base. An exact existing
+branch can resume its original bounded proposal after verifying its tree and
+single parent; it never updates that branch.
 
 The allow-list is part of the active DB-backed `LaunchplaneAuthzPolicyRecord`,
 using existing `github_actions` rules and the supported managed-rule-set
@@ -4434,18 +4440,30 @@ an access grant and retains the Director's existing stop boundary.
 The service resolves its existing delivery App identity and managed private-key
 binding. It mints a fresh token for exactly the verified repository with only
 contents and pull-request write (plus GitHub's implicit metadata read), and
-revokes it on success or failure. No token or App key is returned to the caller.
-It creates Git objects, a fresh `launchplane/updater/<request-digest>` branch, and a
+attempts revocation on success or failure. A failed revocation logs only the
+error type; the token retains its provider expiry and a confirmed PR remains
+confirmed. No token or App key is returned to the caller.
+It creates Git objects, a fresh
+`launchplane/updater/<workflow-digest>/<request-digest>` branch, and a
 new PR; it never updates a branch, edits an existing PR, changes labels, or
 merges. The 201 response contains repository, branch, head SHA, PR number and
 URL. Ordinary CI, review, Client acceptance where applicable, and train
 admission still apply.
 
-Identical requests use the same new-branch name, so transport retries cannot
-create duplicate proposal branches. An existing branch is never updated.
-A provider failure returns a redacted 503. If a branch or PR was created before
-the failure, inspect the repository before retrying: the route deliberately
-has no existing-PR editing or branch-cleanup authority. A disconnected request
-finishes its worker and token revocation. The three updater workflow cutovers
+The response's `disposition` is `created`, `replayed`, or `pending`. The service
+reads existing open PRs and verifies their repository, base and immutable App
+bot author ID. An exact request returns its existing PR; another request from
+the same workflow returns the pending PR for ordinary review, including when
+main has moved. It does not apply or replace the new request's files in that
+case. Once the pending PR closes, a fresh updater run can create a new proposal.
+The approved caller workflow owns the trust of any reusable workflows it runs;
+optional existing policy `job_workflow_refs` selectors still apply.
+
+Identical retries reuse the same branch name. An existing branch is verified
+against the intended tree and parent, then its missing PR can be created. A
+lost PR response is reconciled through a read. Neither recovery path updates a
+ref or edits a PR. Provider errors with no confirmed result return a redacted
+503; retry the original request to reconcile it. A disconnected request
+finishes its worker and revocation attempt. The three updater workflow cutovers
 and real-run qualification follow this route's landing and deployment; they
 are not activated by adding the route.

@@ -7,8 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 UPDATER_PROPOSAL_ROUTE = "/v1/source-control/updater-proposals"
 UPDATER_PROPOSAL_ACTION = "updater_proposal.create"
-UPDATER_PROPOSAL_MAX_BODY_BYTES = 512 * 1024
-UPDATER_PROPOSAL_MAX_CHANGE_BYTES = 256 * 1024
+UPDATER_PROPOSAL_MAX_BODY_BYTES = 1024 * 1024
+UPDATER_PROPOSAL_MAX_CHANGE_BYTES = 512 * 1024
 UPDATER_PROPOSAL_MAX_FILES = 32
 
 
@@ -17,7 +17,7 @@ class UpdaterFileChange(BaseModel):
 
     path: str = Field(min_length=1, max_length=512)
     content: str | None
-    mode: Literal["100644", "100755"] = "100644"
+    mode: Literal["100644", "100755"] | None = None
 
     @model_validator(mode="after")
     def validate_path(self) -> "UpdaterFileChange":
@@ -64,6 +64,7 @@ class UpdaterProposalResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["ok"] = "ok"
+    disposition: Literal["created", "replayed", "pending"] = "created"
     repository: str
     branch: str
     head_sha: str

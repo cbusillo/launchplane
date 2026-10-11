@@ -45421,13 +45421,19 @@
             "title": "Content"
           },
           "mode": {
-            "default": "100644",
-            "enum": [
-              "100644",
-              "100755"
+            "anyOf": [
+              {
+                "enum": [
+                  "100644",
+                  "100755"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ],
-            "title": "Mode",
-            "type": "string"
+            "title": "Mode"
           },
           "path": {
             "maxLength": 512,
@@ -45492,6 +45498,16 @@
         "properties": {
           "branch": {
             "title": "Branch",
+            "type": "string"
+          },
+          "disposition": {
+            "default": "created",
+            "enum": [
+              "created",
+              "replayed",
+              "pending"
+            ],
+            "title": "Disposition",
             "type": "string"
           },
           "head_sha": {
