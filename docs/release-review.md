@@ -546,6 +546,15 @@ For a cancelled run, manually dispatch Deploy Launchplane with the compatible
 `supersedes_deployment_marker` from `runtime.release_drain`; this uses the existing
 workflow authorization. Automatic runs cannot set the repair input. After gated break-glass restores a compatible
 service, use this route to reconcile any remaining fence; never edit its DB row.
+The `self_deploy_fence_conflict` refusal supplies the current fence target and
+exact `supersedes_deployment_marker` in `records`, together with the requested
+candidate `image_reference`, a new `self_deploy_idempotency_key`, and
+`bootstrap_secret_operation=preserve` for a manual Deploy Launchplane dispatch
+on the default branch. Review provider state and candidate compatibility first;
+the workflow target must match the returned target. The failed workflow also
+puts this response in its job summary. The workflow generates the fresh repair
+marker. These inputs describe a new replacement request; the refusal does not
+settle the fence or authorize an automatic repair.
 Provider-call serialization refuses a repair while an earlier service request
 is still executing, so a late original dispatch cannot overtake that repair.
 A drain timeout before dispatch requests no service rollback; its pre-effect

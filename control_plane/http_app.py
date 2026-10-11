@@ -10695,6 +10695,26 @@ def create_launchplane_fastapi_app(
                     deploy_state="dispatch_in_progress",
                 )
             elif isinstance(error, ServiceDeployOutcomeUnknown):
+                repair_records = None
+                message = str(error)
+                if isinstance(error, ServiceDeployFenceConflict) and error.fence is not None:
+                    repair_records = {
+                        "target_type": error.fence.target_type,
+                        "target_id": error.fence.target_id,
+                        "image_reference": self_deploy_request.deploy.image_reference,
+                        "self_deploy_idempotency_key": f"service-repair:{uuid4().hex}",
+                        "supersedes_deployment_marker": error.fence.deployment_marker,
+                        "bootstrap_secret_operation": "preserve",
+                    }
+                    message += (
+                        " Review provider state and confirm the candidate image is compatible. "
+                        "Manually dispatch Deploy Launchplane on the repository default branch "
+                        "using the image_reference, self_deploy_idempotency_key, "
+                        "supersedes_deployment_marker and bootstrap_secret_operation in records. "
+                        "The workflow target must match records.target_type and records.target_id; "
+                        "the workflow supplies a fresh deployment marker. "
+                        "The fence remains until matching replacement startup."
+                    )
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
@@ -10703,7 +10723,8 @@ def create_launchplane_fastapi_app(
                         if isinstance(error, ServiceDeployFenceConflict)
                         else "self_deploy_reconciliation_required"
                     ),
-                    message=str(error),
+                    message=message,
+                    records=repair_records,
                 ) from error
             elif isinstance(error, ServiceDeployPreEffectRefused):
                 raise _launchplane_http_error(
@@ -29130,12 +29151,15 @@ def _launchplane_http_error(
     trace_id: str,
     code: str,
     message: str,
+    records: dict[str, str] | None = None,
     authz: dict[str, object] | None = None,
     authz_evaluation: AuthzEvaluation | None = None,
     authz_policy_provenance: AuthzPolicyProvenance | None = None,
     headers: dict[str, str] | None = None,
 ) -> LaunchplaneHTTPException:
     detail: dict[str, object] = {"trace_id": trace_id, "code": code, "message": message}
+    if records is not None:
+        detail["records"] = records
     if authz is not None:
         detail["authz"] = authz
     resolved_authz_evaluation = authz_evaluation

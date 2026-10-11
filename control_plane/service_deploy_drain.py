@@ -47,6 +47,10 @@ class ServiceDeployDispatchBusy(ValueError):
 class ServiceDeployFenceConflict(ServiceDeployOutcomeUnknown):
     """This request did not acquire an earlier or mismatched replacement fence."""
 
+    def __init__(self, message: str, *, fence: ServiceDeployDrainRecord | None = None) -> None:
+        super().__init__(message)
+        self.fence = fence
+
 
 class ServiceDeployPreEffectRefused(ValueError):
     """The provider definitely refused the first env write; no replacement started."""
@@ -210,7 +214,9 @@ def prepare(
             and target_id == current.target_id
         )
         if supersedes_deployment_marker and not repair_matches:
-            raise ServiceDeployFenceConflict("The superseded self-deploy fence does not match.")
+            raise ServiceDeployFenceConflict(
+                "The superseded self-deploy fence does not match.", fence=current
+            )
         if (
             current is not None
             and current.state in {"dispatching", "requested"}
@@ -218,7 +224,8 @@ def prepare(
         ):
             raise ServiceDeployFenceConflict(
                 "An earlier self-deploy requires matching startup or an explicit "
-                "marker-bound service repair."
+                "marker-bound service repair.",
+                fence=current,
             )
         if (
             current is not None
