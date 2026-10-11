@@ -948,6 +948,20 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             status=candidate_status,
         )
 
+    def read_base_check_status(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> MergeTrainCheckStatus:
+        """Read the candidate's exact base with the same check rules used for candidates."""
+        return _candidate_required_checks_status(
+            transport=self.transport,
+            repository_path=_repository_path(candidate.repository),
+            base_branch=candidate.base_branch,
+            encoded_head_sha=quote(
+                _required_value(candidate.base_sha, "Merge train candidate base SHA is required."),
+                safe="",
+            ),
+        )
+
     def read_candidate_check_failures(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> CandidateCheckFailures:

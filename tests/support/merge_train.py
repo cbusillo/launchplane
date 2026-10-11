@@ -314,6 +314,9 @@ class _FakeMergeTrainGitHubClient:
 class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
     labels_added: list[tuple[int, str]] = []
 
+    def read_base_check_status(self, *, candidate: MergeTrainBatchCandidate) -> str:
+        return "pass"
+
     def observe_batch_candidate_checks(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainBatchCandidate:

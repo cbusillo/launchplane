@@ -1450,6 +1450,72 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
         self.assertEqual(built.status, "ready_for_checks")
 
+    def test_base_check_status_reads_exact_base_with_candidate_check_rules(self) -> None:
+        candidate = _batch_candidate().model_copy(update={"candidate_sha": "failed-candidate"})
+        for conclusion, expected in (("success", "pass"), ("failure", "fail"), (None, "pending")):
+            with self.subTest(conclusion=conclusion):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks("ci-gate"),
+                        _combined_status(),
+                        {
+                            "check_runs": [
+                                _required_check_run(
+                                    "ci-gate",
+                                    "queued" if conclusion is None else "completed",
+                                    conclusion,
+                                )
+                            ]
+                        },
+                    )
+                )
+                status = GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                    candidate=candidate
+                )
+                self.assertEqual(status, expected)
+                self.assertEqual(
+                    [request.path for request in transport.requests],
+                    [
+                        f"/repos/{candidate.repository}/branches/{candidate.base_branch}",
+                        f"/repos/{candidate.repository}/commits/{candidate.base_sha}/status?per_page=100&page=1",
+                        f"/repos/{candidate.repository}/commits/{candidate.base_sha}/check-runs?per_page=100&page=1",
+                    ],
+                )
+                self.assertTrue(all(request.method == "GET" for request in transport.requests))
+
+    def test_base_missing_required_check_is_not_treated_as_green(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _protected_branch_with_checks(),
+                _combined_status(),
+                {"check_runs": [_required_check_run("ci-gate", "completed", "success")]},
+            )
+        )
+        with self.assertRaises(MergeTrainGitHubError):
+            GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                candidate=_batch_candidate()
+            )
+
+    def test_base_failed_nonrequired_check_prevents_blame(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _protected_branch_with_checks("ci-gate"),
+                _combined_status(),
+                {
+                    "check_runs": [
+                        _required_check_run("ci-gate", "completed", "success"),
+                        _required_check_run("test_shard (0)", "completed", "failure"),
+                    ]
+                },
+            )
+        )
+        self.assertEqual(
+            GitHubMergeTrainClient(transport=transport).read_base_check_status(
+                candidate=_batch_candidate()
+            ),
+            "fail",
+        )
+
     def test_observe_batch_candidate_checks_marks_passed_candidate(self) -> None:
         candidate = _batch_candidate().model_copy(
             update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
