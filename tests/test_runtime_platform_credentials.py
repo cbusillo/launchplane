@@ -154,7 +154,6 @@ class StableLaneSyncRefusalTests(unittest.TestCase):
         context_record = RuntimeEnvironmentRecord(
             scope="context",
             context="example-site",
-            instance="",
             env={"GITHUB_TOKEN": "context-token-value"},
             updated_at="2026-09-28T00:00:00Z",
             source_label="test",
