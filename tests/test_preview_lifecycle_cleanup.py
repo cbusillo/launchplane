@@ -1,4 +1,6 @@
 import unittest
+
+import click
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -9,9 +11,55 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.generic_web_preview import GenericWebPreviewDestroyResult
 from control_plane.workflows.preview_lifecycle_cleanup import build_preview_lifecycle_cleanup_record
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewDestroyResult
+from tests.test_generic_web_preview import _profile
 
 
 class PreviewLifecycleCleanupTests(unittest.TestCase):
+    def test_sweep_records_inventory_failures_and_continues_other_products(self) -> None:
+        from control_plane.preview_lifecycle_cleanup_routes import (
+            PreviewLifecycleSweepEnvelope,
+            build_preview_lifecycle_sweep,
+        )
+
+        first = _profile()
+        second = first.model_copy(update={"product": "other-example"})
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            with patch(
+                "control_plane.preview_lifecycle_cleanup_routes.execute_generic_web_preview_inventory",
+                side_effect=[
+                    click.ClickException("incomplete first inventory"),
+                    click.ClickException("incomplete second inventory"),
+                ],
+            ):
+                result = build_preview_lifecycle_sweep(
+                    control_plane_root=root,
+                    record_store=store,
+                    request=PreviewLifecycleSweepEnvelope(
+                        apply=True, destroy_reason="remove orphans"
+                    ),
+                    requested_profiles=(first, second),
+                )
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(
+            result["profiles"],
+            [
+                {
+                    "product": profile.product,
+                    "context": profile.preview.context,
+                    "driver_id": profile.driver_id,
+                    "cleanup_driver_id": "generic-web",
+                    "status": "fail",
+                    "error_message": message,
+                }
+                for profile, message in (
+                    (first, "incomplete first inventory"),
+                    (second, "incomplete second inventory"),
+                )
+            ],
+        )
+
     def test_generic_web_cleanup_destroys_orphan_with_matching_preview_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -20,7 +68,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                 PreviewRecord(
                     preview_id="preview-syo-testing-sellyouroutboard-pr-42",
                     context="sellyouroutboard-testing",
-                    anchor_repo="sellyouroutboard",
+                    anchor_repo="site-repository",
                     anchor_pr_number=42,
                     anchor_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/42",
                     preview_label="sellyouroutboard/pr-42",
@@ -55,6 +103,25 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                     application_id="app-42",
                 ),
             ) as destroy:
+                refused = build_preview_lifecycle_cleanup_record(
+                    plan=plan,
+                    requested_at="2026-04-30T21:02:00Z",
+                    source="test",
+                    apply=True,
+                    destroy_reason="test_cleanup",
+                    control_plane_root=root,
+                    record_store=store,
+                    timeout_seconds=300,
+                    driver_id="generic-web",
+                    preview_slug_template="preview-{number}-site",
+                    profile=_profile().model_copy(update={"repository": "example/unrelated"}),
+                )
+                self.assertEqual(refused.status, "blocked")
+                destroy.assert_not_called()
+                self.assertEqual(
+                    store.read_preview_record("preview-syo-testing-sellyouroutboard-pr-42").state,
+                    "active",
+                )
                 record = build_preview_lifecycle_cleanup_record(
                     plan=plan,
                     requested_at="2026-04-30T21:02:00Z",
@@ -66,11 +133,13 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                     timeout_seconds=300,
                     driver_id="generic-web",
                     preview_slug_template="preview-{number}-site",
+                    profile=_profile().model_copy(update={"repository": "example/site-repository"}),
                 )
 
             self.assertEqual(record.status, "pass")
             self.assertEqual(record.destroyed_slugs, ("preview-42-site",))
             self.assertEqual(record.results[0].anchor_pr_number, 42)
+            self.assertEqual(record.results[0].anchor_repo, "site-repository")
             destroy.assert_called_once()
             preview = store.read_preview_record("preview-syo-testing-sellyouroutboard-pr-42")
             self.assertEqual(preview.state, "destroyed")
