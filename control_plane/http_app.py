@@ -12531,16 +12531,49 @@ def create_launchplane_fastapi_app(
             secret_bindings=secret_bindings,
         )
         if expected_config_request.mode == "apply" and result["changed"]:
-            try:
-                profile_write_store = require_product_profile_write_store(record_store)
-            except TypeError as error:
+            compare_and_write = getattr(
+                record_store, "compare_and_write_product_profile_record", None
+            )
+            if not callable(compare_and_write):
                 raise _launchplane_http_error(
                     status_code=503,
                     trace_id=trace_id,
                     code="database_storage_required",
-                    message=str(error),
-                ) from error
-            profile_write_store.write_product_profile_record(merged_profile)
+                    message=(
+                        "Launchplane record store does not support product profile writes: "
+                        "compare_and_write_product_profile_record"
+                    ),
+                )
+            # Publish only over the exact profile that passed the live guard and built the
+            # merge, so a concurrent profile change is never overwritten with stale fields.
+            stale_error: ValueError | None = None
+            try:
+                write_result = compare_and_write(
+                    expected_record=profile,
+                    replacement_record=merged_profile,
+                )
+                write_status = getattr(write_result, "status", "written")
+            except ValueError as error:
+                # The file-backed store raises instead of reporting a status.
+                write_status = "changed"
+                stale_error = error
+            if write_status == "missing":
+                raise _launchplane_http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="not_found",
+                    message="Product profile disappeared before the expected config was applied.",
+                )
+            if write_status != "written":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="stale",
+                    message=(
+                        "Product profile changed while applying expected config; "
+                        "nothing was written. Retry to apply it to the current profile."
+                    ),
+                ) from stale_error
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={"product_profile": expected_config_request.product},

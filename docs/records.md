@@ -1003,7 +1003,11 @@ requirement is reported as `absent`, so dry-runs are honest and re-applies are
 idempotent. Removing a managed secret binding requirement never unbinds or
 deletes a stored secret; the response lists any configured binding that still
 holds a value under `still_bound`. It does not accept secret plaintext, runtime
-values, repositories, lanes, domains, or promotion settings. The admin
+values, repositories, lanes, domains, or promotion settings. Apply publishes
+with compare-and-write against the profile it read: if another writer changed
+the profile in between, the route writes nothing, answers `409 stale`, and
+stores no idempotency result, so a retry with the same key runs against the
+current profile and its current live status. The admin
 helper (`product-expected-config-dry-run`, then `product-expected-config-apply`
 with the reviewed dry-run evidence) is the supported path for additions and
 removals; real product, context, instance, and binding values come from the
