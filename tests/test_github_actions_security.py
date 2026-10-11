@@ -373,6 +373,31 @@ def _requires_conjunct(expression: str, required: str) -> bool:
     )
 
 
+def _runner_expression_excludes_forks(expression: str) -> bool:
+    """Prove the static runner choice gates its self-hosted branch before checkout."""
+    match = re.fullmatch(
+        r"\$\{\{\s*fromJSON\((?P<condition>.*?)\s*&&\s*"
+        r"'(?P<reserved>\[.*?\])'\s*\|\|\s*'(?P<hosted>\[.*?\])'\s*\)\s*\}\}",
+        expression,
+        flags=re.DOTALL,
+    )
+    if match is None:
+        return False
+    try:
+        reserved = json.loads(match["reserved"])
+        hosted = json.loads(match["hosted"])
+    except json.JSONDecodeError:
+        return False
+    return (
+        isinstance(reserved, list)
+        and "self-hosted" in reserved
+        and isinstance(hosted, list)
+        and bool(hosted)
+        and all(isinstance(label, str) and label != "self-hosted" for label in hosted)
+        and _requires_conjunct(match["condition"], SAME_REPO_PULL_REQUEST_IF)
+    )
+
+
 def _run_scripts() -> Iterator[tuple[Path, str, str]]:
     for path in _action_reference_files():
         data = load_workflow(path).data
@@ -505,13 +530,34 @@ class GitHubActionsSecurityTests(TestCase):
                         f"{path}:{job_id}: self-hosted pull_request jobs using always() "
                         "must stop on cancellation so they release superseded runs."
                     )
-                if not _requires_conjunct(condition, same_repo_guard):
+                if not (
+                    _requires_conjunct(condition, same_repo_guard)
+                    or _runner_expression_excludes_forks(str(runs_on))
+                ):
                     violations.append(
                         f"{path}:{job_id}: self-hosted pull_request jobs must be gated to "
                         "same-repository pull requests."
                     )
 
         self.assertEqual([], violations)
+
+    def test_static_runner_choice_requires_trust_before_self_hosted_selection(self) -> None:
+        guard = f"({SAME_REPO_PULL_REQUEST_IF})"
+        for condition, fallback, safe in (
+            (f"{guard} && startsWith(github.head_ref, 'candidate/')", '["ubuntu-latest"]', True),
+            ("startsWith(github.head_ref, 'candidate/')", '["ubuntu-latest"]', False),
+            (f"{guard} || startsWith(github.head_ref, 'candidate/')", '["ubuntu-latest"]', False),
+            (guard, '["self-hosted","general"]', False),
+        ):
+            expression = (
+                "${{ fromJSON("
+                + condition
+                + ' && \'["self-hosted","reserved"]\' || \''
+                + fallback
+                + "') }}"
+            )
+            with self.subTest(condition=condition, fallback=fallback):
+                self.assertEqual(_runner_expression_excludes_forks(expression), safe)
 
     def test_same_repository_guard_must_hold_for_the_whole_condition(self) -> None:
         guard = f"({SAME_REPO_PULL_REQUEST_IF})"

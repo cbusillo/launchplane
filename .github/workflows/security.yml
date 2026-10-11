@@ -19,7 +19,13 @@ concurrency:
 
 jobs:
   runner_pool:
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/heads/launchplane/train/')) ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'launchplane/train/'))) &&
+      '["self-hosted","launchplane-candidate"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -36,7 +42,6 @@ jobs:
           HEAD_REF: ${{ github.head_ref }}
           REPOSITORY: ${{ github.repository }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          REPOSITORY_VISIBILITY: ${{ github.repository_visibility }}
           RUNNER_LABEL: ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
         run: bash scripts/select-ci-runner.sh
 
@@ -166,7 +171,13 @@ jobs:
 
   security_gate:
     name: security-gate
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/heads/launchplane/train/')) ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'launchplane/train/'))) &&
+      '["self-hosted","launchplane-candidate"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     needs:
       - runner_pool
@@ -175,7 +186,7 @@ jobs:
       - secret_scan
       - secret_scan_fork
     if: >-
-      always() &&
+      !cancelled() &&
       (github.event_name == 'pull_request' || github.event_name == 'push')
     permissions:
       contents: read

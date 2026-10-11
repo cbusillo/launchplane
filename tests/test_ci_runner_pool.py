@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
@@ -49,29 +50,46 @@ class CIRunnerPoolTests(unittest.TestCase):
         self.assertNotIn("configured-ci-lane", labels)
         self.assertEqual(labels, json.loads(fork_pool.stdout))
 
-    def test_public_candidates_bypass_the_self_hosted_queue(self) -> None:
-        self.assert_hosted_pool(EVENT_NAME="push", REF="refs/heads/launchplane/train/batch")
-        self.assert_hosted_pool(HEAD_REF="launchplane/train/batch")
+    def test_candidate_events_share_reserved_capacity(self) -> None:
+        push = self.select(EVENT_NAME="push", REF="refs/heads/launchplane/train/batch")
+        self.assertEqual(push.returncode, 0, push.stderr)
+        reserved = json.loads(push.stdout)
+        self.assertIn("self-hosted", reserved)
+        self.assertNotIn("configured-ci-lane", reserved)
+        for visibility in ["public", "private"]:
+            with self.subTest(visibility=visibility):
+                self.assert_pool(
+                    reserved, HEAD_REF="launchplane/train/batch", REPOSITORY_VISIBILITY=visibility
+                )
+                self.assert_pool(
+                    reserved,
+                    EVENT_NAME="push",
+                    REF="refs/heads/launchplane/train/batch",
+                    REPOSITORY_VISIBILITY=visibility,
+                    RUNNER_LABEL="",
+                )
+
+    def test_bootstrap_and_summary_labels_agree_with_executed_selector(self) -> None:
+        candidate = self.select(EVENT_NAME="push", REF="refs/heads/launchplane/train/batch")
+        self.assertEqual(candidate.returncode, 0, candidate.stderr)
+        reserved = json.loads(candidate.stdout)
+        for name in ["ci.yml", "security.yml"]:
+            workflow = load_workflow(Path(".github/workflows") / name)
+            for job_id in workflow.jobs:
+                runner = str(workflow.job(job_id).get("runs-on", ""))
+                if "fromJSON(" not in runner or "needs.runner_pool" in runner:
+                    continue
+                for encoded in re.findall(r"'(\[.*?\])'", runner):
+                    labels = json.loads(encoded)
+                    if "self-hosted" in labels:
+                        with self.subTest(workflow=name, job=job_id):
+                            self.assertEqual(labels, reserved)
 
     def test_ordinary_work_keeps_its_configured_lane(self) -> None:
         for event in ["pull_request", "push", "schedule", "workflow_dispatch"]:
             with self.subTest(event=event):
                 self.assert_pool(
                     ["self-hosted", "configured-ci-lane"], EVENT_NAME=event, REF="refs/heads/main"
-                )
-
-    def test_private_candidates_do_not_introduce_paid_hosted_work(self) -> None:
-        for event, ref in [
-            ("push", "refs/heads/launchplane/train/batch"),
-            ("pull_request", "refs/pull/1/merge"),
-        ]:
-            with self.subTest(event=event):
-                self.assert_pool(
-                    ["self-hosted", "configured-ci-lane"],
-                    EVENT_NAME=event,
-                    REF=ref,
-                    HEAD_REF="launchplane/train/batch",
-                    REPOSITORY_VISIBILITY="private",
                 )
 
     def test_fork_branches_never_reach_the_private_lane(self) -> None:
@@ -85,7 +103,38 @@ class CIRunnerPoolTests(unittest.TestCase):
         result = self.select(RUNNER_LABEL="")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not configured", result.stderr)
-        self.assert_hosted_pool(HEAD_REF="launchplane/train/batch", RUNNER_LABEL="")
+        candidate = self.select(HEAD_REF="launchplane/train/batch", RUNNER_LABEL="")
+        self.assertEqual(candidate.returncode, 0, candidate.stderr)
+        self.assertIn("self-hosted", json.loads(candidate.stdout))
+
+    def test_browser_install_only_manages_system_packages_on_hosted_runners(self) -> None:
+        step = load_workflow(".github/workflows/ci.yml").step_named(
+            "frontend_browser_smoke", "Install Chromium"
+        )
+        assert step is not None
+        with TemporaryDirectory() as directory:
+            command = Path(directory) / "pnpm"
+            command.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$RECORDED_ARGS"\n')
+            command.chmod(0o755)
+            for environment in ["github-hosted", "self-hosted"]:
+                with self.subTest(environment=environment):
+                    recorded = Path(directory) / "args"
+                    result = subprocess.run(
+                        ["bash", "-c", step.run],
+                        env=os.environ
+                        | {
+                            "PATH": directory + os.pathsep + os.environ["PATH"],
+                            "RUNNER_ENVIRONMENT": environment,
+                            "RECORDED_ARGS": str(recorded),
+                        },
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    arguments = recorded.read_text().splitlines()
+                    self.assertIn("chromium", arguments)
+                    self.assertEqual("--with-deps" in arguments, environment == "github-hosted")
 
     def test_selector_failure_is_reported_by_both_summary_gates(self) -> None:
         for workflow, job, name in [
