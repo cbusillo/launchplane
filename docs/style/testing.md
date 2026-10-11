@@ -165,6 +165,30 @@ shard plan includes per-target timing-source diagnostics:
 - `default`: no timing history exists yet, so the planner uses the conservative
   default estimate until a shard timing artifact teaches it better.
 
+Public train candidates use standard GitHub-hosted Ubuntu runners for CI and
+Security, including the generated candidate PR event. Ordinary same-repository
+PRs and main checks keep the configured self-hosted lane. The shared selector in
+`scripts/select-ci-runner.sh` chooses hosted runners for forks and fails closed
+when a self-hosted path has no configured label. Each dynamic job still requires
+its independent same-repository guard: a fork controls its checkout and cannot
+be trusted to supply a selector result. A private candidate retains the
+self-hosted lane rather than silently consuming paid hosted minutes. Candidate
+jobs still run every existing gate; routing does not reuse or suppress checks.
+Hosted account concurrency and cold caches can still delay candidates, and
+candidate jobs can delay other repositories' hosted jobs and ordinary PR gate
+jobs. Train candidate jobs use a separate pool from heavy same-repository PR
+jobs. CodeQL
+and browser smoke already use hosted runners. Existing PR-number concurrency
+cancels superseded PR runs; candidate creation and reset pushes retain the
+SHA-isolated concurrency documented in
+[merge-train policy](../merge-train-policy.md#candidate-construction).
+
+The test aggregate uses `!cancelled()` so it still reports failed
+shards but does not remain queued after a superseding push cancels the run.
+An `always()` aggregate can keep the old workflow's concurrency slot occupied
+until a shared runner becomes available, preventing the new head's CI from
+starting. Hosted summary gates still report failed check paths.
+
 GitHub Actions remains the source of truth for required pull-request gates.
 Local validation should be proportionate: use targeted behavior proof by
 default, then add the full suite, PostgreSQL integration, browser, generated-

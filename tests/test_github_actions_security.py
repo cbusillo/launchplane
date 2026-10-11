@@ -492,9 +492,20 @@ class GitHubActionsSecurityTests(TestCase):
                 job = workflow.job(job_id)
                 runs_on = job.get("runs-on")
                 labels = runs_on if isinstance(runs_on, list) else [runs_on]
-                if not any("self-hosted" in str(label) for label in labels):
+                # Selector scripts run from the checked-out PR and are not a
+                # trust boundary: dynamic CI lanes still need the job guard.
+                if not any(
+                    "self-hosted" in str(label) or "needs.runner_pool.outputs.runner" in str(label)
+                    for label in labels
+                ):
                     continue
-                if not _requires_conjunct(str(job.get("if", "")), same_repo_guard):
+                condition = str(job.get("if", ""))
+                if "always()" in condition and not _requires_conjunct(condition, "!cancelled()"):
+                    violations.append(
+                        f"{path}:{job_id}: self-hosted pull_request jobs using always() "
+                        "must stop on cancellation so they release superseded runs."
+                    )
+                if not _requires_conjunct(condition, same_repo_guard):
                     violations.append(
                         f"{path}:{job_id}: self-hosted pull_request jobs must be gated to "
                         "same-repository pull requests."
