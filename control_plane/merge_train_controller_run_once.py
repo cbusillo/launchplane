@@ -90,6 +90,11 @@ from control_plane.merge_train_github import (
     merge_train_conflict_probe_ref,
     merge_train_construction_ref,
 )
+from control_plane.merge_train_original_review import (
+    ORIGINAL_REVIEW_RECOVERY_CODE,
+    original_review_recovery_records,
+    original_review_recovery_details,
+)
 from control_plane.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecordStore,
     stack_collapse_expected_root_head_sha,
@@ -505,6 +510,28 @@ def _execute_merge_train_controller_with_client(
             admission_store=admission_store,
             lease=lease,
         )
+        if result is not None and not request.mutate:
+            history = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
+                repository=request.repository, base_branch=request.base_branch
+            )
+            if history:
+                snapshot = github_client.read_merge_train_snapshot(
+                    repository=request.repository, base_branch=request.base_branch
+                )
+                review_recovery = original_review_recovery_records(
+                    records=history, snapshot=snapshot, ancestry=github_client
+                )
+                if review_recovery:
+                    prior_details = result.get("details")
+                    if isinstance(prior_details, dict) and prior_details.get("code"):
+                        result["details"] = {
+                            **prior_details,
+                            "original_review_recovery": original_review_recovery_details(
+                                review_recovery
+                            ),
+                        }
+                    else:
+                        result["details"] = original_review_recovery_details(review_recovery)
         if result is None:
             active_landing_record = latest_merge_train_batch_landing_plan_record(
                 record_store=landing_store,
@@ -1087,6 +1114,33 @@ def _advance_active_landing_record(
         stack_collapse_record=collapse_record,
         trace_id=trace_id,
     )
+    history = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
+        repository=request.repository, base_branch=request.base_branch
+    )
+    if history and not _ordinary_landing_terminal_success(active_landing_record):
+        snapshot = github_client.read_merge_train_snapshot(
+            repository=request.repository, base_branch=request.base_branch
+        )
+        review_recovery = original_review_recovery_records(
+            records=history, snapshot=snapshot, ancestry=github_client
+        )
+        affected = {
+            entry.pull_request_number for record in review_recovery for entry in record.plan.entries
+        }
+        if any(
+            entry.pull_request_number in affected
+            for entry in active_landing_record.landing_plan.entries
+        ):
+            return {
+                "repository": request.repository,
+                "base_branch": request.base_branch,
+                "mode": "blocked",
+                "controller_action": "original_review_recovery",
+                "controller_reconciliation_status": "required",
+                "merge_train_batch_landing_plan_record_id": active_landing_record.record_id,
+                "details": original_review_recovery_details(review_recovery),
+            }
+
     if not request.mutate:
         result: dict[str, object] = {
             "repository": request.repository,
@@ -2649,6 +2703,7 @@ def _reflow_stale_candidate_record(
         snapshot=snapshot,
         records=_read_obsolete_stack_collapse_records(
             store=stack_collapse_store,
+            github_client=github_client,
             snapshot=snapshot,
             repository_policy=repository_policy,
             policy_sha256=policy_sha256,
@@ -2990,6 +3045,7 @@ def _without_obsolete_stack_collapse_pull_requests(
 def _read_obsolete_stack_collapse_records(
     *,
     store: MergeTrainStackCollapsePlanRecordStore,
+    github_client: GitHubMergeTrainClient,
     snapshot: MergeTrainDryRunSnapshot,
     repository_policy: MergeTrainRepositoryPolicy,
     policy_sha256: str,
@@ -3001,12 +3057,17 @@ def _read_obsolete_stack_collapse_records(
             repository=snapshot.repository, base_branch=snapshot.base_branch, status=status
         )
     )
-    return _obsolete_stack_collapse_records(
+    obsolete = _obsolete_stack_collapse_records(
         records=records,
         snapshot=snapshot,
         repository_policy=repository_policy,
         policy_sha256=policy_sha256,
     )
+
+    review = original_review_recovery_records(
+        records=records, snapshot=snapshot, ancestry=github_client
+    )
+    return tuple({record.record_id: record for record in (*obsolete, *review)}.values())
 
 
 def _advance_without_candidate_record(
@@ -3081,6 +3142,19 @@ def _advance_without_candidate_record(
         repository_policy=repository_policy,
         policy_sha256=policy_sha256,
     )
+    review_recovery = original_review_recovery_records(
+        records=waiting_records + retired_records,
+        snapshot=snapshot,
+        ancestry=github_client,
+    )
+    obsolete_records = tuple(
+        {record.record_id: record for record in (*obsolete_records, *review_recovery)}.values()
+    )
+    block_code = (
+        ORIGINAL_REVIEW_RECOVERY_CODE
+        if review_recovery
+        else "merge_train_stack_collapse_policy_changed"
+    )
     obsolete_numbers = {
         entry.pull_request_number for record in obsolete_records for entry in record.plan.entries
     }
@@ -3096,16 +3170,22 @@ def _advance_without_candidate_record(
     def report_obsolete(result: dict[str, object]) -> dict[str, object]:
         if obsolete_records:
             result["details"] = {
-                "code": "merge_train_stack_collapse_policy_changed",
+                "code": block_code,
                 "record_id": obsolete_records[0].record_id,
                 "entries": [
                     {
                         "record_id": record.record_id,
                         "root_pull_request_number": record.plan.root_pull_request_number,
+                        "root_initial_head_sha": record.plan.root_initial_head_sha,
+                        "original_child_pull_request_numbers": [
+                            mutation.child_pull_request_number for mutation in record.plan.mutations
+                        ],
                     }
                     for record in sorted(obsolete_records, key=lambda record: record.record_id)
                 ],
             }
+        if review_recovery:
+            result["details"] = original_review_recovery_details(review_recovery)
         return result
 
     latest_records = tuple(record for record in latest_records if independent(record))
@@ -3255,9 +3335,12 @@ def _advance_without_candidate_record(
             "mode": "blocked",
             "controller_action": "block",
             "blocking_reason": {
-                "code": "merge_train_stack_collapse_policy_changed",
-                "message": "This saved stack requires its original policy or a new root head; unrelated work "
-                "can proceed while its proof remains blocked.",
+                "code": block_code,
+                "message": (
+                    "A code-owned child is still carried in another PR outside the base. Restore the original PR branches without the carry; preserve the recorded history and current-head reviews. Unrelated work can proceed."
+                    if review_recovery
+                    else "This saved stack requires its original policy or a new root head; unrelated work can proceed while its proof remains blocked."
+                ),
             },
         }
     return report_obsolete(live_result)
@@ -4015,6 +4098,7 @@ def try_reflow_failed_merge_train_candidate(
         snapshot=snapshot,
         records=_read_obsolete_stack_collapse_records(
             store=stack_collapse_store,
+            github_client=github_client,
             snapshot=snapshot,
             repository_policy=policy.find_repository_policy(
                 repository=repository, base_branch=base_branch

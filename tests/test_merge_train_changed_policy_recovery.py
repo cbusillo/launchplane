@@ -78,6 +78,10 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         *,
         checkpointed: bool,
         preserve_original_review: bool = False,
+        change_policy: bool = True,
+        unrelated: bool = False,
+        restore_original_root: bool = False,
+        landing_prepared: bool = False,
         moved: bool,
         child_changed: bool = False,
         deeper: bool = False,
@@ -94,6 +98,8 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             graph.heads["feature/leaf"] = "head-leaf"
         child_held = False
         legacy_code_owned = False
+        landing_attempts: list[int] = []
+        landed_prs: set[int] = set()
         comments: list[int] = []
         comment_bodies: dict[int, list[str]] = {}
         closed: set[int] = set()
@@ -112,6 +118,36 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 if legacy_code_owned:
                     root = root.model_copy(update={"requires_individual_landing": True})
                     child = child.model_copy(update={"requires_individual_landing": True})
+                if preserve_original_review and unrelated:
+                    other = root.model_copy(
+                        update={
+                            "number": 4,
+                            "head_ref": "feature/unrelated",
+                            "head_sha": "head-unrelated",
+                            "requires_individual_landing": False,
+                            "base_ref": "main",
+                        }
+                    )
+                    extras = (other,) if 4 not in landed_prs else ()
+                else:
+                    extras = ()
+                if preserve_original_review and restore_original_root and 1 in landed_prs:
+                    return snapshot.model_copy(
+                        update={
+                            "pull_requests": ()
+                            if 2 in landed_prs
+                            else (
+                                child.model_copy(
+                                    update={
+                                        "head_sha": graph.heads[child.head_ref],
+                                        "base_ref": base_branch,
+                                        "base_sha": snapshot.base_sha,
+                                        "required_checks_status": "pass",
+                                    }
+                                ),
+                            ),
+                        }
+                    )
                 if (
                     indirectly_merged
                     and deeper
@@ -131,6 +167,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                                         "base_sha": snapshot.base_sha,
                                     }
                                 ),
+                                *extras,
                             )
                         }
                     )
@@ -161,13 +198,18 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                                 if deeper and 3 not in closed
                                 else ()
                             ),
+                            *extras,
                         )
                     }
                 )
 
         class Client(_FakeMergeTrainGitHubClient):
             def land_batch_candidate(self, **kwargs: Any) -> Any:
+                landing_attempts.extend(
+                    entry.pull_request_number for entry in kwargs["landing_plan"].entries
+                )
                 landed = super().land_batch_candidate(**kwargs)
+                landed_prs.update(entry.pull_request_number for entry in landed.entries)
                 for entry in landed.entries:
                     graph.parents[entry.merge_commit_sha] = (
                         (entry.expected_head_sha, "current-base-main")
@@ -206,6 +248,9 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     .pull_requests
                     if pr.number == pull_request_number
                 )
+
+            def carried_change_requires_individual_landing(self, **kwargs: Any) -> bool:
+                return legacy_code_owned
 
             def branch_contains_commit(
                 self, *, repository: str, branch_ref: str, commit_sha: str
@@ -357,9 +402,20 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 if child_changed:
                     graph.parents["new-child"] = (graph.heads["feature/child"],)
                     graph.heads["feature/child"] = "new-child"
+                if landing_prepared:
+                    for _ in range(12):
+                        prepared = await run()
+                        self.assertEqual(prepared.status_code, 202, prepared.text)
+                        if prepared.json()["result"]["controller_action"] == "plan_landing":
+                            break
+                    else:
+                        self.fail("Legacy landing was not prepared")
+                    self.assertEqual(landing_attempts, [])
+                merge_request_count = len(graph.merge_requests)
                 legacy_code_owned = preserve_original_review
                 changed_policy = original_policy.policy.model_dump(mode="json")
-                changed_policy["policies"][0]["blocked_label"] = "current-policy-blocked"
+                if change_policy:
+                    changed_policy["policies"][0]["blocked_label"] = "current-policy-blocked"
                 if not label_configured:
                     changed_policy["policies"][0]["stack_child_disposition_label"] = ""
                 current = original_policy.model_validate(
@@ -372,31 +428,71 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 )
                 store.write_merge_train_policy_record(current)
                 if preserve_original_review:
-                    for _ in range(10):
+                    legitimate = child_only_in_base or root_refreshed_after_child_landing
+                    if not legitimate:
+                        before = store.list_merge_train_stack_collapse_plan_records()
+                        dry_run = await run(False)
+                        self.assertEqual(dry_run.status_code, 202, dry_run.text)
+                        self.assertEqual(
+                            dry_run.json()["result"].get("details", {}).get("code"),
+                            "merge_train_original_review_recovery_required",
+                        )
+                        self.assertEqual(
+                            store.list_merge_train_stack_collapse_plan_records(), before
+                        )
+                    for _ in range(12):
                         response = await run()
                         self.assertEqual(response.status_code, 202, response.text)
                         result = response.json()["result"]
-                        action = result["controller_action"]
-                        self.assertNotEqual(
-                            action,
-                            "land_batch",
-                            "The carried code-owned child must retain its original PR review",
-                        )
-                        if (
-                            action == "block"
-                            and result.get("details", {}).get("code")
-                            == "merge_train_original_review_recovery_required"
-                        ):
-                            self.assertEqual(len(graph.merge_requests), 1)
-                            self.assertEqual(closed, set())
-                            for old in original_records:
-                                retained = next(
-                                    r
-                                    for r in store.list_merge_train_stack_collapse_plan_records()
-                                    if r.record_id == old.record_id
+                        if legitimate:
+                            if 1 in landed_prs:
+                                return
+                        else:
+                            self.assertNotIn(
+                                1,
+                                landing_attempts,
+                                "The carried child must retain its original PR review",
+                            )
+                            if result.get("details", {}).get(
+                                "code"
+                            ) == "merge_train_original_review_recovery_required" and (
+                                not unrelated or 4 in landed_prs
+                            ):
+                                self.assertEqual(len(graph.merge_requests), merge_request_count)
+                                self.assertEqual(closed, set())
+                                for old in original_records:
+                                    retained = next(
+                                        r
+                                        for r in store.list_merge_train_stack_collapse_plan_records()
+                                        if r.record_id == old.record_id
+                                    )
+                                    self.assertEqual(retained.plan, old.plan)
+                                if not restore_original_root:
+                                    return
+                                graph.heads["feature/root"] = "head-root"
+                                for _ in range(12):
+                                    recovered = await run()
+                                    self.assertEqual(recovered.status_code, 202, recovered.text)
+                                    if 1 in landed_prs:
+                                        self.assertNotIn(2, landing_attempts)
+                                        self.assertEqual(graph.heads["feature/child"], "head-child")
+                                        self.assertEqual(closed, set())
+                                        for _ in range(12):
+                                            child_response = await run()
+                                            self.assertEqual(
+                                                child_response.status_code, 202, child_response.text
+                                            )
+                                            if 2 in landed_prs:
+                                                self.assertEqual(landing_attempts, [1, 2])
+                                                self.assertEqual(
+                                                    graph.heads["feature/child"], "head-child"
+                                                )
+                                                self.assertEqual(closed, set())
+                                                return
+                                        self.fail("Original child did not land through its own PR")
+                                self.fail(
+                                    "Restoring the original root did not resume its own landing"
                                 )
-                                self.assertEqual(retained.plan, old.plan)
-                            return
                     self.fail(f"Original-review recovery was not reported: {result}")
                 if indirectly_merged:
                     for _ in range(10):
@@ -608,3 +704,53 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         await self._recovery(checkpointed=False, moved=False, preserve_original_review=True)
+
+    async def test_recorded_carry_without_policy_change_preserves_original_review(self) -> None:
+        await self._recovery(
+            checkpointed=True, moved=False, preserve_original_review=True, change_policy=False
+        )
+
+    async def test_unrecorded_carry_without_policy_change_preserves_original_review(self) -> None:
+        await self._recovery(
+            checkpointed=False, moved=False, preserve_original_review=True, change_policy=False
+        )
+
+    async def test_new_root_commit_cannot_release_carried_original_review(self) -> None:
+        await self._recovery(checkpointed=True, moved=True, preserve_original_review=True)
+
+    async def test_unrelated_work_lands_while_legacy_review_recovery_is_held(self) -> None:
+        await self._recovery(
+            checkpointed=False, moved=False, preserve_original_review=True, unrelated=True
+        )
+
+    async def test_original_root_restore_releases_review_recovery_without_closing_child(
+        self,
+    ) -> None:
+        await self._recovery(
+            checkpointed=False,
+            moved=False,
+            preserve_original_review=True,
+            restore_original_root=True,
+        )
+
+    async def test_independently_landed_child_is_not_a_review_recovery_hold(self) -> None:
+        await self._recovery(
+            checkpointed=False, moved=True, preserve_original_review=True, child_only_in_base=True
+        )
+
+    async def test_base_refresh_containing_landed_child_is_not_a_review_recovery_hold(self) -> None:
+        await self._recovery(
+            checkpointed=False,
+            moved=True,
+            preserve_original_review=True,
+            root_refreshed_after_child_landing=True,
+        )
+
+    async def test_prepared_legacy_landing_cannot_land_carried_original_review(self) -> None:
+        await self._recovery(
+            checkpointed=False,
+            moved=False,
+            preserve_original_review=True,
+            change_policy=False,
+            landing_prepared=True,
+        )

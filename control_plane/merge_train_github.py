@@ -62,7 +62,10 @@ from control_plane.github_read_cache import GitHubReadCache, MERGE_TRAIN_READ_CA
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.merge_train_candidate_failures import CandidateCheckFailures
 from control_plane.merge_train_candidate_failures import classify_candidate_check_failures
-from control_plane.merge_train_codeowners import individual_landing_snapshots
+from control_plane.merge_train_codeowners import (
+    individual_landing_snapshots,
+    carried_change_requires_individual_landing,
+)
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
 from control_plane.source_control_change import change_fingerprint
@@ -2259,6 +2262,22 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 f"Pull request #{pull_request_number} no longer has current-head Client review.",
                 status_code=409,
             )
+
+    def carried_change_requires_individual_landing(
+        self,
+        *,
+        repository: str,
+        base_sha: str,
+        parent_head_sha: str,
+        child_head_sha: str,
+    ) -> bool:
+        return carried_change_requires_individual_landing(
+            transport=self.transport,
+            repository_path=_repository_path(repository),
+            base_sha=base_sha,
+            parent_head_sha=parent_head_sha,
+            child_head_sha=child_head_sha,
+        )
 
     def merge_pull_request(
         self,

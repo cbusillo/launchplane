@@ -1298,7 +1298,9 @@ Controller actions have these retry/stop semantics:
   completed history cannot revive older execution. The existing supported
   resumption requires the original policy digest to be current again and all
   current head/readiness checks to pass; it merges only remaining children.
-  Alternatively, pushing a new commit to the root makes the old proof
+  For a carried change requiring its original PR review, follow
+  [original review recovery](#original-review-recovery) instead. Otherwise,
+  pushing a new commit to the root makes the old proof
   inapplicable and resumes current-policy discovery with fresh head/readiness
   proof. Closing and reopening at the same checkpointed head keeps the policy
   block. Uncheckpointed execution and moved roots retain their existing retirement
@@ -1754,3 +1756,52 @@ overwritten by a concurrent replay. PostgreSQL uses the same held session for
 feedback reads and writes, so delivery does not require a second pooled connection.
 The lock affects comment delivery only, and does not replace merge authority or
 the controller lease.
+
+## Original review recovery
+
+A historical carry is branch history, not approval on its child's original PR.
+Before selecting work, reflowing a candidate, or merging a saved landing, the
+controller checks each collapse's latest progress across active and retired
+history. A stack is held when a current parent requiring individual landing
+contains a recorded child's exact head, the current base does not contain that
+head, and the recorded child diff requires individual landing under the base's
+current CODEOWNERS. This also detects a successful branch merge whose progress
+write was interrupted. A new parent commit or changed policy cannot release
+this hold. A child already contained in the current base is not an unlanded
+carried change.
+
+Run-once reports `merge_train_original_review_recovery_required` with original
+PR numbers and heads. Selection excludes the affected stack and dependent base
+refs while unrelated eligible PRs continue. A saved landing containing an
+affected entry remains reconciliation-required; no entry is merged and no
+existing admin reconciliation fence is cleared. Dry runs leave collapse history unchanged.
+GitHub still decides current-head approvals and protected merge admission.
+Incomplete provider evidence cannot justify carrying approval to another PR;
+comparison file lists at GitHub's [300-file limit](https://docs.github.com/en/enterprise-cloud%40latest/rest/commits/commits#compare-two-commits)
+are treated conservatively.
+
+The agent responsible for the branch, or one with a supported ownership handoff, can recover
+through the original PRs:
+
+1. Read the complete [review history](service-boundary.md#original-review-history)
+   and current provider heads, ancestry, open/merged state, and review state.
+   Preserve the saved plans and an archive of the current branch head before
+   changing branch history. Missing historical inventory means unknown.
+2. Restore the parent's own changes without the unlanded child carry, using
+   the recorded original parent head as the reconstruction starting point.
+   Preserve subsequent parent work and the child's original head. Use an exact
+   expected-current-head lease for any necessary task-branch rewrite, so a
+   concurrent writer is not overwritten. A merge revert leaves child ancestry
+   present and cannot release this hold. No controller endpoint performs this
+   branch rewrite.
+3. Let the original parent PR pass its current-head checks, review and native
+   merge admission. Retarget the original child PR to the protected base and
+   let it pass its own current-head checks, review and native merge admission.
+   The original child is not closed or credited as landed through the parent.
+   Repeat for each original child in a deeper stack.
+
+If GitHub already marked a carried child PR merged indirectly, preserve that
+original review history; it cannot be reopened or treated as current approval.
+A replacement PR for remaining changes requires its own review and admission.
+This recovery does not reland changes already in the protected base, rewrite
+that base, waive approval, grant access, or retire stored evidence.
