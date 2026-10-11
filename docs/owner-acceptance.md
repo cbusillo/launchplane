@@ -24,6 +24,11 @@ immutable source comparison proves that every changed file is a dependency
 manifest or lockfile. The PR must be authored by Dependabot in the same repository
 and have no Client review label. Mixed code or workflow changes, unavailable or
 incomplete comparisons, and explicit review labels keep the usual notes gate.
+For an otherwise pure Dependabot update, add the configured Client review label
+to request review even when hand-written Client test notes are present. The
+exception classifies PR authorship and changed file paths; it does not certify
+manifest contents or replace the train's commit-provenance, dependency-safety or CI
+gates.
 The train carries the derived engineering-only explanation into batch and release
 notes; it requests no Client preview review and does not accept a release.
 Editing the PR body re-plans its preview and review intent without needing a

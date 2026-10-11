@@ -4,9 +4,9 @@ from collections.abc import Callable
 from pathlib import PurePosixPath
 from urllib.parse import quote
 
-DEPENDENCY_UPDATE_NOTES = (
-    "Nothing for the Client to test: Automated dependency manifest and lockfile update."
-)
+from control_plane.client_test_notes import NOTHING_TO_TEST
+
+DEPENDENCY_UPDATE_NOTES = f"{NOTHING_TO_TEST}: Automated dependency manifest and lockfile update."
 _DEPENDENCY_FILES = frozenset(
     {
         "pyproject.toml",
@@ -45,12 +45,6 @@ def pure_dependabot_update(
         not isinstance(user, dict)
         or user.get("login") != "dependabot[bot]"
         or user.get("type") != "Bot"
-    ):
-        return False
-    labels = pull_request.get("labels", [])
-    if not isinstance(labels, list) or any(
-        isinstance(label, dict) and str(label.get("name", "")).casefold() == "owner-review"
-        for label in labels
     ):
         return False
     head, base = pull_request.get("head"), pull_request.get("base")

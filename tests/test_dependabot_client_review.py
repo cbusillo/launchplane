@@ -67,7 +67,6 @@ class DependabotClientReviewTests(unittest.TestCase):
         for update in (
             {"user": {"login": "agent[bot]", "type": "Bot"}},
             {"user": {"login": "person", "type": "User"}},
-            {"labels": [{"name": "owner-review"}]},
             {"head": {"sha": "new", "repo": {"full_name": "someone/fork"}}},
             {"changed_files": 3},
         ):
@@ -93,3 +92,51 @@ class DependabotClientReviewTests(unittest.TestCase):
         )
         self.assertTrue(intent.error)
         self.assertTrue(intent.review_required)
+
+    def test_shared_dependency_repository_uses_consuming_client_profile(self) -> None:
+        pull = _github_pull_request(16)
+        pull["labels"] = []
+        pull["body"] = "Bumps a dependency."
+        pull["user"] = {"login": "dependabot[bot]", "type": "Bot", "id": 49699333}
+        profile = SimpleNamespace(
+            is_active=True,
+            repository="example/site",
+            driver_id="odoo",
+            owner=SimpleNamespace(is_set=True, review_label="owner-review"),
+            lanes=(SimpleNamespace(instance="prod", context="site"),),
+        )
+        store = SimpleNamespace(
+            list_product_profile_records=lambda: (profile,),
+            read_release_tuple_record=lambda **_: SimpleNamespace(artifact_id="live"),
+            read_artifact_manifest=lambda _: SimpleNamespace(
+                addon_sources=(SimpleNamespace(repository="cbusillo/sellyouroutboard"),)
+            ),
+        )
+        reader = GitHubMergeTrainSnapshotReader(
+            transport=RecordingMergeTrainGitHubTransport(
+                responses=({"files": [{"filename": "requirements.txt", "status": "modified"}]},)
+            ),
+            branch_refresh_store=cast(Any, store),
+        )
+        snapshot = reader._pull_request_snapshot(
+            repository_path="cbusillo/sellyouroutboard", pull_request=pull, enrich=False
+        )
+        self.assertFalse(snapshot.client_test_notes_error)
+        self.assertFalse(snapshot.owner_review_required)
+
+    def test_pure_bot_notes_need_explicit_label_to_request_client_review(self) -> None:
+        from control_plane.client_test_notes import change_client_review
+
+        body = "## Client test notes\nCheck checkout after the SDK update."
+        intent = change_client_review(
+            body=body, labels=(), review_label="owner-review", pure_dependency_update=True
+        )
+        self.assertFalse(intent.review_required)
+        requested = change_client_review(
+            body=body,
+            labels=("owner-review",),
+            review_label="owner-review",
+            pure_dependency_update=True,
+        )
+        self.assertTrue(requested.review_required)
+        self.assertFalse(requested.error)
