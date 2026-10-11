@@ -645,6 +645,19 @@ candidate as same-repository work when no pull
 request payload exists. Otherwise the candidate has no exact-SHA check evidence
 and remains fail-closed in `ready_for_checks`.
 
+Launchplane's own CI runs its full validation on that candidate push once. A
+same-repository PR headed by `launchplane/train/**`, when routing succeeds, skips the validation jobs
+and reports only `candidate-ci-delegated`, identifying its head SHA and branch.
+That routing check supplies no validation evidence and never publishes a
+`ci-gate`, even when the push is missing, pending or failed. The push remains
+the only producer of the candidate's required `ci-gate`; an informational PR
+check cannot satisfy or supersede it. Observation and protected landing still
+require the actual candidate's required checks. A new candidate SHA requires
+its own push validation. Ordinary PRs, including forks using the same branch
+spelling, keep their full CI path. Security, CodeQL and the required-check policy
+are unchanged. Actions still records two workflow events for a batch candidate,
+but only the push executes the full CI suite.
+
 Candidate observation reads the target branch's live required-status-check
 policy and requires every named check, including any pinned GitHub App id, to be
 present and successful on the candidate SHA. Partial workflow evidence cannot
