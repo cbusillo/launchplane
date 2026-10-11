@@ -377,7 +377,7 @@ def _runner_expression_excludes_forks(expression: str) -> bool:
     """Prove the static runner choice gates its self-hosted branch before checkout."""
     match = re.fullmatch(
         r"\$\{\{\s*fromJSON\((?P<condition>.*?)\s*&&\s*"
-        r"'(?P<reserved>\[.*?\])'\s*\|\|\s*'(?P<hosted>\[.*?\])'\s*\)\s*\}\}",
+        r"'(?P<reserved>\[.*?])'\s*\|\|\s*'(?P<hosted>\[.*?])'\s*\)\s*}}",
         expression,
         flags=re.DOTALL,
     )
@@ -635,7 +635,6 @@ class GitHubActionsSecurityTests(TestCase):
                         "-c",
                         step.run,
                     ],
-                    check=False,
                     capture_output=True,
                     env=os.environ
                     | {
@@ -708,7 +707,7 @@ class GitHubActionsSecurityTests(TestCase):
                 violations.append(
                     f"{action.location}: remote action {source!r} must document its provenance."
                 )
-            elif source == ("cbusillo/launchplane/.github/actions/launchplane-request"):
+            elif source == "cbusillo/launchplane/.github/actions/launchplane-request":
                 if action.provenance != "launchplane-request":
                     violations.append(
                         f"{action.location}: first-party cross-repository action provenance "

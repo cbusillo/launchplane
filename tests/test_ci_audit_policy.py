@@ -8,8 +8,8 @@ from tests.support.workflows import load_workflow
 
 
 class AuditPolicyWorkflowTests(unittest.TestCase):
+    @staticmethod
     def classify(
-        self,
         paths: tuple[str, ...],
         *,
         event: str = "pull_request",

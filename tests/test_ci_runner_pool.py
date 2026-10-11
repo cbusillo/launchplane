@@ -10,7 +10,8 @@ from tests.support.workflows import load_workflow
 
 
 class CIRunnerPoolTests(unittest.TestCase):
-    def select(self, **overrides: str) -> subprocess.CompletedProcess[str]:
+    @staticmethod
+    def select(**overrides: str) -> subprocess.CompletedProcess[str]:
         with TemporaryDirectory() as directory:
             output = Path(directory) / "output"
             result = subprocess.run(
@@ -28,7 +29,6 @@ class CIRunnerPoolTests(unittest.TestCase):
                 | overrides,
                 capture_output=True,
                 text=True,
-                check=False,
             )
             if result.returncode == 0:
                 result.stdout = output.read_text().removeprefix("runner=").strip()
@@ -70,7 +70,7 @@ class CIRunnerPoolTests(unittest.TestCase):
                 runner = str(workflow.job(job_id).get("runs-on", ""))
                 if "fromJSON(" not in runner or "needs.runner_pool" in runner:
                     continue
-                for encoded in re.findall(r"'(\[.*?\])'", runner):
+                for encoded in re.findall(r"'(\[.*?])'", runner):
                     labels = json.loads(encoded)
                     if "self-hosted" in labels:
                         with self.subTest(workflow=name, job=job_id):
@@ -120,7 +120,6 @@ class CIRunnerPoolTests(unittest.TestCase):
                         },
                         capture_output=True,
                         text=True,
-                        check=False,
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     arguments = recorded.read_text().splitlines()
@@ -141,7 +140,6 @@ class CIRunnerPoolTests(unittest.TestCase):
                         env=os.environ | {"RUNNER_POOL_RESULT": status},
                         capture_output=True,
                         text=True,
-                        check=False,
                     )
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn(f"runner_pool concluded with: {status}", result.stderr)
@@ -172,7 +170,6 @@ class CIRunnerPoolTests(unittest.TestCase):
                     },
                     capture_output=True,
                     text=True,
-                    check=False,
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(f"test concluded with: {status}", result.stderr)
