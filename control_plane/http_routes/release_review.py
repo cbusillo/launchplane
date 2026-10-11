@@ -48,8 +48,11 @@ class ReleaseReviewRouteDependencies:
         [ReleaseReviewStore, LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord], str
     ]
     # Opens the Client's release request for an engineering-only release, with
-    # the admin's reason; returns whether a request is open afterwards.
-    open_urgent_review: Callable[[ReleaseReviewStore, LaunchplaneProductProfileRecord, str], bool]
+    # the admin's reason for the reviewed checklist digest; returns whether a
+    # request is open afterwards.
+    open_urgent_review: Callable[
+        [ReleaseReviewStore, LaunchplaneProductProfileRecord, str, str], bool
+    ]
 
 
 class ReleaseReviewResponse(BaseModel):
@@ -349,7 +352,10 @@ def register_release_review_routes(
             )
         try:
             opened = dependencies.open_urgent_review(
-                cast(ReleaseReviewStore, record_store), profile, envelope.reason
+                cast(ReleaseReviewStore, record_store),
+                profile,
+                envelope.reason,
+                envelope.checklist_digest,
             )
         except (FileNotFoundError, StopIteration, ValueError, click.ClickException):
             opened = False

@@ -311,12 +311,14 @@ def publish_release_invitation(
     profile: LaunchplaneProductProfileRecord,
     backoff: ReleaseInvitationBackoff | None = None,
     urgent_reason: str = "",
+    urgent_checklist_digest: str = "",
 ) -> bool:
     """Keep the Client's release request current; return whether one is open.
 
     Only a Client-facing change opens a request. An engineering-only candidate
     waits for the next Client-facing release unless an admin deliberately opens
-    it with ``urgent_reason``. The Client still has to accept it either way.
+    it with ``urgent_reason`` for the exact checklist the admin reviewed
+    (``urgent_checklist_digest``). The Client still has to accept it either way.
     """
     origin = launchplane_public_origin_from_env()
     if (
@@ -378,6 +380,9 @@ def publish_release_invitation(
             control_plane_root=control_plane_root, record_store=store, profile=profile
         )
         if not _ready(review, profile):
+            return False
+        # The admin's reason applies only to the checklist they reviewed.
+        if urgent_reason and review.checklist_digest != urgent_checklist_digest:
             return False
         assert review.checklist is not None
         client_changes = client_invitation_changes(store, profile, review.checklist)

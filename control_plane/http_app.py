@@ -26826,11 +26826,12 @@ def create_launchplane_fastapi_app(
                 profile=profile,
                 decision=decision,
             ),
-            open_urgent_review=lambda store, profile, reason: publish_release_invitation(
+            open_urgent_review=lambda store, profile, reason, digest: publish_release_invitation(
                 store=store,
                 control_plane_root=resolved_control_plane_root,
                 profile=profile,
                 urgent_reason=reason,
+                urgent_checklist_digest=digest,
             ),
         ),
     )

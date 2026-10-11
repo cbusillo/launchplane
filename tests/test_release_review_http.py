@@ -346,6 +346,12 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 invitation.call_args.kwargs["urgent_reason"], "Fixes a login security problem."
             )
+            self.assertEqual(
+                invitation.call_args.kwargs["urgent_checklist_digest"],
+                build_release_review(
+                    store=self.store, profile=profile(), read=github_read
+                ).checklist_digest,
+            )
             invitation.return_value = False
             unopened = await self.open_urgent(reason="Fixes a login security problem.")
             self.assertEqual(unopened.status_code, 409, unopened.text)

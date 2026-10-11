@@ -399,6 +399,9 @@ class ReleaseInvitationTests(unittest.TestCase):
 
     def test_urgent_opening_states_reason_and_still_needs_client_acceptance(self) -> None:
         self.make_engineering_only()
+        # A reason written for an earlier checklist never opens the current one.
+        self.assertFalse(self.publish(urgent_reason="Security fix.", urgent_digest="f" * 64))
+        self.assertEqual((self.issues, self.posts), ([], []))
         self.assertTrue(
             self.publish(urgent_reason="Fixes a login security problem.\nPing @someone")
         )
@@ -454,7 +457,11 @@ class ReleaseInvitationTests(unittest.TestCase):
         return self.comments.copy() if "/comments?" in path else self.issues.copy()
 
     def publish(
-        self, backoff: ReleaseInvitationBackoff | None = None, *, urgent_reason: str = ""
+        self,
+        backoff: ReleaseInvitationBackoff | None = None,
+        *,
+        urgent_reason: str = "",
+        urgent_digest: str = "",
     ) -> bool:
         return publish_release_invitation(
             store=cast(ReleaseReviewStore, self.store),
@@ -462,6 +469,7 @@ class ReleaseInvitationTests(unittest.TestCase):
             profile=self.profile,
             backoff=backoff,
             urgent_reason=urgent_reason,
+            urgent_checklist_digest=urgent_digest or self.review.checklist_digest,
         )
 
     def change_candidate(self, **update: str) -> None:
