@@ -183,7 +183,7 @@ cancels superseded PR runs; candidate creation and reset pushes retain the
 SHA-isolated concurrency documented in
 [merge-train policy](../merge-train-policy.md#candidate-construction).
 
-The self-hosted test aggregate uses `!cancelled()` so it still reports failed
+The test aggregate uses `!cancelled()` so it still reports failed
 shards but does not remain queued after a superseding push cancels the run.
 An `always()` aggregate can keep the old workflow's concurrency slot occupied
 until a shared runner becomes available, preventing the new head's CI from
