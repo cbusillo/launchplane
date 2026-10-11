@@ -709,12 +709,21 @@ is not presented as healthy when the recorded ingress, TLS, or runtime identity
 condition is failing. A provider-target record exposes recorded placement even
 without a public route binding, including for private-only services. That record
 does not establish public ingress, TLS ownership, or verified runtime identity;
-missing public route authority still blocks public-lane qualification.
+missing public route authority remains a route-change readiness concern, not
+evidence that the application is unhealthy. The Products operational signal
+requires fresh passing effective health checks and exact matching runtime
+identity. Products that require a website also require an effective public HTTP
+check; private checks cannot substitute for public reachability. Missing,
+disabled, expired or divergent stored route authority remains visible in
+diagnostics and does not prevent operational green. Route-change readiness and
+the proof required immediately before a managed route change remain separate.
 
 Products sidebar lane dots and their accessible descriptions use
 `environmentOperationalTone`, the same signal as product views. Absent lanes
 are neutral and described as absent (not recorded); missing or unsupported
-evidence stays unknown, warnings are amber, and failures are red.
+health or identity evidence stays unknown, health warnings are amber, and
+failures are red. Open incidents and actual negative TLS observations remain
+blocking; a route authority warning is diagnostic rather than a health failure.
 
 Open product inventories, workspaces, and environment evidence views refresh
 their read resources once a minute after a completed read. Hidden tabs pause
@@ -723,9 +732,11 @@ reads do not overlap; access-denied and missing resources require a manual retry
 Evidence still expires at its recorded deadline while a read is delayed or
 failed, including recorded route authority, nested ingress/TLS ownership and
 observed TLS proof. A fresh health/identity observation cannot prolong expired
-applicable topology proof. Focus or visibility return re-evaluates the cached
-deadlines immediately. Only a new service response with fresh applicable proof,
-passing health and current runtime identity can restore green. Automatic reads do not reset action, settings, or
+stored route proof, which becomes stale in diagnostics without changing the
+health signal. Observed TLS proof retains its own freshness deadline. Focus or
+visibility return re-evaluates the cached deadlines immediately. Only a new
+service response with fresh health and current runtime identity can restore a
+health signal that expired. Automatic reads do not reset action, settings, or
 promotion resources; the manual Refresh remains available.
 
 Each Delivery Governance or transitional engineering child route owns an

@@ -85,10 +85,26 @@ export function expireProductEvidence(product: ProductSiteOverview, now = Date.n
 
 export type SignalTone = ProductEnvironmentSummary["trust_state"] | "warning" | "danger";
 
+function healthWarnings(environment: ProductEnvironmentSummary): Topology["warnings"] {
+  // Recorded route ownership and placement describe readiness to change a route.
+  // They do not attest the health of the running application.
+  const routeDiagnostics = new Set([
+    "missing_route_authority", "route_authority_disabled", "stale_route_authority",
+    "domain_divergence", "provider_placement_missing", "placement_divergence",
+    "external_ingress_internals_unsupported", "ingress_ownership_unknown",
+    "ingress_divergence", "tls_ownership_unknown", "tls_ownership_divergence",
+    "tls_observation_missing",
+  ]);
+  return environment.topology.warnings.filter(warning => !routeDiagnostics.has(warning.code));
+}
+
 export function environmentOperationalTone(environment: ProductEnvironmentSummary | null, now = Date.now()): SignalTone {
   if (!environment) return "missing";
   environment = expireEnvironmentEvidence(environment, now);
   const checks = environment.health_monitoring.checks.filter(check => check.probe_effective);
+  const warnings = healthWarnings(environment);
+  const otherWarnings = environment.warnings.filter(detail =>
+    !environment.topology.warnings.some(warning => warning.detail === detail));
   const negativeTlsStates = new Set([
     "expired", "hostname_mismatch", "untrusted", "self_signed", "unreachable",
   ]);
@@ -98,22 +114,27 @@ export function environmentOperationalTone(environment: ProductEnvironmentSummar
     ["mismatch", "malformed"].includes(
       environment.topology.observed.placement?.runtime_identity_status ?? "unchecked",
     ) ||
-    environment.topology.warnings.some(warning => warning.severity === "error") ||
+    warnings.some(warning => warning.severity === "error") ||
     environment.topology.observed.tls_domains.some(domain => negativeTlsStates.has(domain.status))
   ) return "danger";
+  if (!checks.length && environment.provenance.freshness_status === "missing") return "missing";
   if (
-    environment.warnings.length || environment.topology.warnings.some(warning => warning.severity !== "info") ||
+    otherWarnings.length || warnings.some(warning => warning.severity !== "info") ||
     environment.topology.observed.placement.trust_state === "stale" ||
-    publicTopologyApplicable(environment.topology) && publicTopologyEvidence(environment.topology).some(evidence => evidence.trust_state === "stale") ||
+    publicTopologyApplicable(environment.topology) && (
+      !checks.some(check => check.kind === "public_http") ||
+      environment.topology.observed.ingress.trust_state === "stale" ||
+      environment.topology.observed.tls_domains.some(domain => domain.trust_state === "stale")
+    ) ||
+    environment.topology.observed.placement.runtime_identity_status !== "match" ||
     checks.some(check => check.status !== "pass" || check.trust_state !== "verified") ||
     checks.length > 0 && environment.provenance.freshness_status !== "verified" ||
     Date.parse(environment.provenance.stale_after) < now ||
     checks.some(check => Date.parse(check.provenance?.stale_after ?? "") < now) ||
-    environment.provenance.freshness_status === "stale" || environment.trust_state === "stale"
+    environment.provenance.freshness_status === "stale"
   ) return "warning";
   // Lane provenance is verified only after health and current deployment identity both pass.
-  if (checks.length && environment.provenance.freshness_status === "verified" &&
-      !["missing", "unsupported"].includes(environment.trust_state)) return "verified";
+  if (checks.length && environment.provenance.freshness_status === "verified") return "verified";
   if (environment.provenance.freshness_status === "missing") return "missing";
   return environment.trust_state === "verified" ? "recorded" : environment.trust_state;
 }

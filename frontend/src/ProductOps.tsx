@@ -1211,10 +1211,10 @@ export function signalHeadline(environment: ProductEnvironmentSummary | null, to
   if (tone === "warning") {
     return "Review warning";
   }
-  if (!environment || environment.trust_state === "missing") {
+  if (!environment || tone === "missing") {
     return "Evidence missing";
   }
-  if (environment.trust_state === "unsupported") {
+  if (tone === "unsupported") {
     return "Unsupported";
   }
   const status = environment.public_ingress.status.toLowerCase();

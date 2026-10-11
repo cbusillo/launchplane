@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-const cases = ["healthy", "failed", "incident", "stale", "unknown", "absent"] as const;
+const cases = ["healthy", "missing-route", "expired-route", "failed", "incident", "stale", "unknown", "absent"] as const;
 
 for (const state of cases) {
   test(`sidebar and product views agree for ${state} lanes`, async ({ page }, testInfo) => {
@@ -37,6 +37,14 @@ for (const state of cases) {
       if (state === "failed") check.status = "fail";
       if (state === "incident") check.incident_status = "open";
       if (state === "stale") lane.provenance.stale_after = new Date(now - 1000).toISOString();
+      if (state === "missing-route" || state === "expired-route") {
+        lane.trust_state = state === "missing-route" ? "missing" : "stale";
+        lane.topology.provider_recorded.trust_state = lane.trust_state;
+        lane.topology.provider_recorded.provenance.stale_after = new Date(now - 1000).toISOString();
+        const warning = { code: state === "missing-route" ? "missing_route_authority" : "stale_route_authority", scope: "authority", severity: "error", detail: "Stored route authority unavailable", domain_name: "" };
+        lane.topology.warnings = [warning];
+        lane.warnings = [warning.detail];
+      }
       if (state === "unknown") {
         lane.trust_state = "missing";
         lane.provenance.freshness_status = "missing";
@@ -61,7 +69,8 @@ for (const state of cases) {
     await expect(page.getByRole("heading", { level: 1, name: fixtures.product.display_name })).toBeVisible();
     const dot = railLink.locator('[data-lane="testing"]');
     const signal = page.locator(".signal-tile").filter({ hasText: /^Testing/i });
-    const tone = state === "healthy" ? "verified" : state === "failed" || state === "incident" ? "danger" : state === "stale" ? "warning" : "missing";
+    const healthy = state === "healthy" || state === "missing-route" || state === "expired-route";
+    const tone = healthy ? "verified" : state === "failed" || state === "incident" ? "danger" : state === "stale" ? "warning" : "missing";
     await expect(signal).toHaveAttribute("data-tone", tone);
     await expect(dot).toHaveAttribute("data-tone", tone);
     const description = state === "absent" ? "Testing lane: absent (not recorded)" : `Testing operational status: ${tone}`;
@@ -76,7 +85,8 @@ for (const state of cases) {
       expected.remove();
       return matches;
     }, colorToken)).toBe(true);
-    if (state === "healthy" || state === "absent" || state === "failed") {
+    if (healthy) await expect(signal).toContainText("Public evidence passed");
+    if (healthy || state === "absent" || state === "failed") {
       await page.screenshot({ path: `../tmp/browser-smoke/sidebar-${state}-${testInfo.project.name}.png`, fullPage: true });
     }
     expect(mutations).toEqual([]);

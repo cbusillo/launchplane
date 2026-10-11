@@ -157,7 +157,18 @@ export function productsForFixture(
       const incident = incidentSummaryForFixture({
         ...environment, product: site.product, display_name: site.display_name,
       });
-      return { ...environment, health_monitoring: {
+      const missingIdentity = site.trust_state === "missing";
+      return { ...environment, topology: {
+        ...environment.topology,
+        observed: { ...environment.topology.observed, placement: {
+          expected_runtime_identity: missingIdentity ? null : runtimeIdentity(site.product, environment.context, environment.environment, "expected"),
+          observed_runtime_identity: missingIdentity ? null : runtimeIdentity(site.product, environment.context, environment.environment, "observed"),
+          runtime_identity_status: missingIdentity ? "missing" : "match",
+          runtime_identity_detail: missingIdentity ? "No runtime identity evidence is recorded." : "Observed runtime identity matches the expected stable-lane artifact.",
+          trust_state: missingIdentity ? "missing" : "verified",
+          provenance: provenance(missingIdentity ? "missing" : "verified", "Fixture stable-lane runtime identity."),
+        } },
+      }, health_monitoring: {
         ...environment.health_monitoring, open_incidents: incident ? [incident] : [],
       } };
     }),

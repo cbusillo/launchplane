@@ -68,11 +68,12 @@ for (const evidence of ["route", "tls"] as const) for (const environmentView of 
       : page.locator(".signal-tile").filter({ hasText: /^Testing/i });
     const assertState = async (expired: boolean) => {
       const dot = page.locator(".rail-product-link").filter({ hasText: fixture.product.display_name }).locator('[data-lane="testing"]');
-      await expect(dot).toHaveAttribute("data-tone", expired ? "warning" : "verified");
-      if (environmentView) await expect(page.getByLabel("Lane status")).toHaveAttribute("data-tone", expired ? "warning" : "verified");
+      const healthTone = expired && evidence === "tls" ? "warning" : "verified";
+      await expect(dot).toHaveAttribute("data-tone", healthTone);
+      if (environmentView) await expect(page.getByLabel("Lane status")).toHaveAttribute("data-tone", healthTone);
       if (environmentView && evidence === "tls") await expect(page.locator(".tls-domain-list li").first()).toHaveAttribute("data-tone", expired ? "warning" : "pass");
       if (environmentView && evidence === "route") await expect(signal).toContainText(expired ? "Stale" : "Recorded");
-      else await expect(signal).toHaveAttribute("data-tone", expired ? "warning" : environmentView ? "pass" : "verified");
+      else await expect(signal).toHaveAttribute("data-tone", environmentView ? expired ? "warning" : "pass" : healthTone);
     };
     await assertState(false);
     mode = "pending";
