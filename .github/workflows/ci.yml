@@ -25,7 +25,36 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' || (startsWith(github.ref, 'refs/heads/launchplane/train/') && !github.event.created && !github.event.forced) }}
 
 jobs:
+  candidate_ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      delegated: ${{ steps.route.outputs.delegated }}
+      sha: ${{ steps.route.outputs.sha }}
+      branch: ${{ steps.route.outputs.branch }}
+    steps:
+      - name: Route candidate CI
+        id: route
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          delegated=false
+          if [ "${EVENT_NAME}" = "pull_request" ] && jq -e --arg repository "${REPOSITORY}" '
+            .pull_request.head.repo.full_name == $repository and
+            (.pull_request.head.ref | startswith("launchplane/train/")) and
+            (.pull_request.head.sha | test("^[0-9a-f]{40}$"))
+            ' "${GITHUB_EVENT_PATH}" >/dev/null; then
+            delegated=true
+            jq -r '"sha=" + .pull_request.head.sha, "branch=" + .pull_request.head.ref' \
+              "${GITHUB_EVENT_PATH}" >> "${GITHUB_OUTPUT}"
+          fi
+          echo "delegated=${delegated}" >> "${GITHUB_OUTPUT}"
+
   repository_pins:
+    needs: candidate_ci
+    if: needs.candidate_ci.outputs.delegated == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -46,6 +75,8 @@ jobs:
           --repo-root . --revision "$PIN_REVISION" --repository "$PIN_REPOSITORY"
 
   audit_policy:
+    needs: candidate_ci
+    if: needs.candidate_ci.outputs.delegated == 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -99,6 +130,8 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
   verified_tree:
+    needs: candidate_ci
+    if: needs.candidate_ci.outputs.delegated == 'false'
     # Train base pushes can reuse the same commit's successful main CI. Main
     # also reuses an up-to-date PR tree; new candidate combinations run full CI.
     name: verified-tree
@@ -769,6 +802,7 @@ jobs:
     needs: [verified_tree, test_timing_snapshot, test_shards]
     if: >-
       always() &&
+      needs.verified_tree.result == 'success' &&
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
@@ -913,10 +947,16 @@ jobs:
         run: uv run --extra dev launchplane ci postgres-integration
 
   ci_gate:
-    name: ci-gate
+    # A routing-only PR check must never supersede the push's required ci-gate.
+    name: >-
+      ${{ github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'launchplane/train/') &&
+      'candidate-ci-delegated' || 'ci-gate' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - candidate_ci
       - repository_pins
       - audit_policy
       - verified_tree
@@ -938,7 +978,20 @@ jobs:
       actions: read
       contents: read
     steps:
+      - name: Report delegated candidate CI
+        if: needs.candidate_ci.outputs.delegated == 'true'
+        env:
+          CANDIDATE_SHA: ${{ needs.candidate_ci.outputs.sha }}
+          CANDIDATE_BRANCH: ${{ needs.candidate_ci.outputs.branch }}
+        run: |
+          set -euo pipefail
+          echo "Full CI runs on the push of ${CANDIDATE_BRANCH} at ${CANDIDATE_SHA}." \
+            >> "${GITHUB_STEP_SUMMARY}"
+          echo 'This routing check is not ci-gate and supplies no validation evidence. The candidate push must pass the required ci-gate before landing.' \
+            >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Report CI time against budget
+        if: needs.candidate_ci.outputs.delegated != 'true'
         # Reports only; a slow run is a signal to fix a lane, not a failure.
         continue-on-error: true
         env:
@@ -978,7 +1031,9 @@ jobs:
           fi
 
       - name: Require successful CI path
+        if: needs.candidate_ci.outputs.delegated != 'true'
         env:
+          CANDIDATE_CI_RESULT: ${{ needs.candidate_ci.result }}
           BASE_REPOSITORY: ${{ github.repository }}
           HEAD_REPOSITORY: >-
             ${{ github.event.pull_request.head.repo.full_name || github.repository }}
@@ -997,6 +1052,10 @@ jobs:
           VERIFIED_TREE: ${{ needs.verified_tree.outputs.verified }}
         run: |
           set -euo pipefail
+          if [ "${CANDIDATE_CI_RESULT}" != "success" ]; then
+            echo "candidate_ci concluded with: ${CANDIDATE_CI_RESULT}" >&2
+            exit 1
+          fi
           if [ "${AUDIT_POLICY_RESULT}" != "success" ]; then
             echo "audit_policy concluded with: ${AUDIT_POLICY_RESULT}" >&2
             exit 1

@@ -1408,7 +1408,7 @@ export type MergeTrainHeldOutSummary = {
     conflicts_with: Array<number>;
     head_sha: string;
     pull_request_number: number;
-    reason: 'entry_conflict' | 'failure_isolation';
+    reason: 'entry_conflict' | 'failure_isolation' | 'dependency_not_ready';
 };
 
 export type MergeTrainIdentity = {
@@ -1483,6 +1483,7 @@ export type MergeTrainRepositoryPolicyOutput = {
     enqueue_label: string;
     failure_policy: 'pause_train' | 'continue_after_blocking_pr';
     github_token: MergeTrainGitHubTokenSource;
+    max_batch_size?: number | null;
     merge_identity: MergeTrainIdentity;
     merge_method: 'merge' | 'squash' | 'rebase';
     provider_delivery_protection_expectation?: ProviderDeliveryProtectionExpectationV1 | null;

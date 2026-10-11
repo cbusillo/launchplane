@@ -403,6 +403,9 @@ def _held_out_messages(
             continue
         if probed is not None and number not in probed:
             continue
+        if held_out_entry.get("reason") == "dependency_not_ready":
+            # Nothing for its author to do; it joins the next candidate.
+            continue
         if held_out_entry.get("reason") == "failure_isolation":
             messages.append(
                 (
