@@ -24,6 +24,7 @@ from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.release_review import (
     ProductionChangeRequiresPromotion,
     build_release_review,
+    checklist_digest,
     require_release_approval,
     require_unchanged_production_artifact,
 )
@@ -552,3 +553,118 @@ class ReleaseGitHubTests(unittest.TestCase):
         )
         self.assertEqual(len(items), 1)
         self.assertEqual(uncovered, ())
+
+
+class EngineeringNotesReleaseTests(unittest.TestCase):
+    def test_engineering_notes_allow_client_decision_but_bad_notes_do_not(self) -> None:
+        from control_plane.release_review import checklist_blockers
+
+        with TemporaryDirectory() as temporary:
+            for index, (notes, labels, blocked) in enumerate(
+                (
+                    ("Nothing for the Client to test: CI only.", [], False),
+                    ("Nothing for the Client to test", [], True),
+                    ("Nothing for the owner to test", [{"name": "owner-review"}], True),
+                    ("Nothing for the Client to test: CI only.", [{"name": "owner-review"}], True),
+                    ("Nothing for the Client to test. Automated dependency update.", [], True),
+                    ("Nothing for the Client to test.", [], True),
+                    ("Nothing for the Client to test:", [], True),
+                    ("", [], True),
+                )
+            ):
+                with self.subTest(notes=notes, labels=labels):
+                    store = FilesystemRecordStore(Path(temporary) / str(index))
+                    seed(store)
+
+                    def read(path: str) -> object:
+                        value = github_read(path)
+                        if isinstance(value, list):
+                            value[0]["body"] = "## Client test notes\n" + notes
+                            value[0]["labels"] = labels
+                        return value
+
+                    review = build_release_review(store=store, profile=profile(), read=read)
+                    assert review.checklist is not None
+                    self.assertEqual(bool(checklist_blockers(review.checklist)), blocked)
+                    if not blocked:
+                        accepted = ReleaseReviewDecisionRecord(
+                            record_id=f"engineering-accepted-{review.checklist_digest}",
+                            product=profile().product,
+                            checklist_digest=review.checklist_digest,
+                            checklist=review.checklist,
+                            decision="accepted",
+                            actor_github_id=profile().owner.github_id,
+                            actor_github_login=profile().owner.github_login,
+                            decided_at="2026-10-10T00:00:00Z",
+                            release_issue_url="https://github.com/example/site/issues/99",
+                        )
+                        self.assertEqual(accepted.decision, "accepted")
+                        store.write_release_review_decision_record(accepted)
+                        repeated = build_release_review(store=store, profile=profile(), read=read)
+                        self.assertTrue(repeated.approved)
+                        with patch(
+                            "control_plane.release_review.current_release_review",
+                            return_value=repeated,
+                        ):
+                            require_release_approval(
+                                control_plane_root=Path(temporary),
+                                record_store=store,
+                                product=profile().product,
+                                artifact_id=review.checklist.candidate.artifact_id,
+                            )
+
+    def test_existing_client_accept_survives_new_notes_validation_but_not_changed_notes(
+        self,
+    ) -> None:
+        for old_notes in (
+            "Nothing for the Client to test",
+            "Nothing for the Client to test. Automated dependency update.",
+            "Nothing for the Client to test: CI only.",
+            "Nothing for the owner to test.",
+            "N/A.",
+        ):
+            with self.subTest(notes=old_notes), TemporaryDirectory() as temporary:
+                store = FilesystemRecordStore(Path(temporary))
+                seed(store)
+                notes = old_notes
+
+                def read(path: str) -> object:
+                    value = github_read(path)
+                    if isinstance(value, list):
+                        value[0]["body"] = "## Client test notes\n" + notes
+                        value[0]["labels"] = [{"name": "owner-review"}]
+                    return value
+
+                current = build_release_review(store=store, profile=profile(), read=read)
+                assert current.checklist is not None
+                self.assertFalse(current.checklist_complete)
+                legacy = current.checklist.model_copy(
+                    update={
+                        "items": tuple(
+                            item.model_copy(update={"client_test_notes_error": ""})
+                            for item in current.checklist.items
+                        )
+                    }
+                )
+                accepted = ReleaseReviewDecisionRecord(
+                    record_id="legacy-accepted",
+                    product=profile().product,
+                    checklist_digest=checklist_digest(legacy),
+                    checklist=legacy,
+                    decision="accepted",
+                    actor_github_id=profile().owner.github_id,
+                    actor_github_login=profile().owner.github_login,
+                    decided_at="2026-09-23T01:00:00Z",
+                    release_issue_url="https://github.com/example/site/issues/99",
+                )
+                store.write_release_review_decision_record(accepted)
+                repeated = build_release_review(store=store, profile=profile(), read=read)
+                self.assertTrue(repeated.approved)
+                self.assertEqual(repeated.checklist_digest, accepted.checklist_digest)
+                self.assertEqual(
+                    store.list_release_review_decision_records(product=profile().product),
+                    (accepted,),
+                )
+                notes += " Changed instructions."
+                changed = build_release_review(store=store, profile=profile(), read=read)
+                self.assertFalse(changed.approved)

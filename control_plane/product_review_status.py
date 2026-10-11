@@ -30,6 +30,8 @@ from control_plane.github_app_identity import (
     resolve_advisory_github_app_identity,
     revoke_installation_token,
 )
+from control_plane.client_test_notes import change_client_review
+from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane.product_review import ProductReviewStore
 from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 from control_plane.product_review_carry import carry_owner_acceptance, record_decision_base
@@ -68,6 +70,9 @@ class _PullRequestFacts:
     labels: frozenset[str]
     repository_id: str
     base_branch: str = ""
+    body: str = ""
+    head_ref: str = ""
+    head_repository: str = ""
 
 
 def owner_review_status(
@@ -193,7 +198,29 @@ class OwnerReviewStatusPublisher:
                                 "pull_request_number": pull_request_number,
                             },
                         )
-                    if profile.owner.review_label.strip().casefold() in facts.labels:
+                    intent = change_client_review(
+                        body=facts.body,
+                        labels=facts.labels,
+                        review_label=profile.owner.review_label,
+                    )
+                    synthetic = not intent.explicit_override and recorded_train_candidate(
+                        store=store,
+                        repository=repository,
+                        head={
+                            "ref": facts.head_ref,
+                            "sha": facts.head_sha,
+                            "repo": {"full_name": facts.head_repository},
+                        },
+                        base_branch=facts.base_branch,
+                    )
+                    if (
+                        not synthetic
+                        and intent.review_required
+                        and (
+                            profile.owner.is_set
+                            or profile.owner.review_label.strip().casefold() in facts.labels
+                        )
+                    ):
                         written = self._write_status(
                             store=store,
                             profile=profile,
@@ -289,6 +316,7 @@ class OwnerReviewStatusPublisher:
             if isinstance(item, dict) and isinstance(item.get("name"), str)
         )
         base = payload.get("base")
+        head_repository = head.get("repo") if isinstance(head, dict) else None
         base_ref = base.get("ref") if isinstance(base, dict) else None
         base_repository = base.get("repo") if isinstance(base, dict) else None
         raw_repository_id = base_repository.get("id") if isinstance(base_repository, dict) else None
@@ -302,6 +330,11 @@ class OwnerReviewStatusPublisher:
             labels=labels,
             repository_id=repository_id,
             base_branch=base_ref.strip() if isinstance(base_ref, str) else "",
+            body=str(payload.get("body") or ""),
+            head_ref=str(head.get("ref") or "") if isinstance(head, dict) else "",
+            head_repository=str(head_repository.get("full_name") or "")
+            if isinstance(head_repository, dict)
+            else "",
         )
 
     def _write_status(
@@ -348,6 +381,11 @@ class OwnerReviewStatusPublisher:
             ),
             base_branch=facts.base_branch,
         )
+        intent = change_client_review(
+            body=facts.body, labels=facts.labels, review_label=profile.owner.review_label
+        )
+        if intent.error:
+            status = OwnerReviewStatus(state="failure", description=intent.error)
         if not facts.repository_id or not self.public_origin:
             raise ValueError("Client review check requires the Advisory App and public origin.")
         projection = AdvisoryCheckProjection(
