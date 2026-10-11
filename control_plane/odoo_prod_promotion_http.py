@@ -1,3 +1,6 @@
+from collections.abc import Callable
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from pathlib import Path
 from typing import cast
 
@@ -119,6 +122,7 @@ def execute_odoo_prod_promotion_run_result(
     database_url: str | None,
     record_store: object,
     request: OdooProdPromotionRunEnvelope,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     run_request = request.run.model_copy(update={"product": request.product})
     driver_result = execute_odoo_prod_promotion_run(
@@ -127,6 +131,7 @@ def execute_odoo_prod_promotion_run_result(
         database_url=database_url,
         record_store=cast(OdooProdPromotionRunStore, record_store),
         request=run_request,
+        cutover_provider_factory=cutover_provider_factory,
     )
     return _prod_promotion_run_records(driver_result), cast(
         dict[str, object], driver_result.model_dump(mode="json")
@@ -140,6 +145,7 @@ def execute_odoo_prod_promotion_result(
     database_url: str | None,
     record_store: object,
     request: OdooProdPromotionEnvelope,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     promotion_request = request.promotion.model_copy(update={"product": request.product})
     driver_result = execute_odoo_prod_promotion(
@@ -148,6 +154,7 @@ def execute_odoo_prod_promotion_result(
         database_url=database_url,
         record_store=cast(OdooProdPromotionStore, record_store),
         request=promotion_request,
+        cutover_provider_factory=cutover_provider_factory,
     )
     return _prod_promotion_records(driver_result), cast(
         dict[str, object], driver_result.model_dump(mode="json")
