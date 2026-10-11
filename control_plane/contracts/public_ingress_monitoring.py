@@ -142,7 +142,7 @@ class PublicIngressTlsRecordedEvidence(BaseModel):
 
     domain_name: str
     domain_role: Literal["primary", "alias"]
-    route_binding_status: RouteBindingStatus = "active"
+    route_binding_status: RouteBindingStatus | Literal["missing"] = "active"
     owner: RouteBindingTlsOwner
     ingress_provider: str = ""
     termination_kind: RouteBindingTerminationKind
@@ -419,7 +419,7 @@ class PublicIngressIncidentRouteAuthority(BaseModel):
     provider: str = ""
     provider_check: str = ""
     domain_name: str = ""
-    route_binding_status: RouteBindingStatus | Literal[""] = ""
+    route_binding_status: RouteBindingStatus | Literal["", "missing"] = ""
     ingress_provider: str = ""
     termination_kind: RouteBindingTerminationKind | Literal[""] = ""
     tls_owner: RouteBindingTlsOwner | Literal[""] = ""

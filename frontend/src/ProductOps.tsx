@@ -390,12 +390,10 @@ function ProductWorkspace({
   const testing = environmentByName(product, "testing");
   const production = environmentByName(product, "prod");
   const incompleteEvidence =
-    product.trust_state === "missing" ||
-    product.trust_state === "stale" ||
     environments.length === 0 ||
     environments.some(
       (environment) =>
-        environment.trust_state === "missing" || environment.trust_state === "stale",
+        ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)),
     );
 
   useEffect(() => {
@@ -919,7 +917,7 @@ function SignalTile({
     <div className="signal-tile" data-state={state} data-tone={tone}>
       <span>{label}</span>
       <strong>{value}</strong>
-      <small>{detail ?? trustLabel(state)}</small>
+      <small>{detail ?? trustLabel(tone === "verified" ? "verified" : state)}</small>
     </div>
   );
 }

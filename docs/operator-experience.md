@@ -717,11 +717,20 @@ check; private checks cannot substitute for public reachability. Missing,
 disabled, expired or divergent stored route authority remains visible in
 diagnostics and does not prevent operational green. Route-change readiness and
 the proof required immediately before a managed route change remain separate.
+Public green also requires a fresh passing public observation whose runtime
+identity matches the expected deployment, and a fresh valid certificate for
+each HTTPS domain in the lane's desired URL records, with matching public name,
+validated DNS-address evidence and days remaining. Missing observations never
+qualify. TLS probes of Live products derive their names from those URL records
+even when no route binding exists, without inventing proxy or certificate
+ownership. The existing records prove resolver success and the expected runtime
+at the public route; they do not contain an independent expected IP/CNAME set.
 
 Products sidebar lane dots and their accessible descriptions use
 `environmentOperationalTone`, the same signal as product views. Absent lanes
 are neutral and described as absent (not recorded); missing or unsupported
-health or identity evidence stays unknown, health warnings are amber, and
+health evidence stays unknown; passing health with unproved identity or
+incomplete current route observations is amber, and
 failures are red. Open incidents and actual negative TLS observations remain
 blocking; a route authority warning is diagnostic rather than a health failure.
 

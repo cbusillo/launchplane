@@ -21,7 +21,6 @@ function environment() {
   freshen(lane.topology);
   lane.warnings = [];
   lane.topology.warnings = [];
-  lane.topology.observed.tls_domains = [];
   lane.topology.observed.placement.runtime_identity_status = "match";
   lane.health_monitoring.checks = [structuredClone(lane.health_monitoring.checks[0])];
   const check = lane.health_monitoring.checks[0];
@@ -195,10 +194,24 @@ test("a required public website cannot use private health as its public proof", 
 });
 
 test("fresh passing HTTP cannot make absent runtime identity green", () => {
-  for (const status of ["unchecked", "missing", "unsupported"]) {
+  for (const status of ["unchecked", "missing", "unverifiable"]) {
     const lane = environment();
     lane.topology.observed.placement.runtime_identity_status = status;
     assert.equal(environmentOperationalTone(lane), "warning");
+  }
+});
+
+test("public green requires fresh DNS, named TLS and the expected public runtime", () => {
+  for (const update of [
+    { tls_domains: [] },
+    { tls_domains: environment().topology.observed.tls_domains.map(domain => ({ ...domain, validated_address_count: 0 })) },
+    { tls_domains: environment().topology.observed.tls_domains.map(domain => ({ ...domain, public_name_match: false })) },
+    { tls_domains: environment().topology.observed.tls_domains.map(domain => ({ ...domain, days_remaining: null })) },
+    { ingress: { ...environment().topology.observed.ingress, runtime_identity_status: "unchecked" } },
+  ]) {
+    const lane = environment();
+    Object.assign(lane.topology.observed, update);
+    assert.notEqual(environmentOperationalTone(lane), "verified");
   }
 });
 

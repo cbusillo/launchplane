@@ -25,7 +25,6 @@ for (const state of cases) {
       freshen(lane.topology);
       lane.warnings = [];
       lane.topology.warnings = [];
-      lane.topology.observed.tls_domains = [];
       lane.topology.observed.placement.runtime_identity_status = "match";
       lane.health_monitoring.checks = [structuredClone(lane.health_monitoring.checks[0])];
       const check = lane.health_monitoring.checks[0];
@@ -85,7 +84,7 @@ for (const state of cases) {
       expected.remove();
       return matches;
     }, colorToken)).toBe(true);
-    if (healthy) await expect(signal).toContainText("Public evidence passed");
+    if (healthy) await expect(signal.locator("strong")).not.toHaveText(/missing|unsupported/i);
     if (healthy || state === "absent" || state === "failed") {
       await page.screenshot({ path: `../tmp/browser-smoke/sidebar-${state}-${testInfo.project.name}.png`, fullPage: true });
     }

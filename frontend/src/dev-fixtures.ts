@@ -160,7 +160,12 @@ export function productsForFixture(
       const missingIdentity = site.trust_state === "missing";
       return { ...environment, topology: {
         ...environment.topology,
-        observed: { ...environment.topology.observed, placement: {
+        observed: { ...environment.topology.observed, ingress: {
+          ...environment.topology.observed.ingress,
+          expected_runtime_identity: missingIdentity ? null : runtimeIdentity(site.product, environment.context, environment.environment, "expected"),
+          observed_runtime_identity: missingIdentity ? null : runtimeIdentity(site.product, environment.context, environment.environment, "observed"),
+          runtime_identity_status: missingIdentity ? "missing" : "match",
+        }, placement: {
           expected_runtime_identity: missingIdentity ? null : runtimeIdentity(site.product, environment.context, environment.environment, "expected"),
           observed_runtime_identity: missingIdentity ? null : runtimeIdentity(site.product, environment.context, environment.environment, "observed"),
           runtime_identity_status: missingIdentity ? "missing" : "match",
