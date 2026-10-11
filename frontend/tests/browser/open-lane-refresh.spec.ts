@@ -14,7 +14,9 @@ for (const environmentView of [false, true]) {
         incidents: module.incidentsForFixture("products", product.product, "testing") };
     });
     const start = Date.parse(fixtures.detail.provenance.stale_after) - 1000;
-    await page.clock.install({ time: new Date(start) });
+    // Pause one second before expiry so page load cannot spend the fresh window.
+    await page.clock.install({ time: new Date(start - 1000) });
+    await page.clock.pauseAt(new Date(start));
     let responseMode: "old" | "delay" | "fail" | "unverified" | "fresh" = "old";
     let reads = 0;
     let inventoryReads = 0;
