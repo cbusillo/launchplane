@@ -20,6 +20,10 @@ const RELEASE_STEP_STATUS: Record<ClientReleaseRunView["steps"][number]["status"
   cancelled: "Cancelled",
   reconciliation_required: "Stopped for an admin",
 };
+// A started release advances in a background worker after the decision response.
+export const RELEASE_PROGRESS_REFRESH_MS = 10_000;
+const ACTIVE_RELEASE_RUN_STATES: ReadonlySet<ClientReleaseRunView["state"]> = new Set(["waiting", "running"]);
+
 const RELEASE_RUN_STATE: Record<ClientReleaseRunView["state"], string> = {
   waiting: "Starting",
   running: "In progress",
@@ -27,10 +31,11 @@ const RELEASE_RUN_STATE: Record<ClientReleaseRunView["state"], string> = {
   stopped: "Stopped",
 };
 
-function ReleaseRunProgress({ run }: { run: ClientReleaseRunView }) {
+function ReleaseRunProgress({ run, refreshFailed }: { run: ClientReleaseRunView; refreshFailed: boolean }) {
   return <section className="owner-review-latest" aria-label="Release progress">
     <h3>Release progress: {RELEASE_RUN_STATE[run.state]}</h3>
     {run.blocked_reason ? <p role="status">{run.blocked_reason}</p> : null}
+    {refreshFailed ? <p role="alert" className="owner-review-alert">Release progress could not be updated. This page keeps trying; the progress shown may be out of date.</p> : null}
     <ol>{run.steps.map(step => <li key={step.step}>
       {RELEASE_STEP_LABELS[step.kind]}: {RELEASE_STEP_STATUS[step.status]}
       {step.failure ? <div>
@@ -74,6 +79,8 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [recorded, setRecorded] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
+  const [refreshAttempt, setRefreshAttempt] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -82,6 +89,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     setReason("");
     setOverrideReason("");
     setRecorded(false);
+    setRefreshFailed(false);
     const request = fixtureMode
       ? loadDevFixtures().then(fixtures => fixtures.releaseReviewForFixture(fixtureMode))
       : readReleaseReview(product, controller.signal);
@@ -93,11 +101,36 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     return () => controller.abort();
   }, [product, fixtureMode]);
 
+  // Re-read only while a release is under way; a decision in flight cancels the read
+  // so an older read cannot replace the decision's response.
+  const releaseRunActive = !fixtureMode && !busy && !!response?.release_run &&
+    ACTIVE_RELEASE_RUN_STATES.has(response.release_run.state);
+  useEffect(() => {
+    if (!releaseRunActive) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void readReleaseReview(product, controller.signal).then(value => {
+        if (controller.signal.aborted) return;
+        setRefreshFailed(false);
+        setResponse(value);
+      }).catch(() => {
+        if (controller.signal.aborted) return;
+        setRefreshFailed(true);
+        setRefreshAttempt(attempt => attempt + 1);
+      });
+    }, RELEASE_PROGRESS_REFRESH_MS);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [product, releaseRunActive, response, refreshAttempt]);
+
   async function decide(decision: ReleaseReviewDecisionEnvelope["decision"], decisionReason: string) {
     if (!response?.review.checklist || busy) return;
     setBusy(true);
     setError("");
     setRecorded(false);
+    setRefreshFailed(false);
     try {
       if (fixtureMode) {
         const fixtures = await loadDevFixtures();
@@ -141,7 +174,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         {latestDecision.decision === "accepted" && latestDecision.release_start ? <p>This acceptance started the release.</p> : null}
         {!latestDecision.release_issue_url ? <p role="alert" className="owner-review-alert">Decision saved, but its release record has not been published. Approval cannot be used for deployment yet. Retry the same decision to publish its record.</p> : null}
       </section> : null}
-      {response.release_run ? <ReleaseRunProgress run={response.release_run} /> : null}
+      {response.release_run ? <ReleaseRunProgress run={response.release_run} refreshFailed={refreshFailed} /> : null}
       {checklist ? <>
         <h3>What to test</h3>
         <ReleaseItems items={checklist.items} viewerIsOwner={response.viewer_is_owner} emptyMessage={(checklist.shared_sources ?? []).length ? "No website-repository changes. Review the shared components below." : undefined} />
