@@ -511,7 +511,7 @@ def register_release_review_routes(
                 status_code=409,
                 trace_id=trace_id,
                 code="release_review_not_opened",
-                message="The Client was not asked. The release must be complete, undecided and waiting only for the Client; reload and try again.",
+                message="The release review could not be confirmed. Reload before trying again; a request may already be open. The release must be complete, undecided and waiting only for the Client.",
             )
         return current
 

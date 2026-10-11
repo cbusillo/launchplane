@@ -137,7 +137,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       }
       setUrgentSent(true);
     } catch {
-      setError("The Client was not asked. The release may have changed or may not be ready; reload this page and try again.");
+      setError("The release review could not be confirmed. Reload this page before trying again; a request may already be open.");
     } finally {
       setBusy(false);
     }
@@ -156,11 +156,16 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const client = response?.owner_github_login ?? "";
   // A viewer who is not the Client learns first who the Client is and that their
   // own decision cannot start the release.
-  const clientRule = client ? `${client} is the Client, and only ${client}'s Accept ${releaseStarts ? "starts" : "approves"} this release.` : "";
+  const clientRule = client ? reviewingHotfix
+    ? `${client} is the Client. The urgent fix is already live; ${client}'s Accept keeps it as the accepted release, and Request changes rolls it back.`
+    : `${client} is the Client. ${client}'s Accept ${releaseStarts ? "starts" : "approves"} this release.${response?.can_start_temporary_hotfix ? " You can also start a temporary hotfix for breakage on the live site, using the separate control below." : " Only the Client's acceptance starts a normal release."}` : "";
+  const adminRule = reviewingHotfix
+    ? "An admin approval override is unavailable while the live fix awaits the Client's review."
+    : "A decision you record here is an admin override and does not start the release.";
   const viewerRole = response?.viewer_is_owner
     ? "Reviewing as the Client"
     : response?.can_override
-      ? client ? `You are not the Client. ${clientRule} A decision you record here is an admin override and does not start the release.` : "Reviewing as an admin"
+      ? client ? `You are not the Client. ${clientRule} ${adminRule}` : "Reviewing as an admin"
       : `Viewing this release · read only${client ? `. ${clientRule}` : ""}`;
   return <section className="owner-review-page">
     <div className="owner-review-intro">
@@ -213,14 +218,14 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
           <button className="button" type="button" disabled={busy || !reason.trim()} onClick={() => void decide("changes_requested", reason)}>Request changes</button>
         </div>
       </section> : null}
-      {checklist && response.can_override && client && !latestDecision ? <section className="owner-review-action" aria-label="Ask the Client now">
+      {checklist && hasChanges && !reviewingHotfix && response.can_override && client && !latestDecision ? <section className="owner-review-action" aria-label="Ask the Client now">
         <h3>Ask {client} to review this release now</h3>
         <p>A release with only engineering changes waits for the next release that has something for {client} to check. If this one must go live sooner, such as a security or reliability fix, say why in plain words. Launchplane sends {client} a release review with your reason; nothing goes live until {client} accepts it. If {client} was already asked about this release, nothing new is sent.</p>
         <label><span>Why this release cannot wait</span><textarea value={urgentReason} maxLength={1000} disabled={busy} onChange={event => setUrgentReason(event.target.value)} /></label>
         <div className="owner-review-action-buttons">
           <button className="button" type="button" disabled={busy || incomplete || !urgentReason.trim()} onClick={() => void askClientNow()}>Ask {client} to review now</button>
         </div>
-        {urgentSent ? <p role="status" className="owner-review-success">{client} has been asked to review this release. Nothing has been deployed.</p> : null}
+        {urgentSent ? <p role="status" className="owner-review-success">A release review request is open for {client}. Nothing has been deployed.</p> : null}
       </section> : null}
       {checklist && response.can_override ? <section className="owner-review-action release-review-override" aria-label="Admin Approval Override">
         <h3>Admin Approval Override</h3>

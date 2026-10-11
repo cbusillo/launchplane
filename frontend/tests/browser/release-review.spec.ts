@@ -201,3 +201,31 @@ test("A failed release step shows the reason and its record and trace", async ({
   await progress.screenshot({path: testInfo.outputPath("failed-release-step.png")});
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+
+test("Urgent invitation controls respect a live hotfix and an unchanged candidate", async ({ page }) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=operator");
+  await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("operator");
+  });
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "engineer", github_id: 9002, role: "admin", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  response.reviewing_temporary_hotfix = true;
+  for (const director of [false, true]) {
+    response.can_start_temporary_hotfix = director;
+    await page.goto("/ui/owner-review?product=example-site");
+    const role = page.locator(".owner-review-card > .owner-review-state").first();
+    await expect(role).toContainText("urgent fix is already live");
+    await expect(role).toContainText("Accept keeps it");
+    await expect(role).toContainText("override is unavailable");
+    await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toHaveCount(0);
+  }
+  response.reviewing_temporary_hotfix = false;
+  await page.reload();
+  await expect(page.locator(".owner-review-card > .owner-review-state").first()).toContainText("separate control below");
+  response.review.checklist!.candidate = response.review.checklist!.production;
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toHaveCount(0);
+});

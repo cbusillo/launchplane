@@ -499,6 +499,13 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(
             self.store.list_release_review_decision_records(product="example-site"), ()
         )
+        # A deliberate opening of an existing request confirms it without another
+        # mention or replacing the original reason.
+        posts = len(self.posts)
+        self.assertTrue(self.publish(urgent_reason="A later reason."))
+        self.assertEqual(len(self.posts), posts)
+        self.assertIn("**Why now:** Fixes a login security problem.", self.comments[0]["body"])
+        self.assertNotIn("A later reason.", self.comments[0]["body"])
         # Later engineering updates keep the reason, without another mention.
         self.change_candidate(source_commit="e" * 40)
         self.assertTrue(self.publish())

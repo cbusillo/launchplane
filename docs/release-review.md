@@ -36,7 +36,11 @@ review page's **Ask the Client now** section
 checklist digest) with a plain-language reason. The invitation shows that reason
 on a **Why now:** line, kept through later silent updates, and the Client accepts
 it like any other release. Opening records no decision and starts nothing; an
-already open request is left as it is. Missing access is reported; no grant
+already open request keeps its original reason without a new notification. The
+page confirms that a request is open; a delivery error asks the admin to reload
+and retry because the request may already have reached the Client. The urgent
+opening control is hidden while a temporary hotfix awaits review or production
+already runs the testing version. Missing access is reported; no grant
 or credential is created. The worker uses Launchplane's own bootstrap
 `LAUNCHPLANE_PUBLIC_URL` for the review link and checks at most every five minutes
 per unchanged profile and lane versions until delivery. After a confirmed receipt,
@@ -157,7 +161,10 @@ version to become production; requesting changes replaces earlier approval or
 an admin override. A viewer who is not the Client first reads who the Client is
 and that only the Client's Accept starts (or, while held, approves) the release;
 an admin also reads that their decision is recorded as an override and does not
-start it. The latest decision and its written feedback appear above
+start it. During a live temporary hotfix, the first line instead explains that
+the Client's Accept keeps the fix and Request changes rolls it back; an override
+is unavailable then. The Director's normal review names the separate temporary-
+hotfix control as the exception for breakage on the live site. The latest decision and its written feedback appear above
 the checklist. Admins get a separate **Admin Approval Override** section
 and approval-justification field explaining that their decision supplies
 approval under their own identity and replaces an earlier
