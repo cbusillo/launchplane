@@ -7,7 +7,7 @@ import unittest
 
 class BrowserSmokeContainerTests(unittest.TestCase):
     @staticmethod
-    def run_smoke(smoke_exit: int, create_exit: int = 0) -> tuple[int, str]:
+    def run_smoke(smoke_exit: int, create_exit: int = 0, attach_exit: int = 0) -> tuple[int, str]:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             for name, body in {
@@ -17,7 +17,7 @@ class BrowserSmokeContainerTests(unittest.TestCase):
 case "$1" in
   create) if [ "$CREATE_EXIT" != 0 ]; then exit "$CREATE_EXIT"; fi
           echo fixture-container ;;
-  start) exit 0 ;;
+  start) exit "$ATTACH_EXIT" ;;
   inspect) echo "$SMOKE_EXIT" ;;
   rm) printf '%s\\n' "$3" > "$CLEANUP_RECEIPT" ;;
   *) exit 99 ;;
@@ -36,6 +36,7 @@ esac
                     "BROWSER_SMOKE_IMAGE": "fixture/browser:1",
                     "SMOKE_EXIT": str(smoke_exit),
                     "CREATE_EXIT": str(create_exit),
+                    "ATTACH_EXIT": str(attach_exit),
                     "CLEANUP_RECEIPT": str(receipt),
                 },
                 capture_output=True,
@@ -51,6 +52,11 @@ esac
     def test_successful_suite_removes_its_container(self) -> None:
         status, removed = self.run_smoke(0)
         self.assertEqual(status, 0)
+        self.assertEqual(removed, "fixture-container")
+
+    def test_failed_attach_propagates_and_removes_its_container(self) -> None:
+        status, removed = self.run_smoke(13, attach_exit=13)
+        self.assertEqual(status, 13)
         self.assertEqual(removed, "fixture-container")
 
     def test_failed_creation_does_not_remove_an_unowned_container(self) -> None:

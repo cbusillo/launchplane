@@ -10,6 +10,16 @@ from tests.support.workflows import load_workflow
 
 
 class CIRunnerPoolTests(unittest.TestCase):
+    def test_browser_image_agrees_with_the_frontend_playwright_version(self) -> None:
+        package = json.loads(Path("frontend/package.json").read_text())
+        environment = load_workflow(".github/workflows/ci.yml").data["env"]
+        assert isinstance(environment, dict)
+        image = environment["BROWSER_SMOKE_IMAGE"]
+        assert isinstance(image, str)
+        tag = image.partition("@")[0].rsplit(":", 1)[1]
+        version = tag.removeprefix("v").split("-", 1)[0]
+        self.assertEqual(version, package["devDependencies"]["@playwright/test"])
+
     @staticmethod
     def select(**overrides: str) -> subprocess.CompletedProcess[str]:
         with TemporaryDirectory() as directory:

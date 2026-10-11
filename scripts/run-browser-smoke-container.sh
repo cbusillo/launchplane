@@ -40,7 +40,10 @@ container_id="$(docker create --init --shm-size=1g \
     cd frontend
     exec corepack pnpm test:browser
   ')"
-docker start --attach "$container_id"
+docker start --attach "$container_id" &
+# Bash defers traps while a foreground command runs. Waiting on a background
+# client lets runner cancellation immediately reach the container cleanup.
+wait "$!"
 smoke_exit="$(docker inspect --format '{{.State.ExitCode}}' "$container_id")"
 cleanup
 container_id=""
