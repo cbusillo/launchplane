@@ -14,7 +14,6 @@ from zoneinfo import ZoneInfo
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import (
     ReleaseReviewDecisionRecord,
-    ReleaseReviewItem,
     ReleaseReviewStatus,
     ReleaseVersion,
 )
@@ -73,10 +72,14 @@ def _timestamp(value: object) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _change_link(item: ReleaseReviewItem) -> str:
-    # Use the instructions written for the Client, rather than engineering titles.
+def _change_link(change: InvitationChange) -> str:
+    # Keep Client instructions; name constituents instead of their batch PR.
+    item = change.item
+    name = change.feature_name.replace("@", "@\u200b")
     notes = " ".join(item.owner_test_notes.splitlines()).replace("@", "@\u200b")
-    return f"- [#{item.pull_request_number}]({item.url}): {notes}"
+    return f"- [#{item.pull_request_number}]({item.url}): " + (
+        f"{name} — {notes}" if name else notes
+    )
 
 
 def _announced_changes(
@@ -488,7 +491,7 @@ def publish_release_invitation(
                 return
             notify = not request or bool(added)
             changes = [
-                _change_link(change.item)
+                _change_link(change)
                 for change in (added if request and added else client_changes).values()
             ]
             if not changes:

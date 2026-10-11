@@ -25,7 +25,10 @@ from control_plane.release_invitation import (
     release_request_issue_marker,
 )
 from control_plane.release_review import ReleaseReviewStore, build_release_review
-from control_plane.release_invitation_changes import ReleaseInvitationNotesUnavailable
+from control_plane.release_invitation_changes import (
+    ReleaseInvitationNotesUnavailable,
+    client_invitation_changes,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_release_review import decision, github_read, profile, seed
 
@@ -209,14 +212,24 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.comments), 2)
         self.assertIn("change 43", self.comments[-1]["body"])
 
-    def seed_train_batch(self) -> ReleaseReviewItem:
+    def seed_train_batch(self, *, two_features: bool = False) -> ReleaseReviewItem:
         self.add_client_change(43)
+        if two_features:
+            self.add_client_change(44)
         assert self.review.checklist is not None
         batch = self.review.checklist.items[0].model_copy(
             update={
                 "pull_request_number": 99,
                 "url": "https://github.com/example/site/pull/99",
-                "owner_test_notes": "### #43 Prices\n\nCheck the new repair prices for change 43.",
+                "title": "Launchplane batch: #42, #43, #44",
+                "owner_test_notes": (
+                    "### #43 Repair prices\n\nCheck the new repair prices for change 43."
+                    + (
+                        "\n\n### #44 Opening hours\n\nCheck the opening hours on the contact page."
+                        if two_features
+                        else ""
+                    )
+                ),
             }
         )
         plan = MergeTrainBatchLandingPlan(
@@ -240,7 +253,9 @@ class ReleaseInvitationTests(unittest.TestCase):
                     status="merged",
                     merge_commit_sha=batch.merge_commit,
                 )
-                for position, number in enumerate((42, 43), start=1)
+                for position, number in enumerate(
+                    (42, 43, 44) if two_features else (42, 43), start=1
+                )
             ),
         )
         self.store.write_merge_train_batch_landing_plan_record(
@@ -255,6 +270,74 @@ class ReleaseInvitationTests(unittest.TestCase):
             update={"checklist": self.review.checklist.model_copy(update={"items": (batch,)})}
         )
         return batch
+
+    def test_accepted_batch_sends_one_release_invitation_naming_each_feature(self) -> None:
+        self.seed_train_batch(two_features=True)
+        self.change_candidate(source_commit="e" * 40)
+        self.publish()
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(sum("body" in post and "title" not in post for post in self.posts), 1)
+        body = self.comments[0]["body"]
+        self.assertIn("Repair prices", body)
+        self.assertIn("Opening hours", body)
+        self.assertIn("pull/43", body)
+        self.assertIn("pull/44", body)
+        self.assertNotIn("Launchplane batch", body)
+        self.assertNotIn("pull/99", body)
+        self.assertIn("press **Accept** or **Request changes**", body)
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product), ()
+        )
+
+    def test_batch_note_example_cannot_replace_another_features_name_or_notes(self) -> None:
+        batch = self.seed_train_batch(two_features=True)
+        assert self.review.checklist is not None
+        batch = batch.model_copy(
+            update={
+                "owner_test_notes": batch.owner_test_notes.replace(
+                    "Check the new repair prices for change 43.",
+                    "Check the new repair prices for change 43.\n\n```\n"
+                    "### #44 Fake feature\nFake notes\n```",
+                )
+            }
+        )
+        self.review = self.review.model_copy(
+            update={"checklist": self.review.checklist.model_copy(update={"items": (batch,)})}
+        )
+        self.publish()
+        self.assertIn("Opening hours — Check the opening hours", self.comments[0]["body"])
+
+    def test_duplicate_batch_member_sections_refuse_an_invitation(self) -> None:
+        batch = self.seed_train_batch()
+        assert self.review.checklist is not None
+        batch = batch.model_copy(
+            update={"owner_test_notes": batch.owner_test_notes + "\n\n### #43 Other\nOther notes"}
+        )
+        self.review = self.review.model_copy(
+            update={"checklist": self.review.checklist.model_copy(update={"items": (batch,)})}
+        )
+        with self.assertRaisesRegex(ReleaseInvitationNotesUnavailable, "repeat"):
+            self.publish()
+        self.assertEqual(self.comments, [])
+
+    def test_batch_names_and_legacy_note_headings_remain_literal(self) -> None:
+        batch = self.seed_train_batch()
+        assert self.review.checklist is not None
+        for name in ("Support C#", "#"):
+            with self.subTest(name=name):
+                notes = (
+                    f"### #43 {name}\n\n## Check this\nUse the feature.\n### Details\nCheck again."
+                )
+                checklist = self.review.checklist.model_copy(
+                    update={"items": (batch.model_copy(update={"owner_test_notes": notes}),)}
+                )
+                changes = client_invitation_changes(
+                    cast(ReleaseReviewStore, self.store), self.profile, checklist
+                )
+                change = next(iter(changes.values()))
+                self.assertEqual(change.feature_name, name)
+                self.assertIn("Use the feature.", change.item.owner_test_notes)
+                self.assertIn("Check again.", change.item.owner_test_notes)
 
     def test_legacy_batch_receipt_is_adopted_without_another_ping(self) -> None:
         batch = self.seed_train_batch()
