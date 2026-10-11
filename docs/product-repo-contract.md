@@ -76,8 +76,9 @@ Launchplane self-bootstrap.
 ## `Client test notes`
 
 Every product pull request includes a **`Client test notes`** heading with test
-instructions or `Nothing for the Client to test`. The older `Owner test notes`
-heading and `Nothing for the owner to test` marker are still accepted. The action
+instructions or an explicit engineering-only declaration under the
+[Client notes contract](owner-acceptance.md). That contract owns the required
+reason, label override and supported historical spellings. The action
 accepts the Client heading only from the Launchplane commit that introduced it;
 a repository whose pin is older keeps the `Owner test notes` heading until it
 bumps the pin. CI checks presence without

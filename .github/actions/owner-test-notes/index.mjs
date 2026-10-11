@@ -35,9 +35,9 @@ function main() {
   const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
   const body = event.pull_request?.body;
   if (!ownerTestNotes(typeof body === "string" ? body : "")) {
-    throw new Error('Add a "Client test notes" heading and instructions. "Nothing for the Client to test" is valid.');
+    throw new Error('Add a "Client test notes" heading and instructions. For engineering-only changes, use "Nothing for the Client to test: <reason>" with a nonempty reason.');
   }
-  console.log("Client test notes are present. Their content is reviewed by the Client at release.");
+  console.log("Client test notes are present. Launchplane validates their content and requests Client review when there is something to test.");
 }
 
 try {
