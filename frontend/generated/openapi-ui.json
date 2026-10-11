@@ -15888,7 +15888,10 @@
             "type": "integer"
           },
           "reason": {
-            "const": "entry_conflict",
+            "enum": [
+              "entry_conflict",
+              "failure_isolation"
+            ],
             "title": "Reason",
             "type": "string"
           }

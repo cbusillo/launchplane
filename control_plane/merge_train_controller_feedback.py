@@ -27,6 +27,7 @@ BUILDING_ACTIONS = {
     "plan_stack_collapse",
 }
 WAITING_ACTIONS = {"wait_for_checks", "wait_for_root_checks"}
+_MAX_NAMED = 5
 
 
 def build_feedback_payloads(
@@ -275,6 +276,8 @@ def _feedback_message(
             return message
         applied = _as_dict(result.get("block_result"))
         if applied.get("status") == "blocked":
+            if _string(result.get("reason_code")) == "candidate_failure_isolated":
+                return _isolated_failure_message(result)
             selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
             detail = (
                 "pull request has merge conflicts"
@@ -317,6 +320,34 @@ def _feedback_message(
     return f"Launchplane is advancing `{controller_action}` for this train pass."
 
 
+def _isolated_failure_message(result: dict[str, Any]) -> str:
+    details = _as_dict(result.get("details"))
+    seen: set[str] = set()
+    checks: list[str] = []
+    for check in _as_list(details.get("failed_checks")):
+        name = _string(_as_dict(check).get("name"))
+        url = _string(_as_dict(check).get("url"))
+        if name and name not in seen:
+            seen.add(name)
+            checks.append(f"[{name}]({url})" if url.startswith("https://") else name)
+    tests = [f"`{test}`" for test in map(_string, _as_list(details.get("failed_tests"))) if test]
+    named = ""
+    if checks:
+        named += " Failing checks: " + ", ".join(checks[:_MAX_NAMED]) + _more(len(checks)) + "."
+    if tests:
+        named += " Failing tests: " + ", ".join(tests[:_MAX_NAMED]) + _more(len(tests)) + "."
+    return (
+        "Launchplane held this pull request out of the train: its merge-train batch "
+        "failed, and it failed the candidate checks again when tested without the other "
+        f"queued pull requests.{named} The other pull requests continue without it. Fix "
+        "the failure and remove the block label to rejoin the queue."
+    )
+
+
+def _more(count: int) -> str:
+    return f" and {count - _MAX_NAMED} more" if count > _MAX_NAMED else ""
+
+
 def _blocking_detail(result: dict[str, Any]) -> str:
     blocking_reason = _as_dict(result.get("blocking_reason"))
     blocking_message = _string(blocking_reason.get("message"))
@@ -336,7 +367,7 @@ def _blocking_detail(result: dict[str, Any]) -> str:
 def _held_out_messages(
     *, result: dict[str, Any], base_branch: str, stopped: bool
 ) -> list[tuple[int, str]]:
-    """Tell each held-out pull request which queued pull requests it conflicts with.
+    """Tell each held-out pull request why it waits outside the batch.
 
     A stopped failed batch reports only the pull requests its own probe just held
     out, so later passes do not repeat the message.
@@ -363,6 +394,17 @@ def _held_out_messages(
         if not isinstance(number, int) or number <= 0:
             continue
         if probed is not None and number not in probed:
+            continue
+        if held_out_entry.get("reason") == "failure_isolation":
+            messages.append(
+                (
+                    number,
+                    "Launchplane is waiting with this pull request while it retests the "
+                    "pull requests ahead of it on their own, to find which change broke "
+                    "their merge-train batch. It rejoins the queue once that test "
+                    "finishes; nothing is needed from its author.",
+                )
+            )
             continue
         conflicts_with: list[int] = [
             other

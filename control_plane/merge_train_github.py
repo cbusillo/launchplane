@@ -67,6 +67,8 @@ from control_plane.github_response_headers import normalized_github_quota_respon
 from control_plane.github_request_timing import timed_github_request, record_github_response
 from control_plane.github_read_cache import GitHubReadCache, MERGE_TRAIN_READ_CACHE
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
+from control_plane.merge_train_candidate_failures import CandidateCheckFailures
+from control_plane.merge_train_candidate_failures import classify_candidate_check_failures
 from control_plane.merge_train_codeowners import individual_landing_snapshots
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
@@ -951,6 +953,48 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             candidate,
             required_checks_status=check_status,
             status=candidate_status,
+        )
+
+    def read_candidate_check_failures(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> CandidateCheckFailures:
+        """Read which checks failed on the candidate commit and whether runners caused it."""
+        repository_path = _repository_path(candidate.repository)
+        encoded_sha = quote(
+            _required_value(
+                candidate.candidate_sha,
+                "Merge train batch candidate SHA is required before reading failures.",
+            ),
+            safe="",
+        )
+        check_runs = _list_check_runs(
+            transport=self.transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_sha,
+        )["check_runs"]
+        statuses = _list_commit_statuses(
+            transport=self.transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_sha,
+        )["statuses"]
+
+        def read_annotations(check_run_id: int) -> list[dict[str, object]]:
+            payload = self.transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/check-runs/{check_run_id}/annotations?per_page=50",
+            )
+            if not isinstance(payload, list):
+                raise MergeTrainGitHubError("GitHub check run annotations response must be a list.")
+            return [_json_object(item, "GitHub check run annotation") for item in payload]
+
+        return classify_candidate_check_failures(
+            check_runs=[
+                _json_object(item, "GitHub check run") for item in cast(list[object], check_runs)
+            ],
+            commit_statuses=[
+                _json_object(item, "GitHub commit status") for item in cast(list[object], statuses)
+            ],
+            read_annotations=read_annotations,
         )
 
     def read_head_check_reuse(
