@@ -1231,6 +1231,27 @@ to the broader Client or engineering governance facets. It reads persisted
 records only, with no provider requests, record mutation, fence release or
 change in authority.
 
+### Original review history
+
+`GET /v1/service/merge-train/review-history` reads each saved collapse's latest
+progress across active and retired history for the requested `repository` and
+`base_branch`. It uses the existing controller-status diagnostic authorization
+under the current repository policy. It exposes only record/collapse identifiers,
+original PR numbers, branch refs, original parent/child heads, recorded carry
+commit and status. It makes no provider requests or configuration/plan writes;
+normal authentication and denial audit behavior still applies.
+
+Pages default to 50 entries, with `limit` from 1 to 200 and `next_cursor` naming
+the last collapse identifier. Continue until `truncated` is false. Every page
+includes the digest of the complete scoped history; if that digest changes
+between pages, restart the read. The active-only capped controller-status
+summary is not a complete historical inventory. Missing service capability or
+an incomplete page set means unknown, rather than no affected stacks.
+
+History is diagnostic evidence, not current ancestry, review, admission or
+permission to rewrite branches. See [original review recovery](merge-train-policy.md#original-review-recovery)
+for the supported recovery through the original PRs.
+
 `POST /v1/work-graph/merge-train/controller/run-once` is the admin-facing
 one-action controller for the full batch train. Request payloads name
 `repository`, `base_branch`, and optional `mutate`; the route uses the same

@@ -106,6 +106,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         store.write_merge_train_batch_candidate_record(record)
         client = Mock(wraps=self.client)
         client.read_merge_train_snapshot.return_value = self.snapshot
+        client.read_base_check_status.return_value = "pass"
         client.probe_batch_entry_conflicts.return_value = conflicts
         if not observe_checks:
             client.observe_batch_candidate_checks.return_value = candidate

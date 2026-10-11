@@ -432,8 +432,9 @@ pull request head the train read, and every dependency the update names stays
 within one major version. Transitive lockfile changes are not classified; the
 pull request's required checks still gate them. The adapter derives that from Dependabot's
 `updated-dependencies` commit trailer and the "from X to Y" lines, because the
-trailer often omits `update-type`. A major version, a `0.x` minor bump, a
-changed version suffix, a non-version reference such as a commit SHA, an
+trailer often omits `update-type`. Balanced single- or double-quoted dependency
+names match the unquoted names in those version lines. A major version, a `0.x`
+minor bump, a changed version suffix, a non-version reference such as a commit SHA, an
 unparseable message, or a commit by anyone else leaves the pull request
 ineligible with `dependency update needs agent review`. The label still
 enqueues any trusted pull request as before. An empty list, the default, changes
@@ -799,7 +800,20 @@ candidate's check runs, commit statuses and the annotations of failed runs:
   stays stopped with `reason_code: infrastructure_retry_used` until the queue or
   base changes, so a runner outage never blocks a pull request. A retry that
   fails on a real check is isolated as below.
-- **Failure isolation.** Otherwise a failed candidate with several members is
+- **Base checks.** Before splitting or blaming a pull request, the controller
+  reads the base's required checks and the checks that failed on the candidate,
+  on the candidate's exact base commit. Unrelated base-only checks do not stop
+  isolation. If a candidate check fails there too, or the base's required checks are pending,
+  missing or unreadable, it stays stopped with `reason_code: base_checks_not_green`
+  and a reason naming the base branch. No pull request gets `blocked_label`, and
+  the failed candidate stays active for fresh reads on the next pass. A rerun
+  passing on the same base allows isolation to resume; a changed base or eligible
+  queue uses the existing replacement path.
+  Feedback names the base failure or missing evidence as needing attention;
+  pending checks are reported as waiting. A repository without required-check
+  evidence on its base stays stopped without blame; evidence must be supplied
+  before isolation can identify a culprit.
+- **Failure isolation.** On a verified green base, a failed candidate with several members is
   split: the first half is retested on the same base, and the rest wait as
   `held_out` entries with reason `failure_isolation`. A hold lasts only while
   the base and its head are unchanged and every member of the candidate
@@ -807,8 +821,8 @@ candidate's check runs, commit statuses and the annotations of failed runs:
   the queue, the holds are released and the next pass replans. If the half
   passes, it lands and the base moves, so the rest replan together on the next
   pass; if it fails, it is split again.
-- **Culprit.** When a candidate with one member fails, that pull request is the
-  one that breaks the tree. The controller retires the failed lineage, applies
+- **Culprit.** When a candidate with one member fails and its base checks pass,
+  the controller retires the failed lineage, applies
   `blocked_label` to it, and the next pass plans the rest of the queue. The
   result reports `reason_code: candidate_failure_isolated`, and its `details`
   carry the failing check names, check-run links and failed tests. PR feedback
@@ -1313,7 +1327,9 @@ Controller actions have these retry/stop semantics:
   completed history cannot revive older execution. The existing supported
   resumption requires the original policy digest to be current again and all
   current head/readiness checks to pass; it merges only remaining children.
-  Alternatively, pushing a new commit to the root makes the old proof
+  For a carried change requiring its original PR review, follow
+  [original review recovery](#original-review-recovery) instead. Otherwise,
+  pushing a new commit to the root makes the old proof
   inapplicable and resumes current-policy discovery with fresh head/readiness
   proof. Closing and reopening at the same checkpointed head keeps the policy
   block. Uncheckpointed execution and moved roots retain their existing retirement
@@ -1784,3 +1800,78 @@ overwritten by a concurrent replay. PostgreSQL uses the same held session for
 feedback reads and writes, so delivery does not require a second pooled connection.
 The lock affects comment delivery only, and does not replace merge authority or
 the controller lease.
+
+## Original review recovery
+
+A historical carry is branch history, not approval on its child's original PR.
+The service-owned legacy controller checks each collapse's latest progress across active and retired
+history. A stack is held when a current parent requiring individual landing
+contains a recorded child's exact head, the current base does not contain that
+head, and the recorded child diff requires individual landing under the base's
+current CODEOWNERS. This also detects a successful branch merge whose progress
+write was interrupted. A new parent commit or changed policy cannot release
+this hold. A child already contained in the current base is not an unlanded
+carried change. An exact original child PR merged by squash or rebase also
+qualifies when its provider-reported merge commit is contained in that base.
+Three-dot comparison can conservatively include base updates made by a child;
+this may require original-PR recovery even if those owned paths are already in
+the base. It never supplies native approval.
+
+This qualification does not cover ordinary-agent delegated delivery, which
+[DIRECTION.md](../DIRECTION.md#retired) retires and #2437 owns. This change adds
+no history grant or ancestry capability to that retired path.
+
+Run-once reports `merge_train_original_review_recovery_required` with original
+PR numbers and heads. Selection excludes the affected stack and dependent base
+refs while unrelated eligible PRs continue. A saved landing with all entries
+still planned, no provider-dispatch checkpoint and fresh no-effect proof is
+retired through the existing retirement/resumption path, retaining its history
+and permitting fresh selection. Only this no-dispatch recovery can accept
+moved PR heads: current PRs must remain open and unmerged on the protected
+base, the old candidate must be absent from that base, and fresh repeated
+head/base reads must agree. Stored head trees remain immutable proof; this
+never authorizes merging the moved heads. Partial landings, an in-flight dispatch or
+unavailable no-effect proof retain reconciliation. No affected entry is merged
+and no existing admin reconciliation fence is cleared. Dry runs leave collapse history unchanged.
+Selection holds a stack on missing or stale commit/comparison evidence;
+an active landing requires positive ancestry evidence before retiring artifacts. Authentication
+failures and shared provider cooldowns retain their normal failure handling.
+When policy and original-review holds coexist, `details.policy_changed` retains
+the separate obsolete-policy inventory.
+GitHub still decides current-head approvals and protected merge admission.
+Incomplete provider evidence cannot justify carrying approval to another PR;
+comparison file lists at GitHub's [300-file limit](https://docs.github.com/en/enterprise-cloud%40latest/rest/commits/commits#compare-two-commits)
+are treated conservatively.
+
+The agent responsible for the branch, or one with a supported ownership handoff, can recover
+through the original PRs:
+
+1. Read the complete [review history](service-boundary.md#original-review-history)
+   and current provider heads, ancestry, open/merged state, and review state.
+   Preserve the saved plans and an archive of the current branch head before
+   changing branch history. Missing historical inventory means unknown.
+2. Restore the parent's own changes without the unlanded child carry, using
+   the recorded original parent head as the reconstruction starting point.
+   Restore every carrying parent in a deeper stack before landing any member.
+   Preserve subsequent parent work and the child's original head. Use an exact
+   expected-current-head lease for any necessary task-branch rewrite, so a
+   concurrent writer is not overwritten. A merge revert leaves child ancestry
+   present and cannot release this hold. No controller endpoint performs this
+   branch rewrite.
+3. Let the original parent PR pass its current-head checks, review and native
+   merge admission. Retarget the original child PR to the protected base and
+   let it pass its own current-head checks, review and native merge admission.
+   The original child is not closed or credited as landed through the parent.
+   Repeat for each original child in a deeper stack.
+
+If GitHub already marked a carried child PR merged indirectly, preserve that
+original review history; it cannot be reopened or treated as current approval.
+A replacement PR for remaining changes requires its own review and admission.
+This recovery does not reland changes already in the protected base, rewrite
+that base, waive approval, grant access, or retire stored evidence.
+
+An original child PR merged at a different head does not prove that the saved
+version landed through its own review. A hold in that case describes the
+unqualified saved version, rather than claiming that the PR is still open.
+Active landing diagnostics name its old policy record; selection diagnostics
+retain the complete separate obsolete-policy inventory.
