@@ -35,7 +35,8 @@ container_id="$(docker create --init --shm-size=1g \
     printf "Browser namespace: %s; host: %s; UID:GID: %s:%s\n" \
       "$namespace" "$BROWSER_SMOKE_HOST_NETNS" "$(id -u)" "$(id -g)"
     node --version
-    exec corepack pnpm --dir frontend test:browser
+    cd frontend
+    exec corepack pnpm test:browser
   ')"
 docker start --attach "$container_id"
 exit "$(docker inspect --format '{{.State.ExitCode}}' "$container_id")"
