@@ -69,6 +69,7 @@ from control_plane.merge_train_batch_pull_request import (
     bound_closed_batch_pull_request,
     changed_closed_batch_body,
 )
+
 from control_plane.merge_train_batch_candidate import (
     MergeTrainBatchCandidateBaseHistoryReadStore,
     MergeTrainBatchCandidateRecordStore,
@@ -115,6 +116,7 @@ from control_plane.workflows.merge_train_controller import (
 
 
 _LOGGER = logging.getLogger(__name__)
+_QUEUE_RETRY_RETIREMENT_SOURCE = "service:controller:queue-retry-retirement:"
 DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS = 300
 MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION = "merge_train_controller_run_once"
 MERGE_TRAIN_CONTROLLER_ADOPTABLE_ACTIVE_ACTIONS = (
@@ -2841,6 +2843,28 @@ def _reflow_stale_candidate_record(
                     "batch_id": candidate_record.candidate.batch_id,
                 },
             )
+            retry = candidate_record.candidate
+            if (
+                candidate_record.ordinary_job_binding is None
+                and len(retry.entries) > 1
+                and retry.candidate_sha
+                and retry.status in {"building", "ready_for_checks"}
+                and (
+                    retry.check_retry_of
+                    or retry.infrastructure_retry_of
+                    or retry.batch_body_retry_of
+                )
+                and bound_closed_batch_pull_request(client=github_client, candidate=retry) is None
+            ):
+                # Record the controller's queue-retirement intent before closing.
+                # A crash after the close must not turn it into a manual-close hold.
+                lease.checkpoint(active_phase="record_retry_queue_retirement")
+                retirement = build_merge_train_batch_candidate_record(
+                    candidate=retry,
+                    source=f"{_QUEUE_RETRY_RETIREMENT_SOURCE}{trace_id}",
+                    updated_at=recorded_at,
+                ).model_copy(update={"status": "superseded"})
+                candidate_store.write_merge_train_batch_candidate_record(retirement)
             _close_service_batch_pull_request(
                 github_client=github_client,
                 candidate_record=candidate_record,
@@ -2869,6 +2893,46 @@ def _reflow_stale_candidate_record(
         )
         result["superseded_merge_train_batch_candidate_record_id"] = candidate_record.record_id
         return result
+    if (
+        candidate_record.ordinary_job_binding is None
+        and candidate_record.candidate.candidate_sha
+        and (
+            candidate_record.candidate.check_retry_of
+            or candidate_record.candidate.infrastructure_retry_of
+            or candidate_record.candidate.batch_body_retry_of
+        )
+        and any(
+            record.source.startswith(_QUEUE_RETRY_RETIREMENT_SOURCE)
+            and record.candidate.candidate_ref == candidate_record.candidate.candidate_ref
+            and record.candidate.candidate_sha == candidate_record.candidate.candidate_sha
+            and record.candidate.policy_sha256 == policy_sha256
+            for record in _candidate_history_on_base(
+                candidate_store=candidate_store,
+                repository=request.repository,
+                base_branch=request.base_branch,
+                base_sha=snapshot.base_sha,
+            )
+        )
+    ):
+        # The queue may return immediately after a crash during retirement,
+        # while the pre-close record is still active. Resume its recorded intent
+        # before the ordinary observation path sees the closed PR as a failure.
+        recovery = _resume_known_failed_batch(
+            candidate_store=candidate_store,
+            github_client=github_client,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            snapshot=candidate_snapshot,
+            dry_run_result=dry_run_result,
+            held_out=candidate_record.candidate.held_out,
+            merge_method=repository_policy.merge_method,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=request.mutate,
+            lease=lease,
+        )
+        if recovery is not None:
+            return recovery
     if candidate_record.ordinary_job_binding is None and any(
         (
             pr.client_test_notes_error
@@ -4419,7 +4483,7 @@ def try_reflow_failed_merge_train_candidate(
                 # The matching historical failure can belong to another batch.
                 # Retire the current lineage too, without retiring the replacement.
                 replacement_id = recovery.get("merge_train_batch_candidate_record_id")
-                if recovery["controller_action"] == "block":
+                if recovery["controller_action"] == "block" and "candidate" not in recovery:
                     replacement_id = None
                 details = recovery.get("details")
                 recovery_source_id = recovery.get(
@@ -4609,11 +4673,16 @@ def _resume_known_failed_batch(
                     trace_id=trace_id,
                     mutate=mutate,
                     lease=lease,
+                    stopped_result={"reason_code": "candidate_retry_evidence_unavailable"},
                 )
             if observed.required_checks_status == "fail":
                 latest = latest.model_copy(update={"candidate": observed})
                 matching_records = (latest, *matching_records[1:])
                 unfinished_retry = False
+            elif closed is not None and latest.source.startswith(_QUEUE_RETRY_RETIREMENT_SOURCE):
+                # The controller intentionally closed this unfinished retry.
+                # Reconstruct it on its existing budget/ref, after rereading S.
+                retry = retry.model_copy(update={"candidate_sha": ""})
             elif closed is not None:
                 return _stop_failed_batch_after_conflict_probe(
                     candidate_store=candidate_store,
@@ -5156,7 +5225,9 @@ def _plan_failed_candidate_replacement(
             snapshot=snapshot,
             dry_run_result=plan_dry_run,
             held_out=holds,
-            merge_method="merge",
+            merge_method=policy.find_repository_policy(
+                repository=repository, base_branch=base_branch
+            ).merge_method,
             recorded_at=recorded_at,
             trace_id=trace_id,
             mutate=mutate,

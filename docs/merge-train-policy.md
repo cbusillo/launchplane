@@ -851,7 +851,12 @@ not mistaken for an exhausted failed retry. Unfinished construction without a
 candidate SHA restarts validation. A retry with a recorded SHA rereads its
 current checks: a concluded failure resumes isolation, and an open retry
 resumes observation at that SHA. A closed retry with no conclusive failure stays
-stopped; it is not reopened or rebuilt. New conflict holds are retained,
+stopped; it is not reopened or rebuilt. When the controller retires an open
+retry after a queue change, it records that retirement intent before closing
+the batch PR. If the queue returns, recovery rereads the recorded SHA and may
+restart unfinished construction on the existing retry ref and budget, with new
+checks and a new batch PR; a conclusive failure instead resumes isolation.
+The recorded intent survives an interruption after the close. New conflict holds are retained,
 including when recovery blocks a culprit. Legacy body
 retries still require fresh passing evidence on their original SHA before they
 can resume. Reobserving a singleton renews the controller lease before any
