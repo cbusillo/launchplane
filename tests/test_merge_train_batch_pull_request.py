@@ -320,8 +320,11 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
                 )
                 return {"check_runs": list(statuses)}
             response = original(method=method, path=path, body=body)
+            if method == "GET" and path.endswith("/pulls/1") and isinstance(response, dict):
+                response["body"] = "## Client test notes\nNothing for the Client to test: CI only."
             if method == "GET" and path.endswith("/pulls/2") and isinstance(response, dict):
                 response["labels"] = [{"name": "client-check"}]
+                response["body"] = "## Client test notes\nTry the changed page."
             return response
 
         provider_request = patch.object(self.provider, "request", side_effect=request)
@@ -330,7 +333,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         profile = SimpleNamespace(
             is_active=True,
             repository=self.provider.repository_name,
-            owner=SimpleNamespace(review_label="client-check"),
+            owner=SimpleNamespace(review_label="client-check", is_set=True),
         )
         store = SimpleNamespace(
             list_product_profile_records=lambda: (profile,),

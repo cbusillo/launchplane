@@ -183,7 +183,10 @@ def _preview_feedback(
     failure_summary = ""
     waiting_for = ""
     status: PreviewPrFeedbackStatus
-    if action == "wait" and plan.get("reason") == "no_verified_build":
+    if action == "wait" and plan.get("reason") == "client_test_notes_required":
+        status = "pending"
+        waiting_for = _text(plan.get("detail"))
+    elif action == "wait" and plan.get("reason") == "no_verified_build":
         status = "pending"
         waiting_for = "a verified build of this commit"
     elif action == "apply" and error:
@@ -218,6 +221,9 @@ def _preview_feedback(
     owner_review = ""
     owner_review_url = ""
     owner_review_accepted = ""
+    if plan.get("reason") == "client_test_notes_required" and owner_review_status is not None:
+        # A notes refusal must not prevent delivery of an already-saved decision.
+        owner_review_status(profile, request.pull_request_number)
     if status == "ready" and plan.get("owner_review_requested") is True:
         owner_review, owner_review_url = _owner_review(
             profile=profile,

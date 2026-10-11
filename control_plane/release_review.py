@@ -128,9 +128,11 @@ def checklist_digest(checklist: ReleaseChecklist) -> str:
     # Prior preview decisions are helpful annotations, never release approval.
     for item in payload["items"]:
         item.pop("already_reviewed")
+        item.pop("client_test_notes_error", None)
     for source in payload.get("shared_sources", ()):
         for item in source["items"]:
             item.pop("already_reviewed")
+            item.pop("client_test_notes_error", None)
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -225,6 +227,7 @@ def build_release_review(
             candidate_commit=candidate.source_commit,
             read=read,
             preview_hosts=preview_hosts,
+            review_label=profile.owner.review_label,
         )
         if production.shared_addons_digest != candidate.shared_addons_digest:
             shared_sources, additional_changes = read_shared_source_changes(
@@ -233,6 +236,7 @@ def build_release_review(
                 repository=profile.repository,
                 read=read,
                 preview_hosts=preview_hosts,
+                review_label=profile.owner.review_label,
             )
     except ReleaseEvidenceUnavailable:
         raise
@@ -294,6 +298,42 @@ def build_release_review(
     latest_decision = max(
         matching, key=lambda decision: (decision.decided_at, decision.record_id), default=None
     )
+    if (
+        latest_decision
+        and latest_decision.decision == "accepted"
+        and not any(
+            item.client_test_notes_error
+            for item in (
+                *latest_decision.checklist.items,
+                *(
+                    item
+                    for source in latest_decision.checklist.shared_sources
+                    for item in source.items
+                ),
+            )
+        )
+    ):
+        # The digest binds the real notes and artifact pair, not this derived
+        # validator annotation. Do not reinterpret an already-saved Client Accept.
+        checklist = checklist.model_copy(
+            update={
+                "items": tuple(
+                    item.model_copy(update={"client_test_notes_error": ""})
+                    for item in checklist.items
+                ),
+                "shared_sources": tuple(
+                    source.model_copy(
+                        update={
+                            "items": tuple(
+                                item.model_copy(update={"client_test_notes_error": ""})
+                                for item in source.items
+                            )
+                        }
+                    )
+                    for source in checklist.shared_sources
+                ),
+            }
+        )
     blockers = checklist_blockers(checklist)
     complete = not blockers
     approved = bool(latest_decision and latest_decision.release_issue_url) and (
@@ -332,6 +372,10 @@ def checklist_blockers(checklist: ReleaseChecklist) -> tuple[str, ...]:
             if not item.owner_test_notes.strip():
                 blockers.append(
                     f"Pull request {repository}#{item.pull_request_number} has no Client test notes."
+                )
+            elif item.client_test_notes_error:
+                blockers.append(
+                    f"Pull request {repository}#{item.pull_request_number}: {item.client_test_notes_error}"
                 )
             # A merge-train batch PR names each of its pull requests that came without notes.
             for number in pull_requests_missing_owner_test_notes(item.owner_test_notes):
