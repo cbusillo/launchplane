@@ -16120,7 +16120,8 @@
           "reason": {
             "enum": [
               "entry_conflict",
-              "failure_isolation"
+              "failure_isolation",
+              "dependency_not_ready"
             ],
             "title": "Reason",
             "type": "string"
@@ -16515,6 +16516,19 @@
           },
           "github_token": {
             "$ref": "#/components/schemas/MergeTrainGitHubTokenSource"
+          },
+          "max_batch_size": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Batch Size",
+            "x-launchplane-optional-response": true
           },
           "merge_identity": {
             "$ref": "#/components/schemas/MergeTrainIdentity"
