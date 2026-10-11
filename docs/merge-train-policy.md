@@ -398,6 +398,17 @@ review on the head it is about to merge and treats a changed decision as a
 stale head.
 Successful review still requires all other current-head checks.
 
+When an admitted Client feature is ready on its current head, batch planning
+selects it together with the other ready admitted features for that repository
+and base. Client features with pending, failed or unknown checks, or conflicts, stay visible
+in the queue but outside that candidate; they do not delay accepted siblings.
+The existing CODEOWNERS individual-landing boundary still applies. Combined
+merge-commit candidates preserve member heads without a branch refresh between them.
+Admission keeps these exclusions for a ready remaining planned head, including
+an engineering member after the last feature in a rolling landing has merged.
+The release invitation expands the recorded landing's members as described in
+[release review](release-review.md).
+
 Only an actor allowed to enqueue may put a pull request in the train: a trusted
 automation identity, or an actor whose role is in `allowed_actor_roles` (by
 default the repository owner and its admins). Pull-request write access
@@ -669,14 +680,14 @@ A changed member or base reflows to a
 new candidate without retaining a reconciliation fence. Landing rechecks member
 identity before waiting on checks, so a pending or failed check cannot hide a
 new source head. A manually closed batch PR is not automatically reopened.
-Change or remove the queued source entries to build a replacement; an unchanged
-failed candidate remains visibly failed rather than being rebuilt in a loop.
 A candidate that failed on check evidence may be re-read at its recorded SHA,
 so re-running the failed check lets it continue once the re-run is no longer
-failing. A multi-entry batch whose batch PR was closed is never reopened. It
-has one narrow rebuild exception: a changed generated batch body, confirmed
-closed and unmerged binding, and a persisted unused retry budget, as described
-under `candidate_failed` below.
+failing. A multi-entry batch whose batch PR was closed is never reopened. A
+changed generated batch body, confirmed closed and unmerged binding, and a
+persisted unused retry budget allow one rebuild of the same members, as
+described under `candidate_failed` below. Otherwise an unchanged failed
+candidate moves on through [blocker isolation](#blocker-isolation) rather than
+being rebuilt in a loop.
 
 The landing plan binds `candidate_pull_request_number` into its immutable
 digest. The controller evaluates every constituent before appending the first
@@ -766,17 +777,50 @@ SHA and the root passes required checks from the protected base branch.
 
 ### Blocker Isolation
 
-When the combined candidate fails checks, Launchplane must not assume all queued
-entries are bad. The first implementation may split the batch or fall back to
-smaller batches/one-at-a-time validation to identify the blocking PR. Once a
-blocker is identified, Launchplane applies `blocked_label` and either pauses or
-reflows later entries according to `failure_policy`.
+When the combined candidate fails checks, Launchplane does not assume all queued
+entries are bad. On the next pass over an unchanged queue and base, after the
+batch-body rebuild above when it applies, the controller reads the failed
+candidate's check runs, commit statuses and the annotations of failed runs:
 
-A failed candidate remains a stop state while the current eligible queue and
-base SHA still match that candidate. If the eligible queue changes, for example
-because a new queued PR repairs train validation, the controller may supersede
-the failed candidate batch lineage and plan a replacement candidate from the
-fresh snapshot.
+- **Infrastructure failure.** GitHub's runner-loss annotation on any failed or
+  cancelled run (lost communication, a shutdown signal, or a job never acquired
+  by a runner) marks the failure as infrastructure; jobs that depend on the lost
+  job fail with a generic exit-code annotation, so they do not count against it.
+  Runs that were cancelled, went stale or failed to start count only when no
+  run failed outright, because fail-fast also cancels the siblings of a real
+  failure. A named failed test or a failing commit status always rules
+  infrastructure out. The controller rebuilds the same members once on a new
+  `-infrastructure-retry` candidate ref, recording `infrastructure_retry_of`;
+  nobody is blamed. If the retry fails on infrastructure again, the candidate
+  stays stopped with `reason_code: infrastructure_retry_used` until the queue or
+  base changes, so a runner outage never blocks a pull request. A retry that
+  fails on a real check is isolated as below.
+- **Failure isolation.** Otherwise a failed candidate with several members is
+  split: the first half is retested on the same base, and the rest wait as
+  `held_out` entries with reason `failure_isolation`. A hold lasts only while
+  the base and its head are unchanged and every member of the candidate
+  retesting without it is still queued at its recorded head; if one leaves
+  the queue, the holds are released and the next pass replans. If the half
+  passes, it lands and the base moves, so the rest replan together on the next
+  pass; if it fails, it is split again.
+- **Culprit.** When a candidate with one member fails, that pull request is the
+  one that breaks the tree. The controller retires the failed lineage, applies
+  `blocked_label` to it, and the next pass plans the rest of the queue. The
+  result reports `reason_code: candidate_failure_isolated`, and its `details`
+  carry the failing check names, check-run links and failed tests. PR feedback
+  names them. A test is named when its CI job writes a GitHub annotation
+  titled `Failed test` whose message is the dotted test id; Launchplane's
+  `unittest-shard run` does this under GitHub Actions.
+
+A batch with two broken pull requests isolates and blocks each in turn. When the
+failure evidence cannot be read, shows no failed run, or a check on the
+candidate is still running (for example a manual re-run), the failed candidate
+stays stopped and the next pass reads it again. The retired ordinary-agent job path keeps its
+earlier stop behavior.
+
+If the eligible queue changes, for example because a new queued PR repairs
+train validation, the controller may supersede the failed candidate batch
+lineage and plan a replacement candidate from the fresh snapshot.
 
 Candidate construction can fail before required checks run when GitHub rejects
 one rolling merge entry as stale or conflicting. Its partial state is retained
@@ -1343,7 +1387,11 @@ Controller actions have these retry/stop semantics:
   no recorded candidate SHA never reached checks, so the controller may also
   supersede and replan it against the unchanged queue after a transient build
   failure is repaired. Failed candidates with a recorded candidate SHA are not
-  rebuilt until the queue or base changes. If one failed on check evidence and a
+  rebuilt with the same members until the queue or base changes, except for the
+  single batch-body and infrastructure retries; a check failure otherwise moves
+  through [blocker isolation](#blocker-isolation), returning `plan_candidate`
+  with `reason_code: failure_isolation` or `infrastructure_retry`, or `block`
+  for the isolated pull request. If one failed on check evidence and a
   re-run of the failed check at that SHA is now pending or passing, the controller
   returns `observe_candidate`, retires the failed record, and continues from the
   re-read evidence. A multi-entry merge batch whose service PR is closed and
@@ -1356,8 +1404,9 @@ Controller actions have these retry/stop semantics:
   cannot authorize recovery. Ambiguous provider-effect evidence still requires
   reconciliation rather than being treated as an ordinary failed check.
   The replacement still passes current checks,
-  constituent validation, and every admission gate. Otherwise the controller
-  reports the failed candidate and its recovery reason.
+  constituent validation, and every admission gate. When none of these
+  recoveries applies, for example because the failure evidence is unreadable,
+  the controller reports the failed candidate and its recovery reason.
   When the current queue head waits for checks, both read-only and mutating
   passes report `wait_for_checks` with that PR and its dry-run reason, retaining
   the failure and retry budget until the wait resolves.
@@ -1525,6 +1574,12 @@ labeled historical. A stale active record, policy-digest mismatch or
 unresolved reconciliation still requires attention. It is
 also store-only, so it can power dashboards and status summaries without
 consuming GitHub API capacity or advancing the train.
+
+The workbench's landing fraction uses the stored PR-entry identities as its total;
+`planned_count` is the remaining planned partition, alongside merged, blocked,
+stale and skipped counts. Remaining entries are shown as in progress. Candidate
+rows do not claim a landing fraction; collapse rows report mutated child entries
+as collapsed without treating the root as another mutation.
 
 For an unresolved `land_batch` controller fence, `reconciliation_diagnostics`
 adds bounded stored admission/outcome classifications for entries in the active

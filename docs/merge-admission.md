@@ -25,8 +25,10 @@ lease immediately before its provider merge. The live adapter resolves current
 engineering decision and run evidence, required technical checks, policy fingerprints, structural candidate
 provenance, queue position, rolling base, exact head/tree, candidate identity,
 and the expected effect SHA. It re-reads the active merge-train policy record
-and GitHub queue for every entry rather than treating request-start policy or
-stored candidate order as live evidence.
+for every entry and the GitHub queue for every sequential entry, rather than
+treating request-start policy or stored candidate order as live evidence.
+Protected batch landing shares queue and member reads within one pass, as
+described under [Batch And Recovery](#batch-and-recovery).
 
 The native controller route and scheduled controller create a repository-evidence
 reader per call. Within that reader they reuse up to 128 Git commit-to-tree
@@ -136,6 +138,18 @@ admissions before its one provider effect, and binds the provider PR in the
 landing plan's digest. Queue, head, policy,
 technical-check, structural, lease, or expected-SHA drift refuses the next
 admission before mutation.
+
+Within one protected batch pass, the live adapter reads the open-PR queue
+snapshot and each member's repository evidence once and reuses them for every
+evaluation except the final admission, which rereads both before the
+member, batch-PR and base rechecks that precede the provider merge. Each
+member's head and open state, the active policy, technical checks and the
+controller fence are still read for every admission. Without this, a pass
+cost two evaluations per member, each reading every open PR in the
+repository, so an eight-member batch took about half an hour while holding
+the controller lease (#3069). The shared reads end with the pass; a queue
+change in between is caught by the final admission and records the earlier
+admissions as not dispatched.
 
 If a batch stops after admitting only a prefix but before dispatch, those
 admissions receive `rejected / batch_not_dispatched` outcomes with

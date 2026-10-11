@@ -2248,6 +2248,9 @@ const atlasProduct: ProductSiteOverview = {
     slug_template: "pr-{number}",
     active_count: 3,
     latest_preview_id: "preview-example-3",
+    records_status: "unsupported",
+    records: [],
+    records_truncated: false,
     trust_state: "recorded",
     provenance: provenance(
       "recorded",
@@ -2280,6 +2283,9 @@ const missingEvidenceProduct: ProductSiteOverview = {
     slug_template: "",
     active_count: 0,
     latest_preview_id: "",
+    records_status: "unsupported",
+    records: [],
+    records_truncated: false,
     trust_state: "unsupported",
     provenance: provenance(
       "unsupported",
@@ -2890,6 +2896,17 @@ export function productReviewForFixture(
         ? { ...productReviewDecisionForFixture("accepted", ""), feedback_url: "", head_sha: "b".repeat(40) }
         : scenario === "earlier-decision"
         ? { ...productReviewDecisionForFixture("accepted", ""), head_sha: "b".repeat(40) }
+        : scenario === "carried-decision"
+        ? {
+            ...productReviewDecisionForFixture("accepted", ""),
+            carried_from: {
+              record_id: "fixture-original-acceptance",
+              head_sha: "b".repeat(40),
+              reason: "unchanged_patch_base_update",
+              refresh_record_ids: [],
+              comparison_base_sha: "c".repeat(40),
+            },
+          }
         : scenario === "decided"
         ? productReviewDecisionForFixture("changes_requested", "Please adjust the checkout flow.")
         : null),

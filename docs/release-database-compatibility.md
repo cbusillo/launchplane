@@ -71,22 +71,35 @@ enterprise base digest, build flags, selector, platform, lock hash, package
 inventory and external dependency changes remain conservative even if the
 source file declarations suggest compatibility.
 
-To examine an opaque change, both declarations supply `examined_inputs_sha256`,
-matching the full-input fingerprint defined by `release_examined_inputs_sha256` in
+To examine an opaque change, the candidate declaration supplies
+`examined_inputs_sha256` for its own inputs and
+`examined_baseline_inputs_sha256` for the production baseline it examined.
+Both must match the full-input fingerprints computed from the actual verified
+production and candidate manifests by `release_examined_inputs_sha256` in
 `control_plane/release_compatibility.py`. That function is the canonical
 semantic projection and hashing specification: sorted-key compact JSON of the
 opaque inputs, complete source/file inventories, module graph and install
 requirements, hashed with SHA-256. The plan/hash fields themselves are excluded
-to avoid a circular hash. Reusing a plan after a file or module input changes
-fails, even when opaque dependency/base metadata did not change. The producer supplies
-`database_update_modules` naming the resolved update roots for its examined
-inputs. `null` means unexamined; an explicit empty list asserts no module DB
-work is required. Names must exist in the full module graph. A non-addon dependency/build configuration file uses `kind=dependency` with
-an empty module and the same explicitly examined plan; that plan can be empty
-when no module work is required. This supports root `pyproject.toml`, Compose,
+to avoid a circular hash. The baseline does not need an examined plan of its own;
+its complete verified inventory supplies the baseline fingerprint.
+
+`database_update_modules` names the resolved update roots for that exact
+baseline-to-candidate transition. `null` means unexamined; an explicit empty list
+asserts no module DB work is required for that transition. Names must exist in
+the full module graph. If an intermediate build was never promoted, a candidate
+plan examined against it cannot be reused for the older production baseline.
+Re-examine the actual production-to-candidate pair and publish a newly verified
+artifact with the bound plan; never edit an immutable artifact in place.
+
+A non-addon dependency/build configuration file uses `kind=dependency` with an
+empty module and the same explicitly examined plan; that plan can be empty when
+no module work is required. This supports root `pyproject.toml`, Compose,
 Docker-ignore and package configuration changes without falsely treating them
-as documentation or guessing `-u`. Hash mismatch, missing baseline hash or
-missing candidate plan keeps execution incomplete.
+as documentation or guessing `-u`. Missing baseline bindings (including legacy
+declarations), hash mismatch, or a missing candidate plan keep execution
+incomplete when the diff requires an examined plan: opaque changes report
+`unexamined_opaque_input_plan`, and non-module dependency changes report
+`unexamined_non_module_dependency_plan`.
 A matching plan stays `database_changing` and expands dependents, providing a
 supported path for framework/base-image and Python dependency updates without
 silently declaring overlap safe or copying the artifact install list.

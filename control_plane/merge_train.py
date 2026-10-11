@@ -121,6 +121,7 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     mergeable: MergeTrainMergeableState = "unknown"
     requires_individual_landing: bool = Field(default=False, exclude_if=lambda value: not value)
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
+    client_test_notes_error: str = Field(default="", exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus = "unknown"
     branch_update_required: bool = False
     # Set only for bot-authored pull requests; see merge_train_dependency_updates.
@@ -186,6 +187,7 @@ class MergeTrainQueueEntry(BaseModel):
     mergeable: MergeTrainMergeableState
     requires_individual_landing: bool = Field(default=False, exclude_if=lambda value: not value)
     owner_review_required: bool = Field(default=False, exclude_if=lambda value: not value)
+    client_test_notes_error: str = Field(default="", exclude_if=lambda value: not value)
     required_checks_status: MergeTrainCheckStatus
     branch_update_required: bool
     eligible: bool
@@ -323,6 +325,35 @@ def build_merge_train_dry_run_result(
     )
     eligible_entries = tuple(entry for entry in queue if entry.eligible)
     if batch_landing:
+        # Accepted features start a batch; remaining planned heads keep its
+        # exclusions stable after earlier members land. Client heads needing
+        # review or repair stay visible, but outside this landing candidate.
+        if any(
+            (
+                entry.owner_review_required
+                or (entry.number, entry.head_sha) in planned_dependency_heads
+            )
+            and entry.required_checks_status == "pass"
+            and entry.mergeable != "conflicting"
+            for entry in eligible_entries
+        ):
+            queue = tuple(
+                entry.model_copy(
+                    update={
+                        "eligible": False,
+                        "ineligible_reasons": (
+                            *entry.ineligible_reasons,
+                            "Client feature is not ready on its current head",
+                        ),
+                    }
+                )
+                if entry.eligible
+                and entry.owner_review_required
+                and (entry.required_checks_status != "pass" or entry.mergeable == "conflicting")
+                else entry
+                for entry in queue
+            )
+            eligible_entries = tuple(entry for entry in queue if entry.eligible)
         batch_entries: list[MergeTrainQueueEntry] = []
         for entry in eligible_entries:
             if entry.requires_individual_landing:
@@ -348,7 +379,8 @@ def build_merge_train_dry_run_result(
             (
                 entry
                 for entry in eligible_entries
-                if entry.owner_review_required and entry.required_checks_status != "pass"
+                if entry.client_test_notes_error
+                or (entry.owner_review_required and entry.required_checks_status != "pass")
             ),
             None,
         )
@@ -683,7 +715,9 @@ def _build_queue_entry(
         # persistent label. The next snapshot requalifies it without clearing
         # any manual hold or guessing who applied an existing block label.
         ineligible_reasons.append(
-            "dependency update current-head merge conflicts"
+            pull_request.client_test_notes_error
+            if pull_request.client_test_notes_error
+            else "dependency update current-head merge conflicts"
             if pull_request.mergeable == "conflicting"
             else "dependency update current-head mergeability unknown"
             if pull_request.mergeable == "unknown"
@@ -718,6 +752,7 @@ def _build_queue_entry(
         mergeable=pull_request.mergeable,
         requires_individual_landing=pull_request.requires_individual_landing,
         owner_review_required=pull_request.owner_review_required,
+        client_test_notes_error=pull_request.client_test_notes_error,
         required_checks_status=pull_request.required_checks_status,
         branch_update_required=pull_request.branch_update_required,
         eligible=not ineligible_reasons,
@@ -861,6 +896,8 @@ def _next_action_for_selected_pr(
 ) -> tuple[MergeTrainDryRunAction, str]:
     if selected_pr is None:
         return "idle", "No eligible pull requests are queued."
+    if selected_pr.client_test_notes_error:
+        return "block", f"Pull request #{selected_pr.number}: {selected_pr.client_test_notes_error}"
     if selected_pr.mergeable == "conflicting":
         return (
             "block",

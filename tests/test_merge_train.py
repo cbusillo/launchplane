@@ -87,6 +87,89 @@ class _FakeSnapshotReader:
 
 
 class MergeTrainDryRunTests(unittest.TestCase):
+    def test_remaining_planned_unknown_head_keeps_an_older_unaccepted_feature_out(self) -> None:
+        waiting = _pull_request(1, created_at="2026-05-08T10:00:00Z").model_copy(
+            update={"owner_review_required": True, "required_checks_status": "pending"}
+        )
+        remaining = _pull_request(2, created_at="2026-05-08T11:00:00Z").model_copy(
+            update={"owner_review_required": True, "mergeable": "unknown"}
+        )
+        # After the last accepted feature lands in a rolling batch, a planned
+        # engineering member must retain the same exclusions too.
+        for client_feature in (True, False):
+            with self.subTest(client_feature=client_feature):
+                result = build_merge_train_dry_run_result(
+                    policy=build_test_merge_train_policy(),
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository="cbusillo/sellyouroutboard",
+                        base_branch="main",
+                        pull_requests=(
+                            waiting,
+                            remaining.model_copy(update={"owner_review_required": client_feature}),
+                        ),
+                    ),
+                    batch_landing=True,
+                    planned_dependency_heads=frozenset({(remaining.number, remaining.head_sha)}),
+                )
+                self.assertEqual(result.queue_order, (remaining.number,))
+
+    def test_planned_accepted_head_retains_queue_position_during_unknown_mergeability(self) -> None:
+        features = tuple(
+            _pull_request(number, created_at=f"2026-05-08T10:{number:02}:00Z").model_copy(
+                update={"owner_review_required": True, "mergeable": mergeable}
+            )
+            for number, mergeable in ((1, "mergeable"), (2, "unknown"))
+        )
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main", pull_requests=features
+        )
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(),
+            snapshot=snapshot,
+            batch_landing=True,
+            planned_dependency_heads=frozenset((pr.number, pr.head_sha) for pr in features),
+        )
+        self.assertEqual(result.queue_order, (1, 2))
+
+    def test_batch_selects_only_ready_admitted_client_features(self) -> None:
+        features = tuple(
+            _pull_request(
+                number,
+                created_at=f"2026-05-08T10:{number:02}:00Z",
+                required_checks_status=checks,
+                mergeable=mergeable,
+                labels=labels,
+                branch_update_required=True,
+            ).model_copy(update={"owner_review_required": True})
+            for number, checks, mergeable, labels in (
+                (1, "pending", "mergeable", ("ready-to-merge",)),
+                (2, "fail", "mergeable", ("ready-to-merge",)),
+                (3, "unknown", "mergeable", ("ready-to-merge",)),
+                (4, "pass", "conflicting", ("ready-to-merge",)),
+                (5, "pass", "mergeable", ()),
+                (6, "pass", "mergeable", ("ready-to-merge", "merge-blocked")),
+                (7, "pass", "mergeable", ("ready-to-merge",)),
+                (8, "pass", "mergeable", ("ready-to-merge",)),
+            )
+        )
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main", pull_requests=features
+        )
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(), snapshot=snapshot, batch_landing=True
+        )
+        self.assertEqual(result.queue_order, (7, 8))
+        self.assertEqual(result.intended_next_action, "merge")
+        self.assertEqual(
+            {entry.number for entry in result.queue if not entry.eligible}, {1, 2, 3, 4, 5, 6}
+        )
+        # The single-transition path still refreshes the oldest waiting head;
+        # only the protected combined landing can preserve the accepted heads.
+        single = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(), snapshot=snapshot
+        )
+        self.assertEqual(single.intended_next_action, "update_branch")
+
     def test_cli_merge_train_dry_run_requires_policy_file(self) -> None:
         with TemporaryDirectory() as temp_dir:
             snapshot_file = Path(temp_dir) / "snapshot.json"
@@ -353,6 +436,16 @@ class MergeTrainDryRunTests(unittest.TestCase):
             build_merge_train_dry_run_result(policy=policy, snapshot=snapshot).intended_next_action,
             "block",
         )
+        invalid_notes = update.model_copy(
+            update={"client_test_notes_error": "Client test notes are missing."}
+        )
+        held = build_merge_train_dry_run_result(
+            policy=policy,
+            snapshot=snapshot.model_copy(update={"pull_requests": (invalid_notes,)}),
+            batch_landing=True,
+        )
+        self.assertEqual(held.queue_order, ())
+        self.assertIn(invalid_notes.client_test_notes_error, held.queue[0].ineligible_reasons)
         no_label_policy = policy.model_copy(
             update={
                 "policies": (

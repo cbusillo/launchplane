@@ -154,6 +154,7 @@ export type ArtifactPythonPackageSource = {
 export type ArtifactReleaseCompatibility = {
     complete: boolean;
     database_update_modules: Array<string> | null;
+    examined_baseline_inputs_sha256: string;
     examined_inputs_sha256: string;
     modules: Array<ReleaseModuleDeclaration>;
     read_write_compatible: boolean;
@@ -855,6 +856,8 @@ export type IntegrationKeyReadbackFinding = {
     code: string;
 };
 
+export type JsonValue = unknown;
+
 export type LaunchplaneAuthzPolicyOutput = {
     [key: string]: unknown;
 };
@@ -1404,7 +1407,7 @@ export type MergeTrainHeldOutSummary = {
     conflicts_with: Array<number>;
     head_sha: string;
     pull_request_number: number;
-    reason: 'entry_conflict';
+    reason: 'entry_conflict' | 'failure_isolation';
 };
 
 export type MergeTrainIdentity = {
@@ -2320,6 +2323,13 @@ export type PreviewGenerationRecord = {
     state: 'resolving' | 'building' | 'deploying' | 'verifying' | 'ready' | 'failed' | 'superseded';
     superseded_at: string;
     verify_status: 'pending' | 'pass' | 'fail' | 'skipped';
+};
+
+export type PreviewHistoryResponse = {
+    generations: Array<PreviewGenerationRecord>;
+    preview: PreviewRecord;
+    status: 'ok';
+    trace_id: string;
 };
 
 export type PreviewPullRequestSummary = {
@@ -3388,12 +3398,23 @@ export type ProductPreviewProfile = {
     template_instance: string;
 };
 
+export type ProductPreviewReference = {
+    change_number: number;
+    change_url: string;
+    preview_id: string;
+    recorded_state: 'pending' | 'active' | 'failed' | 'paused' | 'teardown_pending' | 'destroyed';
+    updated_at: string;
+};
+
 export type ProductPreviewSummary = {
     active_count: number;
     context: string;
     enabled: boolean;
     latest_preview_id: string;
     provenance: DataProvenance;
+    records: Array<ProductPreviewReference>;
+    records_status: 'available' | 'authorization_denied' | 'unsupported';
+    records_truncated: boolean;
     slug_template: string;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
@@ -3638,9 +3659,33 @@ export type ProductPublicIngressSummary = {
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
 
+export type ProductReconcileRequestView = {
+    attempt: number;
+    last_delivery_id: string;
+    last_error: string;
+    last_plan: {
+        [key: string]: JsonValue;
+    };
+    pull_request_number: number | null;
+    request_count: number;
+    requested_at: string;
+    state: 'pending' | 'running' | 'done' | 'failed';
+    target_key: string;
+    target_kind: 'testing' | 'preview';
+    updated_at: string;
+};
+
+export type ProductReconcileRequestsResponse = {
+    product: string;
+    requests: Array<ProductReconcileRequestView>;
+    status: 'ok';
+    trace_id: string;
+};
+
 export type ProductReviewCarry = {
+    comparison_base_sha: string;
     head_sha: string;
-    reason: 'merge_train_base_refresh';
+    reason: 'merge_train_base_refresh' | 'unchanged_patch_base_update';
     record_id: string;
     refresh_record_ids: Array<string>;
 };
@@ -4001,6 +4046,7 @@ export type ReleaseReviewDecisionRecord = {
 
 export type ReleaseReviewItem = {
     already_reviewed: boolean;
+    client_test_notes_error?: string;
     head_sha: string;
     merge_commit: string;
     owner_test_notes: string;
@@ -4884,6 +4930,36 @@ export type ReadPreviewReadinessResponses = {
 
 export type ReadPreviewReadinessResponse = ReadPreviewReadinessResponses[keyof ReadPreviewReadinessResponses];
 
+export type ReadPreviewHistoryData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        preview_id: string;
+    };
+    query?: never;
+    url: '/v1/previews/{preview_id}/history';
+};
+
+export type ReadPreviewHistoryErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadPreviewHistoryError = ReadPreviewHistoryErrors[keyof ReadPreviewHistoryErrors];
+
+export type ReadPreviewHistoryResponses = {
+    200: PreviewHistoryResponse;
+};
+
+export type ReadPreviewHistoryResponse = ReadPreviewHistoryResponses[keyof ReadPreviewHistoryResponses];
+
 export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsData = {
     body?: never;
     headers?: {
@@ -5131,6 +5207,35 @@ export type ReadProductProfileMutationReceiptResponses = {
 };
 
 export type ReadProductProfileMutationReceiptResponse = ReadProductProfileMutationReceiptResponses[keyof ReadProductProfileMutationReceiptResponses];
+
+export type ReadProductReconcileRequestsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/product-profiles/{product}/reconcile-requests';
+};
+
+export type ReadProductReconcileRequestsErrors = {
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadProductReconcileRequestsError = ReadProductReconcileRequestsErrors[keyof ReadProductReconcileRequestsErrors];
+
+export type ReadProductReconcileRequestsResponses = {
+    200: ProductReconcileRequestsResponse;
+};
+
+export type ReadProductReconcileRequestsResponse = ReadProductReconcileRequestsResponses[keyof ReadProductReconcileRequestsResponses];
 
 export type ReadProductReviewData = {
     body?: never;

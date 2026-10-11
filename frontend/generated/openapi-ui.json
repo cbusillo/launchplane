@@ -1375,6 +1375,117 @@
         "summary": "Read preview readiness"
       }
     },
+    "/v1/previews/{preview_id}/history": {
+      "get": {
+        "operationId": "read_preview_history",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "preview_id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Preview Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewHistoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read one preview record with generation history"
+      }
+    },
     "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs": {
       "get": {
         "operationId": "read_ordinary_agent_delivery_authorization_candidate_inputs",
@@ -2215,6 +2326,107 @@
           }
         },
         "summary": "Check completion of the caller's retained profile mutation key"
+      }
+    },
+    "/v1/product-profiles/{product}/reconcile-requests": {
+      "get": {
+        "operationId": "read_product_reconcile_requests",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductReconcileRequestsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read what the event reconciler last decided for a product"
       }
     },
     "/v1/product-review": {
@@ -8180,6 +8392,12 @@
             ],
             "title": "Database Update Modules"
           },
+          "examined_baseline_inputs_sha256": {
+            "default": "",
+            "pattern": "^(|[0-9a-f]{64})$",
+            "title": "Examined Baseline Inputs Sha256",
+            "type": "string"
+          },
           "examined_inputs_sha256": {
             "default": "",
             "pattern": "^(|[0-9a-f]{64})$",
@@ -8214,6 +8432,7 @@
         "required": [
           "complete",
           "database_update_modules",
+          "examined_baseline_inputs_sha256",
           "examined_inputs_sha256",
           "modules",
           "read_write_compatible",
@@ -12247,6 +12466,7 @@
         "title": "IntegrationKeyReadbackFinding",
         "type": "object"
       },
+      "JsonValue": {},
       "LaunchplaneAuthzPolicy-Output": {
         "additionalProperties": true,
         "type": "object"
@@ -15888,7 +16108,10 @@
             "type": "integer"
           },
           "reason": {
-            "const": "entry_conflict",
+            "enum": [
+              "entry_conflict",
+              "failure_isolation"
+            ],
             "title": "Reason",
             "type": "string"
           }
@@ -21165,6 +21388,39 @@
           "verify_status"
         ],
         "title": "PreviewGenerationRecord",
+        "type": "object"
+      },
+      "PreviewHistoryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "generations": {
+            "items": {
+              "$ref": "#/components/schemas/PreviewGenerationRecord"
+            },
+            "title": "Generations",
+            "type": "array"
+          },
+          "preview": {
+            "$ref": "#/components/schemas/PreviewRecord"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "generations",
+          "preview",
+          "status",
+          "trace_id"
+        ],
+        "title": "PreviewHistoryResponse",
         "type": "object"
       },
       "PreviewPullRequestSummary": {
@@ -27700,6 +27956,49 @@
           "template_instance"
         ]
       },
+      "ProductPreviewReference": {
+        "additionalProperties": false,
+        "properties": {
+          "change_number": {
+            "minimum": 1,
+            "title": "Change Number",
+            "type": "integer"
+          },
+          "change_url": {
+            "title": "Change Url",
+            "type": "string"
+          },
+          "preview_id": {
+            "title": "Preview Id",
+            "type": "string"
+          },
+          "recorded_state": {
+            "enum": [
+              "pending",
+              "active",
+              "failed",
+              "paused",
+              "teardown_pending",
+              "destroyed"
+            ],
+            "title": "Recorded State",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "change_number",
+          "change_url",
+          "preview_id",
+          "recorded_state",
+          "updated_at"
+        ],
+        "title": "ProductPreviewReference",
+        "type": "object"
+      },
       "ProductPreviewSummary": {
         "additionalProperties": false,
         "properties": {
@@ -27735,6 +28034,29 @@
               "stale_after": ""
             }
           },
+          "records": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductPreviewReference"
+            },
+            "title": "Records",
+            "type": "array"
+          },
+          "records_status": {
+            "default": "unsupported",
+            "enum": [
+              "available",
+              "authorization_denied",
+              "unsupported"
+            ],
+            "title": "Records Status",
+            "type": "string"
+          },
+          "records_truncated": {
+            "default": false,
+            "title": "Records Truncated",
+            "type": "boolean"
+          },
           "slug_template": {
             "default": "",
             "title": "Slug Template",
@@ -27759,6 +28081,9 @@
           "enabled",
           "latest_preview_id",
           "provenance",
+          "records",
+          "records_status",
+          "records_truncated",
           "slug_template",
           "trust_state"
         ],
@@ -29223,17 +29548,143 @@
           "trust_state"
         ]
       },
+      "ProductReconcileRequestView": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "last_delivery_id": {
+            "title": "Last Delivery Id",
+            "type": "string"
+          },
+          "last_error": {
+            "title": "Last Error",
+            "type": "string"
+          },
+          "last_plan": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Last Plan",
+            "type": "object"
+          },
+          "pull_request_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pull Request Number"
+          },
+          "request_count": {
+            "title": "Request Count",
+            "type": "integer"
+          },
+          "requested_at": {
+            "title": "Requested At",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "running",
+              "done",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "target_key": {
+            "title": "Target Key",
+            "type": "string"
+          },
+          "target_kind": {
+            "enum": [
+              "testing",
+              "preview"
+            ],
+            "title": "Target Kind",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt",
+          "last_delivery_id",
+          "last_error",
+          "last_plan",
+          "pull_request_number",
+          "request_count",
+          "requested_at",
+          "state",
+          "target_key",
+          "target_kind",
+          "updated_at"
+        ],
+        "title": "ProductReconcileRequestView",
+        "type": "object"
+      },
+      "ProductReconcileRequestsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/ProductReconcileRequestView"
+            },
+            "title": "Requests",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "requests",
+          "status",
+          "trace_id"
+        ],
+        "title": "ProductReconcileRequestsResponse",
+        "type": "object"
+      },
       "ProductReviewCarry": {
         "additionalProperties": false,
-        "description": "Where a carried acceptance came from: the Client decided on another head.\n\n`merge_train_base_refresh`: the merge train only merged the base branch into the\npull request, and the pull request's change against its base adds and removes\nthe same lines.",
+        "description": "The source acceptance and immutable evidence for an unchanged feature patch.",
         "properties": {
+          "comparison_base_sha": {
+            "default": "",
+            "title": "Comparison Base Sha",
+            "type": "string"
+          },
           "head_sha": {
             "title": "Head Sha",
             "type": "string"
           },
           "reason": {
-            "const": "merge_train_base_refresh",
             "default": "merge_train_base_refresh",
+            "enum": [
+              "merge_train_base_refresh",
+              "unchanged_patch_base_update"
+            ],
             "title": "Reason",
             "type": "string"
           },
@@ -29242,15 +29693,16 @@
             "type": "string"
           },
           "refresh_record_ids": {
+            "default": [],
             "items": {
               "type": "string"
             },
-            "minItems": 1,
             "title": "Refresh Record Ids",
             "type": "array"
           }
         },
         "required": [
+          "comparison_base_sha",
           "head_sha",
           "reason",
           "record_id",
@@ -31333,6 +31785,12 @@
             "default": false,
             "title": "Already Reviewed",
             "type": "boolean"
+          },
+          "client_test_notes_error": {
+            "default": "",
+            "title": "Client Test Notes Error",
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "head_sha": {
             "pattern": "^[0-9a-f]{40}$",
