@@ -935,6 +935,10 @@ jobs:
     runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     # A lock wait without a timeout would otherwise hold a runner for six hours.
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
     services:
       postgres:
         image: *postgres_test_image
@@ -966,9 +970,11 @@ jobs:
 
       - name: Run PostgreSQL integration tests
         env:
+          SHARD_COUNT: ${{ strategy.job-total }}
+          SHARD_INDEX: ${{ matrix.shard }}
           LAUNCHPLANE_TEST_POSTGRES_URL: >-
             postgresql+psycopg://launchplane_test@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/launchplane_root
-        run: uv run --extra dev launchplane ci postgres-integration
+        run: uv run --extra dev launchplane ci postgres-integration --shard-count "$SHARD_COUNT" --shard-index "$SHARD_INDEX"
 
   ci_gate:
     # A routing-only PR check must never supersede the push's required ci-gate.
