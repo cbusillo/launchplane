@@ -18,7 +18,10 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductSecretConfigRequirement,
+)
 from control_plane.contracts.public_ingress_monitoring import (
     PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS,
     PublicIngressIncidentEventRecord,
@@ -3496,6 +3499,237 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 202, payload)
         self.assertEqual(len(stored.expected_config.managed_secret_bindings), 1)
+
+    async def _post_expected_config_racing_profile_write(
+        self,
+        *,
+        store_kind: str,
+        concurrent_update: dict[str, object],
+        local_operator: bool,
+    ) -> tuple[
+        tuple[int, dict[str, object]],
+        tuple[int, dict[str, object]],
+        LaunchplaneProductProfileRecord,
+    ]:
+        """Apply expected config while another writer publishes between its read and write."""
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_operators": [
+                    {
+                        "subjects": ["local-owner-agent"],
+                        "token_labels": ["local-owner-read"],
+                        "products": ["sellyouroutboard"],
+                        "contexts": ["launchplane"],
+                        "actions": ["product_profile.expected_config.apply"],
+                    }
+                ],
+                "github_actions": [
+                    rule.model_dump(mode="json")
+                    for rule in _product_expected_config_policy().github_actions
+                ],
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store: FilesystemRecordStore | PostgresRecordStore
+            if store_kind == "filesystem":
+                record_store = FilesystemRecordStore(state_dir=root / "state")
+            else:
+                record_store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+                )
+                record_store.ensure_schema()
+            original = LaunchplaneProductProfileRecord.model_validate(
+                {**_product_profile_payload(), "production_use": "prelaunch"}
+            )
+            record_store.write_product_profile_record(original)
+            concurrent = original.model_copy(update=concurrent_update)
+            read_profile = record_store.read_product_profile_record
+            reads = 0
+
+            def read_then_lose_race(product: str) -> LaunchplaneProductProfileRecord:
+                nonlocal reads
+                reads += 1
+                profile = read_profile(product)
+                if reads == 1:
+                    record_store.write_product_profile_record(concurrent)
+                return profile
+
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+
+            async def apply() -> tuple[int, dict[str, object]]:
+                response = await _post_product_expected_config(
+                    app,
+                    {**_product_expected_config_payload(), "mode": "apply"},
+                    authorization=(
+                        "Bearer local-operator-token" if local_operator else "Bearer valid-token"
+                    ),
+                    idempotency_key="expected-config-race",
+                )
+                return response.status_code, response.json()
+
+            with patch.object(
+                record_store, "read_product_profile_record", side_effect=read_then_lose_race
+            ):
+                raced = await apply()
+            retried = await apply()
+            stored = record_store.read_product_profile_record("sellyouroutboard")
+        return raced, retried, stored
+
+    async def test_apply_product_expected_config_refuses_to_overwrite_concurrent_profile_write(
+        self,
+    ) -> None:
+        concurrent_binding = {
+            "binding_key": "API_TOKEN",
+            "integration": "runtime_environment",
+            "context": "sellyouroutboard-prod",
+            "instance": "prod",
+        }
+        base_profile = LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+        cases: tuple[tuple[str, dict[str, object]], ...] = (
+            ("unrelated field", {"display_name": "Sell Your Outboard Today"}),
+            (
+                "another expected-config addition",
+                {
+                    "expected_config": base_profile.expected_config.model_copy(
+                        update={
+                            "managed_secret_bindings": (
+                                ProductSecretConfigRequirement.model_validate(concurrent_binding),
+                            )
+                        }
+                    )
+                },
+            ),
+        )
+        for store_kind in ("filesystem", "postgres"):
+            for name, concurrent_update in cases:
+                with self.subTest(store=store_kind, concurrent=name):
+                    raced, retried, stored = await self._post_expected_config_racing_profile_write(
+                        store_kind=store_kind,
+                        concurrent_update=concurrent_update,
+                        local_operator=False,
+                    )
+                    self.assertEqual(raced[0], 409, raced[1])
+                    self.assertEqual(cast(dict[str, object], raced[1]["error"])["code"], "stale")
+                    self.assertEqual(retried[0], 202, retried[1])
+                    self.assertFalse(retried[1].get("replayed"))
+                    for field, value in concurrent_update.items():
+                        if field != "expected_config":
+                            self.assertEqual(getattr(stored, field), value)
+                    self.assertIn(
+                        "SMTP_PASSWORD",
+                        {
+                            binding.binding_key
+                            for binding in stored.expected_config.managed_secret_bindings
+                        },
+                    )
+                    if name == "another expected-config addition":
+                        self.assertIn(
+                            "API_TOKEN",
+                            {
+                                binding.binding_key
+                                for binding in stored.expected_config.managed_secret_bindings
+                            },
+                        )
+
+    async def test_apply_product_expected_config_stale_local_operator_cannot_revert_live(
+        self,
+    ) -> None:
+        for store_kind in ("filesystem", "postgres"):
+            with self.subTest(store=store_kind):
+                raced, retried, stored = await self._post_expected_config_racing_profile_write(
+                    store_kind=store_kind,
+                    concurrent_update={"production_use": "live", "display_name": "Now Live"},
+                    local_operator=True,
+                )
+                self.assertEqual(raced[0], 409, raced[1])
+                self.assertEqual(cast(dict[str, object], raced[1]["error"])["code"], "stale")
+                self.assertEqual(retried[0], 403, retried[1])
+                self.assertEqual(
+                    cast(dict[str, object], retried[1]["error"])["code"],
+                    "live_product_requires_operator",
+                )
+                self.assertEqual(stored.production_use, "live")
+                self.assertEqual(stored.display_name, "Now Live")
+                self.assertEqual(stored.expected_config.managed_secret_bindings, ())
+
+    async def test_apply_product_expected_config_reports_profile_removed_before_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            read_profile = record_store.read_product_profile_record
+
+            def read_then_remove(product: str) -> LaunchplaneProductProfileRecord:
+                profile = read_profile(product)
+                record_store._record_path("launchplane_product_profiles", product).unlink()
+                return profile
+
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=_product_expected_config_policy(),
+                record_store_factory=lambda: record_store,
+            )
+            with patch.object(
+                record_store, "read_product_profile_record", side_effect=read_then_remove
+            ):
+                response = await _post_product_expected_config(
+                    app,
+                    {**_product_expected_config_payload(), "mode": "apply"},
+                    idempotency_key="expected-config-removed",
+                )
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_apply_product_expected_config_commits_replay_with_database_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            record_store.ensure_schema()
+            record_store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_expected_config_identity()),
+                authz_policy=_product_expected_config_policy(),
+                record_store_factory=lambda: record_store,
+            )
+            payload = {**_product_expected_config_payload(), "mode": "apply"}
+            with patch.object(
+                record_store,
+                "write_idempotency_record",
+                side_effect=AssertionError("replay result must commit with the profile"),
+            ):
+                first = await _post_product_expected_config(
+                    app, payload, idempotency_key="expected-config-atomic"
+                )
+            replay = await _post_product_expected_config(
+                app, payload, idempotency_key="expected-config-atomic"
+            )
+            stored = record_store.read_product_profile_record("sellyouroutboard")
+
+        self.assertEqual(first.status_code, 202, first.text)
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        self.assertEqual(replay.json()["original_trace_id"], first.json()["trace_id"])
+        self.assertEqual(
+            [binding.binding_key for binding in stored.expected_config.managed_secret_bindings],
+            ["SMTP_PASSWORD"],
+        )
 
     async def test_apply_product_expected_config_reports_missing_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
