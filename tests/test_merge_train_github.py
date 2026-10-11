@@ -52,7 +52,7 @@ from control_plane.merge_train_structural_provenance import (
     evaluate_merge_train_structural_candidate,
 )
 
-from tests.test_merge_train_dependency_updates import INDIRECT_PATCH
+from tests.test_merge_train_dependency_updates import INDIRECT_PATCH, SCOPED_MINOR
 
 
 class _ReadOnlyMergeTrainTransport(RecordingMergeTrainGitHubTransport):
@@ -110,6 +110,9 @@ class _RecordingSemanticEffectExecutor:
 
 class _PermissiveMergeAdmissionGuard:
     def __init__(self) -> None:
+        from control_plane.merge_admission import _utc_now_timestamp
+
+        self.observation_time_provider = _utc_now_timestamp
         self.admit_calls: list[dict[str, object]] = []
         self.landed_calls: list[dict[str, object]] = []
         self.reconcile_required_calls: list[dict[str, object]] = []
@@ -389,6 +392,42 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 repository="example/repo",
                 pull_request_number=11,
                 body_contains="restored annotation",
+            )
+
+    def test_unlanded_batch_proof_does_not_require_current_notes(self) -> None:
+        plan = _landing_plan()
+        entry = plan.entries[0]
+        pull = _landing_pull_request(entry.pull_request_number, base_sha=entry.expected_base_sha)
+        pull["body"] = ""
+        profile = SimpleNamespace(
+            is_active=True,
+            repository=plan.repository,
+            owner=SimpleNamespace(is_set=True, review_label="owner-review"),
+        )
+        client = GitHubMergeTrainClient(
+            transport=RecordingMergeTrainGitHubTransport(responses=(pull, pull)),
+            branch_refresh_store=cast(
+                Any, SimpleNamespace(list_product_profile_records=lambda: (profile,))
+            ),
+        )
+        self.assertFalse(
+            client._validate_open_landing_pull_request(
+                repository_path=plan.repository,
+                entry=entry,
+                expected_base_ref=plan.base_branch,
+                expected_base_sha=entry.expected_base_sha,
+                expected_base_tree_sha="tree-main",
+                require_client_review=False,
+            )
+        )
+        with self.assertRaises(MergeAdmissionDeniedError):
+            client._validate_open_landing_pull_request(
+                repository_path=plan.repository,
+                entry=entry,
+                expected_base_ref=plan.base_branch,
+                expected_base_sha=entry.expected_base_sha,
+                expected_base_tree_sha="tree-main",
+                require_client_review=True,
             )
 
     def test_pull_request_has_label_reads_pr_labels(self) -> None:
@@ -2941,11 +2980,17 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             ("owner-review", (_owner_review_check("success", head_sha="older-head"),), "pending"),
             ("missing-app", (_owner_review_check("success"),), "pending"),
             ("client-check", (), "pending"),
+            ("notes-without-label", (), "pending"),
             ("unrelated", (_owner_review_check("failure"),), "pass"),
         )
         for label, checks, expected in cases:
             with self.subTest(label=label, checks=checks):
                 pull = _github_pull_request(42)
+                pull["body"] = "## Client test notes\n" + (
+                    "Nothing for the Client to test: CI only."
+                    if label == "unrelated"
+                    else "Try the changed page."
+                )
                 pull["labels"] = [{"name": "ready-to-merge"}, {"name": label}]
                 transport = RecordingMergeTrainGitHubTransport(
                     responses=(
@@ -2966,7 +3011,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     is_active=True,
                     repository="cbusillo/sellyouroutboard",
                     owner=SimpleNamespace(
-                        review_label=label if label != "unrelated" else "client-check"
+                        is_set=True,
+                        review_label=label
+                        if label not in {"unrelated", "notes-without-label"}
+                        else "client-check",
                     ),
                 )
                 store = SimpleNamespace(
@@ -2980,6 +3028,38 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 ).read_merge_train_snapshot(repository=profile.repository, base_branch="main")
                 self.assertEqual(snapshot.pull_requests[0].required_checks_status, expected)
 
+    def test_explicit_review_override_still_holds_a_product_without_a_client(self) -> None:
+        profile = SimpleNamespace(
+            is_active=True,
+            repository="example/site",
+            owner=SimpleNamespace(is_set=False, review_label="owner-review"),
+        )
+        reader = GitHubMergeTrainSnapshotReader(
+            transport=RecordingMergeTrainGitHubTransport(responses=()),
+            branch_refresh_store=cast(
+                Any, SimpleNamespace(list_product_profile_records=lambda: (profile,))
+            ),
+        )
+        intent = reader.client_review_intent(
+            labels=("owner-review",),
+            repository=profile.repository,
+            body="## Client test notes\nTry the changed prices.",
+        )
+        self.assertTrue(intent.review_required)
+        self.assertFalse(intent.error)
+        self.assertTrue(
+            reader.client_review_intent(
+                labels=("owner-review",),
+                repository=profile.repository,
+                body="## Client test notes\nNothing for the Client to test: CI only.",
+            ).error
+        )
+        self.assertFalse(
+            reader.client_review_intent(
+                labels=(), repository=profile.repository, body=""
+            ).review_required
+        )
+
     def test_review_label_without_matching_active_profile_creates_no_wait(self) -> None:
         for profiles in (
             (),
@@ -2987,14 +3067,14 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 SimpleNamespace(
                     is_active=False,
                     repository="cbusillo/sellyouroutboard",
-                    owner=SimpleNamespace(review_label="owner-review"),
+                    owner=SimpleNamespace(is_set=True, review_label="owner-review"),
                 ),
             ),
             (
                 SimpleNamespace(
                     is_active=True,
                     repository="cbusillo/sellyouroutboard",
-                    owner=SimpleNamespace(review_label="client-check"),
+                    owner=SimpleNamespace(is_set=True, review_label="client-check"),
                 ),
             ),
         ):
@@ -3007,7 +3087,9 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 )
                 self.assertFalse(
                     reader.client_review_required(
-                        labels=("owner-review",), repository="cbusillo/sellyouroutboard"
+                        labels=("unrelated",),
+                        repository="cbusillo/sellyouroutboard",
+                        body="## Client test notes\nNothing for the Client to test: CI only.",
                     )
                 )
 
@@ -3117,6 +3199,12 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             ...,
         ] = (
             ("bot commit", [own], [], "patch_or_minor"),
+            (
+                "quoted scoped dependency name",
+                [_github_commit(49699333, SCOPED_MINOR, sha="head-16")],
+                [],
+                "patch_or_minor",
+            ),
             ("bot rebased itself", [own], bot_push, "patch_or_minor"),
             (
                 "another author added a commit",

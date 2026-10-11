@@ -14,7 +14,10 @@ from control_plane.lane_movement import LaneMovementRefused
 
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
+from control_plane.contracts.durable_operation_authorization import (
+    RELEASE_DECISION_GRANTS,
+    DurableOperationAuthorization,
+)
 from control_plane.contracts.odoo_prod_backup_restore import OdooProdBackupRestoreResult
 from control_plane.contracts.odoo_prod_backup_restore_operation import (
     OdooProdBackupRestoreOperationPhase,
@@ -1618,7 +1621,7 @@ def _execute_prod_promotion_operation(
         def before_effect(effect_name: str) -> None:
             if (
                 effect_name == TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE
-                and operation.authorization.grant == "client_release_acceptance"
+                and operation.authorization.grant in RELEASE_DECISION_GRANTS
             ):
                 if not isinstance(record_store, PostgresRecordStore):
                     raise ValueError("Odoo Client release recovery requires durable storage.")

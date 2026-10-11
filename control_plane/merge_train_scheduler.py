@@ -11,7 +11,7 @@ record's ``scheduler`` block stays the switch: ``enabled`` selects the target an
 import logging
 import time
 from contextlib import nullcontext
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerLeaseHeldError,
+    build_merge_train_controller_key,
 )
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
@@ -60,7 +61,10 @@ from control_plane.merge_train_policy_source import (
 )
 from control_plane.merge_train_pr_feedback import (
     MergeTrainPrFeedbackEnvelope,
-    build_merge_train_pr_feedback_record,
+    write_merge_train_pr_feedback_record,
+    deliver_merge_train_pr_feedback_record,
+    feedback_retry_is_due,
+    feedback_provider_backoff_is_active,
     require_merge_train_pr_feedback_record_store,
 )
 from control_plane.merge_train_run_once import (
@@ -104,13 +108,26 @@ def run_merge_train_scheduler_pass(
     control_plane_root: Path,
     now: Callable[[], str] = utc_now_timestamp,
     should_stop: Callable[[], bool] = lambda: False,
+    target_keys: Collection[str] | None = None,
 ) -> tuple[MergeTrainScheduledTargetResult, ...]:
+    """Run every enabled target, or only those named by controller key."""
     try:
         policy_record = resolve_merge_train_policy_record(record_store)
     except MergeTrainPolicyStoreMissingError:
         return ()
     scheduled_policies = sorted(
-        (policy for policy in policy_record.policy.policies if policy.scheduler.enabled),
+        (
+            policy
+            for policy in policy_record.policy.policies
+            if policy.scheduler.enabled
+            and (
+                target_keys is None
+                or build_merge_train_controller_key(
+                    repository=policy.repository, base_branch=policy.base_branch
+                )
+                in target_keys
+            )
+        ),
         key=lambda policy: (policy.repository, policy.base_branch),
     )
     results: list[MergeTrainScheduledTargetResult] = []
@@ -173,21 +190,34 @@ def run_merge_train_scheduler_loop(
     max_passes: int | None = None,
     pass_callback: Callable[[tuple[MergeTrainScheduledTargetResult, ...]], None] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
-    wait_for_event: Callable[[float, Event], None] | None = None,
+    wait_for_event: Callable[[float, Event], Collection[str] | None] | None = None,
 ) -> int:
+    """Sweep every target on the interval; between sweeps, run only the woken trains.
+
+    ``wait_for_event`` returns the controller keys an event woke, or None when
+    the wait ended without naming trains; a sweep runs then, and whenever one is due.
+    """
     if interval_seconds < 1:
         raise ValueError("Merge train scheduler interval_seconds must be positive.")
     if max_passes is not None and max_passes < 1:
         raise ValueError("Merge train scheduler max_passes must be positive.")
     scheduler_stop_event = stop_event or Event()
     passes = 0
+    # No trains named yet, so the first pass is a sweep.
+    next_sweep_at = 0.0
+    woken: Collection[str] | None = None
     while not scheduler_stop_event.is_set():
         started_at = monotonic()
+        sweep = woken is None or started_at >= next_sweep_at
+        if sweep:
+            # Sweeps start on the interval; event passes in between never delay one.
+            next_sweep_at = started_at + interval_seconds
         try:
             results = run_merge_train_scheduler_pass(
                 record_store=record_store,
                 control_plane_root=control_plane_root,
                 should_stop=scheduler_stop_event.is_set,
+                target_keys=None if sweep else woken,
             )
         except Exception:  # noqa: BLE001 - a bad pass (say, an unreadable policy) waits one interval.
             _LOGGER.exception("Scheduled merge train pass failed.")
@@ -197,13 +227,13 @@ def run_merge_train_scheduler_loop(
             pass_callback(results)
         if max_passes is not None and passes >= max_passes:
             break
-        # Start passes on the interval; a long landing only shortens the wait.
-        elapsed = monotonic() - started_at
-        timeout = max(0.0, interval_seconds - elapsed)
+        # A long landing only shortens the wait for the next sweep.
+        timeout = max(0.0, next_sweep_at - monotonic())
         if wait_for_event is None:
             scheduler_stop_event.wait(timeout=timeout)
+            woken = None
         else:
-            wait_for_event(timeout, scheduler_stop_event)
+            woken = wait_for_event(timeout, scheduler_stop_event)
     return passes
 
 
@@ -408,8 +438,16 @@ def _controller_can_continue(result: dict[str, object]) -> bool:
         return candidate.get("status") in {"ready_for_checks", "passed"}
     if action == "observe_candidate" and isinstance(candidate, dict):
         return candidate.get("status") == "passed"
+    if action == "land_batch":
+        # A finished landing leaves the rest of the queue with nothing external
+        # to wait on; the next action plans it against the moved base.
+        return (
+            result.get("mode") == "land"
+            and result.get("landing_progress") in {None, "complete"}
+            and result.get("candidate_ref_cleanup_status") != "failed"
+        )
     # Branch updates, stack collapse and candidate publication start CI. Blocks,
-    # waits, reconciliation and landing outcomes end this bounded pass.
+    # waits, reconciliation and unfinished landings end this bounded pass.
     return False
 
 
@@ -426,25 +464,84 @@ def _deliver_controller_feedback(
     payloads = build_feedback_payloads(
         response=response, source=MERGE_TRAIN_SCHEDULER_FEEDBACK_SOURCE
     )
-    if not payloads:
-        return 0, 0
     feedback_store = require_merge_train_pr_feedback_record_store(record_store)
     delivered = 0
     failed = 0
+    quota_records = feedback_store.list_merge_train_pr_feedback_records(
+        repository=repository_policy.repository,
+        base_branch=repository_policy.base_branch,
+        latest_per_pr=True,
+        delivery_status="failed",
+        provider_backoff_only=True,
+        limit=1,
+    )
+    backoff = ""
+    if quota_records and feedback_provider_backoff_is_active(record=quota_records[0], now=now()):
+        backoff = quota_records[0].provider_retry_at
     for payload in payloads:
-        feedback_record = build_merge_train_pr_feedback_record(
+        feedback_record = write_merge_train_pr_feedback_record(
+            store=feedback_store,
             request=MergeTrainPrFeedbackEnvelope.model_validate(payload),
             policy_key=repository_policy.policy_key,
             policy_sha256=policy_record.policy_sha256,
             token=token,
             recorded_at=now(),
             response_trace_id=trace_id,
+            defer_until=backoff,
         )
-        feedback_store.write_merge_train_pr_feedback_record(feedback_record)
         if feedback_record.delivery_status == "failed":
             failed += 1
+            if feedback_record.provider_retry_at:
+                backoff = feedback_record.provider_retry_at
         else:
             delivered += 1
+    if backoff:
+        return delivered, failed
+    # Current responses are persisted first, so a newer status supersedes an old
+    # failed terminal body even when this pass advances different controller work.
+    for record in feedback_store.list_merge_train_pr_feedback_records(
+        repository=repository_policy.repository,
+        base_branch=repository_policy.base_branch,
+        latest_per_pr=True,
+        delivery_status="failed",
+        terminal_retry_candidates=True,
+        limit=25,
+    ):
+        if record.event not in {"completed", "stale_policy"}:
+            continue
+        attempted_at = now()
+        if not feedback_retry_is_due(record, now=attempted_at):
+            continue
+        with feedback_store.merge_train_feedback_delivery_lock(
+            repository=record.repository, pull_request_number=record.pull_request_number
+        ):
+            latest = feedback_store.list_merge_train_pr_feedback_records(
+                repository=record.repository,
+                base_branch=record.base_branch,
+                pr_number=record.pull_request_number,
+                limit=2,
+            )
+            if not latest or latest[0].feedback_id != record.feedback_id:
+                continue
+            if (
+                not record.created_at_ns
+                and len(latest) > 1
+                and latest[1].recorded_at == record.recorded_at
+            ):
+                # Legacy second-resolution ties have no proven causal order.
+                continue
+            recovered = deliver_merge_train_pr_feedback_record(
+                record=record,
+                token=token,
+                attempted_at=attempted_at,
+            )
+            feedback_store.write_merge_train_pr_feedback_record(recovered)
+        if recovered.delivery_status == "delivered":
+            delivered += 1
+        elif recovered.delivery_status == "failed":
+            failed += 1
+            if recovered.provider_retry_at:
+                break
     return delivered, failed
 
 

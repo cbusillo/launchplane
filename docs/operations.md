@@ -1055,14 +1055,7 @@ Client identity directly. Do not introduce new GitHub-secret/workflow grants;
 use the native reviewed policy path for any separately authorized contraction.
 See [Client acceptance](owner-acceptance.md).
 
-The `manager-preview-approval` and `manager-preview-approval-retirement`
-selectors and wrapper jobs are removed, along with the
-`LAUNCHPLANE_AUTHZ_MANAGER_PREVIEW_APPROVAL_MANAGED_SET_JSON` reference,
-after the reviewed `operator.manager-preview-approval` contraction
-and independent empty-set readback recorded on #2006. Source retirement does
-not itself mutate authorization records or delete GitHub secrets. The Director
-deletes the unused managed-set secret by hand after the wiring removal lands.
-Other separately authorized contractions use the current reviewed
+Separately authorized contractions use the current reviewed
 [authorization surface](authorization-authority.md). The signed trusted-maintenance
 webhook and its independent `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`
 remain in use.
@@ -1374,6 +1367,9 @@ reusable workflow accepts only mode, reason, and an idempotency key, preserves a
 30-day request/response artifact, and fails after artifact upload when any target
 requires attention. Production enrollment is a separate change and cannot be
 selected through this endpoint.
+
+The [record contract](records.md) documents the separate remaining-stable
+controller for bindings outside this testing-only slice.
 
 `Odoo Testing Route Binding Refresh` is the clock-only wrapper. It accepts no
 target selectors and calls the reusable worker pinned to an immutable commit.
@@ -2650,22 +2646,9 @@ context only, and `context_instance` has both context and instance.
   replacement passes, rollback refreshes prod inventory with rollback provenance
   and annotates the current prod promotion record.
 - `POST /v1/drivers/odoo/prod-backup-gate` captures the DB and filestore backup
-  evidence required before Odoo prod promotion. It resolves `ODOO_DB_NAME`,
-  `ODOO_FILESTORE_PATH`, and `ODOO_BACKUP_ROOT` from DB-backed runtime
-  environment records, runs a Dokploy schedule against the compose lane, stops
-  the web service while capturing, and writes the backup-gate record only after
-  the exact schedule deployment emits nonce-, record-, and database-bound
-  completion evidence with non-empty artifact sizes and SHA-256 values. A
-  provider `done` status without that bounded marker fails the gate. A web
-  service stopped for capture must restart successfully and read back as
-  `running`; restart or final status-read failure makes the schedule fail. Recovery
-  on an earlier backup failure still attempts the restart and preserves that
-  original non-zero exit status. Directory
-  preparation accepts only the dedicated `/volumes/data/backups/launchplane`
-  tree and assigns only its exact backup-root/database/record path to the
-  script-runner identity, so stale root-owned directories cannot make `pg_dump`
-  fail after the provider has reported success or broaden ownership changes to
-  unrelated mounted data.
+  evidence required before Odoo prod promotion. See
+  [online Odoo recovery tuples](odoo-online-backups.md) for the capture,
+  consistency, verification and failure contract.
 - Odoo rollback is image/release-tuple rollback, not VM snapshot rollback. Do not
   invent artifact ids, source commits, backup gates, or env-file overlays to make
   a rollback proceed; write or import the real Launchplane records first.

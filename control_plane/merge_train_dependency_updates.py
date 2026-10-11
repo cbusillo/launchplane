@@ -11,10 +11,12 @@ from typing import Literal
 
 DependencyUpdateClass = Literal["patch_or_minor", "needs_review"]
 
-_TRAILER = re.compile(r"^---\s*\nupdated-dependencies:\s*\n(?P<body>.*?)^\.\.\.\s*$", re.M | re.S)
+_TRAILER = re.compile(r"^---\s*\nupdated-dependencies:\s*\n(?P<body>.*?)^[.]{3}\s*$", re.M | re.S)
 _ENTRY_START = re.compile(r"^- dependency-name:\s*(?P<name>\S+)\s*$", re.M)
 _ENTRY_FIELD = re.compile(r"^\s+(?P<key>[a-z-]+):\s*(?P<value>\S+)\s*$", re.M)
-_VERSION = re.compile(r"^v?(?P<major>\d+)(?:\.(?P<minor>\d+))?(?:\.(?P<patch>\d+))?(?P<suffix>.*)$")
+_VERSION = re.compile(
+    r"^v?(?P<major>\d+)(?:[.](?P<minor>\d+))?(?:[.](?P<patch>\d+))?(?P<suffix>.*)$"
+)
 
 
 def classify_dependency_update(commit_messages: Sequence[str]) -> DependencyUpdateClass:
@@ -54,7 +56,10 @@ def _trailer_entries(body: str) -> list[tuple[str, dict[str, str]]]:
             match.group("key"): match.group("value").strip("'\"")
             for match in _ENTRY_FIELD.finditer(body, start.end(), end)
         }
-        entries.append((start.group("name"), fields))
+        name = start.group("name")
+        if len(name) >= 2 and name[0] in ("'", '"') and name[-1] == name[0]:
+            name = name[1:-1]
+        entries.append((name, fields))
     return entries
 
 

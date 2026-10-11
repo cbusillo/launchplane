@@ -60,14 +60,20 @@ class MergeTrainBatchEntry(BaseModel):
         return self
 
 
+# entry_conflict: the head does not merge onto the heads accepted ahead of it.
+# failure_isolation: the head waits while part of a failed batch is retested
+# on the same base to find the pull request that broke it.
+MergeTrainHeldOutReason = Literal["entry_conflict", "failure_isolation"]
+
+
 class MergeTrainBatchHeldOutEntry(BaseModel):
-    """A conflict observation bound to the base and accepted preceding heads."""
+    """A hold bound to the base and, for conflicts, the accepted preceding heads."""
 
     model_config = ConfigDict(extra="forbid")
 
     pull_request_number: int = Field(gt=0)
     head_sha: str
-    reason: Literal["entry_conflict"] = "entry_conflict"
+    reason: MergeTrainHeldOutReason = "entry_conflict"
     # Queued pull requests merged ahead of it; empty when it conflicts with the base.
     conflicts_with: tuple[int, ...] = ()
     probe_base_sha: str = ""
@@ -85,6 +91,10 @@ class MergeTrainBatchHeldOutEntry(BaseModel):
             raise ValueError("conflict probe lineage requires its base")
         if any(not head.strip() for head in self.conflicts_with_head_shas):
             raise ValueError("conflict probe lineage requires nonempty preceding heads")
+        if self.reason == "failure_isolation" and (
+            not self.probe_base_sha or self.conflicts_with or self.conflicts_with_head_shas
+        ):
+            raise ValueError("failure isolation hold requires its base and no conflict lineage")
         return self
 
 
@@ -110,6 +120,15 @@ class MergeTrainHeadCheckReuse(BaseModel):
     required_checks: tuple[MergeTrainReusedCheck, ...] = Field(min_length=1)
 
 
+class MergeTrainCheckRetryEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_sha: str = Field(min_length=1)
+    controller_pass_recorded_at: str = Field(min_length=1)
+    required_checks_status: Literal["pass"] = "pass"
+    closed_batch_pull_request_number: int = Field(gt=0)
+
+
 class MergeTrainBatchCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -127,6 +146,13 @@ class MergeTrainBatchCandidate(BaseModel):
     entries: tuple[MergeTrainBatchEntry, ...]
     held_out: tuple[MergeTrainBatchHeldOutEntry, ...] = ()
     batch_body_retry_of: str = Field(default="", exclude_if=lambda value: not value)
+    # Record id of the failed candidate this one rebuilds after an infrastructure failure.
+    infrastructure_retry_of: str = Field(default="", exclude_if=lambda value: not value)
+    # Failed record whose exact SHA subsequently passed checks before this rebuild.
+    check_retry_of: str = Field(default="", exclude_if=lambda value: not value)
+    check_retry_evidence: MergeTrainCheckRetryEvidence | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     stack_collapse_root: MergeTrainStackCollapseRootProof | None = None
     structural_provenance: MergeTrainStructuralProvenance | None = None
     required_checks_status: Literal["unknown", "pending", "pass", "fail"] = "unknown"

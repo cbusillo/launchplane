@@ -55,6 +55,8 @@ import type {
   ProductOperationalReadinessResponse,
   ProductEnvironmentResponse,
   ProductOverviewResponse,
+  PreviewHistoryResponse,
+  ProductReconcileRequestsResponse,
   ProductPromotionStatusResponse,
   ProductPromotionWorkflowDeliveryStatusResponse,
   PrivilegedOperationHumanResponse,
@@ -308,6 +310,14 @@ export function readProduct(
     undefined,
     signal,
   );
+}
+
+export function readPreviewHistory(previewId: string, signal?: AbortSignal): Promise<PreviewHistoryResponse> {
+  return requestJson(`/v1/previews/${encodeURIComponent(previewId)}/history`, "GET", undefined, signal);
+}
+
+export function readProductReconcileRequests(product: string, signal?: AbortSignal): Promise<ProductReconcileRequestsResponse> {
+  return requestJson(`/v1/product-profiles/${encodeURIComponent(product)}/reconcile-requests`, "GET", undefined, signal);
 }
 
 export function readProductActivity(
