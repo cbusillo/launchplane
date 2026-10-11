@@ -943,6 +943,43 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(code, response.text)
                 self.assertNotIn("private provider diagnostic", response.text)
 
+    async def test_notes_refusal_retries_saved_feedback_without_changing_the_decision(self) -> None:
+        from control_plane.client_test_notes import ClientTestNotesRequired
+
+        payload = product_profile_payload("verireel")
+        payload["repository"] = "every/verireel"
+        payload["owner"] = {"github_login": "site-owner", "github_id": str(_OWNER_GITHUB_ID)}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        github = _GitHub(repository="every/verireel", labels=())
+        github.body = "## Client test notes\n"
+        original = _decision(
+            decision="changes_requested", decided_at="2026-09-25T12:00:00Z"
+        ).model_copy(update={"product": "verireel", "repository": "every/verireel"})
+        self.store.write_product_review_decision_record(original)
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(_preview_pr_feedback_identity()),
+            authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+            control_plane_root_path=self.root,
+            record_store_factory=lambda: self.store,
+            owner_review_status_publisher=_publisher(github),
+        )
+        with patch(
+            "control_plane.http_app.pull_request_client_review",
+            side_effect=ClientTestNotesRequired("Client test notes are missing."),
+        ):
+            response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        (saved,) = self.store.list_product_review_decision_records(
+            repository="every/verireel", pull_request_number=42
+        )
+        self.assertEqual(saved.decision, original.decision)
+        self.assertEqual(saved.reason, original.reason)
+        self.assertTrue(saved.feedback_url)
+
     async def test_ready_preview_feedback_writes_the_status_and_retires_leftovers(self) -> None:
         github = _GitHub(repository="every/verireel")
         github.statuses = [

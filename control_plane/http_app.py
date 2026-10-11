@@ -22711,6 +22711,21 @@ def create_launchplane_fastapi_app(
                             pull_request_number=feedback_request.anchor_pr_number,
                         )
             except ClientTestNotesRequired as error:
+                # Retry already-requested feedback even while the new notes
+                # are refused, matching the preview reconciliation path.
+                try:
+                    product_review_store = require_product_review_store(record_store)
+                    if owner_profile is not None:
+                        await run_in_threadpool(
+                            resolved_owner_review_status_publisher.publish,
+                            store=product_review_store,
+                            profile=owner_profile,
+                            pull_request_number=feedback_request.anchor_pr_number,
+                            context=effective_context,
+                            retire_leftovers=True,
+                        )
+                except Exception:
+                    _LOGGER.warning("Saved Client feedback remains pending during a notes refusal.")
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
