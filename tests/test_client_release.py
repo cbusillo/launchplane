@@ -809,7 +809,12 @@ class ClientReleaseTests(unittest.TestCase):
                 )
                 self.assertEqual(odoo_release_recovery_source(recovery), source.operation_id)
                 self.assertTrue(odoo_release_recovery_allows(self.store, recovery))
-                # Automatic recovery is still changing production.
+                # Automatic recovery is still changing production, even after a
+                # newer decision.
+                self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
+                self.store.write_release_review_decision_record(
+                    decision(self.store, outcome="changes_requested", date="2026-09-23T05:00:00Z")
+                )
                 self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
                 self.assertEqual(self.advance(), ())
                 self.store.write_deployment_record(

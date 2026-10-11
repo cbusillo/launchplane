@@ -51,13 +51,15 @@ def merge_train_release_hold(
     """Return the in-flight release holding ``repository``, if there is one."""
 
     for profile in store.list_product_profile_records():
-        decisions = store.list_release_review_decision_records(product=profile.product, limit=1)
-        if not decisions or decisions[0].decision != "accepted":
+        decisions = store.list_release_review_decision_records(product=profile.product)
+        # A later decision stops new steps, but recovery from an earlier accepted
+        # release still runs under that acceptance.
+        accepted = next((item for item in decisions if item.decision == "accepted"), None)
+        if accepted is None:
             continue
-        decision = decisions[0]
-        if repository_key(repository) not in _release_repositories(store, decision):
+        if repository_key(repository) not in _release_repositories(store, accepted):
             continue
-        if _release_in_flight(store, profile, decision):
+        if _release_in_flight(store, profile, accepted, newest=accepted == decisions[0]):
             return MergeTrainReleaseHold(product=profile.product)
     return None
 
@@ -102,6 +104,8 @@ def _release_in_flight(
     store: MergeTrainReleaseHoldStore,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
+    *,
+    newest: bool,
 ) -> bool:
     """Whether the release worker is running this release or will start its next step.
 
@@ -115,7 +119,7 @@ def _release_in_flight(
     # A step or its automatic recovery is changing production now.
     if any(step.status in {"pending", "running"} for step in run.steps):
         return True
-    if run.state != "waiting":
+    if not newest or run.state != "waiting":
         return False
     # A drain only delays the next step; any other blocker waits on an admin.
     if run.blocked_reason and not read_status(store).get("admission_paused"):
