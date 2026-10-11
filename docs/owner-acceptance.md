@@ -23,10 +23,12 @@ Editing the PR body re-plans its preview and review intent without needing a
 push or label change.
 The preview reconciler refreshes the Client-review check even while waiting for
 a verified build. Valid engineering-only notes replace an earlier missing-notes
-failure with a passing check saying no Client preview review is required, without
+failure with a neutral check saying no Client preview review is required, without
 recording a Client decision or sending a review invitation. A later review label,
 missing notes, or real test notes restores the corresponding review gate on the
-same head. The consuming product's release acceptance remains required.
+same head when the check refreshes. Until then, an engineering-only check cannot
+satisfy required Client acceptance. An existing Client rejection stays visible.
+The consuming product's release acceptance remains required.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
 Launchplane accepts a product-review decision.
 

@@ -50,7 +50,7 @@ RETIRED_OWNER_ACCEPTANCE_SUMMARY: Final = (
     f"Client review for this pull request is shown by the `{OWNER_REVIEW_STATUS_CONTEXT}` check."
 )
 
-OwnerReviewStatusState = Literal["pending", "success", "failure"]
+OwnerReviewStatusState = Literal["pending", "success", "failure", "neutral"]
 GitHubApiRequest = Callable[..., object]
 GitHubTokenResolver = Callable[..., str]
 GitHubAppTokenMinter = Callable[[str, str], GitHubAppInstallationToken]
@@ -345,13 +345,29 @@ class OwnerReviewStatusPublisher:
         intent = change_client_review(
             body=facts.body, labels=facts.labels, review_label=profile.owner.review_label
         )
-        if intent.error:
-            status = OwnerReviewStatus(state="failure", description=intent.error)
-        elif not intent.review_required:
+        if not intent.review_required:
+            decisions = store.list_product_review_decision_records(
+                repository=profile.repository, pull_request_number=pull_request_number
+            )
+            current = next(
+                (
+                    decision
+                    for decision in decisions
+                    if decision.head_sha.strip().lower() == facts.head_sha
+                ),
+                None,
+            )
             status = OwnerReviewStatus(
-                state="success",
+                state="neutral",
                 description="Engineering-only change; no Client preview review required",
             )
+            if current is not None and current.decision == "changes_requested":
+                status = owner_review_status(
+                    owner=profile.owner,
+                    head_sha=facts.head_sha,
+                    decisions=decisions,
+                    base_branch=facts.base_branch,
+                )
         else:
             status = self._required_review_status(
                 store=store,
@@ -360,6 +376,8 @@ class OwnerReviewStatusPublisher:
                 facts=facts,
                 token=token,
             )
+        if intent.error:
+            status = OwnerReviewStatus(state="failure", description=intent.error)
         if not facts.repository_id or not self.public_origin:
             raise ValueError("Client review check requires the Advisory App and public origin.")
         projection = AdvisoryCheckProjection(

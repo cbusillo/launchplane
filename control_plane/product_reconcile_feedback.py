@@ -226,7 +226,7 @@ def _preview_feedback(
     # PRs whose earlier missing-note failure must no longer block delivery.
     written = (
         owner_review_status(profile, request.pull_request_number)
-        if owner_review_status is not None and status in {"pending", "ready"}
+        if owner_review_status is not None and status in {"pending", "ready", "failed"}
         else None
     )
     if status == "ready" and plan.get("owner_review_requested") is True:

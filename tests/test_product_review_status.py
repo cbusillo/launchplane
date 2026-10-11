@@ -366,7 +366,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
         github.body = "## Client test notes\nNothing for the Client to test: CI tools only."
         self._publish(github)
 
-        self.assertEqual(github.statuses[0]["state"], "success")
+        self.assertEqual(github.statuses[0]["state"], "neutral")
         self.assertNotIn("Accepted", str(github.statuses[0]["description"]))
         self.assertEqual(github.check_runs[0]["id"], failed_check_id)
         self.assertEqual(github.check_runs[0]["head_sha"], github.head_sha)
@@ -382,6 +382,20 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertEqual(tuple(github.writes), writes)
 
         # Requiring review again must restore the gate, even without a new head.
+        # Before publication catches up, the train must not mistake the existing
+        # engineering-only check for a Client acceptance.
+        from control_plane.merge_train_github import _owner_review_status
+
+        github.body = "## Client test notes\nTry the changed page."
+        self.assertEqual(
+            _owner_review_status(
+                {"check_runs": github.check_runs},
+                head_sha=github.head_sha,
+                advisory_app_id=_APP_ID,
+            ),
+            "pending",
+        )
+        github.body = "## Client test notes\nNothing for the Client to test: CI tools only."
         github.labels = ("owner-review",)
         self._publish(github)
         self.assertEqual(github.statuses[0]["state"], "failure")
@@ -389,6 +403,20 @@ class OwnerReviewStatusTests(unittest.TestCase):
         github.body = "## Client test notes\nTry the changed page."
         self._publish(github)
         self.assertEqual(github.statuses[0]["state"], "pending")
+
+    def test_engineering_notes_preserve_a_current_client_rejection(self) -> None:
+        github = _GitHub()
+        decision = _decision(decision="changes_requested", decided_at="2026-09-20T10:00:00Z")
+        self.store.write_product_review_decision_record(decision)
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "failure")
+
+        github.labels = ()
+        github.body = "## Client test notes\nNothing for the Client to test: CI tools only."
+        self._publish(github)
+
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        self.assertEqual(github.check_runs[0]["conclusion"], "failure")
 
     def test_marked_pull_request_without_an_owner_says_so(self) -> None:
         github = _GitHub()

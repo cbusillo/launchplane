@@ -3630,6 +3630,29 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertEqual(self.provider.applied, [])
         self.assertNotIn("@site-owner", self.comment_body())
 
+    def test_notes_status_refreshes_when_preview_apply_fails(self) -> None:
+        payload = _profile()
+        payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        self.github.pull_request["body"] = "## Client test notes\n"
+        self.assertEqual(self.reconcile_preview()["reason"], "client_test_notes_required")
+        self.owner_review_status_calls.clear()
+        self.github.pull_request["body"] = (
+            "## Client test notes\nNothing for the Client to test: CI tools only."
+        )
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.provider.execute_apply = lambda **_kwargs: {  # type: ignore[method-assign]
+            "status": "fail",
+            "provider_effect_attempted": True,
+        }
+
+        result = self.reconcile_preview()
+
+        self.assertEqual(cast(dict[str, object], result["pr_feedback"])["status"], "failed")
+        self.assertEqual(self.owner_review_status_calls, [("site", 5)])
+
     def test_ready_preview_on_an_accepted_head_says_so_instead_of_asking_again(self) -> None:
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
