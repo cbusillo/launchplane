@@ -9,10 +9,10 @@ export default defineConfig({
   testDir: "./tests/browser",
   testMatch: "**/*.spec.ts",
   outputDir: resolve(artifactRoot, "test-results"),
-  // Each test mocks its own API reads in a fresh browser context, so tests
-  // share no state; CI runs one worker per runner core.
+  // Tests mock their own API reads in fresh contexts. CI runners can share a
+  // host, so keep browser fan-out bounded independently of its CPU count.
   fullyParallel: true,
-  workers: process.env.CI ? "100%" : undefined,
+  workers: process.env.CI ? 4 : undefined,
   retries: 0,
   forbidOnly: Boolean(process.env.CI),
   reporter: "line",

@@ -257,6 +257,11 @@ the smoke configuration and checks that their origins differ. It runs as part
 of `test:browser`; the standalone command above is for focused diagnosis.
 It writes only task-local test artifacts.
 
+CI uses a bounded worker count in `frontend/playwright.config.ts`, including
+self-hosted candidate lanes. Shared-host CPU count is not a per-job browser
+budget. Local runs retain Playwright's default concurrency; use its `--workers`
+option for a measured diagnostic comparison.
+
 The suite uses only repo-local
 development fixtures. Product-detail journeys use `?fixture=products`; product
 inventory boundaries use `?fixture=empty` and `?fixture=error`. Anonymous
