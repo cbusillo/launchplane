@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -8,6 +10,34 @@ from pydantic import BaseModel
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 
 LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
+
+_LOGGER = logging.getLogger(__name__)
+
+
+async def run_in_worker_thread[Result](operation: Callable[[], Result]) -> Result:
+    """Run a blocking provider operation, with its whole credential lifetime, off the loop.
+
+    A client disconnect cancels only the wait. The worker thread still finishes, so a
+    token it minted is still revoked, and a late failure is logged instead of being
+    left unretrieved.
+    """
+    task = asyncio.ensure_future(asyncio.to_thread(operation))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        task.add_done_callback(_log_failure_after_disconnect)
+        raise
+
+
+def _log_failure_after_disconnect(task: asyncio.Future[Any]) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        _LOGGER.warning(
+            "Provider operation finished with %s after its client disconnected",
+            type(error).__name__,
+        )
 
 
 class ApiRouteRegistrar(Protocol):

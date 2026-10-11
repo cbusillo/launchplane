@@ -1,3 +1,5 @@
+import asyncio
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,7 +12,10 @@ from control_plane.contracts.preview_pr_feedback_remediation import (
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.filesystem import FilesystemRecordStore
+from fastapi import FastAPI
+
 from tests.http_app_test_support import (
+    _asgi_get,
     _asgi_request,
     _local_operator_bearer_config,
 )
@@ -35,34 +40,36 @@ def _payload(*, mode: str) -> dict[str, object]:
     return payload
 
 
+def _operator_app(root: Path, store: FilesystemRecordStore) -> FastAPI:
+    profile_payload = _generic_site_profile_payload(product="verireel")
+    profile_payload["repository"] = "cbusillo/verireel"
+    preview_payload = cast(dict[str, object], profile_payload["preview"])
+    preview_payload["context"] = "verireel-preview"
+    store.write_product_profile_record(
+        LaunchplaneProductProfileRecord.model_validate(profile_payload)
+    )
+    return create_launchplane_fastapi_app(
+        verifier=_StubVerifier(_identity()),
+        authz_policy=_local_operator_policy(
+            actions=(
+                "preview_pr_feedback_remediation.plan",
+                "preview_pr_feedback_remediation.apply",
+            ),
+            products=("verireel",),
+            contexts=("verireel-preview",),
+        ),
+        bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+        control_plane_root_path=root,
+        record_store_factory=lambda: store,
+    )
+
+
 class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_operator_dry_run_and_apply_record_already_absent(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             store = FilesystemRecordStore(state_dir=root / "state")
-            profile_payload = _generic_site_profile_payload(product="verireel")
-            profile_payload["repository"] = "cbusillo/verireel"
-            preview_payload = cast(dict[str, object], profile_payload["preview"])
-            preview_payload["context"] = "verireel-preview"
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(profile_payload)
-            )
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_local_operator_policy(
-                    actions=(
-                        "preview_pr_feedback_remediation.plan",
-                        "preview_pr_feedback_remediation.apply",
-                    ),
-                    products=("verireel",),
-                    contexts=("verireel-preview",),
-                ),
-                bearer_identity_config=_local_operator_bearer_config(
-                    token_label="local-owner-write"
-                ),
-                control_plane_root_path=root,
-                record_store_factory=lambda: store,
-            )
+            app = _operator_app(root, store)
             observation = PreviewPrFeedbackObservation(
                 state="absent",
                 digest_sha256="a" * 64,
@@ -142,6 +149,75 @@ class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
                 idempotency_key="preview-feedback-remediation-verireel-311",
             )
             self.assertEqual({record.mode for record in records}, {"apply", "dry-run"})
+
+    async def test_slow_provider_keeps_event_loop_free_and_revokes_after_cancellation(
+        self,
+    ) -> None:
+        loop_thread = threading.get_ident()
+        started = threading.Event()
+        release = threading.Event()
+        revoked = threading.Event()
+        revocations: list[tuple[str, int]] = []
+
+        def slow_observation(**_: object) -> PreviewPrFeedbackObservation:
+            started.set()
+            if not release.wait(5):
+                raise ValueError("fixture timed out")
+            return PreviewPrFeedbackObservation(
+                state="absent",
+                digest_sha256="a" * 64,
+                token_actor_id=101,
+                token_actor_login="launchplane-bot",
+            )
+
+        def revoke(**kwargs: object) -> object:
+            revocations.append((str(kwargs["token"]), threading.get_ident()))
+            revoked.set()
+            return None
+
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = _operator_app(root, FilesystemRecordStore(state_dir=root / "state"))
+            with (
+                patch(
+                    "control_plane.preview_pr_feedback_remediation.resolve_launchplane_github_token",
+                    return_value="token",
+                ),
+                patch(
+                    "control_plane.preview_pr_feedback_remediation.github_api_request",
+                    side_effect=revoke,
+                ),
+                patch(
+                    "control_plane.http_app.observe_managed_preview_pr_feedback",
+                    side_effect=slow_observation,
+                ),
+            ):
+                task = asyncio.ensure_future(
+                    _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/previews/pr-feedback/remediation",
+                        headers={
+                            "Authorization": "Bearer local-operator-token",
+                            "Idempotency-Key": "slow-provider",
+                        },
+                        payload=_payload(mode="dry-run"),
+                    )
+                )
+                try:
+                    self.assertTrue(await asyncio.to_thread(started.wait, 3))
+                    healthy = await asyncio.wait_for(_asgi_get(app, "/v1/health"), 2)
+                    self.assertEqual(healthy.status_code, 200)
+                    self.assertFalse(task.done(), "the event loop waited for the blocked provider")
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                finally:
+                    release.set()
+                self.assertTrue(await asyncio.to_thread(revoked.wait, 5))
+
+        self.assertEqual([token for token, _ in revocations], ["token"])
+        self.assertNotEqual(revocations[0][1], loop_thread)
 
     async def test_github_actions_identity_cannot_use_operator_route(self) -> None:
         app = create_launchplane_fastapi_app(
