@@ -815,6 +815,23 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(github.comments, [])
 
+    async def test_ready_feedback_without_client_explains_an_explicit_review_mark(self) -> None:
+        payload = product_profile_payload("verireel")
+        payload["owner"] = {}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(_preview_pr_feedback_identity()),
+            authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+            control_plane_root_path=self.root,
+            record_store_factory=lambda: self.store,
+        )
+        response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+        self.assertEqual(response.status_code, 202)
+        (feedback,) = self.store.list_preview_pr_feedback_records()
+        self.assertIn("no Client is set", feedback.comment_markdown)
+
     async def test_ready_feedback_separates_invalid_notes_from_read_failures(self) -> None:
         from control_plane.client_test_notes import ClientTestNotesRequired
 

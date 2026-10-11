@@ -2725,7 +2725,10 @@ def _reflow_stale_candidate_record(
         result["superseded_merge_train_batch_candidate_record_id"] = candidate_record.record_id
         return result
     if candidate_record.ordinary_job_binding is None and any(
-        pr.owner_review_required and pr.required_checks_status != "pass"
+        (
+            pr.client_test_notes_error
+            or (pr.owner_review_required and pr.required_checks_status != "pass")
+        )
         for pr in dry_run_result.queue
         if pr.number in dry_run_result.queue_order
     ):
@@ -2733,16 +2736,20 @@ def _reflow_stale_candidate_record(
             pr
             for pr in dry_run_result.queue
             if pr.number in dry_run_result.queue_order
-            and pr.owner_review_required
-            and pr.required_checks_status != "pass"
+            and (
+                pr.client_test_notes_error
+                or (pr.owner_review_required and pr.required_checks_status != "pass")
+            )
         )
         dry_run_result = dry_run_result.model_copy(
             update={
                 "selected_pr": waiting_pr,
                 "intended_next_action": "block"
-                if waiting_pr.required_checks_status == "fail"
+                if waiting_pr.client_test_notes_error or waiting_pr.required_checks_status == "fail"
                 else "wait_for_checks",
-                "next_action_detail": f"Wait for current-head Client review and required checks on pull request #{waiting_pr.number}."
+                "next_action_detail": f"Pull request #{waiting_pr.number}: {waiting_pr.client_test_notes_error}"
+                if waiting_pr.client_test_notes_error
+                else f"Wait for current-head Client review and required checks on pull request #{waiting_pr.number}."
                 if waiting_pr.required_checks_status != "fail"
                 else f"Current-head review or required checks failed on pull request #{waiting_pr.number}.",
             }

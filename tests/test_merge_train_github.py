@@ -394,6 +394,42 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 body_contains="restored annotation",
             )
 
+    def test_unlanded_batch_proof_does_not_require_current_notes(self) -> None:
+        plan = _landing_plan()
+        entry = plan.entries[0]
+        pull = _landing_pull_request(entry.pull_request_number, base_sha=entry.expected_base_sha)
+        pull["body"] = ""
+        profile = SimpleNamespace(
+            is_active=True,
+            repository=plan.repository,
+            owner=SimpleNamespace(is_set=True, review_label="owner-review"),
+        )
+        client = GitHubMergeTrainClient(
+            transport=RecordingMergeTrainGitHubTransport(responses=(pull, pull)),
+            branch_refresh_store=cast(
+                Any, SimpleNamespace(list_product_profile_records=lambda: (profile,))
+            ),
+        )
+        self.assertFalse(
+            client._validate_open_landing_pull_request(
+                repository_path=plan.repository,
+                entry=entry,
+                expected_base_ref=plan.base_branch,
+                expected_base_sha=entry.expected_base_sha,
+                expected_base_tree_sha="tree-main",
+                require_client_review=False,
+            )
+        )
+        with self.assertRaises(MergeAdmissionDeniedError):
+            client._validate_open_landing_pull_request(
+                repository_path=plan.repository,
+                entry=entry,
+                expected_base_ref=plan.base_branch,
+                expected_base_sha=entry.expected_base_sha,
+                expected_base_tree_sha="tree-main",
+                require_client_review=True,
+            )
+
     def test_pull_request_has_label_reads_pr_labels(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=({"labels": [{"name": "stack-landed"}]},)

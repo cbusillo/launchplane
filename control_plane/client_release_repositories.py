@@ -46,7 +46,9 @@ def client_release_profiles(
     return tuple(result)
 
 
-def recorded_train_candidate(*, store: object, repository: str, head: object) -> bool:
+def recorded_train_candidate(
+    *, store: object, repository: str, head: object, base_branch: str = ""
+) -> bool:
     """A branch name alone cannot suppress Client review of an ordinary change."""
     if not isinstance(head, dict):
         return False
@@ -68,5 +70,6 @@ def recorded_train_candidate(*, store: object, repository: str, head: object) ->
     return any(
         record.candidate.candidate_ref.removeprefix("refs/heads/") == ref
         and record.candidate.candidate_sha == head.get("sha")
+        and record.candidate.base_branch == base_branch.strip()
         for record in records
     )

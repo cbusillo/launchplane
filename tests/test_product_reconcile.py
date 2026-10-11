@@ -3525,6 +3525,15 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
                 else:
                     self.assertNotIn("@site-owner", body)
 
+    def test_explicit_review_mark_without_client_explains_the_hold_on_the_preview(self) -> None:
+        self.github.pull_request["body"] = "## Client test notes\nTry the price list."
+        self.github.pull_request["labels"] = [{"name": "owner-review"}]
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["action"], "apply")
+        self.assertIn("no Client is set", self.comment_body())
+        self.assertIn("An admin needs to set one", self.comment_body())
+
     def test_notes_without_label_invite_client_and_missing_notes_are_visible(self) -> None:
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}

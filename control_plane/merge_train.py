@@ -350,7 +350,8 @@ def build_merge_train_dry_run_result(
             (
                 entry
                 for entry in eligible_entries
-                if entry.owner_review_required and entry.required_checks_status != "pass"
+                if entry.client_test_notes_error
+                or (entry.owner_review_required and entry.required_checks_status != "pass")
             ),
             None,
         )

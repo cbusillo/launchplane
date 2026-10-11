@@ -265,6 +265,14 @@ def _feedback_message(
             )
         return "Launchplane needs to refresh this pull request's branch before continuing."
     if event == "blocked":
+        selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
+        if selected.get("client_test_notes_error"):
+            message = (
+                f"Launchplane cannot admit this pull request: {selected['client_test_notes_error']}"
+            )
+            if _as_dict(result.get("block_result")).get("status") == "blocked":
+                message += " Correct the PR's Client test notes and remove the block label to rejoin the queue. Other eligible pull requests can proceed."
+            return message
         applied = _as_dict(result.get("block_result"))
         if applied.get("status") == "blocked":
             selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
@@ -390,6 +398,7 @@ def _pull_request_numbers(
             or phase == "batch-candidate"
             or "merge_train_batch_candidate_record_id" in result
             or selected.get("owner_review_required") is True
+            or bool(selected.get("client_test_notes_error"))
             or _as_dict(result.get("block_result")).get("status") == "blocked"
         ) and (isinstance(number, int) and number > 0):
             return [number]

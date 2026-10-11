@@ -1435,11 +1435,20 @@ def _plan_preview_target(
         labels=_labels(pull_request),
         review_label=profile.owner.review_label,
     )
-    if recorded_train_candidate(
-        store=record_store, repository=profile.repository, head=pull_request.get("head")
+    if not intent.explicit_override and recorded_train_candidate(
+        store=record_store,
+        repository=profile.repository,
+        head=pull_request.get("head"),
+        base_branch=str(
+            _object(pull_request.get("base", {}), "pull request base").get("ref") or ""
+        ),
     ):
         intent = ClientTestNotes(False)
-    plan["owner_review_requested"] = intent.review_required and profile.owner.is_set
+    plan["owner_review_requested"] = intent.review_required and (
+        profile.owner.is_set
+        or profile.owner.review_label.strip().casefold()
+        in {label.casefold() for label in _labels(pull_request)}
+    )
     if profile.owner.is_set and intent.error:
         plan.update(
             action="wait", reason="client_test_notes_required", detail=intent.error, held=False

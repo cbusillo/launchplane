@@ -67,23 +67,26 @@ class ClientTestNotesRequired(ValueError):
 class ClientTestNotes:
     review_required: bool
     error: str = ""
+    explicit_override: bool = False
 
 
 def client_test_notes(notes: str, *, review_override: bool = False) -> ClientTestNotes:
+    notes = re.sub(r"<!--[\s\S]*?-->", "", notes).strip()
     sections = re.split(r"(?m)^### #([0-9]+)[^\n]*\n", notes)
     if len(sections) > 1:
+        member_notes = ([sections[0]] if sections[0].strip() else []) + sections[2::2]
         members = tuple(
-            client_test_notes(section, review_override=review_override)
-            for section in sections[2::2]
+            client_test_notes(section, review_override=review_override) for section in member_notes
         )
         return ClientTestNotes(
             any(member.review_required for member in members),
             next((member.error for member in members if member.error), ""),
+            review_override,
         )
     # Template comments and empty placeholders are not instructions for a Client.
-    value = re.sub(r"<!--[\s\S]*?-->", "", notes).strip()
+    value = notes
     if not value or value.casefold() in {"none", "n/a", "todo", "tbd"}:
-        return ClientTestNotes(True, "Client test notes are missing.")
+        return ClientTestNotes(True, "Client test notes are missing.", review_override)
     marker = next(
         (
             marker
@@ -103,12 +106,16 @@ def client_test_notes(notes: str, *, review_override: bool = False) -> ClientTes
             or not suffix[1:].strip()
         ):
             return ClientTestNotes(
-                True, "Use Nothing for the Client to test: <reason> with a nonempty reason."
+                True,
+                "Use Nothing for the Client to test: <reason> with a nonempty reason.",
+                review_override,
             )
         if review_override:
-            return ClientTestNotes(True, "The Client review label requires real Client test notes.")
+            return ClientTestNotes(
+                True, "The Client review label requires real Client test notes.", True
+            )
         return ClientTestNotes(False)
-    return ClientTestNotes(True)
+    return ClientTestNotes(True, explicit_override=review_override)
 
 
 def change_client_review(*, body: str, labels: Iterable[str], review_label: str) -> ClientTestNotes:

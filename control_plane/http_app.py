@@ -22693,15 +22693,15 @@ def create_launchplane_fastapi_app(
                 owner_profile = cast(
                     ProductProfileWriteStore, record_store
                 ).read_product_profile_record(feedback_request.product)
-                if owner_profile.owner.is_set:
-                    owner_review_requested = await run_in_threadpool(
-                        pull_request_client_review,
-                        control_plane_root=resolved_control_plane_root,
-                        context=effective_context,
-                        anchor_pr_url=feedback_request.anchor_pr_url,
-                        label=owner_profile.owner.review_label,
-                        record_store=record_store,
-                    )
+                owner_review_requested = await run_in_threadpool(
+                    pull_request_client_review,
+                    control_plane_root=resolved_control_plane_root,
+                    context=effective_context,
+                    anchor_pr_url=feedback_request.anchor_pr_url,
+                    label=owner_profile.owner.review_label,
+                    record_store=record_store,
+                    client_set=owner_profile.owner.is_set,
+                )
                 if owner_review_requested and owner_profile.owner.is_set:
                     owner_login = owner_profile.owner.github_login
                     if human_session_manager is not None:
@@ -22725,12 +22725,20 @@ def create_launchplane_fastapi_app(
                 ValueError,
                 click.ClickException,
             ) as error:
-                raise _launchplane_http_error(
-                    status_code=503,
-                    trace_id=trace_id,
-                    code="client_review_evidence_unavailable",
-                    message="Client review notes could not be read. Retry after source-control access is restored.",
-                ) from error
+                if owner_profile is not None and not owner_profile.owner.is_set:
+                    # Keep the existing best-effort metadata path for products
+                    # outside Client release review. The train still holds explicit overrides.
+                    _LOGGER.warning(
+                        "Preview Client mark could not be read for a product without a Client."
+                    )
+                    owner_review_requested = False
+                else:
+                    raise _launchplane_http_error(
+                        status_code=503,
+                        trace_id=trace_id,
+                        code="client_review_evidence_unavailable",
+                        message="Client review notes could not be read. Retry after source-control access is restored.",
+                    ) from error
         try:
             feedback_record = build_preview_pr_feedback_record(
                 control_plane_root=resolved_control_plane_root,

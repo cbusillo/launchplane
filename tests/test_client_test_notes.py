@@ -78,11 +78,13 @@ class ClientTestNotesTests(unittest.TestCase):
         payload: dict[str, object] = {
             "body": "## Client test notes\nTry the price list.",
             "head": head,
+            "base": {"ref": "main"},
             "labels": [],
         }
         candidate = SimpleNamespace(
             candidate_ref="refs/heads/launchplane/train/example/site/main/batch",
             candidate_sha="a" * 40,
+            base_branch="main",
         )
         store = SimpleNamespace(
             list_merge_train_batch_candidate_records=lambda **_: (
@@ -100,17 +102,29 @@ class ClientTestNotesTests(unittest.TestCase):
             ),
         ):
 
-            def read(record_store: object = None) -> bool:
+            def read(record_store: object = None, *, client_set: bool = True) -> bool:
                 return pull_request_client_review(
                     control_plane_root=Path("."),
                     context="test",
                     anchor_pr_url="https://github.com/example/site/pull/42",
                     label="owner-review",
                     record_store=record_store,
+                    client_set=client_set,
                 )
 
             self.assertTrue(read())
             self.assertFalse(read(store))
+            payload["body"] = "Synthetic train candidate."
+            self.assertFalse(read(store))
+            with self.assertRaises(ClientTestNotesRequired):
+                read()
+            payload["body"] = "## Client test notes\nTry the price list."
+            payload["base"] = {"ref": "other-base"}
+            self.assertTrue(read(store))
+            payload["base"] = {"ref": "main"}
+            payload["labels"] = [{"name": "owner-review"}]
+            self.assertTrue(read(store))
+            payload["labels"] = []
             payload["head"] = head | {"sha": "b" * 40}
             self.assertTrue(read(store))
             payload["body"] = "## Client test notes\nNothing for the Client to test: CI only."
@@ -118,6 +132,9 @@ class ClientTestNotesTests(unittest.TestCase):
             payload["labels"] = [{"name": "owner-review"}]
             with self.assertRaises(ClientTestNotesRequired):
                 read()
+            self.assertTrue(read(client_set=False))
+            payload["labels"] = []
+            self.assertFalse(read(client_set=False))
 
 
 class BatchNotesTests(unittest.TestCase):
@@ -125,6 +142,10 @@ class BatchNotesTests(unittest.TestCase):
         notes = "### #1 CI\n\nNothing for the Client to test: Faster lint.\n\n### #2 Tests\n\nNothing for the Client to test: Added coverage."
         self.assertFalse(client_test_notes(notes).review_required)
         self.assertFalse(client_test_notes(notes).error)
+        self.assertTrue(
+            client_test_notes("Try the changed price list.\n\n" + notes).review_required
+        )
+        self.assertFalse(client_test_notes("<!-- generated batch -->\n" + notes).review_required)
         self.assertTrue(client_test_notes(notes.replace("Added coverage.", "")).error)
         self.assertTrue(client_test_notes(notes, review_override=True).error)
         self.assertTrue(
@@ -142,6 +163,7 @@ class BatchNotesTests(unittest.TestCase):
         candidate = SimpleNamespace(
             candidate_ref="refs/heads/launchplane/train/example/site/main/batch",
             candidate_sha="a" * 40,
+            base_branch="main",
         )
         store = SimpleNamespace(
             list_merge_train_batch_candidate_records=lambda **_: (
@@ -153,10 +175,17 @@ class BatchNotesTests(unittest.TestCase):
             "sha": candidate.candidate_sha,
             "repo": {"full_name": "example/site"},
         }
-        self.assertTrue(recorded_train_candidate(store=store, repository="example/site", head=head))
+        self.assertTrue(
+            recorded_train_candidate(
+                store=store, repository="example/site", head=head, base_branch="main"
+            )
+        )
         self.assertFalse(
             recorded_train_candidate(
-                store=store, repository="example/site", head=head | {"sha": "b" * 40}
+                store=store,
+                repository="example/site",
+                head=head | {"sha": "b" * 40},
+                base_branch="main",
             )
         )
         self.assertFalse(
@@ -164,5 +193,6 @@ class BatchNotesTests(unittest.TestCase):
                 store=store,
                 repository="example/site",
                 head=head | {"repo": {"full_name": "outside/site"}},
+                base_branch="main",
             )
         )

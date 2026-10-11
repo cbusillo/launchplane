@@ -2025,10 +2025,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         review_reader = GitHubMergeTrainSnapshotReader(
             transport=self.transport, branch_refresh_store=self._branch_refresh_store
         )
-        intent = review_reader.client_review_intent(
-            labels=_labels(pull_request.get("labels")),
-            repository=repository_path,
-            body=str(pull_request.get("body") or ""),
+        intent = (
+            review_reader.client_review_intent(
+                labels=_labels(pull_request.get("labels")),
+                repository=repository_path,
+                body=str(pull_request.get("body") or ""),
+            )
+            if require_client_review
+            else ClientTestNotes(False)
         )
         if intent.error:
             raise MergeAdmissionDeniedError(intent.error, reason_code="client_test_notes_required")
@@ -2868,8 +2872,11 @@ class GitHubMergeTrainSnapshotReader:
         review_intent = self.client_review_intent(
             labels=labels, repository=base_repository, body=str(source.get("body") or "")
         )
-        if recorded_train_candidate(
-            store=self._branch_refresh_store, repository=base_repository, head=head
+        if not review_intent.explicit_override and recorded_train_candidate(
+            store=self._branch_refresh_store,
+            repository=base_repository,
+            head=head,
+            base_branch=str(base.get("ref") or ""),
         ):
             review_intent = ClientTestNotes(False)
         owner_review_required = review_intent.review_required
@@ -3213,6 +3220,7 @@ class GitHubMergeTrainSnapshotReader:
                 if repository_key(profile.repository) == repository_key(repository)
             ),
             next((intent.error for intent in intents if intent.error), ""),
+            any(intent.explicit_override for intent in intents),
         )
 
     def client_review_required(

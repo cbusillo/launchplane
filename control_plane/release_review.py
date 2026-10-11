@@ -335,13 +335,13 @@ def checklist_blockers(checklist: ReleaseChecklist) -> tuple[str, ...]:
             notes_error = (
                 item.client_test_notes_error or client_test_notes(item.owner_test_notes).error
             )
-            if notes_error:
-                blockers.append(
-                    f"Pull request {repository}#{item.pull_request_number}: {notes_error}"
-                )
             if not item.owner_test_notes.strip():
                 blockers.append(
                     f"Pull request {repository}#{item.pull_request_number} has no Client test notes."
+                )
+            elif notes_error:
+                blockers.append(
+                    f"Pull request {repository}#{item.pull_request_number}: {notes_error}"
                 )
             # A merge-train batch PR names each of its pull requests that came without notes.
             for number in pull_requests_missing_owner_test_notes(item.owner_test_notes):

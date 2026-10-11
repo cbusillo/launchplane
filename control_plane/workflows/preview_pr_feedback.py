@@ -320,6 +320,7 @@ def pull_request_client_review(
     anchor_pr_url: str,
     label: str,
     record_store: object = None,
+    client_set: bool = True,
 ) -> bool:
     from control_plane.client_test_notes import ClientTestNotesRequired, change_client_review
     from control_plane.client_release_repositories import recorded_train_candidate
@@ -341,19 +342,24 @@ def pull_request_client_review(
         )
     if not isinstance(payload, dict):
         raise ValueError("Client review notes could not be read.")
-    if recorded_train_candidate(
-        store=record_store, repository=repository, head=payload.get("head")
-    ):
-        return False
+    labels = tuple(
+        str(item.get("name") or "") for item in payload.get("labels", ()) if isinstance(item, dict)
+    )
+    if not client_set:
+        return label.strip().casefold() in {value.casefold() for value in labels}
     intent = change_client_review(
         body=str(payload.get("body") or ""),
-        labels=(
-            str(item.get("name") or "")
-            for item in payload.get("labels", ())
-            if isinstance(item, dict)
-        ),
+        labels=labels,
         review_label=label,
     )
+    base = payload.get("base")
+    if not intent.explicit_override and recorded_train_candidate(
+        store=record_store,
+        repository=repository,
+        head=payload.get("head"),
+        base_branch=str(base.get("ref") or "") if isinstance(base, dict) else "",
+    ):
+        return False
     if intent.error:
         raise ClientTestNotesRequired(intent.error)
     return intent.review_required
