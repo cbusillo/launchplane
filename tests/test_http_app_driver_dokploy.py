@@ -1,4 +1,6 @@
 import json
+import os
+import re
 import unittest
 from datetime import (
     datetime,
@@ -1113,12 +1115,12 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
     async def test_break_glass_conflict_supplies_inputs_that_repair_the_fence(self) -> None:
         from control_plane.dokploy import api as provider
         from control_plane.service_deploy_drain import confirm_startup, read_status
+        from tests.test_deploy_launchplane_workflow import DeployLaunchplaneWorkflowTests
         from tests.test_emergency_dokploy_rollback import _load_script
 
         failed_image = "registry.example/service@sha256:" + "a" * 64
         restored_image = "registry.example/service@sha256:" + "b" * 64
         candidate_image = "registry.example/service@sha256:" + "c" * 64
-        failed_marker = "synthetic-failed-deployment"
         provider_env = self._BOOTSTRAP_ENV
 
         def update_provider_env(**kwargs: Any) -> None:
@@ -1126,6 +1128,9 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             provider_env = kwargs["env_text"]
 
         with TemporaryDirectory() as directory:
+            root = Path(directory)
+            sentinel = root / "must-not-exist"
+            failed_marker = f"synthetic-$(touch {sentinel})"
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
             )
@@ -1137,7 +1142,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 record_store_factory=lambda: store,
             )
             with (
-                patch.dict("os.environ", {}, clear=True),
+                patch.dict("os.environ", {"PATH": os.environ["PATH"]}, clear=True),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
                     return_value=("https://provider.example", "synthetic"),
@@ -1208,20 +1213,75 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(read_status(store), fence_before_rollback)
                 self.assertEqual((update.call_count, dispatch.call_count), effects_before_conflict)
 
-                repair_marker = "explicit-repair-deployment"
-                repair: dict[str, Any] = {
-                    "product": "launchplane",
-                    "deploy": {
-                        name: repair_inputs[name]
-                        for name in (
-                            "target_type",
-                            "target_id",
-                            "image_reference",
-                            "supersedes_deployment_marker",
-                        )
+                workflow = DeployLaunchplaneWorkflowTests(methodName="runTest")
+                workflow.setUp()
+                response_file = root / "response.json"
+                response_file.write_text(response.text)
+                summary = root / "summary.md"
+                result = workflow._run_step(
+                    "deploy",
+                    "Check Launchplane self deploy request",
+                    {
+                        "SELF_DEPLOY_RESPONSE_FILE": str(response_file),
+                        "SELF_DEPLOY_STATUS": str(response.status_code),
+                        "SELF_DEPLOY_OUTCOME": "failure",
+                        "GITHUB_STEP_SUMMARY": str(summary),
                     },
-                }
-                repair["deploy"]["oauth_env"] = {"LAUNCHPLANE_DEPLOYMENT_MARKER": repair_marker}
+                    root,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                rendered_json = re.search(r"```json\n(.*?)\n```", summary.read_text(), re.DOTALL)
+                assert rendered_json is not None
+                self.assertEqual(json.loads(rendered_json.group(1))["records"], repair_inputs)
+                result = workflow._run_step(
+                    "deploy",
+                    "Resolve deploy inputs",
+                    {
+                        "GITHUB_RUN_ID": "123",
+                        "GITHUB_RUN_ATTEMPT": "1",
+                        "LAUNCHPLANE_IMAGE_REPOSITORY": candidate_image.split("@", 1)[0],
+                    },
+                    root,
+                    expression_values={
+                        **{
+                            f"${{{{ inputs.{name} }}}}": value
+                            for name, value in repair_inputs.items()
+                        },
+                        "${{ inputs.bootstrap_secret_operation }}": "preserve",
+                        "${{ inputs.ordinary_agent_workers }}": "preserve",
+                        "${{ inputs.ordinary_agent_workers_expected_state }}": "absent",
+                        "${{ github.event_name }}": "workflow_dispatch",
+                        "${{ github.sha }}": "a" * 40,
+                    },
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                prepared = dict(
+                    line.split("=", 1) for line in (root / "output").read_text().splitlines()
+                )
+                result = workflow._run_step(
+                    "deploy",
+                    "Render Launchplane self deploy request",
+                    {
+                        "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": repair_inputs["target_type"],
+                        "LAUNCHPLANE_DOKPLOY_TARGET_ID": repair_inputs["target_id"],
+                    },
+                    root,
+                    expression_values={
+                        **{
+                            f"${{{{ steps.prep.outputs.{name} }}}}": value
+                            for name, value in prepared.items()
+                        },
+                        "${{ steps.image.outputs.image_reference }}": prepared[
+                            "deploy_image_reference"
+                        ],
+                    },
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                repair: dict[str, Any] = json.loads(
+                    (root / "launchplane-self-deploy-payload.json").read_text()
+                )
+                self.assertFalse(sentinel.exists())
+                self.assertEqual(repair["deploy"]["target_type"], forward_deploy["target_type"])
                 for _ in range(2):
                     response = await _post_launchplane_self_deploy(
                         app, repair, idempotency_key=repair_inputs["self_deploy_idempotency_key"]
@@ -1234,6 +1294,18 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 with patch.dict("os.environ", provider.parse_dokploy_env_text(provider_env)):
                     confirm_startup(store)
                     self.assertFalse(read_status(store)["admission_paused"])
+                    stale_repair: dict[str, object] = {
+                        "product": "launchplane",
+                        "deploy": {
+                            **repair["deploy"],
+                            "oauth_env": {"LAUNCHPLANE_DEPLOYMENT_MARKER": "stale-repair"},
+                        },
+                    }
+                    response = await _post_launchplane_self_deploy(
+                        app, stale_repair, idempotency_key="stale"
+                    )
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertNotIn("records", response.json())
                     normal_deploy["oauth_env"]["LAUNCHPLANE_DEPLOYMENT_MARKER"] = "next-deploy"
                     response = await _post_launchplane_self_deploy(
                         app, normal, idempotency_key="next-normal-deploy"

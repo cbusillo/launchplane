@@ -548,13 +548,16 @@ workflow authorization. Automatic runs cannot set the repair input. After gated 
 service, use this route to reconcile any remaining fence; never edit its DB row.
 The `self_deploy_fence_conflict` refusal supplies the current fence target and
 exact `supersedes_deployment_marker` in `records`, together with the requested
-candidate `image_reference`, a new `self_deploy_idempotency_key`, and
-`bootstrap_secret_operation=preserve` for a manual Deploy Launchplane dispatch
-on the default branch. Review provider state and candidate compatibility first;
+candidate `image_reference` and a new `self_deploy_idempotency_key` for a manual
+Deploy Launchplane dispatch on the default branch. Start a new dispatch with
+a fresh key for each repair attempt, and review other configuration inputs
+deliberately. Review provider state and candidate compatibility first;
 the workflow target must match the returned target. The failed workflow also
 puts this response in its job summary. The workflow generates the fresh repair
 marker. These inputs describe a new replacement request; the refusal does not
-settle the fence or authorize an automatic repair.
+settle the fence or authorize an automatic repair. Repair inputs are returned
+only for a fence awaiting replacement startup; a stale repair marker against a
+settled or draining fence instead directs the caller to current runtime progress.
 Provider-call serialization refuses a repair while an earlier service request
 is still executing, so a late original dispatch cannot overtake that repair.
 A drain timeout before dispatch requests no service rollback; its pre-effect

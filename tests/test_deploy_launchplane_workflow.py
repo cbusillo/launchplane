@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import re
 import time
 from tempfile import TemporaryDirectory
 from typing import cast
@@ -182,40 +181,6 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 self.assertFalse(
                     (directory / "launchplane-self-deploy-rollback-payload.json").exists()
                 )
-
-    def test_fence_conflict_failure_summarizes_repair_inputs_without_executing_them(self) -> None:
-        with TemporaryDirectory() as directory_name:
-            directory = Path(directory_name)
-            sentinel = directory / "must-not-exist"
-            repair_inputs = {
-                "supersedes_deployment_marker": f"$(touch {sentinel})",
-                "image_reference": "registry.example/service@sha256:" + "a" * 64,
-                "self_deploy_idempotency_key": "synthetic-new-key",
-                "bootstrap_secret_operation": "preserve",
-            }
-            response = directory / "response.json"
-            response.write_text(
-                json.dumps(
-                    {"error": {"code": "self_deploy_fence_conflict"}, "records": repair_inputs}
-                )
-            )
-            summary = directory / "summary.md"
-            result = self._run_step(
-                "deploy",
-                "Check Launchplane self deploy request",
-                {
-                    "SELF_DEPLOY_RESPONSE_FILE": str(response),
-                    "SELF_DEPLOY_STATUS": "409",
-                    "SELF_DEPLOY_OUTCOME": "failure",
-                    "GITHUB_STEP_SUMMARY": str(summary),
-                },
-                directory,
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertFalse(sentinel.exists())
-            rendered_json = re.search(r"```json\n(.*?)\n```", summary.read_text(), re.DOTALL)
-            assert rendered_json is not None
-            self.assertEqual(json.loads(rendered_json.group(1))["records"], repair_inputs)
 
     def test_rollback_requires_matching_marker_even_when_preserving_bootstrap(self) -> None:
         for marker_outcome in ("success", "failure"):

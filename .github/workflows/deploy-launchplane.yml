@@ -796,7 +796,6 @@ jobs:
               if jq -e '.error.code == "self_deploy_fence_conflict"' "$SELF_DEPLOY_RESPONSE_FILE" >/dev/null; then
                 {
                   printf '%s\n' '## Self-deploy fence conflict' ''
-                  printf '%s\n' 'Review provider state and candidate compatibility before manually dispatching Deploy Launchplane on the default branch. The response names the target and repair inputs; the fence stays in place until matching replacement startup.' ''
                   printf '%s\n' '```json'
                   jq '{error, records}' "$SELF_DEPLOY_RESPONSE_FILE"
                   printf '%s\n' '```'
