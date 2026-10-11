@@ -31331,6 +31331,12 @@
             "title": "Already Reviewed",
             "type": "boolean"
           },
+          "client_test_notes_error": {
+            "default": "",
+            "title": "Client Test Notes Error",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "head_sha": {
             "pattern": "^[0-9a-f]{40}$",
             "title": "Head Sha",

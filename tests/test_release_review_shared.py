@@ -8,7 +8,11 @@ from unittest.mock import patch
 import click
 
 from control_plane.contracts.artifact_identity import ArtifactAddonSelector, ArtifactAddonSource
-from control_plane.contracts.release_review import ReleaseReviewDecisionRecord, ReleaseReviewStatus
+from control_plane.contracts.release_review import (
+    ReleaseChecklist,
+    ReleaseReviewDecisionRecord,
+    ReleaseReviewStatus,
+)
 from control_plane.release_review import (
     build_release_review,
     checklist_blockers,
@@ -126,15 +130,43 @@ class SharedReleaseReviewTests(unittest.TestCase):
             self.assertIn(source.items[0].owner_test_notes, body)
         self.assertEqual(self.store.list_deployment_records(), ())
 
-    def test_shared_engineering_notes_allow_release_and_missing_notes_block(self) -> None:
+    def test_shared_engineering_notes_allow_release_and_empty_reasons_block(self) -> None:
         self.github.notes = "Nothing for the Client to test: Shared CI maintenance only."
         accepted = self.accept()
         self.assertTrue(self.review().approved)
         self.assertTrue(accepted.checklist.shared_sources)
-        self.github.notes = ""
+        self.github.notes = "Nothing for the Client to test:"
         review = self.review()
         self.assertFalse(review.approved)
-        self.assertTrue(any("has no Client test notes" in blocker for blocker in review.blockers))
+        self.assertTrue(any("nonempty reason" in blocker for blocker in review.blockers))
+
+    def test_legacy_acceptance_keeps_its_product_and_shared_notes_binding(self) -> None:
+        self.github.notes = "Nothing for the Client to test. Shared dependency update."
+        current = self.review()
+        assert current.checklist is not None
+        self.assertFalse(current.checklist_complete)
+        payload = current.checklist.model_dump(mode="json")
+        for group in (payload, *payload["shared_sources"]):
+            for item in group["items"]:
+                item.pop("client_test_notes_error", None)
+        legacy = ReleaseChecklist.model_validate(payload)
+        accepted = ReleaseReviewDecisionRecord(
+            record_id="legacy-shared-acceptance",
+            product=profile().product,
+            checklist_digest=checklist_digest(legacy),
+            checklist=legacy,
+            decision="accepted",
+            actor_github_id=profile().owner.github_id,
+            actor_github_login=profile().owner.github_login,
+            decided_at="2026-10-05T00:00:00Z",
+            release_issue_url="https://github.com/example/site/issues/90",
+        )
+        self.store.write_release_review_decision_record(accepted)
+        repeated = self.review()
+        self.assertTrue(repeated.approved)
+        self.assertEqual(repeated.checklist_digest, accepted.checklist_digest)
+        self.github.notes += " Changed instructions."
+        self.assertFalse(self.review().approved)
 
     def test_shared_release_membership_comes_from_recorded_artifact_sources(self) -> None:
         from control_plane.client_release_repositories import client_release_profiles
