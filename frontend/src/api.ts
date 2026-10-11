@@ -113,6 +113,7 @@ export type OrdinaryAgentDeliveryInspectionRuntimeState =
 export type OrdinaryAgentDeliveryInspectionSecretState =
   InspectionSetupMetadata["managed_secret"]["state"];
 import type { BrowserOperationOptions } from "./browser-operation";
+import type { RestartLaneServiceData, LaneServiceRestartResponse } from "./generated/openapi.ts";
 import {
   BROWSER_WRITE_ROUTES,
   type BrowserWriteRoute,
@@ -331,6 +332,18 @@ export function readProductActivity(
     undefined,
     signal,
   );
+}
+
+export function restartLaneService(
+  payload: RestartLaneServiceData["body"],
+  idempotencyKey = "",
+): Promise<LaneServiceRestartResponse> {
+  const request: RestartLaneServiceData = {
+    url: BROWSER_WRITE_ROUTES.laneServiceRestart,
+    body: payload,
+    headers: { "Idempotency-Key": idempotencyKey },
+  };
+  return requestJson(request.url, "POST", request.body, undefined, idempotencyKey);
 }
 
 export function readProductEnvironment(
