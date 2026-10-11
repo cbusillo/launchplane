@@ -1440,7 +1440,7 @@ def _advance_active_landing_record(
                 "mode": "blocked",
                 "controller_action": "land_batch",
                 "controller_reconciliation_status": "required",
-                "controller_reconciliation_detail": "ordinary_landing_recovery_required",
+                "reconciliation_detail": "ordinary_landing_recovery_required",
                 "landing_plan": preserved_record.landing_plan.model_dump(mode="json"),
                 "error": {
                     "code": "ordinary_landing_recovery_required",
@@ -1903,8 +1903,6 @@ def _finish_landed_merge_train_batch(
         return result
     if landed_record.ordinary_job_binding is not None:
         result["landing_progress"] = "complete"
-    elif not repository_policy.stack_child_disposition_label:
-        result["historical_stack_child_label_status"] = "not_configured"
     if not collapse_records:
         if lease.record.step_payload.get("stack_collapse_plan_record_id"):
             raise MergeTrainControllerRequestError(
@@ -2005,7 +2003,7 @@ def _reconcile_completed_landing_after_policy_change(
             mode="blocked",
             reason_code=reason,
             controller_reconciliation_status="required",
-            controller_reconciliation_detail=reason,
+            reconciliation_detail=reason,
             blocking_reason={
                 "code": reason,
                 "message": message,
@@ -5538,7 +5536,7 @@ def _controller_result_reconciliation_detail(
     current_detail: str,
 ) -> str:
     if result.get("controller_reconciliation_status") == "required":
-        result_detail = result.get("controller_reconciliation_detail")
+        result_detail = result.get("reconciliation_detail")
         if isinstance(result_detail, str) and result_detail.strip():
             return result_detail.strip()
         return current_detail
