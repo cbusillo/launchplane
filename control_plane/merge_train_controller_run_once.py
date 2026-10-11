@@ -4105,6 +4105,25 @@ def _advance_from_live_snapshot(
             "dry_run_result": dry_run_result.model_dump(mode="json"),
         }
 
+    if lease.record.ordinary_job_binding is None:
+        recovery = _resume_known_failed_batch(
+            candidate_store=candidate_store,
+            github_client=github_client,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            snapshot=probe.snapshot,
+            dry_run_result=probe.dry_run_result,
+            held_out=probe.held_out,
+            merge_method=policy.find_repository_policy(
+                repository=request.repository, base_branch=request.base_branch
+            ).merge_method,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=request.mutate,
+            lease=lease,
+        )
+        if recovery is not None:
+            return recovery
     controller_action = "plan_candidate"
     candidate = build_merge_train_batch_candidate(
         ordinary_job_binding=lease.record.ordinary_job_binding,
@@ -4269,6 +4288,25 @@ def try_reflow_failed_merge_train_candidate(
             )
             if recovered is not None:
                 return recovered
+            # Real failures must shrink the batch before any generated-body retry.
+            recovery = _recover_failed_merge_train_candidate(
+                candidate_store=candidate_store,
+                active_candidate_record=active_candidate_record,
+                github_client=github_client,
+                policy=policy,
+                policy_sha256=policy_sha256,
+                snapshot=snapshot,
+                dry_run_result=dry_run_result,
+                held_out=held_out,
+                repository=repository,
+                base_branch=base_branch,
+                recorded_at=recorded_at,
+                trace_id=trace_id,
+                mutate=mutate,
+                lease=lease,
+            )
+            if recovery is not None:
+                return recovery
             reason = "batch_body_retry_already_used"
             retry_used = failed.batch_body_retry_of or any(
                 record.candidate.batch_body_retry_of
@@ -4294,24 +4332,6 @@ def try_reflow_failed_merge_train_candidate(
                         reason = "closed_batch_body_changed"
                         body_retry_approved = True
             if reason != "closed_batch_body_changed":
-                recovery = _recover_failed_merge_train_candidate(
-                    candidate_store=candidate_store,
-                    active_candidate_record=active_candidate_record,
-                    github_client=github_client,
-                    policy=policy,
-                    policy_sha256=policy_sha256,
-                    snapshot=snapshot,
-                    dry_run_result=dry_run_result,
-                    held_out=held_out,
-                    repository=repository,
-                    base_branch=base_branch,
-                    recorded_at=recorded_at,
-                    trace_id=trace_id,
-                    mutate=mutate,
-                    lease=lease,
-                )
-                if recovery is not None:
-                    return recovery
                 return {
                     "repository": repository,
                     "base_branch": base_branch,
@@ -4400,6 +4420,37 @@ def try_reflow_failed_merge_train_candidate(
         }
     if probe.dry_run_result.intended_next_action != "merge":
         return None
+    if active_candidate_record.ordinary_job_binding is None and not body_retry_approved:
+        recovery = _resume_known_failed_batch(
+            candidate_store=candidate_store,
+            github_client=github_client,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            snapshot=probe.snapshot,
+            dry_run_result=probe.dry_run_result,
+            held_out=probe.held_out,
+            merge_method=merge_method,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=mutate,
+            lease=lease,
+        )
+        if recovery is not None:
+            if mutate and recovery["controller_action"] != "candidate_failed":
+                # The matching historical failure can belong to another batch.
+                # Retire the current lineage too, without retiring the replacement.
+                lease.checkpoint()
+                replacement_id = recovery.get("merge_train_batch_candidate_record_id")
+                _supersede_active_merge_train_batch_candidate_records(
+                    record_store=candidate_store,
+                    repository=repository,
+                    base_branch=base_branch,
+                    batch_id=active_candidate_record.candidate.batch_id,
+                    replacement_record_id=(
+                        replacement_id if isinstance(replacement_id, str) else None
+                    ),
+                )
+            return recovery
     candidate = build_merge_train_batch_candidate(
         ordinary_job_binding=active_candidate_record.ordinary_job_binding,
         dry_run_result=probe.dry_run_result,
@@ -4468,6 +4519,104 @@ def try_reflow_failed_merge_train_candidate(
             lease=lease,
         )
     return result
+
+
+def _resume_known_failed_batch(
+    *,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    github_client: GitHubMergeTrainClient,
+    policy: MergeTrainPolicy,
+    policy_sha256: str,
+    snapshot: MergeTrainDryRunSnapshot,
+    dry_run_result: MergeTrainDryRunResult,
+    held_out: tuple[MergeTrainBatchHeldOutEntry, ...],
+    merge_method: str,
+    recorded_at: str,
+    trace_id: str,
+    mutate: bool,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object] | None:
+    """Resume recorded failure isolation rather than rebuild identical failed inputs."""
+    failed_record = next(
+        (
+            record
+            for record in candidate_store.list_merge_train_batch_candidate_records(
+                repository=snapshot.repository, base_branch=snapshot.base_branch
+            )
+            if record.ordinary_job_binding is None
+            and record.candidate.status == "failed"
+            and record.candidate.required_checks_status == "fail"
+            and record.candidate.candidate_sha
+            and record.candidate.policy_key == dry_run_result.policy_key
+            and record.candidate.policy_sha256 == policy_sha256
+            and _merge_train_candidate_matches_dry_run_queue(
+                candidate=record.candidate,
+                dry_run_result=dry_run_result,
+                base_sha=snapshot.base_sha,
+            )
+        ),
+        None,
+    )
+    if failed_record is None:
+        return None
+    if len(failed_record.candidate.entries) > 1 and merge_method == "merge":
+        recovered = _retry_closed_candidate_after_passing_checks(
+            candidate_store=candidate_store,
+            active_candidate_record=failed_record,
+            github_client=github_client,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            snapshot=snapshot,
+            dry_run_result=dry_run_result,
+            held_out=held_out,
+            repository=snapshot.repository,
+            base_branch=snapshot.base_branch,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=mutate,
+            lease=lease,
+        )
+    else:
+        recovered = _reobserve_failed_merge_train_candidate(
+            candidate_store=candidate_store,
+            active_candidate_record=failed_record,
+            github_client=github_client,
+            merge_method=merge_method,
+            repository=snapshot.repository,
+            base_branch=snapshot.base_branch,
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            mutate=mutate,
+        )
+    if recovered is not None:
+        return recovered
+    recovery = _recover_failed_merge_train_candidate(
+        candidate_store=candidate_store,
+        active_candidate_record=failed_record,
+        github_client=github_client,
+        policy=policy,
+        policy_sha256=policy_sha256,
+        snapshot=snapshot,
+        dry_run_result=dry_run_result,
+        held_out=held_out,
+        repository=snapshot.repository,
+        base_branch=snapshot.base_branch,
+        recorded_at=recorded_at,
+        trace_id=trace_id,
+        mutate=mutate,
+        lease=lease,
+    )
+    if recovery is not None:
+        return recovery
+    return {
+        "repository": snapshot.repository,
+        "base_branch": snapshot.base_branch,
+        "mode": "dry-run",
+        "controller_action": "candidate_failed",
+        "merge_train_batch_candidate_record_id": failed_record.record_id,
+        "candidate": failed_record.candidate.model_dump(mode="json"),
+        "reason_code": "known_failed_batch_evidence_unavailable",
+    }
 
 
 def _persist_replacement_candidate(

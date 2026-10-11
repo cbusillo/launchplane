@@ -681,18 +681,10 @@ A changed member or base reflows to a
 new candidate without retaining a reconciliation fence. Landing rechecks member
 identity before waiting on checks, so a pending or failed check cannot hide a
 new source head. A manually closed batch PR is not automatically reopened.
-A candidate that failed on check evidence may be re-read at its recorded SHA,
-so re-running the failed check lets it continue once the re-run is no longer
-failing. A multi-entry batch whose batch PR was closed is never reopened. A
-changed generated batch body, confirmed closed and unmerged binding, and a
-persisted unused retry budget allow one rebuild of the same members, as
-described under `candidate_failed` below. Fresh passing required checks at the
-failed candidate's exact SHA also allow one audited rebuild of a bound closed,
-unmerged batch, even when its generated body is unchanged. The replacement
-records `check_retry_of` and uses a separate `-check-retry` ref; it receives its
-own checks and normal landing admission. Otherwise an unchanged failed
-candidate moves on through [blocker isolation](#blocker-isolation) rather than
-being rebuilt in a loop.
+A candidate that failed on check evidence follows the recovery rules under
+`candidate_failed` below and [blocker isolation](#blocker-isolation). A closed
+multi-entry batch PR is never reopened. Every replacement receives its own
+checks and normal landing admission.
 
 The landing plan binds `candidate_pull_request_number` into its immutable
 digest. The controller evaluates every constituent before appending the first
@@ -783,8 +775,7 @@ SHA and the root passes required checks from the protected base branch.
 ### Blocker Isolation
 
 When the combined candidate fails checks, Launchplane does not assume all queued
-entries are bad. On the next pass over an unchanged queue and base, after the
-batch-body rebuild above when it applies, the controller reads the failed
+entries are bad. On the next pass over an unchanged queue and base, the controller reads the failed
 candidate's check runs, commit statuses and the annotations of failed runs:
 
 - **Infrastructure failure.** GitHub's runner-loss annotation on any failed or
@@ -835,6 +826,26 @@ failure evidence cannot be read, shows no failed run, or a check on the
 candidate is still running (for example a manual re-run), the failed candidate
 stays stopped and the next pass reads it again. The retired ordinary-agent job path keeps its
 earlier stop behavior.
+
+An interaction-only failure is isolated against the rolling base too: if the
+first half passes and lands, a remaining member that fails only with a newly
+landed member is blocked against that verified green base. The controller does
+not label both members as individually broken; feedback names the failing
+candidate checks and tests against the base used for that candidate.
+
+Before ordinary planning or failed-candidate reflow creates a candidate, the
+controller checks persisted failure history, including superseded records.
+An identical repository, base branch and SHA, policy key and digest, and ordered
+member heads resume recovery from the failed record rather than rebuilding it.
+This survives a restart or a queue change that later returns to the failed
+membership. Conflict probing that reduces the queue back to a known failed
+group also resumes isolation immediately, retaining the new conflict holds.
+Changed base, policy, order or member heads permit fresh validation. Unreadable
+failure evidence stays stopped without assigning blame or rebuilding; the
+existing same-SHA passing-check and infrastructure recovery budgets still apply.
+Recovery results identify the source failure record, and replacement records,
+holds, controller checkpoints and managed PR feedback retain each step's audit
+trail. Dry runs perform no writes.
 
 If the eligible queue changes, for example because a new queued PR repairs
 train validation, the controller may supersede the failed candidate batch
@@ -1429,7 +1440,9 @@ Controller actions have these retry/stop semantics:
   not authorize this retry. Dry runs report the plan without consuming a budget
   or changing a ref, record, PR or label. A replacement that fails real checks
   still goes through blocker isolation. The batch-body and infrastructure
-  budgets remain separate. A multi-entry merge batch whose service PR is closed and
+  budgets remain separate. Conclusive failures enter isolation before inspecting
+  generated-body changes; a changed body never spends CI on the same proven
+  failing inputs. When failure evidence is inconclusive, a multi-entry merge batch whose service PR is closed and
   confirmed unmerged may be rebuilt once for the same ordered heads and base,
   only when the body Launchplane would generate now differs from that bound
   failed PR's body. The replacement uses a separate candidate ref and persists
