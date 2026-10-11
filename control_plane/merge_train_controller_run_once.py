@@ -4616,9 +4616,9 @@ def _recover_failed_merge_train_candidate(
     """Move an unchanged candidate that failed its checks toward landing the rest.
 
     An infrastructure failure is rebuilt once with the same members; a second
-    one stays stopped without blaming anyone. Any other
-    failure of several members retests the first half on the same base while
-    the rest wait; when one member fails alone, only that pull request is
+    one stays stopped without blaming anyone. Other failures stay stopped until
+    the base's own checks pass, then retest the first half while the rest wait.
+    When one member fails alone on a green base, only that pull request is
     blocked. ``None`` keeps the failure stopped.
     """
     failed = active_candidate_record.candidate
@@ -4676,6 +4676,40 @@ def _recover_failed_merge_train_candidate(
             mutate=mutate,
             lease=lease,
         )
+    try:
+        base_check_status = github_client.read_base_check_status(
+            candidate=failed, failed_check_names=failures.check_identity_names
+        )
+    except MergeTrainGitHubError:
+        base_check_status = "unknown"
+    if base_check_status != "pass":
+        # Failure on an unverified base cannot identify a queued change as its cause.
+        base_detail = (
+            "has failing checks"
+            if base_check_status == "fail"
+            else "still has checks pending"
+            if base_check_status == "pending"
+            else "has missing or unreadable check evidence"
+        )
+        return {
+            "repository": repository,
+            "base_branch": base_branch,
+            "mode": "dry-run",
+            "controller_action": "candidate_failed",
+            "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+            "candidate": failed.model_dump(mode="json"),
+            "reason_code": "base_checks_not_green",
+            "blocking_reason": {
+                "code": "merge_train_base_checks_not_green",
+                "message": f"The base branch {base_branch} {base_detail}; "
+                "queued pull requests are not blamed.",
+            },
+            "details": {
+                **details,
+                "base_sha": failed.base_sha,
+                "base_checks_status": base_check_status,
+            },
+        }
     if len(failed.entries) > 1:
         retested = failed.entries[: len(failed.entries) // 2]
         waiting = failed.entries[len(retested) :]
