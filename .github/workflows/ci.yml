@@ -948,7 +948,11 @@ jobs:
 
   ci_gate:
     # A routing-only PR check must never supersede the push's required ci-gate.
-    name: ${{ needs.candidate_ci.outputs.delegated == 'true' && 'candidate-ci-delegated' || 'ci-gate' }}
+    name: >-
+      ${{ github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'launchplane/train/') &&
+      'candidate-ci-delegated' || 'ci-gate' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
