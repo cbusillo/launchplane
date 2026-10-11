@@ -2484,10 +2484,8 @@ return a typed blocked result rather than guessing a domain.
   `DOKPLOY_TOKEN`, `DOKPLOY_HOST`, Launchplane's own service and admin
   tokens, and any value shaped like a GitHub token (`ghp_`, `gho_`, `ghs_`,
   `github_pat_` and similar). The error names the key and its source, never
-  the value. The one exception is global- and context-scope records, where
-  Launchplane keeps its own operating credentials such as the preview
-  PR-comment token: those named keys are withheld from the app instead of
-  refused. Live-target runtime sync, ship and promotion, Odoo previews, Odoo
+  the value. Launchplane's own credentials live in the `launchplane_service`
+  secret store, which no app render reads. Live-target runtime sync, ship and promotion, Odoo previews, Odoo
   target replacement, and the Odoo prod backup gate resolve through the site
   environment (`resolve_site_runtime_environment`): no global values, the
   lane's `retired_provider_keys` dropped, and a key the product declares for

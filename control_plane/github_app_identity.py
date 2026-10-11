@@ -176,12 +176,9 @@ def resolve_advisory_github_app_identity(*, control_plane_root: Path) -> GitHubA
                 control_plane_root=control_plane_root,
             )
         )
-        private_key = (
-            control_plane_secrets.resolve_launchplane_service_secret(
-                context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
-                binding_key=ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY,
-            )
-            or values.get(ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY, "").strip()
+        private_key = control_plane_secrets.resolve_launchplane_service_secret(
+            context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
+            binding_key=ADVISORY_GITHUB_APP_PRIVATE_KEY_ENV_KEY,
         ).replace("\\n", "\n")
     except (click.ClickException, ValueError) as error:
         raise GitHubAppIdentityError(
