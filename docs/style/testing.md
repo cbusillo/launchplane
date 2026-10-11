@@ -283,6 +283,17 @@ narrow screenshot set before passing. These screenshots are review evidence
 rather than pixel-diff baselines, so intentional visual changes do not require
 snapshot churn.
 
+The browser job runs Vite and Chromium together inside an Actions job container
+on both hosted and self-hosted runners. Its private network namespace prevents
+sibling jobs' Docker bridge lifecycle from reaching Chromium's network-change
+observer; OS-assigned Vite ports still isolate overlapping suite processes.
+The digest-pinned Playwright image supplies browser system libraries. Browser
+installation and every smoke step run inside the container, with private shared
+memory, while Actions owns the job network and container teardown. Match the
+image's Playwright version to the frontend dependency when updating it. Preserve
+the same suite, diagnostics, timeouts and zero retries when qualifying changes
+under normal sibling CI load.
+
 Development fixtures remain excluded from production authority. `pnpm --dir
 frontend validate` still runs the independent production build and
 `assert-production-fixtures.mjs` scan; browser smoke does not weaken or replace

@@ -312,6 +312,9 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
     ),
 }
 APPROVED_CONTAINER_IMAGES: Mapping[str, ActionClassification] = {
+    "mcr.microsoft.com/playwright": ActionClassification(
+        "First-party publisher", "isolated browser-smoke runtime"
+    ),
     "ghcr.io/aquasecurity/trivy": ActionClassification(
         "Third-party publisher", "runtime image vulnerability scanning"
     ),
