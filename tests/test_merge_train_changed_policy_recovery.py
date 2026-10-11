@@ -77,6 +77,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self,
         *,
         checkpointed: bool,
+        preserve_original_review: bool = False,
         moved: bool,
         child_changed: bool = False,
         deeper: bool = False,
@@ -92,6 +93,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         if deeper:
             graph.heads["feature/leaf"] = "head-leaf"
         child_held = False
+        legacy_code_owned = False
         comments: list[int] = []
         comment_bodies: dict[int, list[str]] = {}
         closed: set[int] = set()
@@ -107,6 +109,9 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     repository=repository, base_branch=base_branch
                 )
                 root, child = snapshot.pull_requests
+                if legacy_code_owned:
+                    root = root.model_copy(update={"requires_individual_landing": True})
+                    child = child.model_copy(update={"requires_individual_landing": True})
                 if (
                     indirectly_merged
                     and deeper
@@ -352,6 +357,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 if child_changed:
                     graph.parents["new-child"] = (graph.heads["feature/child"],)
                     graph.heads["feature/child"] = "new-child"
+                legacy_code_owned = preserve_original_review
                 changed_policy = original_policy.policy.model_dump(mode="json")
                 changed_policy["policies"][0]["blocked_label"] = "current-policy-blocked"
                 if not label_configured:
@@ -365,6 +371,33 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
                 store.write_merge_train_policy_record(current)
+                if preserve_original_review:
+                    for _ in range(10):
+                        response = await run()
+                        self.assertEqual(response.status_code, 202, response.text)
+                        result = response.json()["result"]
+                        action = result["controller_action"]
+                        self.assertNotEqual(
+                            action,
+                            "land_batch",
+                            "The carried code-owned child must retain its original PR review",
+                        )
+                        if (
+                            action == "block"
+                            and result.get("details", {}).get("code")
+                            == "merge_train_original_review_recovery_required"
+                        ):
+                            self.assertEqual(len(graph.merge_requests), 1)
+                            self.assertEqual(closed, set())
+                            for old in original_records:
+                                retained = next(
+                                    r
+                                    for r in store.list_merge_train_stack_collapse_plan_records()
+                                    if r.record_id == old.record_id
+                                )
+                                self.assertEqual(retained.plan, old.plan)
+                            return
+                    self.fail(f"Original-review recovery was not reported: {result}")
                 if indirectly_merged:
                     for _ in range(10):
                         response = await run()
@@ -570,3 +603,8 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             indirectly_merged=True,
             interrupt_root_checkpoint=True,
         )
+
+    async def test_uncheckpointed_carried_code_owned_child_is_not_landed_through_parent(
+        self,
+    ) -> None:
+        await self._recovery(checkpointed=False, moved=False, preserve_original_review=True)
