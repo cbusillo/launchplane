@@ -1,6 +1,7 @@
 import asyncio
 import unittest
-from typing import Annotated
+from unittest.mock import patch
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.routing import APIRoute
@@ -43,6 +44,39 @@ def _app(
 
 
 class PreparedRouteIsolationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_warm_route_serves_current_records_without_repeating_preparation(self) -> None:
+        _app({"record": "warm-up"})
+        with patch.object(APIRoute, "__init__", side_effect=AssertionError("route rebuilt")):
+            app = _app({"record": "current"})
+        self.assertEqual(
+            (await request(app, "GET", "/example?value=2")).json()["record"], "current"
+        )
+
+    async def test_real_app_health_route_uses_warm_preparation(self) -> None:
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from tests.http_app_test_support import _EmptyStore, _driver_read_policy
+        from tests.support.auth import _StubVerifier, _identity
+
+        def build() -> FastAPI:
+            return create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_driver_read_policy(),
+                record_store_factory=_EmptyStore,
+            )
+
+        build()
+        prepared_paths: list[str] = []
+        original = APIRoute.__init__
+
+        def prepare(route: APIRoute, path: str, *args: Any, **kwargs: Any) -> None:
+            prepared_paths.append(path)
+            original(route, path, *args, **kwargs)
+
+        with patch.object(APIRoute, "__init__", prepare):
+            app = build()
+        self.assertNotIn("/v1/health", prepared_paths)
+        self.assertEqual((await request(app, "GET", "/v1/health")).status_code, 200)
+
     async def test_retained_apps_keep_separate_store_policy_state_and_overrides(self) -> None:
         first_store = {"record": "first"}
         first = _app(first_store)

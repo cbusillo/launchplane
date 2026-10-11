@@ -2,7 +2,7 @@
 
 from collections import OrderedDict
 from collections.abc import Callable
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass
 from threading import RLock
 from types import FunctionType
@@ -14,7 +14,6 @@ from fastapi.params import Depends
 from fastapi.routing import APIRoute, request_response
 from fastapi.utils import generate_unique_id
 from pydantic.fields import FieldInfo
-from pydantic import TypeAdapter
 
 
 class _UncacheableRoute(Exception):
@@ -63,32 +62,35 @@ def _value_key(value: Any, bindings: list[Callable[..., Any]]) -> Any:
 def _call_key(call: Callable[..., Any], bindings: list[Callable[..., Any]]) -> Any:
     # Callable instances, partials and decorated signatures may carry extra
     # preparation semantics. Let FastAPI analyze those normally.
-    if not isinstance(call, FunctionType) or hasattr(call, "__wrapped__"):
+    if (
+        not isinstance(call, FunctionType)
+        or hasattr(call, "__wrapped__")
+        or hasattr(call, "__signature__")
+    ):
         raise _UncacheableRoute
     if any(bound is call for bound in bindings):
         return _Binding(next(index for index, bound in enumerate(bindings) if bound is call))
     bindings.append(call)
-    signature = get_typed_signature(call)
+    annotations = call.__annotations__
+    if any(isinstance(annotation, str) for annotation in annotations.values()):
+        signature = get_typed_signature(call)
+        annotations = {
+            name: parameter.annotation for name, parameter in signature.parameters.items()
+        } | {"return": get_typed_return_annotation(call)}
     return (
         call.__code__,
         call.__name__,
         call.__doc__,
-        tuple(
-            (
-                parameter.name,
-                parameter.kind,
-                _value_key(parameter.annotation, bindings),
-                _value_key(parameter.default, bindings),
-            )
-            for parameter in signature.parameters.values()
-        ),
-        _value_key(get_typed_return_annotation(call), bindings),
+        _value_key(annotations, bindings),
+        _value_key(call.__defaults__, bindings),
+        _value_key(call.__kwdefaults__, bindings),
     )
 
 
 class PreparedAPIRoute(APIRoute):
-    # Bounded, process-local preparation only: no app, store, policy, endpoint
-    # closure, lifespan, middleware or override provider is retained here.
+    # Bounded, process-local preparation only. Endpoint/dependency closures and
+    # override providers are replaced; explicit schema metadata (including its
+    # declared callables) remains part of the prepared schema.
     _prepared: OrderedDict[Any, dict[str, Any]] = OrderedDict()
     _lock = RLock()
 
@@ -105,6 +107,7 @@ class PreparedAPIRoute(APIRoute):
             if generator is not None and generator is not generate_unique_id:
                 raise _UncacheableRoute
             key = (
+                type(self),
                 path,
                 _call_key(endpoint, bindings),
                 _value_key(preparation_kwargs, bindings),
@@ -168,9 +171,21 @@ def _schema_memo(value: Any) -> dict[int, Any]:
 
     result: dict[int, Any] = {id(_Unset): _Unset}
     if isinstance(value, ModelField):
-        adapter = value._type_adapter
-        if isinstance(adapter, TypeAdapter):
-            result[id(adapter)] = adapter
+        cloned = copy(value)
+        info = copy(value.field_info)
+        field_memo: dict[int, Any] = {id(_Unset): _Unset}
+        # FieldInfo's copy preserves immutable annotations and copies its
+        # attribute map. Isolate mutable defaults, constraints and schema hints
+        # without walking the compiled schema or the full annotation graph.
+        for name, attribute in value.field_info.asdict()["attributes"].items():
+            if isinstance(attribute, (dict, list, set)):
+                setattr(info, name, deepcopy(attribute, field_memo))
+        info.metadata = deepcopy(value.field_info.metadata, field_memo)
+        if hasattr(value.field_info, "__dict__"):
+            info.__dict__.update(deepcopy(vars(value.field_info), field_memo))
+        cloned.field_info = info
+        cloned.config = deepcopy(value.config, field_memo)
+        result[id(value)] = cloned
     elif isinstance(value, dict):
         for item in value.values():
             result.update(_schema_memo(item))
