@@ -9,6 +9,22 @@ application authority. GitHub identities, workflows, environments, repository
 secrets, OIDC tokens, and checked-in files may authenticate callers or transport
 reviewed requests, but they do not grant Launchplane permission by themselves.
 
+Stored-policy startup retains the context-scoped meaning of
+`live_target_runtime.plan` and `live_target_runtime.apply`. The service-restart
+route uses those actions with an instance target; schema-v2 context-only rules
+do not authorize that request. Instance rules still require explicit selectors.
+Registering a new driver route must not retroactively change existing actions
+into exclusively instance-scoped actions.
+
+If an active stored policy fails model or digest validation at startup, the
+service keeps an empty authorization runtime and logs a bounded validation
+error. It neither seeds nor falls back to bootstrap grants, and does not rewrite
+the stored record. `/v1/health` remains a liveness check; other `/v1/` requests
+return `503 authz_policy_unavailable`. The existing PostgreSQL request refresh
+continues validating the active record and can recover only after it reads a
+valid policy. This keeps the process available for diagnosis without granting
+access to an invalid policy or silently starting with bootstrap authority.
+
 ## Who Can Do What
 
 - People sign in with GitHub and hold the `admin` or `read_only` role. Clients

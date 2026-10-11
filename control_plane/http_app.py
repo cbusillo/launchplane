@@ -4054,7 +4054,20 @@ def resolve_launchplane_authz_policy(
 ) -> ResolvedLaunchplaneAuthzPolicy:
     list_records = optional_callable_attribute(record_store, "list_authz_policy_records")
     if list_records is not None:
-        records = list_records(status="active", limit=1)
+        try:
+            records = list_records(status="active", limit=1)
+        except ValidationError as error:
+            logging.error(
+                "Launchplane stored authorization policy validation failed (%s errors); "
+                "authorization is unavailable. No bootstrap fallback or policy write occurred.",
+                error.error_count(),
+            )
+            closed_policy = LaunchplaneAuthzPolicy()
+            return ResolvedLaunchplaneAuthzPolicy(
+                policy=closed_policy,
+                policy_sha256=authz_policy_sha256(closed_policy),
+                source="db-invalid",
+            )
         if records:
             record = records[0]
             return ResolvedLaunchplaneAuthzPolicy(
@@ -4255,8 +4268,14 @@ def create_launchplane_fastapi_app(
             trace_id = next_trace_id()
             try:
                 refresh_result = await run_in_threadpool(read_active_authz_policy_records)
-            except (OSError, RuntimeError, SQLAlchemyError, TypeError, ValueError):
-                logging.exception("Failed to refresh the active Launchplane authz policy.")
+            except (OSError, RuntimeError, SQLAlchemyError, TypeError, ValueError) as error:
+                if isinstance(error, ValidationError):
+                    logging.error(
+                        "Active Launchplane authz policy validation failed (%s errors).",
+                        error.error_count(),
+                    )
+                else:
+                    logging.exception("Failed to refresh the active Launchplane authz policy.")
                 return JSONResponse(
                     status_code=503,
                     content=LaunchplaneErrorResponse(
@@ -4267,12 +4286,12 @@ def create_launchplane_fastapi_app(
                         ),
                     ).model_dump(mode="json"),
                 )
-            if refresh_result is None:
+            if refresh_result is None and resolved_authz_policy_runtime.source != "db-invalid":
                 request.state.launchplane_authz_policy_provenance = (
                     resolved_authz_policy_runtime.provenance()
                 )
                 return cast(Response, await call_next(request))
-            active_records = refresh_result
+            active_records = refresh_result or ()
             if not active_records:
                 return JSONResponse(
                     status_code=503,
