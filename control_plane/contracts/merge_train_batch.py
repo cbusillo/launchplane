@@ -20,7 +20,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralProvenance,
     MergeTrainStructuralSubject,
 )
-from control_plane.merge_train import MergeTrainDryRunResult
+from control_plane.merge_train import DEPENDENCY_HEAD_HOLD_REASONS, MergeTrainDryRunResult
 
 
 MergeTrainBatchCandidateStatus = Literal[
@@ -63,7 +63,10 @@ class MergeTrainBatchEntry(BaseModel):
 # entry_conflict: the head does not merge onto the heads accepted ahead of it.
 # failure_isolation: the head waits while part of a failed batch is retested
 # on the same base to find the pull request that broke it.
-MergeTrainHeldOutReason = Literal["entry_conflict", "failure_isolation"]
+# dependency_not_ready: an automatically admitted dependency head was held for
+# its own checks or mergeability when the candidate was planned. If it settles
+# on the same base, it waits for the next candidate instead of replacing this one.
+MergeTrainHeldOutReason = Literal["entry_conflict", "failure_isolation", "dependency_not_ready"]
 
 
 class MergeTrainBatchHeldOutEntry(BaseModel):
@@ -91,10 +94,10 @@ class MergeTrainBatchHeldOutEntry(BaseModel):
             raise ValueError("conflict probe lineage requires its base")
         if any(not head.strip() for head in self.conflicts_with_head_shas):
             raise ValueError("conflict probe lineage requires nonempty preceding heads")
-        if self.reason == "failure_isolation" and (
+        if self.reason != "entry_conflict" and (
             not self.probe_base_sha or self.conflicts_with or self.conflicts_with_head_shas
         ):
-            raise ValueError("failure isolation hold requires its base and no conflict lineage")
+            raise ValueError(f"{self.reason} hold requires its base and no conflict lineage")
         return self
 
 
@@ -569,6 +572,16 @@ def build_merge_train_batch_candidate(
     normalized_base_sha = _normalize_required_value(
         base_sha, "merge train batch candidate builder requires base_sha"
     )
+    if ordinary_job_binding is None:
+        held = {hold.pull_request_number for hold in held_out}
+        held_out = (
+            *held_out,
+            *(
+                hold
+                for hold in _dependency_not_ready_holds(dry_run_result, normalized_base_sha)
+                if hold.pull_request_number not in held
+            ),
+        )
     batch_id = build_merge_train_batch_id(
         repository=dry_run_result.repository,
         base_branch=dry_run_result.base_branch,
@@ -599,6 +612,22 @@ def build_merge_train_batch_candidate(
         stack_collapse_root=stack_collapse_root,
         created_at=created_at,
         updated_at=created_at,
+    )
+
+
+def _dependency_not_ready_holds(
+    dry_run_result: MergeTrainDryRunResult, base_sha: str
+) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
+    return tuple(
+        MergeTrainBatchHeldOutEntry(
+            pull_request_number=entry.number,
+            head_sha=entry.head_sha,
+            reason="dependency_not_ready",
+            probe_base_sha=base_sha,
+        )
+        for entry in dry_run_result.queue
+        if len(entry.ineligible_reasons) == 1
+        and entry.ineligible_reasons[0] in DEPENDENCY_HEAD_HOLD_REASONS
     )
 
 

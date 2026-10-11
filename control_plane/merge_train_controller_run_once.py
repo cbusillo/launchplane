@@ -5013,7 +5013,9 @@ def _surviving_held_out_entries(
     unchanged. A failure-isolation hold also needs its base and head, and lasts
     only while every member of the candidate retesting without it
     (``isolating_entries``) is still queued at the same head; planning without
-    that candidate releases it.
+    that candidate releases it. A dependency-not-ready hold lasts while its base
+    and head are unchanged, so a head that settles mid-candidate waits for the
+    next base instead of replacing the candidate.
     """
     if not held_out:
         return ()
@@ -5038,7 +5040,8 @@ def _surviving_held_out_entries(
             and (
                 isolation_active
                 if hold.reason == "failure_isolation"
-                else tuple(zip(hold.conflicts_with, hold.conflicts_with_head_shas))
+                else hold.reason == "dependency_not_ready"
+                or tuple(zip(hold.conflicts_with, hold.conflicts_with_head_shas))
                 == tuple(preceding)
             )
         ):

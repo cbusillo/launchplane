@@ -1,0 +1,214 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+from typing import Any
+from unittest.mock import patch
+
+from fastapi import FastAPI
+
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train_controller_feedback import build_feedback_payloads
+from control_plane.storage.filesystem import FilesystemRecordStore
+from tests.http_app_test_support import _post_merge_train_controller_run_once
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from tests.support.auth import _StubVerifier
+from tests.support.merge_train import (
+    _FakeExpandedMergeTrainSnapshotReader,
+    _FakeMergeTrainGitHubClient,
+    _merge_train_service_identity,
+    _merge_train_service_policy,
+    _seed_merge_train_policy,
+)
+
+
+class DependencyRequalificationTests(unittest.IsolatedAsyncioTestCase):
+    """An older dependency head that settles mid-candidate waits for the next base (#3259)."""
+
+    async def test_settled_dependency_waits_instead_of_replacing_the_candidate(self) -> None:
+        for settled in ("mergeable", "rerun_passed"):
+            for position in ("ahead", "behind"):
+                with self.subTest(settled=settled, position=position):
+                    await self._assert_candidate_kept(settled=settled, position=position)
+
+    async def test_changed_dependency_head_still_replaces_the_candidate(self) -> None:
+        state = _DependencyState(mergeable="unknown")
+        async with _controller(state) as (app, store, request):
+            planned = await _post(app, request, "plan_candidate")
+            self.assertEqual(_entries(planned), [2])
+            await _post(app, request, "build_candidate")
+
+            state.mergeable = "mergeable"
+            state.head_sha = "dependency-head-2"
+            replaced = await _post(app, request, "plan_candidate")
+            self.assertEqual(_entries(replaced), [1, 2])
+            self.assertEqual(len(_batch_ids(store)), 2)
+
+    async def test_conflicting_dependency_stays_out_and_the_batch_lands(self) -> None:
+        state = _DependencyState(mergeable="unknown")
+        async with _controller(state) as (app, store, request):
+            await _post(app, request, "plan_candidate")
+            await _post(app, request, "build_candidate")
+            state.mergeable = "conflicting"
+            for action in ("observe_candidate", "plan_landing", "land_batch"):
+                await _post(app, request, action)
+            self.assertEqual(len(_batch_ids(store)), 1)
+
+            state.landed = True
+            idle = await _post(app, request, "idle")
+            self.assertNotIn("candidate", idle)
+
+    async def _assert_candidate_kept(self, *, settled: str, position: str) -> None:
+        state = _DependencyState(
+            mergeable="unknown" if settled == "mergeable" else "mergeable",
+            checks="pass" if settled == "mergeable" else "fail",
+        )
+        if position == "behind":
+            state.created_at = "2026-05-08T10:10:00Z"
+        async with _controller(state) as (app, store, request):
+            planned_response = await _post(app, request, "plan_candidate", full=True)
+            planned = planned_response["result"]
+            self.assertEqual(_entries(planned), [2])
+            self.assertEqual(
+                [
+                    (hold["pull_request_number"], hold["head_sha"], hold["reason"])
+                    for hold in planned["candidate"]["held_out"]
+                ],
+                [(1, "dependency-head-1", "dependency_not_ready")],
+            )
+            # The author has nothing to do; the head simply waits for the next base.
+            self.assertNotIn(
+                1,
+                [
+                    payload["pull_request_number"]
+                    for payload in build_feedback_payloads(response=planned_response)
+                ],
+            )
+            await _post(app, request, "build_candidate")
+
+            state.mergeable = "mergeable"
+            state.checks = "pass"
+            for action in ("observe_candidate", "plan_landing", "land_batch"):
+                landed = await _post(app, request, action, full=True)
+            self.assertEqual(len(_batch_ids(store)), 1)
+            landing = next(
+                record
+                for record in store.list_merge_train_batch_landing_plan_records()
+                if record.record_id == landed["records"]["merge_train_batch_landing_plan_record_id"]
+            )
+            self.assertEqual(
+                [
+                    (entry.pull_request_number, entry.status)
+                    for entry in landing.landing_plan.entries
+                ],
+                [(2, "merged")],
+            )
+
+            state.landed = True
+            reentered = await _post(app, request, "plan_candidate")
+            self.assertEqual(_entries(reentered), [1])
+            self.assertEqual(reentered["candidate"]["held_out"], [])
+
+
+class _DependencyState:
+    def __init__(self, *, mergeable: str, checks: str = "pass") -> None:
+        self.mergeable = mergeable
+        self.checks = checks
+        self.head_sha = "dependency-head-1"
+        self.created_at = "2026-05-08T10:00:00Z"
+        self.landed = False
+
+
+@asynccontextmanager
+async def _controller(
+    state: _DependencyState,
+) -> AsyncIterator[tuple[FastAPI, FilesystemRecordStore, dict[str, str]]]:
+    class Reader(_FakeExpandedMergeTrainSnapshotReader):
+        def read_merge_train_snapshot(
+            self, *, repository: str, base_branch: str
+        ) -> MergeTrainDryRunSnapshot:
+            snapshot = super().read_merge_train_snapshot(
+                repository=repository, base_branch=base_branch
+            )
+            dependency, green = snapshot.pull_requests
+            dependency = dependency.model_copy(
+                update={
+                    "labels": (),
+                    "label_actors": (),
+                    "actor_id": 42,
+                    "actor_role": "trusted_automation",
+                    "dependency_update_class": "patch_or_minor",
+                    "head_sha": state.head_sha,
+                    "created_at": state.created_at,
+                    "mergeable": state.mergeable,
+                    "required_checks_status": state.checks,
+                }
+            )
+            if state.landed:
+                return snapshot.model_copy(
+                    update={"base_sha": "base-after-landing", "pull_requests": (dependency,)}
+                )
+            return snapshot.model_copy(update={"pull_requests": (dependency, green)})
+
+    with (
+        TemporaryDirectory() as directory,
+        patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
+        patch("control_plane.merge_train_github.GitHubMergeTrainSnapshotReader", Reader),
+        patch(
+            "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+            _FakeMergeTrainGitHubClient,
+        ),
+    ):
+        state_dir = Path(directory) / "state"
+        record = build_test_merge_train_policy_record()
+        repository_policy = record.policy.policies[0]
+        repository_policy = repository_policy.model_copy(
+            update={
+                "enqueue": repository_policy.enqueue.model_copy(
+                    update={
+                        "dependency_update_github_user_ids": (42,),
+                        "trusted_automation_github_user_ids": (42,),
+                    }
+                ),
+            }
+        )
+        _seed_merge_train_policy(
+            state_dir,
+            policy=MergeTrainPolicyRecord(
+                record_id=record.record_id,
+                source=record.source,
+                updated_at=record.updated_at,
+                policy=record.policy.model_copy(update={"policies": (repository_policy,)}),
+            ),
+        )
+        store = FilesystemRecordStore(state_dir)
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: store,
+        )
+        yield app, store, {"repository": repository_policy.repository, "base_branch": "main"}
+
+
+async def _post(
+    app: FastAPI, request: dict[str, str], action: str, *, full: bool = False
+) -> dict[str, Any]:
+    response = await _post_merge_train_controller_run_once(app, {**request, "mutate": True})
+    assert response.status_code == 202, response.text
+    payload: dict[str, Any] = response.json()
+    assert payload["result"]["controller_action"] == action, payload["result"]
+    result: dict[str, Any] = payload["result"]
+    return payload if full else result
+
+
+def _entries(result: dict[str, Any]) -> list[int]:
+    return [entry["pull_request_number"] for entry in result["candidate"]["entries"]]
+
+
+def _batch_ids(store: FilesystemRecordStore) -> set[str]:
+    return {
+        record.candidate.batch_id for record in store.list_merge_train_batch_candidate_records()
+    }

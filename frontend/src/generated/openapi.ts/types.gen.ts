@@ -1404,7 +1404,7 @@ export type MergeTrainHeldOutSummary = {
     conflicts_with: Array<number>;
     head_sha: string;
     pull_request_number: number;
-    reason: 'entry_conflict' | 'failure_isolation';
+    reason: 'entry_conflict' | 'failure_isolation' | 'dependency_not_ready';
 };
 
 export type MergeTrainIdentity = {

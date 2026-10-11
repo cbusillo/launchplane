@@ -17233,7 +17233,8 @@
           "reason": {
             "enum": [
               "entry_conflict",
-              "failure_isolation"
+              "failure_isolation",
+              "dependency_not_ready"
             ],
             "title": "Reason",
             "type": "string"
