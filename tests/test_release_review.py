@@ -556,6 +556,35 @@ class ReleaseGitHubTests(unittest.TestCase):
 
 
 class EngineeringNotesReleaseTests(unittest.TestCase):
+    def test_pure_dependabot_carries_engineering_notes_into_release_checklist(self) -> None:
+        from control_plane.release_review import checklist_blockers
+
+        def read(path: str) -> object:
+            if "/compare/base..." in path:
+                return {"files": [{"filename": "uv.lock", "status": "modified"}]}
+            value = github_read(path)
+            if isinstance(value, list):
+                value[0].update(
+                    {
+                        "body": "Bumps a dependency.",
+                        "labels": [],
+                        "user": {"login": "dependabot[bot]", "type": "Bot"},
+                        "head": {"sha": PR_HEAD, "repo": {"full_name": "example/site"}},
+                        "base": {"sha": "base", "repo": {"full_name": "example/site"}},
+                    }
+                )
+            return value
+
+        with TemporaryDirectory() as temporary:
+            store = FilesystemRecordStore(Path(temporary))
+            seed(store)
+            review = build_release_review(store=store, profile=profile(), read=read)
+            assert review.checklist is not None
+            self.assertFalse(checklist_blockers(review.checklist))
+            self.assertFalse(review.approved)
+            self.assertFalse(review.checklist.items[0].client_test_notes_error)
+            self.assertTrue(review.checklist.items[0].owner_test_notes)
+
     def test_engineering_notes_allow_client_decision_but_bad_notes_do_not(self) -> None:
         from control_plane.release_review import checklist_blockers
 

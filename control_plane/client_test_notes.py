@@ -131,8 +131,10 @@ def client_test_notes(notes: str, *, review_override: bool = False) -> ClientTes
     return ClientTestNotes(True, explicit_override=review_override)
 
 
-def change_client_review(*, body: str, labels: Iterable[str], review_label: str) -> ClientTestNotes:
-    return client_test_notes(
-        owner_test_notes(body),
-        review_override=review_label.strip().casefold() in {label.casefold() for label in labels},
-    )
+def change_client_review(
+    *, body: str, labels: Iterable[str], review_label: str, pure_dependency_update: bool = False
+) -> ClientTestNotes:
+    override = review_label.strip().casefold() in {label.casefold() for label in labels}
+    if pure_dependency_update and not override:
+        return ClientTestNotes(False)
+    return client_test_notes(owner_test_notes(body), review_override=override)

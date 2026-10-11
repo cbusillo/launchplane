@@ -411,6 +411,60 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         self.assertNotIn("Passed.", notes)
         self.assertNotIn("Dependency bump", notes)
 
+    def test_batch_carries_derived_notes_for_a_pure_dependabot_member(self) -> None:
+        from control_plane.client_test_notes import client_test_notes
+        from control_plane.merge_train_batch_pull_request import _batch_owner_test_notes
+
+        class DependabotProvider(_BatchProvider):
+            review_labels: tuple[str, ...] = ()
+
+            def pull_request(self, number: int) -> dict[str, object]:
+                return super().pull_request(number) | {
+                    "user": {"login": "dependabot[bot]", "type": "Bot"},
+                    "labels": [{"name": label} for label in self.review_labels],
+                }
+
+            def request(
+                self, *, method: str, path: str, body: dict[str, object] | None = None
+            ) -> object:
+                if "/compare/" in path:
+                    return {"files": [{"filename": "uv.lock", "status": "modified"}]}
+                return super().request(method=method, path=path, body=body)
+
+        provider = DependabotProvider(self.guard.candidate_record.candidate)
+        body = _batch_owner_test_notes(
+            client=GitHubMergeTrainClient(transport=provider),
+            candidate=self.guard.candidate_record.candidate,
+        )
+        intent = client_test_notes(owner_test_notes(body))
+        self.assertFalse(intent.error)
+        self.assertFalse(intent.review_required)
+
+        provider.review_labels = ("owner-review",)
+        provider.member_bodies = {
+            entry.pull_request_number: "## Client test notes\nCheck checkout after the SDK update."
+            for entry in provider.candidate.entries
+        }
+        profile = SimpleNamespace(
+            is_active=True,
+            repository=provider.repository_name,
+            owner=SimpleNamespace(is_set=True, review_label="owner-review"),
+        )
+        body = _batch_owner_test_notes(
+            client=GitHubMergeTrainClient(
+                transport=provider,
+                branch_refresh_store=cast(
+                    Any, SimpleNamespace(list_product_profile_records=lambda: (profile,))
+                ),
+            ),
+            candidate=self.guard.candidate_record.candidate,
+        )
+        labeled_intent = client_test_notes(owner_test_notes(body))
+        self.assertFalse(labeled_intent.error)
+        self.assertTrue(labeled_intent.review_required)
+        for notes in provider.member_bodies.values():
+            self.assertIn(owner_test_notes(notes), owner_test_notes(body))
+
     def test_both_entries_land_through_one_sha_guarded_protected_merge(self) -> None:
         landed = self.land()
         self.assertEqual([entry.status for entry in landed.entries], ["merged", "merged"])

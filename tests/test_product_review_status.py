@@ -346,6 +346,36 @@ class OwnerReviewStatusTests(unittest.TestCase):
             github.statuses[0]["description"], "Waiting for @site-owner to review the preview"
         )
 
+    def test_pure_dependabot_update_publishes_neutral_without_inviting_client(self) -> None:
+        class DependabotGitHub(_GitHub):
+            def __call__(self, **kwargs: object) -> object:
+                if "/compare/" in str(kwargs["path"]):
+                    return {"files": [{"filename": "uv.lock", "status": "modified"}]}
+                value = super().__call__(**kwargs)
+                if str(kwargs["path"]).endswith(f"/pulls/{_PULL_REQUEST}"):
+                    assert isinstance(value, dict)
+                    value["user"] = {"login": "dependabot[bot]", "type": "Bot"}
+                    value["base"] = {
+                        "sha": "base",
+                        "repo": {"id": 5150, "full_name": self.repository},
+                    }
+                return value
+
+        github = DependabotGitHub(labels=())
+        github.body = "Bumps a dependency."
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "neutral")
+        self.assertEqual(github.comments, [])
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            ),
+            (),
+        )
+        github.labels = ("owner-review",)
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "failure")
+
     def test_real_notes_without_label_publish_review_and_missing_notes_fail(self) -> None:
         github = _GitHub(labels=())
         github.body = "## Client test notes\nTry the changed prices."
