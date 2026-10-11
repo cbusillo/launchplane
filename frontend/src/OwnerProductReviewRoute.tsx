@@ -363,8 +363,8 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
       </p>
       {decision.carried_from ? (
         <p>
-          Carried from version {decision.carried_from.head_sha.slice(0, 7)}: the merge train only
-          merged the base branch in, and the change itself is identical.
+          Carried from version {decision.carried_from.head_sha.slice(0, 7)}: the base was updated,
+          and the change itself is identical.
         </p>
       ) : null}
       {decision.reason ? <blockquote>{decision.reason}</blockquote> : null}

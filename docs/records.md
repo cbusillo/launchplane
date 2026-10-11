@@ -294,6 +294,27 @@ expiry, retrying with the same controller key replans already-refreshed records
 as unchanged and continues remaining due bindings. The controller never creates
 a missing binding or selects production.
 
+The separate remaining-stable controller at
+`POST /v1/route-bindings/odoo-stable/controller/run-once` discovers active Odoo
+testing and production bindings outside that testing controller's service-owned
+slice. It uses the managed reconcile planner for managed authority and the
+external reconcile planner for external authority, with each planner's own
+half-life. Only unchanged or refresh operations are eligible: external authority
+replacement is reported as conflict, never applied automatically. The existing
+testing controller remains testing-only. Both controllers share the bounded
+batch, per-binding CAS, parent replay and partial-progress recovery implementation.
+
+The stable controller requires its own `route_binding.odoo_stable_refresh.plan`
+or `.apply` capability in the Launchplane service context plus the exact target's
+managed `route_binding.read` / `.apply` or external
+`route_binding.external.plan` / `.apply` authority. Every
+target is authorized before the first binding write. Its request accepts only
+schema version, mode, reason and confirmation. Apply requires
+`APPLY ODOO STABLE ROUTE BINDING REFRESH` and an Idempotency-Key. The new route
+grants no access and starts no schedule; a service-owned clock, its existing-authority
+execution path, consecutive completion proof and subsequent TLS read-back must
+be qualified separately before claiming recurring renewal.
+
 Product authority bundle writes are the same atomicity boundary for product
 runtime/config ownership. PostgreSQL storage exposes a single
 `write_product_authority_bundle` repository method for the authority graph that
@@ -884,6 +905,34 @@ public checks so Launchplane can show readiness evidence before public
 availability is expected. Missing intent on a policy with checks, unknown
 values, and public/private intent without its required check fail validation.
 
+The product profile's `public_website` fact defaults to `required`. Only an
+explicit `none` declaration makes missing public route, ingress and TLS
+authority inapplicable. Private monitoring intent alone is not an exemption.
+Declare it through the existing `POST /v1/product-profiles` service write under
+`product_profile.write`, preserving the rest of the profile, then read it back.
+No new grant or checked-in product list is involved. Monitoring changes still
+use their own reviewed health-monitoring apply endpoint; its dry-run validates
+the same complete candidate profile as apply, including the website declaration.
+The declaration rejects public lane URLs, public monitoring intent and enabled
+public checks. It is persisted in the profile and projected in desired topology
+with profile provenance, and the environment overview shows the declaration.
+Provider placement, current health and runtime identity, open incidents and
+monitor cadence remain required. Missing placement or absent effective checks
+cannot become green. Existing products keep their public authority requirements.
+
+Topology records distinguish `info` from blocking `warning` and `error`.
+No-website applicability and external proxy-internals visibility remain visible
+as information. A disabled public check's failed observation remains history,
+with `probe_effective=false`, rather than a current topology error. Disabled
+public history does not age current placement evidence or imply a current
+public runtime-identity failure when its check is disabled. Projected negative
+TLS observations remain diagnostic errors even for a no-website declaration.
+Applicable missing/stale public authority, enabled-check failures and negative TLS still
+block green. Environment warning strings contain only blocking warnings;
+structured topology retains the informational evidence for review.
+Enabled public-check observations take precedence over disabled-check history.
+External ingress still requires effective public proof when a website is required.
+
 Each check has a stable name and kind. `public_http` checks use an explicit URL
 or the lane `health_url`, or derive one from lane `base_url` plus product
 `health_path`. `private_http` checks monitor internal service endpoints without
@@ -1447,11 +1496,15 @@ id and login, and `decided_at`. The newest record for a repository and pull
 request is the current decision. The record authorizes nothing.
 
 A record with `carried_from` was not decided again: it carries an acceptance to
-a new head after a base-only refresh by the merge train (see
+a new head after an unchanged-feature base update or rebase (see
 [carried acceptance](owner-acceptance.md#carried-acceptance)). `carried_from`
 names the decision record and head it came from, the reason
-(`merge_train_base_refresh`), and the merge train branch refresh records that
-produced the new head. Its `decided_at` is when Launchplane carried it.
+(`merge_train_base_refresh` or `unchanged_patch_base_update`), the immutable
+`comparison_base_sha`, and any merge train branch refresh records that produced
+the new head. Older train carries remain readable without a comparison base;
+their refresh records supply it. A carry outside the train requires a full
+comparison base revision and needs no train refresh record. Its `decided_at` is
+when Launchplane carried it.
 `base_branch` is the pull request's base branch when the decision was first shown
 on it; an acceptance carries, and a carried acceptance applies, only on that base.
 
@@ -1991,9 +2044,18 @@ backfill or authorization change.
   product must also be Odoo, not `prelaunch`, with `release_on_acceptance` not
   `held`. Otherwise the operation fails with
   `operation_authorization_client_release_refused`. Every other guard refuses it.
-- A release decision's `release_start` (`promote` or
-  `promote_with_rollback_drill`, omitted when empty) records whether the Client's
-  acceptance starts the release. It is fixed when the decision is recorded. A
+  The same grant, from the Client's request for changes to a live temporary
+  hotfix (`release_start: rollback`), covers only the rollback to their last
+  accepted release, even while releases are held.
+  A `temporary_hotfix` grant has the same shape with the Director as its GitHub
+  human caller, role `admin`, naming the Director's temporary hotfix decision.
+  The workers accept it only while that decision is still the product's newest
+  and published, and the active policy still names the caller as administrator;
+  otherwise the operation fails with the same code. See
+  [Temporary hotfix](release-review.md#temporary-hotfix).
+- A release decision's `release_start` (`promote`,
+  `promote_with_rollback_drill`, or `rollback`, omitted when empty) records whether
+  the decision starts the release, or rolls back a rejected temporary hotfix. It is fixed when the decision is recorded. A
   product profile's `release_on_acceptance` is omitted while `held`. The step
   operations of an accepted release take ids derived from the decision, so the
   release needs no record of its own; see

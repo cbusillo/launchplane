@@ -4,17 +4,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 ProductReviewDecision = Literal["accepted", "changes_requested"]
-ProductReviewCarryReason = Literal["merge_train_base_refresh"]
+ProductReviewCarryReason = Literal["merge_train_base_refresh", "unchanged_patch_base_update"]
 PRODUCT_REVIEW_REASON_MAX_LENGTH = 4000
 
 
 class ProductReviewCarry(BaseModel):
-    """Where a carried acceptance came from: the Client decided on another head.
-
-    `merge_train_base_refresh`: the merge train only merged the base branch into the
-    pull request, and the pull request's change against its base adds and removes
-    the same lines.
-    """
+    """The source acceptance and immutable evidence for an unchanged feature patch."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -22,12 +17,20 @@ class ProductReviewCarry(BaseModel):
     head_sha: str
     reason: ProductReviewCarryReason = "merge_train_base_refresh"
     # The train's refresh records that produced each new head, oldest first.
-    refresh_record_ids: tuple[str, ...] = Field(min_length=1)
+    refresh_record_ids: tuple[str, ...] = ()
+    comparison_base_sha: str = ""
 
     @model_validator(mode="after")
     def _validate_carry(self) -> "ProductReviewCarry":
         if not self.record_id.strip() or not self.head_sha.strip():
             raise ValueError("a carried decision names the decision and head it came from")
+        if self.reason == "merge_train_base_refresh" and not self.refresh_record_ids:
+            raise ValueError("a train refresh carry names its refresh records")
+        if self.reason == "unchanged_patch_base_update" and (
+            len(self.comparison_base_sha) != 40
+            or any(character not in "0123456789abcdef" for character in self.comparison_base_sha)
+        ):
+            raise ValueError("an unchanged-patch carry names its immutable comparison base")
         return self
 
 

@@ -284,6 +284,13 @@ test.describe("operator journeys", () => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto("/ui/products?fixture=products");
+    const productsHeading = page.getByRole("heading", {
+      level: 1,
+      name: "Products",
+    });
+    // The app imports fixtures through Vite's ?import URL; the timestamp read
+    // below uses a separate module request. Let the app finish before reloading.
+    await expect(productsHeading).toBeFocused();
     const recordedAt = await page.evaluate(async () => {
       const modulePath = "/ui/src/dev-fixtures.ts";
       const { productsForFixture } = await import(modulePath);
@@ -292,10 +299,6 @@ test.describe("operator journeys", () => {
     await page.clock.install({ time: new Date(recordedAt) });
     await page.reload();
 
-    const productsHeading = page.getByRole("heading", {
-      level: 1,
-      name: "Products",
-    });
     await expect(productsHeading).toBeFocused();
     const atlasLink = page
       .getByRole("list", { name: "Launchplane products" })
@@ -472,6 +475,11 @@ test.describe("operator journeys", () => {
     await page.goto(
       "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=empty",
     );
+    const incidentRegion = page.getByRole("region", {
+      name: "Public ingress incidents",
+    });
+    // Wait for the app's fixture import before the clock-setup reload.
+    await expect(incidentRegion).toBeVisible();
     const recordedAt = await page.evaluate(async () => {
       const modulePath = "/ui/src/dev-fixtures.ts";
       const { environmentForFixture } = await import(modulePath);
@@ -480,9 +488,6 @@ test.describe("operator journeys", () => {
     await page.clock.install({ time: new Date(recordedAt) });
     await page.reload();
 
-    const incidentRegion = page.getByRole("region", {
-      name: "Public ingress incidents",
-    });
     await expect(
       incidentRegion.getByText("No incidents recorded", { exact: true }),
     ).toBeVisible();

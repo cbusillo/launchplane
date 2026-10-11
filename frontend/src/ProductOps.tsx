@@ -19,7 +19,9 @@ import { formatTime } from "./format";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
-import { environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { previewInventoryPresentation } from "./preview-inventory";
+import { PreviewInventory } from "./PreviewInventory";
+import { environmentEvidenceDeadlines, environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -47,7 +49,7 @@ interface WarningItem {
   id: string;
   scope: string;
   detail: string;
-  severity: "warning" | "error";
+  severity: ProductTopologyWarning["severity"];
 }
 
 interface InspectionStep {
@@ -265,6 +267,7 @@ export function ProductWorkspaceRoute({
   return (
     <ProductWorkspace
       fixtureMode={fixtureMode}
+      refreshToken={refreshToken}
       product={expireProductEvidence(resource.data)}
       refreshError={resource.status === "error" ? resource.error : ""}
       route={{ kind: "product-workspace", product: productKey }}
@@ -274,20 +277,19 @@ export function ProductWorkspaceRoute({
   );
 }
 
-export function useEvidenceExpiry(environments: Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring">[]) {
+export function useEvidenceExpiry(environments: Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring" | "topology">[]) {
   const [tick, setTick] = useState(0);
-  const nextExpiry = Math.min(...environments.flatMap(environment => [
-    environment.provenance.stale_after,
-    ...environment.health_monitoring.checks.map(check => check.provenance.stale_after),
-  ]).map(value => Date.parse(value)).filter(value => Number.isFinite(value) && value >= Date.now()));
+  const nextExpiry = Math.min(...environments.flatMap(environmentEvidenceDeadlines).map(value => Date.parse(value)).filter(value => Number.isFinite(value) && value >= Date.now()));
   useEffect(() => {
     const update = () => setTick(value => value + 1);
     const timer = Number.isFinite(nextExpiry)
       ? window.setTimeout(update, Math.min(nextExpiry - Date.now() + 1, 2_147_483_647)) : undefined;
     window.addEventListener("focus", update);
+    document.addEventListener("visibilitychange", update);
     return () => {
       window.clearTimeout(timer);
       window.removeEventListener("focus", update);
+      document.removeEventListener("visibilitychange", update);
     };
   }, [nextExpiry, tick]);
 }
@@ -295,7 +297,7 @@ export function useEvidenceExpiry(environments: Pick<ProductEnvironmentSummary, 
 function ProductDirectoryRow({ product }: { product: ProductSiteOverview }) {
   const testing = environmentByName(product, "testing");
   const production = environmentByName(product, "prod");
-  const warnings = warningsForProduct(product);
+  const warnings = warningsForProduct(product).filter(warning => warning.severity !== "info");
 
   return (
     <li>
@@ -319,9 +321,7 @@ function ProductDirectoryRow({ product }: { product: ProductSiteOverview }) {
         <span className="directory-preview">
           <span className="lane-name">Previews</span>
           <strong>
-            {product.preview.enabled
-              ? `${product.preview.active_count} active`
-              : "Not enabled"}
+            {previewInventoryPresentation(product.preview).headline}
           </strong>
           <EvidenceBadge compact state={product.preview.trust_state} />
         </span>
@@ -365,6 +365,7 @@ function DirectoryLane({
 
 function ProductWorkspace({
   fixtureMode,
+  refreshToken,
   product,
   refreshError,
   route,
@@ -372,6 +373,7 @@ function ProductWorkspace({
   updating,
 }: {
   fixtureMode: DevFixtureMode;
+  refreshToken: number;
   product: ProductSiteOverview;
   refreshError: string;
   route: AppRoute;
@@ -383,6 +385,7 @@ function ProductWorkspace({
     [product.environments],
   );
   const warnings = useMemo(() => warningsForProduct(product), [product]);
+  const applicableWarnings = warnings.filter(warning => warning.severity !== "info");
   const inspection = useMemo(() => nextSafeInspection(product, warnings), [product, warnings]);
   const testing = environmentByName(product, "testing");
   const production = environmentByName(product, "prod");
@@ -480,18 +483,14 @@ function ProductWorkspace({
         <SignalTile
           label="Previews"
           state={product.preview.trust_state}
-          value={
-            product.preview.enabled
-              ? `${product.preview.active_count} active`
-              : "Not enabled"
-          }
+          value={previewInventoryPresentation(product.preview).headline}
         />
         <SignalTile
           label="Warnings"
           state={product.trust_state}
-          tone={warnings.length ? "warning" : product.trust_state}
-          value={`${warnings.length} recorded`}
-          detail={warnings.length ? "Needs review" : trustLabel(product.trust_state)}
+          tone={applicableWarnings.length ? "warning" : product.trust_state}
+          value={`${applicableWarnings.length} recorded`}
+          detail={applicableWarnings.length ? "Needs review" : warnings.length ? "Information only" : trustLabel(product.trust_state)}
         />
       </section>
 
@@ -545,6 +544,8 @@ function ProductWorkspace({
         <PreviewSummary product={product} />
         <WarningSummary product={product} warnings={warnings} />
       </div>
+
+      <PreviewInventory key={product.product} product={product} refreshToken={refreshToken} />
 
       <ProductOwnerPanel fixtureMode={fixtureMode} product={product.product} />
 
@@ -740,20 +741,7 @@ function EnvironmentRow({
 
 function PreviewSummary({ product }: { product: ProductSiteOverview }) {
   const preview = product.preview;
-  const title = !preview.enabled
-    ? "Preview environments are not enabled"
-    : preview.trust_state === "missing"
-      ? "Preview inventory evidence is missing"
-      : preview.active_count
-        ? `${preview.active_count} active preview${preview.active_count === 1 ? "" : "s"}`
-        : "No active previews";
-  const detail = !preview.enabled
-    ? "This product profile does not expose preview lifecycle capability."
-    : preview.trust_state === "missing"
-      ? "Launchplane cannot determine whether previews exist without inventory evidence."
-      : preview.active_count
-        ? "Active preview inventory is recorded under this product workspace."
-        : "The inventory read completed without an active preview environment.";
+  const { headline, detail } = previewInventoryPresentation(preview);
 
   return (
     <section className="summary-panel preview-summary" id="preview-summary">
@@ -762,7 +750,7 @@ function PreviewSummary({ product }: { product: ProductSiteOverview }) {
       </div>
       <div>
         <p className="eyebrow">Preview inventory</p>
-        <h2>{title}</h2>
+        <h2>{headline}</h2>
         <p>{detail}</p>
       </div>
       <EvidenceBadge
@@ -780,6 +768,7 @@ function WarningSummary({
   product: ProductSiteOverview;
   warnings: WarningItem[];
 }) {
+  const applicableCount = warnings.filter(warning => warning.severity !== "info").length;
   const trustworthyEmpty =
     (product.trust_state === "verified" || product.trust_state === "recorded") &&
     product.environments.every(
@@ -792,7 +781,7 @@ function WarningSummary({
       <div className="section-title-row">
         <div>
           <p className="eyebrow">Warnings</p>
-          <h2>{warnings.length ? `${warnings.length} need review` : "No warnings listed"}</h2>
+          <h2>{applicableCount ? `${applicableCount} need review` : warnings.length ? "Information only" : "No warnings listed"}</h2>
         </div>
         <EvidenceBadge compact state={product.trust_state} />
       </div>
@@ -802,6 +791,8 @@ function WarningSummary({
             <li data-severity={warning.severity} key={warning.id}>
               {warning.severity === "error" ? (
                 <AlertCircle size={16} aria-hidden="true" />
+              ) : warning.severity === "info" ? (
+                <Radar size={16} aria-hidden="true" />
               ) : (
                 <AlertTriangle size={16} aria-hidden="true" />
               )}
@@ -1164,7 +1155,7 @@ function nextSafeInspection(
       targetId: `lane-${safeAnchor(incomplete.environment)}`,
     };
   }
-  if (warnings.length) {
+  if (warnings.some(warning => warning.severity !== "info")) {
     return {
       title: "Review recorded warnings",
       detail:
@@ -1213,8 +1204,7 @@ function ingressHeadline(environment: ProductEnvironmentSummary): string {
     : `${trustLabel(environment.trust_state)} evidence`;
 }
 
-function signalHeadline(environment: ProductEnvironmentSummary | null): string {
-  const tone = environmentOperationalTone(environment);
+export function signalHeadline(environment: ProductEnvironmentSummary | null, tone = environmentOperationalTone(environment)): string {
   if (tone === "danger") {
     return "Needs attention";
   }

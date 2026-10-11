@@ -8,6 +8,7 @@ import click
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.durable_operation_authorization import (
+    RELEASE_DECISION_GRANTS,
     DurableOperationAuthorization,
     DurableOperationCancellation,
     DurableOperationCallerIdentity,
@@ -58,8 +59,8 @@ class DurableOperationAuthorizationGuard:
     # Only a worker path that Launchplane's reconciler may queue passes this; every
     # other guard refuses a launchplane_reconcile grant.
     reconcile_grant_allows: Callable[[DurableOperationAuthorization], bool] | None = None
-    # Likewise, only a worker path a Client release may queue passes this; every
-    # other guard refuses a client_release_acceptance grant.
+    # Likewise, only a worker path a Client release or temporary hotfix may queue
+    # passes this; every other guard refuses a release decision grant.
     client_release_grant_allows: Callable[[DurableOperationAuthorization], bool] | None = None
 
     def authorize_execution(self) -> None:
@@ -115,15 +116,15 @@ class DurableOperationAuthorizationGuard:
                     ),
                 )
             return
-        if self.authorization.grant == "client_release_acceptance":
+        if self.authorization.grant in RELEASE_DECISION_GRANTS:
             if self.client_release_grant_allows is None or not self.client_release_grant_allows(
                 self.authorization
             ):
                 raise DurableOperationAuthorizationDeniedError(
                     code="operation_authorization_client_release_refused",
                     message=(
-                        "The Client's release acceptance no longer covers this operation: "
-                        "a newer decision, a changed Client, or held releases."
+                        "The release decision no longer covers this operation: "
+                        "a newer decision, a changed Client or admin, or held releases."
                     ),
                 )
             return

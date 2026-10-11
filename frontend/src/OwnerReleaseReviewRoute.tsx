@@ -27,12 +27,19 @@ const RELEASE_RUN_STATE: Record<ClientReleaseRunView["state"], string> = {
   stopped: "Stopped",
 };
 
+const DECISION_HEADINGS: Record<ReleaseReviewDecisionEnvelope["decision"], string> = {
+  accepted: "Client approval recorded",
+  changes_requested: "Changes requested",
+  overridden: "Admin approval override recorded",
+  temporary_hotfix: "Urgent temporary fix by the Director",
+};
+
 function ReleaseRunProgress({ run }: { run: ClientReleaseRunView }) {
   return <section className="owner-review-latest" aria-label="Release progress">
     <h3>Release progress: {RELEASE_RUN_STATE[run.state]}</h3>
     {run.blocked_reason ? <p role="status">{run.blocked_reason}</p> : null}
     <ol>{run.steps.map(step => <li key={step.step}>
-      {RELEASE_STEP_LABELS[step.kind]}: {RELEASE_STEP_STATUS[step.status]}
+      {step.kind === "rollback" && !run.rollback_drill ? "Roll back to the last accepted release" : RELEASE_STEP_LABELS[step.kind]}: {RELEASE_STEP_STATUS[step.status]}
       {step.failure ? <div>
         <p>{step.failure.reason} (<code>{step.failure.code}</code>)</p>
         <details><summary>Failure details</summary>
@@ -71,6 +78,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const [response, setResponse] = useState<ReleaseReviewResponse | null>(null);
   const [reason, setReason] = useState("");
   const [overrideReason, setOverrideReason] = useState("");
+  const [hotfixReason, setHotfixReason] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [recorded, setRecorded] = useState(false);
@@ -81,6 +89,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     setError("");
     setReason("");
     setOverrideReason("");
+    setHotfixReason("");
     setRecorded(false);
     const request = fixtureMode
       ? loadDevFixtures().then(fixtures => fixtures.releaseReviewForFixture(fixtureMode))
@@ -120,12 +129,14 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const releaseStarts = !!response && response.release_on_acceptance !== "held";
   const liveSite = response ? safeExternalUrl(response.live_site_url) : null;
   const liveSiteName = response ? `${response.display_name}${liveSite ? ` (${liveSite.host})` : ""}` : "";
-  const incomplete = !checklist || !testingUrl || response?.review.checklist_complete !== true;
+  const reviewingHotfix = !!response?.reviewing_temporary_hotfix;
+  const incomplete = !checklist || !(reviewingHotfix || testingUrl) || response?.review.checklist_complete !== true;
+  const hasChanges = !!checklist && checklist.production.source_commit !== checklist.candidate.source_commit;
   return <section className="owner-review-page">
     <div className="owner-review-intro">
       <p className="eyebrow">Release decision</p>
       <h1 data-route-heading tabIndex={-1}>Review this release</h1>
-      <p>Review the changes proposed for production. Open the testing site and check each item below before recording your decision.</p>
+      <p>{response?.reviewing_temporary_hotfix ? "An urgent temporary fix is already live. Open the live site and check each item below before recording your decision." : "Review the changes proposed for production. Open the testing site and check each item below before recording your decision."}</p>
     </div>
     {error ? <p role="alert" className="owner-review-alert">{error}</p> : null}
     {!response && !error ? <p role="status">Loading the release checklist…</p> : null}
@@ -133,10 +144,15 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       <h2>{response.display_name}</h2>
       <p className="owner-review-state">{response.viewer_is_owner ? "Reviewing as the Client" : response.can_override ? "Reviewing as an admin" : "Viewing this release · read only"}</p>
       {!response.owner_github_login ? <p role="alert">No Client set for this product. Ask an admin to name one.</p> : null}
-      {testingUrl ? <a className="button button-primary owner-review-preview" href={testingUrl.toString()} target="_blank" rel="noreferrer">Open the testing site</a> : null}
+      {response.reviewing_temporary_hotfix
+        // The urgent fix runs on the live site; testing may already carry newer work.
+        ? liveSite ? <a className="button button-primary owner-review-preview" href={liveSite.toString()} target="_blank" rel="noreferrer">Open the live site</a> : null
+        : testingUrl ? <a className="button button-primary owner-review-preview" href={testingUrl.toString()} target="_blank" rel="noreferrer">Open the testing site</a> : null}
       {latestDecision ? <section className="owner-review-latest" aria-label="Latest release decision">
-        <h3>{latestDecision.decision === "overridden" ? "Admin approval override recorded" : latestDecision.decision === "accepted" ? "Client approval recorded" : "Changes requested"}</h3>
-        <p>Recorded by {latestDecision.actor_github_login} for this proposed version.</p>
+        <h3>{DECISION_HEADINGS[latestDecision.decision]}</h3>
+        {latestDecision.decision === "temporary_hotfix"
+          ? <p>{reviewingHotfix ? "This version is already live." : "The Director is putting this version live"} before {response.viewer_is_owner ? "your" : "the Client's"} review, because of breakage on the live site. {response.viewer_is_owner ? "Please review it like any release." : ""}</p>
+          : <p>Recorded by {latestDecision.actor_github_login} for this proposed version.</p>}
         {latestDecision.reason ? <blockquote>{latestDecision.reason}</blockquote> : null}
         {latestDecision.decision === "accepted" && latestDecision.release_start ? <p>This acceptance started the release.</p> : null}
         {!latestDecision.release_issue_url ? <p role="alert" className="owner-review-alert">Decision saved, but its release record has not been published. Approval cannot be used for deployment yet. Retry the same decision to publish its record.</p> : null}
@@ -155,10 +171,12 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       {response.review.unavailable_reason ? <p className="owner-review-state">Reason code <code>{response.review.unavailable_reason}</code> · Trace ID <code>{response.trace_id}</code></p> : null}
       {checklist && response.viewer_is_owner ? <section className="owner-review-action" aria-label="Client release decision">
         <h3>Your release decision</h3>
-        {releaseStarts
+        {reviewingHotfix
+          ? <p className="owner-review-golive"><strong>Accepting keeps this urgent fix live as your accepted release.</strong> Nothing else is deployed.</p>
+          : releaseStarts
           ? <p className="owner-review-golive"><strong>Accepting puts this version on the live site, {liveSiteName}.</strong> Launchplane takes a verified backup, puts it live, checks it, and rolls back by itself if the checks fail.{response.release_on_acceptance === "promote_with_rollback_drill" ? " This first time, it also rolls back once and puts the same version live again, to prove rollback works." : ""}</p>
           : <p><strong>Releases are on hold for {response.display_name}.</strong> Accepting records your approval; nothing goes live until an admin releases the hold.</p>}
-        <p><strong>Request changes</strong> records your feedback and replaces any earlier approval or admin override for this release.</p>
+        <p><strong>Request changes</strong> {reviewingHotfix ? `rolls ${liveSiteName} back to your last accepted release and records your feedback.` : "records your feedback and replaces any earlier approval or admin override for this release."}</p>
         <label><span>What should change? (needed only when you request changes)</span><textarea value={reason} maxLength={4000} disabled={busy} onChange={event => setReason(event.target.value)} /></label>
         <div className="owner-review-action-buttons">
           <button className="button button-primary" type="button" disabled={busy || incomplete} onClick={() => void decide("accepted", reason)}>Accept release</button>
@@ -173,13 +191,21 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
           <button className="button" type="button" disabled={busy || !overrideReason.trim()} onClick={() => void decide("overridden", overrideReason)}>Record admin approval override</button>
         </div>
       </section> : null}
+      {checklist && hasChanges && response.can_start_temporary_hotfix ? <section className="owner-review-action release-review-override" aria-label="Temporary hotfix">
+        <h3>Temporary hotfix</h3>
+        <p>For breakage on the live site only. This puts exactly the version listed above live on {liveSiteName} now, before the Client accepts it, on the gated path: a verified backup, checks and automatic rollback. Launchplane then asks {response.owner_github_login || "the Client"} to review it. Their acceptance keeps it; their request for changes rolls the site back to their last accepted release.</p>
+        <label><span>What is broken, and how this fixes it</span><textarea value={hotfixReason} maxLength={4000} disabled={busy} onChange={event => setHotfixReason(event.target.value)} /></label>
+        <div className="owner-review-action-buttons">
+          <button className="button" type="button" disabled={busy || incomplete || !hotfixReason.trim()} onClick={() => void decide("temporary_hotfix", hotfixReason)}>Ship temporary hotfix now</button>
+        </div>
+      </section> : null}
       {checklist && (response.viewer_is_owner || response.can_override) ? <p className="owner-review-state">Each new decision is saved and published as a separate release record. {releaseStarts ? "Only the Client's acceptance starts the release; an admin override does not, and an admin can hold releases." : "Recording a decision does not deploy anything."} Production deployment still requires the release and backup checks.</p> : null}
-      {recorded ? <p role="status" className="owner-review-success">{latestDecision?.release_start ? "Release accepted. Launchplane is starting it; this page shows its progress." : "Decision recorded. Nothing has been deployed."}</p> : null}
+      {recorded ? <p role="status" className="owner-review-success">{latestDecision?.decision === "temporary_hotfix" ? "Temporary hotfix recorded. Launchplane is putting it live; this page shows its progress." : latestDecision?.release_start === "rollback" ? "Changes requested. Launchplane is rolling the site back to your last accepted release." : latestDecision?.release_start ? "Release accepted. Launchplane is starting it; this page shows its progress." : "Decision recorded. Nothing has been deployed."}</p> : null}
       {checklist ? <details className="release-review-technical">
         <summary>Technical details</summary>
         <dl>
-          <div><dt>Current production version:</dt><dd><code>{checklist.production.source_commit}</code></dd></div>
-          <div><dt>Proposed production version:</dt><dd><code>{checklist.candidate.source_commit}</code><span>Currently in testing</span></dd></div>
+          <div><dt>{reviewingHotfix ? "Version the urgent fix replaced:" : "Current production version:"}</dt><dd><code>{checklist.production.source_commit}</code></dd></div>
+          <div><dt>{reviewingHotfix ? "Live urgent fix:" : "Proposed production version:"}</dt><dd><code>{checklist.candidate.source_commit}</code>{reviewingHotfix ? null : <span>Currently in testing</span>}</dd></div>
           {(checklist.shared_sources ?? []).map(source => <div key={source.repository}>
             <dt>Shared components from {source.repository}</dt>
             <dd><span>Production</span><code>{source.production_commit}</code><span>Currently in testing</span><code>{source.candidate_commit}</code></dd>

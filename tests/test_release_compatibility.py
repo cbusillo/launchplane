@@ -257,14 +257,10 @@ class ReleaseCompatibilityTests(unittest.TestCase):
         before, after = artifact("old", modules=graph), artifact("new", modules=graph)
         after.enterprise_base_digest = "sha256:" + "e" * 64
         assert before.release_compatibility is not None and after.release_compatibility is not None
-        before.release_compatibility = before.release_compatibility.model_copy(
-            update={
-                "examined_inputs_sha256": release_examined_inputs_sha256(before),
-            }
-        )
         after.release_compatibility = after.release_compatibility.model_copy(
             update={
                 "examined_inputs_sha256": release_examined_inputs_sha256(after),
+                "examined_baseline_inputs_sha256": release_examined_inputs_sha256(before),
                 "database_update_modules": ("base",),
             }
         )
@@ -296,14 +292,10 @@ class ReleaseCompatibilityTests(unittest.TestCase):
                     before.release_compatibility is not None
                     and after.release_compatibility is not None
                 )
-                before.release_compatibility = before.release_compatibility.model_copy(
-                    update={
-                        "examined_inputs_sha256": release_examined_inputs_sha256(before),
-                    }
-                )
                 after.release_compatibility = after.release_compatibility.model_copy(
                     update={
                         "examined_inputs_sha256": release_examined_inputs_sha256(after),
+                        "examined_baseline_inputs_sha256": release_examined_inputs_sha256(before),
                         "database_update_modules": (),
                     }
                 )
@@ -317,14 +309,10 @@ class ReleaseCompatibilityTests(unittest.TestCase):
         before = artifact("old", files=(file("Makefile", "dependency", module=""),))
         after = artifact("new", files=(file("Makefile", "dependency", module="", digest="b"),))
         assert before.release_compatibility is not None and after.release_compatibility is not None
-        before.release_compatibility = before.release_compatibility.model_copy(
-            update={
-                "examined_inputs_sha256": release_examined_inputs_sha256(before),
-            }
-        )
         after.release_compatibility = after.release_compatibility.model_copy(
             update={
                 "examined_inputs_sha256": release_examined_inputs_sha256(after),
+                "examined_baseline_inputs_sha256": release_examined_inputs_sha256(before),
                 "database_update_modules": (),
             }
         )
@@ -345,6 +333,89 @@ class ReleaseCompatibilityTests(unittest.TestCase):
             result = classify(before, unexamined)
             self.assertEqual(result.classification, "database_changing")
             self.assertFalse(result.module_plan_complete)
+
+    def test_skipped_release_plan_requires_the_actual_production_baseline(self) -> None:
+        for change in ("opaque", "non_module_dependency"):
+            with self.subTest(change=change):
+                files = (file("pyproject.toml", "dependency", module=""),)
+                production = artifact("old", files=files)
+                intermediate = artifact("intermediate", files=files)
+                candidate = intermediate.model_copy(deep=True, update={"artifact_id": "new"})
+                if change == "opaque":
+                    intermediate.enterprise_base_digest = "sha256:" + "e" * 64
+                    candidate.enterprise_base_digest = intermediate.enterprise_base_digest
+                    reason = "unexamined_opaque_input_plan"
+                else:
+                    assert intermediate.release_compatibility is not None
+                    sources = list(intermediate.release_compatibility.sources)
+                    sources[0] = sources[0].model_copy(
+                        update={
+                            "files": (file("pyproject.toml", "dependency", module="", digest="b"),)
+                        }
+                    )
+                    intermediate.release_compatibility = (
+                        intermediate.release_compatibility.model_copy(
+                            update={"sources": tuple(sources)}
+                        )
+                    )
+                    candidate.release_compatibility = intermediate.release_compatibility
+                    reason = "unexamined_non_module_dependency_plan"
+                assert intermediate.release_compatibility is not None
+                intermediate.release_compatibility = intermediate.release_compatibility.model_copy(
+                    update={
+                        "examined_inputs_sha256": release_examined_inputs_sha256(intermediate),
+                        "examined_baseline_inputs_sha256": release_examined_inputs_sha256(
+                            production
+                        ),
+                        "database_update_modules": ("base",),
+                    }
+                )
+                self.assertEqual(
+                    classify(production, intermediate).update_modules, ("base", "site")
+                )
+                assert candidate.release_compatibility is not None
+                candidate.release_compatibility = candidate.release_compatibility.model_copy(
+                    update={
+                        "examined_inputs_sha256": release_examined_inputs_sha256(candidate),
+                        "examined_baseline_inputs_sha256": release_examined_inputs_sha256(
+                            intermediate
+                        ),
+                        "database_update_modules": (),
+                    }
+                )
+                # Empty is valid for the adjacent pair, but production skipped it.
+                self.assertTrue(classify(intermediate, candidate).module_plan_complete)
+                result = classify(production, candidate)
+                self.assertEqual(result.classification, "database_changing")
+                self.assertFalse(result.module_plan_complete)
+                self.assertIn(reason, result.reasons)
+                # Examining the actual transition recovers its required DB work.
+                candidate.release_compatibility = candidate.release_compatibility.model_copy(
+                    update={
+                        "examined_baseline_inputs_sha256": release_examined_inputs_sha256(
+                            production
+                        ),
+                        "database_update_modules": ("base",),
+                    }
+                )
+                result = classify(production, candidate)
+                self.assertTrue(result.module_plan_complete)
+                self.assertEqual(result.update_modules, ("base", "site"))
+
+    def test_legacy_examined_plan_without_baseline_is_incomplete(self) -> None:
+        production, candidate = artifact("old"), artifact("new")
+        candidate.enterprise_base_digest = "sha256:" + "e" * 64
+        assert candidate.release_compatibility is not None
+        declaration = candidate.release_compatibility.model_dump(mode="json")
+        declaration.pop("examined_baseline_inputs_sha256")
+        declaration.update(
+            examined_inputs_sha256=release_examined_inputs_sha256(candidate),
+            database_update_modules=[],
+        )
+        candidate.release_compatibility = ArtifactReleaseCompatibility.model_validate(declaration)
+        result = classify(production, candidate)
+        self.assertFalse(result.module_plan_complete)
+        self.assertIn("unexamined_opaque_input_plan", result.reasons)
 
     def test_missing_history_declarations_or_full_inputs_cannot_be_compatible(self) -> None:
         after = artifact("new")
@@ -406,6 +477,13 @@ class ReleaseCompatibilityTests(unittest.TestCase):
         sources[0] = sources[0].model_copy(update={"commit": manifest.source_commit})
         manifest.release_compatibility = manifest.release_compatibility.model_copy(
             update={"sources": tuple(sources)}
+        )
+        manifest.release_compatibility = manifest.release_compatibility.model_copy(
+            update={
+                "examined_inputs_sha256": release_examined_inputs_sha256(manifest),
+                "examined_baseline_inputs_sha256": release_examined_inputs_sha256(artifact("old")),
+                "database_update_modules": ("base",),
+            }
         )
         # Ingestion assigns the identity and source build; producer values cannot
         # substitute for those checked against the source-host build record.
