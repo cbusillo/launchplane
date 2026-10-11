@@ -74,6 +74,7 @@ class _GitHub:
         repository_path = f"/repos/{_REPOSITORY}"
         if path == f"{repository_path}/pulls/{_PULL_REQUEST}":
             return {
+                "body": "## Client test notes\nTry the changed page.",
                 "head": {"sha": self.head_sha},
                 "labels": [{"name": "owner-review"}],
                 "base": {"ref": self.base_branch, "repo": {"id": 5150}},

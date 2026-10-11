@@ -62,6 +62,24 @@ class ClientTestNotesTests(unittest.TestCase):
                 self.assertTrue(client_test_notes(notes, review_override=True).error)
         self.assertTrue(client_test_notes("Nothing for the owner to test").error)
 
+    def test_merged_bare_declarations_are_compatible_but_new_admission_is_strict(self) -> None:
+        for notes in ("Nothing for the Client to test", "Nothing for the owner to test"):
+            with self.subTest(notes=notes):
+                self.assertTrue(client_test_notes(notes).error)
+                self.assertTrue(client_test_notes(notes, review_override=True).error)
+                self.assertFalse(client_test_notes(notes, historical=True).error)
+                self.assertFalse(
+                    client_test_notes(notes, historical=True, review_override=True).error
+                )
+
+    def test_formatted_declaration_is_refused_instead_of_requesting_review(self) -> None:
+        for notes in (
+            "- Nothing for the Client to test: CI only.",
+            "**Nothing for the Client to test:** CI only.",
+        ):
+            with self.subTest(notes=notes):
+                self.assertTrue(client_test_notes(notes).error)
+
     def test_workflow_feedback_reads_notes_and_skips_only_bound_train_heads(self) -> None:
         from contextlib import nullcontext
         from pathlib import Path

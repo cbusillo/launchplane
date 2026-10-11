@@ -66,6 +66,8 @@ class _GitHub:
         self.repository = repository
         self.labels = labels
         self.head_sha = head_sha
+        self.head_ref = "pr-42"
+        self.base_ref = ""
         self.statuses: list[dict[str, object]] = []
         self.legacy_statuses: list[dict[str, object]] = []
         self.check_runs: list[dict[str, object]] = []
@@ -101,9 +103,13 @@ class _GitHub:
         if path == f"{repository_path}/pulls/{_PULL_REQUEST}":
             return {
                 "body": self.body,
-                "head": {"sha": self.head_sha},
+                "head": {
+                    "sha": self.head_sha,
+                    "ref": self.head_ref,
+                    "repo": {"full_name": self.repository},
+                },
                 "labels": [{"name": label} for label in self.labels],
-                "base": {"repo": {"id": 5150}},
+                "base": {"ref": self.base_ref, "repo": {"id": 5150}},
             }
         if path == f"{repository_path}/statuses/{self.head_sha}" and method == "POST":
             assert isinstance(body, dict)
@@ -835,10 +841,10 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_ready_train_preview_does_not_publish_a_duplicate_client_review(self) -> None:
         from contextlib import nullcontext
         from types import SimpleNamespace
-        from unittest.mock import Mock
         from control_plane.workflows.preview_pr_feedback import pull_request_client_review
 
         payload = product_profile_payload("verireel")
+        payload["repository"] = "every/verireel"
         payload["owner"] = {"github_login": "site-owner", "github_id": str(_OWNER_GITHUB_ID)}
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(payload)
@@ -848,13 +854,20 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             candidate_sha=_HEAD_SHA,
             base_branch="main",
         )
-        publisher = Mock(spec=OwnerReviewStatusPublisher)
+        github = _GitHub(repository="every/verireel", labels=())
+        github.body = "## Owner test notes\n### #12 Feature\nTry the price list."
+        github.head_ref = candidate.candidate_ref.removeprefix("refs/heads/")
+        github.base_ref = "main"
+        original = _decision(
+            decision="changes_requested", decided_at="2026-09-25T12:00:00Z"
+        ).model_copy(update={"product": "verireel", "repository": "every/verireel"})
+        self.store.write_product_review_decision_record(original)
         app = create_launchplane_fastapi_app(
             verifier=StubVerifier(_preview_pr_feedback_identity()),
             authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
             control_plane_root_path=self.root,
             record_store_factory=lambda: self.store,
-            owner_review_status_publisher=publisher,
+            owner_review_status_publisher=_publisher(github),
         )
         with (
             patch(
@@ -886,7 +899,12 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         ):
             response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
         self.assertEqual(response.status_code, 202, response.json())
-        publisher.publish.assert_not_called()
+        self.assertEqual(github.statuses, [])
+        self.assertEqual(len(github.comments), 1)
+        (saved,) = self.store.list_product_review_decision_records(
+            repository="every/verireel", pull_request_number=42
+        )
+        self.assertTrue(saved.feedback_url)
         (feedback,) = self.store.list_preview_pr_feedback_records()
         self.assertNotIn("review the preview", feedback.comment_markdown)
 

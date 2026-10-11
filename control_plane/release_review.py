@@ -333,7 +333,8 @@ def checklist_blockers(checklist: ReleaseChecklist) -> tuple[str, ...]:
     for repository, items, untracked in groups:
         for item in items:
             notes_error = (
-                item.client_test_notes_error or client_test_notes(item.owner_test_notes).error
+                item.client_test_notes_error
+                or client_test_notes(item.owner_test_notes, historical=True).error
             )
             if not item.owner_test_notes.strip():
                 blockers.append(

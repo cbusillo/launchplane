@@ -563,6 +563,8 @@ class EngineeringNotesReleaseTests(unittest.TestCase):
             seed(store)
             for notes, labels, blocked in (
                 ("Nothing for the Client to test: CI only.", [], False),
+                ("Nothing for the Client to test", [], False),
+                ("Nothing for the owner to test", [{"name": "owner-review"}], False),
                 ("Nothing for the Client to test: CI only.", [{"name": "owner-review"}], True),
                 ("Nothing for the Client to test:", [], True),
                 ("", [], True),
@@ -581,7 +583,7 @@ class EngineeringNotesReleaseTests(unittest.TestCase):
                     self.assertEqual(bool(checklist_blockers(review.checklist)), blocked)
                     if not blocked:
                         accepted = ReleaseReviewDecisionRecord(
-                            record_id="engineering-accepted",
+                            record_id=f"engineering-accepted-{review.checklist_digest}",
                             product=profile().product,
                             checklist_digest=review.checklist_digest,
                             checklist=review.checklist,
@@ -589,5 +591,19 @@ class EngineeringNotesReleaseTests(unittest.TestCase):
                             actor_github_id=profile().owner.github_id,
                             actor_github_login=profile().owner.github_login,
                             decided_at="2026-10-10T00:00:00Z",
+                            release_issue_url="https://github.com/example/site/issues/99",
                         )
                         self.assertEqual(accepted.decision, "accepted")
+                        store.write_release_review_decision_record(accepted)
+                        repeated = build_release_review(store=store, profile=profile(), read=read)
+                        self.assertTrue(repeated.approved)
+                        with patch(
+                            "control_plane.release_review.current_release_review",
+                            return_value=repeated,
+                        ):
+                            require_release_approval(
+                                control_plane_root=Path(temporary),
+                                record_store=store,
+                                product=profile().product,
+                                artifact_id=review.checklist.candidate.artifact_id,
+                            )

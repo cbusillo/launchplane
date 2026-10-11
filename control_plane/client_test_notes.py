@@ -70,13 +70,16 @@ class ClientTestNotes:
     explicit_override: bool = False
 
 
-def client_test_notes(notes: str, *, review_override: bool = False) -> ClientTestNotes:
+def client_test_notes(
+    notes: str, *, review_override: bool = False, historical: bool = False
+) -> ClientTestNotes:
     notes = re.sub(r"<!--[\s\S]*?-->", "", notes).strip()
     sections = re.split(r"(?m)^### #([0-9]+)[^\n]*\n", notes)
     if len(sections) > 1:
         member_notes = ([sections[0]] if sections[0].strip() else []) + sections[2::2]
         members = tuple(
-            client_test_notes(section, review_override=review_override) for section in member_notes
+            client_test_notes(section, review_override=review_override, historical=historical)
+            for section in member_notes
         )
         return ClientTestNotes(
             any(member.review_required for member in members),
@@ -97,6 +100,10 @@ def client_test_notes(notes: str, *, review_override: bool = False) -> ClientTes
     )
     if marker:
         suffix = value[len(marker) :]
+        if historical and not suffix:
+            # Old merged declarations were valid without a reason. New PR
+            # admission is strict; release evidence must not rewrite that history.
+            return ClientTestNotes(False)
         # Older notes used a sentence separator; retain that spelling with a reason.
         separators = {":", "."} if marker == LEGACY_NOTHING_TO_TEST else {":"}
         if (
@@ -115,11 +122,23 @@ def client_test_notes(notes: str, *, review_override: bool = False) -> ClientTes
                 True, "The Client review label requires real Client test notes.", True
             )
         return ClientTestNotes(False)
+    if not historical and any(
+        marker.casefold() in value.casefold()
+        for marker in (NOTHING_TO_TEST, LEGACY_NOTHING_TO_TEST)
+    ):
+        return ClientTestNotes(
+            True,
+            "Write Nothing for the Client to test: <reason> as a plain notes line.",
+            review_override,
+        )
     return ClientTestNotes(True, explicit_override=review_override)
 
 
-def change_client_review(*, body: str, labels: Iterable[str], review_label: str) -> ClientTestNotes:
+def change_client_review(
+    *, body: str, labels: Iterable[str], review_label: str, historical: bool = False
+) -> ClientTestNotes:
     return client_test_notes(
         owner_test_notes(body),
         review_override=review_label.strip().casefold() in {label.casefold() for label in labels},
+        historical=historical,
     )

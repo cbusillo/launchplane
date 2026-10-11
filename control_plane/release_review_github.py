@@ -188,6 +188,7 @@ def read_release_changes(
                 )
                 intent = change_client_review(
                     body=str(pull.get("body") or ""),
+                    historical=True,
                     labels=(
                         str(label.get("name") or "")
                         for label in pull.get("labels", ())
