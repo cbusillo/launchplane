@@ -1,0 +1,26 @@
+"""Passive representative pages in an isolated Odoo fixture only."""
+
+from odoo import http
+from odoo.http import request
+
+
+class CutoverPages(http.Controller):
+    @http.route("/fixture-submit", type="http", auth="public", methods=["POST"], csrf=False)
+    def submit(self, message=""):
+        request.env["ir.config_parameter"].sudo().set_param("cutover.fixture.accepted", message)
+        return request.make_response("Accepted", headers=[("Content-Type", "text/plain")])
+
+    @http.route(["/", "/contact", "/prices"], type="http", auth="public", website=True, csrf=False)
+    def page(self, **_values):
+        version = request.env["ir.config_parameter"].sudo().get_param("cutover.fixture.version")
+        html = (
+            '<html><head><title>Cutover fixture</title>'
+            '<link rel="stylesheet" href="/cutover_probe/static/site.css">'
+            '<script src="/cutover_probe/static/site.js"></script></head><body>'
+            '<a href="/">Home</a><a href="/prices">Prices</a><a href="/contact">Contact</a>'
+            f'<h1>Isolated Odoo release {version}</h1>'
+            '<img src="/cutover_probe/static/mark.svg" alt="Fixture mark">'
+            '<form method="post" action="/contact"><input name="message"><button>Send</button></form>'
+            '</body></html>'
+        )
+        return request.make_response(html, headers=[("Content-Type", "text/html")])

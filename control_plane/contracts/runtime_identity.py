@@ -33,6 +33,40 @@ class RuntimeIdentity(BaseModel):
     preview_id: str = ""
     preview_generation_id: str = ""
     deployed_at: str = ""
+    slot: str = Field(
+        default="",
+        exclude_if=lambda value: value == "",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    release_id: str = Field(
+        default="",
+        exclude_if=lambda value: value == "",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    image_digest: str = Field(
+        default="",
+        pattern=r"^(|sha256:[0-9a-f]{64})$",
+        exclude_if=lambda value: value == "",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    database_uuid: str = Field(
+        default="",
+        exclude_if=lambda value: value == "",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_odoo_source_alias(cls, value: object) -> object:
+        # The database-bound Odoo addon names this same source revision. Keep
+        # source_git_ref as Launchplane's single persisted source of truth.
+        if isinstance(value, dict) and "source_revision" in value:
+            value = dict(value)
+            revision = value.pop("source_revision")
+            if value.get("source_git_ref", revision) != revision:
+                raise ValueError("Odoo source revision disagrees with runtime identity")
+            value.setdefault("source_git_ref", revision)
+        return value
 
     @model_validator(mode="after")
     def _validate_identity(self) -> "RuntimeIdentity":
@@ -131,6 +165,10 @@ def compare_runtime_identity(
         "source_git_ref",
         "preview_id",
         "preview_generation_id",
+        "slot",
+        "release_id",
+        "image_digest",
+        "database_uuid",
     ):
         expected_value = str(getattr(expected, field_name) or "")
         observed_value = str(getattr(observed, field_name) or "")

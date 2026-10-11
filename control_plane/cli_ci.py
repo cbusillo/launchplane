@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unittest
 
 import click
 
@@ -17,10 +18,13 @@ from control_plane.unittest_sharding import (
     ShardPlan,
     ShardRunSummary,
     TIMING_SCHEMA_VERSION,
+    TemporaryImportRoot,
     UnittestShardingError,
     aggregate_shard_timings,
+    contains_failed_test,
     discover_test_modules,
     discover_test_targets,
+    iter_test_target_ids,
     plan_shards,
     read_json_object,
     read_module_timings,
@@ -29,6 +33,7 @@ from control_plane.unittest_sharding import (
     utc_timestamp,
     write_json_object,
     write_shard_run_summary,
+    validate_shard_index,
 )
 
 CI_UNITTEST_SHARD_COUNT = 12
@@ -76,7 +81,11 @@ def ci() -> None:
     ),
 )
 @click.option("--verbosity", type=int, default=2, show_default=True)
-def run_postgres_integration_tests(database_url: str, verbosity: int) -> None:
+@click.option("--shard-count", type=click.IntRange(min=1), default=1, show_default=True)
+@click.option("--shard-index", type=int, default=0, show_default=True)
+def run_postgres_integration_tests(
+    database_url: str, verbosity: int, shard_count: int, shard_index: int
+) -> None:
     """Run real-PostgreSQL schema and concurrency integration tests."""
     normalized_database_url = database_url.strip()
     if not normalized_database_url:
@@ -86,17 +95,58 @@ def run_postgres_integration_tests(database_url: str, verbosity: int) -> None:
         )
     environment = os.environ.copy()
     environment["LAUNCHPLANE_TEST_POSTGRES_URL"] = normalized_database_url
+    try:
+        targets = postgres_integration_shard_targets(
+            shard_count=shard_count, shard_index=shard_index
+        )
+    except UnittestShardingError as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(
+        json.dumps(
+            {"shard_count": shard_count, "shard_index": shard_index, "tests": list(targets)},
+            sort_keys=True,
+        )
+    )
     command = [
         sys.executable,
         "-m",
         "unittest",
         "-v" if verbosity > 1 else "",
-        *POSTGRES_INTEGRATION_MODULES,
+        *(POSTGRES_INTEGRATION_MODULES if shard_count == 1 else targets),
     ]
     command = [argument for argument in command if argument]
+    started_at = time.monotonic()
     result = subprocess.run(command, cwd=Path.cwd(), env=environment, check=False)
+    click.echo(
+        json.dumps(
+            {
+                "shard_index": shard_index,
+                "seconds": round(time.monotonic() - started_at, 3),
+                "test_count": len(targets),
+                "returncode": result.returncode,
+            },
+            sort_keys=True,
+        )
+    )
     if result.returncode != 0:
         raise click.ClickException("PostgreSQL integration tests failed")
+
+
+def postgres_integration_shard_targets(*, shard_count: int, shard_index: int) -> tuple[str, ...]:
+    """Partition the existing gate's discovered tests, preserving template reuse per process."""
+    validate_shard_index(shard_count=shard_count, shard_index=shard_index)
+    loader = unittest.TestLoader()
+    with TemporaryImportRoot(Path.cwd()):
+        suite = loader.loadTestsFromNames(POSTGRES_INTEGRATION_MODULES)
+    if contains_failed_test(suite):
+        raise UnittestShardingError("failed to load PostgreSQL integration tests")
+    targets = tuple(iter_test_target_ids(suite))
+    if len(set(targets)) != len(targets):
+        raise UnittestShardingError("duplicate PostgreSQL integration test IDs")
+    selected = plan_shards(targets, shard_count=shard_count).shard(shard_index).modules
+    if not selected:
+        raise UnittestShardingError(f"PostgreSQL integration shard {shard_index} is empty")
+    return selected
 
 
 @ci.group("unittest-shard")

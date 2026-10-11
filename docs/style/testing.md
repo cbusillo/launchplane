@@ -82,8 +82,17 @@ business-write completion and rollback, operation claims, stale lease holders,
 lease recovery, and active-operation partial uniqueness. Same-repo CI provides
 the URL via a PostgreSQL service container with an IPv4-only dynamic host port,
 preventing the runner from selecting an IPv6 mapping for an IPv4 connection;
-fork PRs keep the SQLite/unittest path only. Keep the integration module
-focused: target runtime is under 2 minutes in CI, and any flake should be
+fork PRs keep the SQLite/unittest path only. Same-repo CI partitions the existing
+integration inventory into three parallel jobs using the unittest shard planner.
+Each job discovers the CLI's canonical module/class inventory, runs its
+disjoint test IDs in one process, and retains one migrated template database in
+its own PostgreSQL service. `fail-fast: false` lets every shard finish after a
+failure; `ci-gate` requires the whole matrix to succeed. Each log records selected
+test IDs and elapsed test time. The default local command still runs the complete
+serial inventory; reproduce one CI job with `--shard-count 3 --shard-index 0`
+(or index 1 or 2). Invalid, empty, or unloadable selections fail before execution.
+Keep the integration module focused: target runtime is under 2 minutes in CI,
+and any flake should be
 treated as a storage or harness bug rather than hidden with a retry loop.
 
 The lower-level CI shard commands remain available for diagnosis:

@@ -54,6 +54,10 @@ _DUAL_SCOPE_AUTHZ_ACTIONS = frozenset(
         "driver.read",
         "ingress_route.apply",
         "ingress_route.plan",
+        # The live-target endpoint authorizes these at context scope; the
+        # service-restart endpoint additionally requires an instance target.
+        "live_target_runtime.apply",
+        "live_target_runtime.plan",
         "operations.read",
         "product_config.apply",
         "product_config.plan",

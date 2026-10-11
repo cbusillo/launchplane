@@ -1,0 +1,1 @@
+<odoo><record id="version" model="ir.config_parameter"><field name="key">cutover.fixture.version</field><field name="value">one</field></record></odoo>
