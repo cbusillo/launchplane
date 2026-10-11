@@ -381,12 +381,10 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self._publish(github)
         self.assertEqual(tuple(github.writes), writes)
 
-        # Requiring review again must restore the gate, even without a new head.
-        # Before publication catches up, the train must not mistake the existing
-        # engineering-only check for a Client acceptance.
+        # The train's acceptance predicate must not mistake the neutral check for
+        # a Client acceptance, even before the next publication.
         from control_plane.merge_train_github import _owner_review_status
 
-        github.body = "## Client test notes\nTry the changed page."
         self.assertEqual(
             _owner_review_status(
                 {"check_runs": github.check_runs},
@@ -395,7 +393,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
             ),
             "pending",
         )
-        github.body = "## Client test notes\nNothing for the Client to test: CI tools only."
+        # Requiring review again must restore the gate, even without a new head.
         github.labels = ("owner-review",)
         self._publish(github)
         self.assertEqual(github.statuses[0]["state"], "failure")

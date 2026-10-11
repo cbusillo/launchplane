@@ -22,8 +22,9 @@ notes is described in [release-review.md](release-review.md).
 Editing the PR body re-plans its preview and review intent without needing a
 push or label change.
 The preview reconciler refreshes the Client-review check even while waiting for
-a verified build. Valid engineering-only notes replace an earlier missing-notes
-failure with a neutral check saying no Client preview review is required, without
+a verified build or after a failed preview apply. Valid engineering-only notes
+publish a neutral check, replacing any earlier missing-notes failure, saying no
+Client preview review is required, without
 recording a Client decision or sending a review invitation. A later review label,
 missing notes, or real test notes restores the corresponding review gate on the
 same head when the check refreshes. Until then, an engineering-only check cannot

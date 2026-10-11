@@ -264,41 +264,16 @@ evidence requires fresh review.
 
 ## Client Review Request
 
-Launchplane does not decide which pull requests a Client needs to see. The
-agent (or the Director) that opens the pull request marks it with the product's
-Client review label (`owner.review_label` on the product profile, default
-`owner-review`). When a ready preview comment is written for a marked pull
-request, Launchplane mentions the product's Client with the preview URL and the
-focused `/ui/owner-review` page. A marked pull request on a product with no
-Client says so instead of mentioning anyone. Unmarked pull requests get no Client
-section. If the labels cannot be read, the comment is still delivered without an
-Client section; release approval is the safety net (see
-[DIRECTION.md](../DIRECTION.md)).
+[Client review](owner-acceptance.md#current-client-review) owns review intent
+from test notes, label overrides, engineering-only checks, invitations and
+decision delivery. Its [carry rules](owner-acceptance.md#carried-acceptance) own
+acceptance across unchanged-feature base updates.
 
-Feedback comments use a repository-scoped Launchplane Delivery App token.
-
-The Client's answer is shown on the pull request as one App-owned check run,
-`launchplane/owner-review`, on the current head. Launchplane writes it with the
-dedicated Advisory Checks App, when the ready preview comment is written
-(by the feedback route or the event reconciler) and again as soon as the Client
-records a decision:
-
-- marked, Client set, no decision for the current head: `in_progress`, "Waiting for
-  @client to review the preview", linking the focused `/ui/owner-review` page;
-- latest decision recorded for the current head: `success` ("Accepted by
-  @client") or `failure` ("Changes requested by @client");
-- a decision recorded for an older head does not count, because the Client
-  reviews what is actually previewed, so the check returns to `in_progress`;
-  a carried acceptance is saved as its own decision for the new head and shown
-  as `success` with its source acceptance. The carry rules are owned by
-  [carried acceptance](owner-acceptance.md#carried-acceptance);
-- marked with no Client: `in_progress`, `No Client set for this product`;
-- unmarked: no check is written.
-
-Check delivery is best-effort. A source-control failure is logged and never
-fails preview feedback or loses a recorded decision; the next ready preview
-comment or decision writes it again. The check is a signal for people. It is
-not a merge or promotion gate.
+Feedback comments use a repository-scoped Launchplane Delivery App token;
+the [Client-review check](advisory-governance-checks.md#client-review-check)
+uses the separate Advisory Checks App. Check delivery is best-effort and never
+loses a saved decision or fails preview feedback. A later preview reconcile or
+decision retries publication.
 
 ## Manager Preview Approval
 
