@@ -15,6 +15,7 @@ from control_plane.client_release import accepted_release_can_start, read_client
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.release_review_shared import repository_key
 from control_plane.release_review import (
     ReleaseEvidenceUnavailable,
     ReleaseReviewStore,
@@ -53,7 +54,7 @@ def merge_train_release_hold(
         if not decisions or decisions[0].decision != "accepted":
             continue
         decision = decisions[0]
-        if repository.casefold() not in _release_repositories(decision):
+        if repository_key(repository) not in _release_repositories(store, decision):
             continue
         if _release_in_flight(store, profile, decision):
             return MergeTrainReleaseHold(product=profile.product)
@@ -72,11 +73,28 @@ def merge_train_release_hold_reader(store: object) -> MergeTrainReleaseHoldReade
     return read
 
 
-def _release_repositories(decision: ReleaseReviewDecisionRecord) -> set[str]:
+def _release_repositories(
+    store: MergeTrainReleaseHoldStore, decision: ReleaseReviewDecisionRecord
+) -> set[str]:
+    """The product repository and every source the accepted candidate was built from.
+
+    The checklist names only shared sources that changed, so the candidate
+    artifact supplies the unchanged ones too.
+    """
+
     checklist = decision.checklist
-    return {checklist.repository.casefold()} | {
-        source.repository.casefold() for source in checklist.shared_sources
+    repositories = {repository_key(checklist.repository)} | {
+        repository_key(source.repository) for source in checklist.shared_sources
     }
+    try:
+        artifact = store.read_artifact_manifest(checklist.candidate.artifact_id)
+    except FileNotFoundError:
+        return repositories
+    return (
+        repositories
+        | {repository_key(source.repository) for source in artifact.addon_sources}
+        | {repository_key(selector.repository) for selector in artifact.addon_selectors}
+    )
 
 
 def _release_in_flight(
@@ -90,11 +108,18 @@ def _release_in_flight(
     if run.state == "running":
         return True
     # A waiting release continues only while its decision still starts a release
-    # and testing still holds the accepted candidate; otherwise it can never run.
+    # and the lanes still carry it: testing the accepted candidate, and production
+    # the checklist's version before any step, or either version between steps.
     if not accepted_release_can_start(store, decision):
         return False
+    checklist = decision.checklist
     try:
         candidate = release_version(store=store, profile=profile, instance="testing")
+        production = release_version(store=store, profile=profile, instance="prod")
     except ReleaseEvidenceUnavailable:
         return False
-    return candidate == decision.checklist.candidate
+    started = any(step.status == "pass" for step in run.steps)
+    allowed_production = (
+        (checklist.production, checklist.candidate) if started else (checklist.production,)
+    )
+    return candidate == checklist.candidate and production in allowed_production

@@ -44,8 +44,8 @@ from control_plane.contracts.product_profile_record import ReleaseOnAcceptance
 from control_plane.contracts.release_review import (
     ReleaseReviewDecisionRecord,
     ReleaseStart,
-    SharedSourceReview,
 )
+from control_plane.contracts.artifact_identity import ArtifactAddonSource
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyResult,
@@ -1156,24 +1156,24 @@ class ClientReleaseTests(unittest.TestCase):
     ) -> None:
         self.switch("promote")
         self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
-        accepted = decision(self.store).model_copy(update={"release_start": "promote"})
-        accepted = accepted.model_copy(
-            update={
-                "checklist": accepted.checklist.model_copy(
+        # An unchanged shared source is absent from the checklist but still feeds
+        # the candidate, so its train is held too.
+        for artifact_id in ("artifact-prod", "artifact-testing"):
+            manifest = self.store.read_artifact_manifest(artifact_id)
+            self.store.write_artifact_manifest(
+                manifest.model_copy(
                     update={
-                        "shared_sources": (
-                            SharedSourceReview(
-                                repository="example/shared-addons",
-                                production_commit=BASE,
-                                candidate_commit=HEAD,
-                                items=(),
+                        "addon_sources": (
+                            ArtifactAddonSource(
+                                repository="https://github.com/example/shared-addons.git",
+                                ref=BASE,
                             ),
                         )
                     }
                 )
-            }
-        )
-        self.store.write_release_review_decision_record(accepted)
+            )
+        accepted = self.accept()
+        self.assertEqual(accepted.checklist.shared_sources, ())
         held = MergeTrainReleaseHold(product=PRODUCT)
 
         self.assertEqual(merge_train_release_hold(self.store, "Example/Site"), held)
@@ -1182,6 +1182,7 @@ class ClientReleaseTests(unittest.TestCase):
         (backup_id,) = self.advance()
         self.assertEqual(merge_train_release_hold(self.store, "example/site"), held)
         self.finish(backup_id)
+        self.assertEqual(merge_train_release_hold(self.store, "example/site"), held)
         (promotion_id,) = self.advance()
         self.finish(promotion_id)
         self.set_prod("artifact-testing")
@@ -1199,6 +1200,15 @@ class ClientReleaseTests(unittest.TestCase):
         self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
 
         self.accept(date="2026-09-23T03:00:00Z")
+        self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
+        # A hotfix moved production off the reviewed version before any step.
+        hotfix = self.store.read_artifact_manifest("artifact-prod")
+        self.store.write_artifact_manifest(
+            hotfix.model_copy(update={"artifact_id": "artifact-hotfix"})
+        )
+        self.set_prod("artifact-hotfix")
+        self.assertIsNone(merge_train_release_hold(self.store, "example/site"))
+        self.set_prod("artifact-prod")
         self.assertIsNotNone(merge_train_release_hold(self.store, "example/site"))
         # An admin holding the product's releases after acceptance stops the start.
         self.switch("held")
