@@ -152,13 +152,17 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const liveSiteName = response ? `${response.display_name}${liveSite ? ` (${liveSite.host})` : ""}` : "";
   const reviewingHotfix = !!response?.reviewing_temporary_hotfix;
   const incomplete = !checklist || !(reviewingHotfix || testingUrl) || response?.review.checklist_complete !== true;
-  const hasChanges = !!checklist && checklist.production.source_commit !== checklist.candidate.source_commit;
+  const hasChanges = !!checklist && (
+    checklist.production.artifact_id !== checklist.candidate.artifact_id
+    || checklist.production.source_commit !== checklist.candidate.source_commit
+    || (checklist.production.shared_addons_digest ?? "") !== (checklist.candidate.shared_addons_digest ?? "")
+  );
   const client = response?.owner_github_login ?? "";
   // A viewer who is not the Client learns first who the Client is and that their
   // own decision cannot start the release.
   const clientRule = client ? reviewingHotfix
     ? `${client} is the Client. The urgent fix is already live; ${client}'s Accept keeps it as the accepted release, and Request changes rolls it back.`
-    : `${client} is the Client. ${client}'s Accept ${releaseStarts ? "starts" : "approves"} this release.${response?.can_start_temporary_hotfix ? " You can also start a temporary hotfix for breakage on the live site, using the separate control below." : " Only the Client's acceptance starts a normal release."}` : "";
+    : `${client} is the Client. ${client}'s Accept ${releaseStarts ? "starts" : "approves"} this release.${response?.can_start_temporary_hotfix && hasChanges ? " You can also start a temporary hotfix for breakage on the live site, using the separate control below." : " Only the Client can accept a normal release."}` : "";
   const adminRule = reviewingHotfix
     ? "An admin approval override is unavailable while the live fix awaits the Client's review."
     : "A normal approval you record here is an admin override and does not start the release.";
@@ -227,7 +231,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         </div>
         {urgentSent ? <p role="status" className="owner-review-success">A release review request is open for {client}. Nothing has been deployed.</p> : null}
       </section> : null}
-      {checklist && response.can_override ? <section className="owner-review-action release-review-override" aria-label="Admin Approval Override">
+      {checklist && response.can_override && !reviewingHotfix ? <section className="owner-review-action release-review-override" aria-label="Admin Approval Override">
         <h3>Admin Approval Override</h3>
         <p>This records approval under your admin identity for a later production deployment without Client acceptance. It replaces any earlier request for changes. Explain why you are overriding the Client review.</p>
         <label><span>Justification for approving this release by override</span><textarea value={overrideReason} maxLength={4000} disabled={busy} onChange={event => setOverrideReason(event.target.value)} /></label>

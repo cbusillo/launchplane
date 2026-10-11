@@ -3,7 +3,7 @@ import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
 
 test("Preview-era note markers identify each PR only in the engineering view", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
-  await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
   const response = await page.evaluate(async () => {
     const fixtures = await import("/ui/src/dev-fixtures.ts");
     return fixtures.releaseReviewForFixture("products");
@@ -26,7 +26,7 @@ test("Preview-era note markers identify each PR only in the engineering view", a
 
 test("Failed releases distinguish automatic recovery from the rollback drill", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
-  await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
   const response = await page.evaluate(async () => {
     const modulePath = "/ui/src/dev-fixtures.ts";
     const fixtures = await import(modulePath);
@@ -82,7 +82,7 @@ test("Owner reviews the complete release and can request changes after accepting
   page.on("request", request => { if (request.method() !== "GET") mutations.push(request.url()); });
   page.on("pageerror", error => errors.push(error.message));
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
-  await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Open the testing site" })).toHaveAttribute("href", "https://testing.example.invalid/");
   const checks = page.locator(".release-review-checklist").first().locator(":scope > li");
   await expect(checks).toHaveCount(1);
@@ -205,7 +205,7 @@ test("A failed release step shows the reason and its record and trace", async ({
 
 test("Urgent invitation controls respect a live hotfix and an unchanged candidate", async ({ page }) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=operator");
-  await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
   const response = await page.evaluate(async () => {
     const fixtures = await import("/ui/src/dev-fixtures.ts");
     return fixtures.releaseReviewForFixture("operator");
@@ -220,12 +220,19 @@ test("Urgent invitation controls respect a live hotfix and an unchanged candidat
     await expect(role).toContainText("urgent fix is already live");
     await expect(role).toContainText("Accept keeps it");
     await expect(role).toContainText("override is unavailable");
+    await expect(page.getByRole("region", { name: "Admin Approval Override", exact: true })).toHaveCount(0);
     await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toHaveCount(0);
   }
   response.reviewing_temporary_hotfix = false;
   await page.reload();
   await expect(page.locator(".owner-review-card > .owner-review-state").first()).toContainText("separate control below");
-  response.review.checklist!.candidate = response.review.checklist!.production;
+  response.review.checklist!.candidate = { ...response.review.checklist!.production };
   await page.reload();
   await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toHaveCount(0);
+  response.review.checklist!.candidate.shared_addons_digest = "shared-security-fix";
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toBeVisible();
+  response.review.checklist!.candidate = { ...response.review.checklist!.production, artifact_id: "rebuilt-security-image" };
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toBeVisible();
 });
