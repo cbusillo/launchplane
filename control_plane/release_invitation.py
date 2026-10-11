@@ -122,6 +122,7 @@ def _announced_changes(
 
 
 REPLACED_MARKER = "<!-- launchplane:release-invitation-replaced -->"
+WHY_NOW = "**Why now:** "
 
 
 def _replace_older_invitations(
@@ -318,7 +319,16 @@ def publish_release_invitation(
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
     backoff: ReleaseInvitationBackoff | None = None,
-) -> None:
+    urgent_reason: str = "",
+    urgent_checklist_digest: str = "",
+) -> bool:
+    """Keep the Client's release request current; return whether one is open.
+
+    Only a Client-facing change opens a request. An engineering-only candidate
+    waits for the next Client-facing release unless an admin deliberately opens
+    it with ``urgent_reason`` for the exact checklist the admin reviewed
+    (``urgent_checklist_digest``). The Client still has to accept it either way.
+    """
     origin = launchplane_public_origin_from_env()
     if (
         not origin
@@ -327,11 +337,11 @@ def publish_release_invitation(
         or profile.release_on_acceptance == "director_standing"
         or not profile.owner.is_set
     ):
-        return
+        return False
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
     if production == candidate:
-        return
+        return False
     last_decision = _last_client_decision(store, profile)
     request_marker = _request_marker(profile, last_decision)
     receipt = (
@@ -344,7 +354,7 @@ def publish_release_invitation(
         previous_marker, next_read = backoff.delivered.get(receipt[:2], ("", 0))
         if previous_marker == receipt[2]:
             if monotonic() < next_read:
-                return
+                return True
             receipt_due = True
             backoff.delivered.pop(receipt[:2])
     # A live temporary hotfix awaits the Client's review first; its release record
@@ -352,7 +362,7 @@ def publish_release_invitation(
     from control_plane.client_release import live_temporary_hotfix
 
     if live_temporary_hotfix(store, profile) is not None:
-        return
+        return False
     # Do not compile a large checklist on every worker poll. This is a read
     # throttle only; GitHub's candidate marker remains the durable receipt.
     fingerprint = (
@@ -361,7 +371,7 @@ def publish_release_invitation(
     if backoff is not None:
         previous_fingerprint, next_read = backoff.next_reads.get(profile.product, ("", 0))
         if not receipt_due and previous_fingerprint == fingerprint and monotonic() < next_read:
-            return
+            return False
         backoff.next_reads[profile.product] = (fingerprint, monotonic() + 300)
     # A person already decided about these versions. The decision still settles the
     # review only while it covers the current checklist; edited test notes change the
@@ -383,7 +393,7 @@ def publish_release_invitation(
         if backoff is not None:
             checked, next_check = backoff.settled.get(profile.product, ("", 0))
             if checked == settled.record_id and monotonic() < next_check:
-                return
+                return False
         current_review = current_release_review(
             control_plane_root=control_plane_root, record_store=store, profile=profile
         )
@@ -396,7 +406,7 @@ def publish_release_invitation(
                     settled.record_id,
                     monotonic() + SETTLED_DECISION_RECHECK_SECONDS,
                 )
-            return
+            return False
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,38}", profile.owner.github_login):
         raise ValueError("Release invitation requires a GitHub login.")
     # Product-wide serialization also prevents competing candidates creating
@@ -404,13 +414,17 @@ def publish_release_invitation(
     with store.release_review_publication_lock(record_id=f"invitation:{profile.product}"):
         current = store.read_product_profile_record(profile.product)
         if current != profile:
-            return
+            return False
         review = current_release_review(
             control_plane_root=control_plane_root, record_store=store, profile=profile
         )
         if not _ready(review, profile):
-            return
+            return False
+        # The admin's reason applies only to the checklist they reviewed.
+        if urgent_reason and review.checklist_digest != urgent_checklist_digest:
+            return False
         assert review.checklist is not None
+        client_changes = client_invitation_changes(store, profile, review.checklist)
         marker = release_invitation_marker(profile.product, review.checklist.candidate)
         issue_marker = release_request_issue_marker(profile.product)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
@@ -434,6 +448,8 @@ def publish_release_invitation(
             if len(issues) > 1:
                 raise ValueError("Release invitation destination is ambiguous.")
             if not issues:
+                if not client_changes and not urgent_reason:
+                    return False
                 created = github_api_request(
                     path=path,
                     token=token,
@@ -449,12 +465,16 @@ def publish_release_invitation(
             comments_path = f"{path}/{number}/comments"
             comments = _pages(comments_path, token)
             request = _open_request(comments, request_marker, last_decision)
+            # Engineering-only changes never open a release review on their own;
+            # they ride with the next Client-facing release or an urgent opening.
+            if request is None and not client_changes and not urgent_reason:
+                return False
             reminder_marker = request_marker.replace("release-request:", "release-reminder:")
             reminded = any(reminder_marker in _comment_lines(comment) for comment in comments)
             # Recompile after destination lookup: a concurrent acceptance or testing
             # deploy must not receive an invitation for the obsolete snapshot.
             if store.read_product_profile_record(profile.product) != profile:
-                return
+                return False
             latest = current_release_review(
                 control_plane_root=control_plane_root, record_store=store, profile=profile
             )
@@ -463,7 +483,7 @@ def publish_release_invitation(
                 or latest.checklist_digest != review.checklist_digest
                 or _last_client_decision(store, profile) != last_decision
             ):
-                return
+                return False
             # Reuse the review page's authority calculation, including unsupported
             # drivers and the one-time rollback drill. Import here to avoid the
             # client-release module's publisher import creating a module cycle.
@@ -481,7 +501,6 @@ def publish_release_invitation(
                 if request
                 else _now() + timedelta(days=3)
             )
-            client_changes = client_invitation_changes(store, profile, review.checklist)
             announced = _announced_changes(request, client_changes, marker)
             added = {key: item for key, item in client_changes.items() if key not in announced}
             # A matching candidate receipt still needs the one-time migration
@@ -500,9 +519,11 @@ def publish_release_invitation(
                     request_marker=request_marker,
                     last_decision=last_decision,
                 )
-                if reminded or _now() < due:
+                # An explicit urgent-open retry only confirms the existing request;
+                # routine workers retain the scheduled reminder behavior.
+                if reminded or _now() < due or urgent_reason:
                     _remember_delivery(backoff, receipt, due, reminded)
-                    return
+                    return True
                 # One durable reminder per open request. A lost response is
                 # recovered from this marker, including after replica restart.
                 body = f"{reminder_marker}\n" + "\n".join(_comment_lines(request)).replace(
@@ -524,7 +545,7 @@ def publish_release_invitation(
                     last_decision=last_decision,
                 )
                 _remember_delivery(backoff, receipt, due, True)
-                return
+                return True
             notify = not request or bool(added)
             changes = [
                 _change_link(change)
@@ -542,6 +563,15 @@ def publish_release_invitation(
             )
             if reminded:
                 receipts += f"\n{reminder_marker}"
+            # The admin's reason for opening early stays on the request through
+            # later silent updates; neutralize mentions in it like Client notes.
+            why_now = (
+                next((line for line in _comment_lines(request) if line.startswith(WHY_NOW)), "")
+                if request
+                else ""
+            )
+            if not request and urgent_reason:
+                why_now = WHY_NOW + " ".join(urgent_reason.split()).replace("@", "@\u200b")
             display_time = _display_time()
             action = (
                 "check the changes on the testing site, then press **Accept** or **Request changes**."
@@ -552,7 +582,8 @@ def publish_release_invitation(
                 f"{request_marker}\n{marker}\n{receipts}\n\n"
                 "**Release review** — is the site working with these changes, so they can go live?\n\n"
                 f"Hi {client},\n\n"
-                f"{heading}:\n"
+                + (f"{why_now}\n\n" if why_now else "")
+                + f"{heading}:\n"
                 + "\n".join(changes)
                 + f"\n\nStill one thing to do: [open the release page]({review_link}), "
                 + action
@@ -583,6 +614,9 @@ def publish_release_invitation(
             if notify:
                 due = _timestamp(result.get("created_at")) + timedelta(days=3)
             _remember_delivery(backoff, receipt, due, reminded)
+            return True
+    # The lock's context-manager type allows it to suppress an error.
+    return False
 
 
 def main() -> None:
