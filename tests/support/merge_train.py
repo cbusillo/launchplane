@@ -28,6 +28,10 @@ from control_plane.contracts.merge_train_stack_collapse import (
     build_merge_train_stack_collapse_plan_record,
     execute_merge_train_stack_collapse_plan,
 )
+from control_plane.merge_train_candidate_failures import (
+    CandidateCheckFailure,
+    CandidateCheckFailures,
+)
 from control_plane.merge_train import (
     MergeTrainLabelActor,
     MergeTrainCheckStatus,
@@ -308,10 +312,31 @@ class _FakeMergeTrainGitHubClient:
 
 
 class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
+    labels_added: list[tuple[int, str]] = []
+
     def observe_batch_candidate_checks(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainBatchCandidate:
         return candidate.model_copy(update={"required_checks_status": "fail", "status": "failed"})
+
+    def read_candidate_check_failures(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> CandidateCheckFailures:
+        return CandidateCheckFailures(
+            checks=(
+                CandidateCheckFailure(
+                    name="test_shard (0)",
+                    conclusion="failure",
+                    url="https://github.com/cbusillo/sellyouroutboard/actions/runs/1/job/2",
+                    failed_tests=("tests.test_widget.WidgetTests.test_renders",),
+                ),
+            )
+        )
+
+    def add_pull_request_label(
+        self, *, repository: str, pull_request_number: int, label: str
+    ) -> None:
+        self.labels_added.append((pull_request_number, label))
 
 
 class _StaleCandidateMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):

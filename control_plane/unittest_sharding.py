@@ -467,7 +467,14 @@ def run_test_modules(
     import_root: Path,
     stream: TextIO,
     verbosity: int = 2,
+    annotation_stream: TextIO | None = None,
 ) -> ShardRunSummary:
+    """Run the shard's targets.
+
+    With ``annotation_stream``, each failed or erroring test is also written as a
+    GitHub Actions error annotation titled ``Failed test``, which the merge train
+    reads to name the test on a pull request it holds out.
+    """
     validate_shard_index(shard_count=shard_count, shard_index=shard_index)
     if not modules:
         raise UnittestShardingError(f"shard {shard_index} has no test targets")
@@ -484,6 +491,8 @@ def run_test_modules(
             result = unittest.TextTestRunner(stream=stream, verbosity=verbosity).run(suite)
             elapsed_seconds = time.monotonic() - started_at
             successful = successful and result.wasSuccessful()
+            if annotation_stream is not None:
+                write_failed_test_annotations(result, annotation_stream)
             module_timings.append(
                 ModuleRunTiming(
                     module=module_name,
@@ -497,6 +506,21 @@ def run_test_modules(
         successful=successful,
         modules=tuple(module_timings),
     )
+
+
+def write_failed_test_annotations(result: unittest.TestResult, stream: TextIO) -> None:
+    failed_test_ids: dict[str, None] = {}
+    failed_tests = (
+        *(test for test, _ in (*result.failures, *result.errors)),
+        *result.unexpectedSuccesses,
+    )
+    for test in failed_tests:
+        # A failed subtest names its parent test; the subtest parameters stay in the log.
+        test_case = getattr(test, "test_case", test)
+        failed_test_ids[test_case.id()] = None
+    for test_id in failed_test_ids:
+        stream.write(f"::error title=Failed test::{test_id}\n")
+    stream.flush()
 
 
 def write_shard_run_summary(summary: ShardRunSummary, output_file: Path) -> None:
