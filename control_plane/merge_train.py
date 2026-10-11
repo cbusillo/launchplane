@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from typing import Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
@@ -65,6 +66,13 @@ class MergeTrainLabelActor(BaseModel):
 
 # GitHub's code-scanning App opens review threads for its findings.
 CODE_SCANNING_REVIEW_AUTHOR = "github-advanced-security"
+DEPENDENCY_HEAD_CONFLICTS = "dependency update current-head merge conflicts"
+DEPENDENCY_HEAD_MERGEABILITY_UNKNOWN = "dependency update current-head mergeability unknown"
+DEPENDENCY_HEAD_CHECKS_FAILED = "dependency update current-head checks failed"
+# The current-head holds an automatically admitted dependency update requalifies from.
+DEPENDENCY_HEAD_HOLD_REASONS = frozenset(
+    {DEPENDENCY_HEAD_CONFLICTS, DEPENDENCY_HEAD_MERGEABILITY_UNKNOWN, DEPENDENCY_HEAD_CHECKS_FAILED}
+)
 
 
 class MergeTrainReviewConversations(BaseModel):
@@ -356,6 +364,8 @@ def build_merge_train_dry_run_result(
             eligible_entries = tuple(entry for entry in queue if entry.eligible)
         batch_entries: list[MergeTrainQueueEntry] = []
         for entry in eligible_entries:
+            if len(batch_entries) == repository_policy.max_batch_size:
+                break
             if entry.requires_individual_landing:
                 if not batch_entries:
                     batch_entries.append(entry)
@@ -402,6 +412,27 @@ def build_merge_train_dry_run_result(
         selected_pr=selected_pr,
         intended_next_action=intended_next_action,
         next_action_detail=next_action_detail,
+    )
+
+
+def merge_train_snapshot_of(
+    snapshot: MergeTrainDryRunSnapshot, pull_request_numbers: Collection[int]
+) -> MergeTrainDryRunSnapshot:
+    """The snapshot as if only these pull requests were open against the base.
+
+    Rebuilding a planned batch from its own members applies every batch rule to
+    them while other eligible pull requests, wherever they sort, wait for the
+    next candidate.
+    """
+    numbers = frozenset(pull_request_numbers)
+    return snapshot.model_copy(
+        update={
+            "pull_requests": tuple(
+                pull_request
+                for pull_request in snapshot.pull_requests
+                if pull_request.number in numbers
+            )
+        }
     )
 
 
@@ -717,11 +748,11 @@ def _build_queue_entry(
         ineligible_reasons.append(
             pull_request.client_test_notes_error
             if pull_request.client_test_notes_error
-            else "dependency update current-head merge conflicts"
+            else DEPENDENCY_HEAD_CONFLICTS
             if pull_request.mergeable == "conflicting"
-            else "dependency update current-head mergeability unknown"
+            else DEPENDENCY_HEAD_MERGEABILITY_UNKNOWN
             if pull_request.mergeable == "unknown"
-            else "dependency update current-head checks failed"
+            else DEPENDENCY_HEAD_CHECKS_FAILED
         )
     if repository_policy.enqueue.label_required and label_refusal:
         if not is_dependency_update:

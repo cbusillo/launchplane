@@ -54,6 +54,7 @@ from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainSnapshotReader,
     build_merge_train_dry_run_result,
+    merge_train_snapshot_of,
     review_conversations_reason,
 )
 from control_plane.merge_train_github import GitHubMergeTrainClient, GitHubMergeTrainSnapshotReader
@@ -301,24 +302,14 @@ class LiveMergeAdmissionEvaluator:
                 repository=landing_plan.repository,
                 base_branch=landing_plan.base_branch,
             )
-            # Use the same conflict hold-outs as planning, bound to the exact
-            # PR and head. A changed head returns to the live queue.
-            held_out = {
-                (held.pull_request_number, held.head_sha)
-                for held in candidate_record.candidate.held_out
-            }
-            snapshot = snapshot.model_copy(
-                update={
-                    "pull_requests": tuple(
-                        pull_request
-                        for pull_request in snapshot.pull_requests
-                        if (pull_request.number, pull_request.head_sha) not in held_out
-                    )
-                }
-            )
+            # Only the plan's own entries decide its lineage. Conflict hold-outs
+            # and pull requests that joined the queue after planning, wherever
+            # they sort, wait for the next candidate (#2637, #3327).
             live_queue = build_merge_train_dry_run_result(
                 policy=policy_record.policy,
-                snapshot=snapshot,
+                snapshot=merge_train_snapshot_of(
+                    snapshot, [number for number, _ in expected_queue]
+                ),
                 batch_landing=candidate_record.ordinary_job_binding is None,
                 # Already verified heads can briefly report unknown mergeability
                 # after the base moves. Unplanned heads retain their queue hold.
@@ -349,11 +340,7 @@ class LiveMergeAdmissionEvaluator:
             (pull_request_number, live_queue_by_number[pull_request_number].head_sha)
             for pull_request_number in live_queue.queue_order
         )
-        # The planned entries must still lead the live queue, unchanged and in
-        # order. A pull request that joined behind them waits for the next
-        # candidate instead of wedging this landing (#2637); one that sorts ahead
-        # of a planned entry still changes the lineage.
-        queue_matches = live_queue_identity[: len(expected_queue)] == expected_queue
+        queue_matches = live_queue_identity == expected_queue
         if not queue_matches:
             queue_matches = _ordinary_no_op_lifecycle_queue_matches(
                 candidate_record=candidate_record,
