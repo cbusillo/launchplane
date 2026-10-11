@@ -25,6 +25,28 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' || (startsWith(github.ref, 'refs/heads/launchplane/train/') && !github.event.created && !github.event.forced) }}
 
 jobs:
+  runner_pool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      runner: ${{ steps.select.outputs.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select CI runner pool
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          REPOSITORY_VISIBILITY: ${{ github.repository_visibility }}
+          RUNNER_LABEL: ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+        run: bash scripts/select-ci-runner.sh
+
   repository_pins:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -171,14 +193,12 @@ jobs:
           echo "verified=${verified}" >> "${GITHUB_OUTPUT}"
 
   static_checks:
-    needs: [verified_tree, audit_policy]
+    needs: [runner_pool, verified_tree, audit_policy]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -276,14 +296,12 @@ jobs:
           fi
 
   container_scan:
-    needs: [verified_tree, audit_policy]
+    needs: [runner_pool, verified_tree, audit_policy]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     permissions:
       contents: read
       packages: read
@@ -471,14 +489,12 @@ jobs:
         run: docker image rm "$LAUNCHPLANE_CI_IMAGE_TAG" || true
 
   frontend_validate:
-    needs: verified_tree
+    needs: [runner_pool, verified_tree]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -627,14 +643,12 @@ jobs:
           retention-days: 14
 
   test_timing_snapshot:
-    needs: verified_tree
+    needs: [runner_pool, verified_tree]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     env:
       UNITTEST_TIMINGS_CACHE: .ci-cache/unittest-timings/history.json
       UNITTEST_SHARD_COUNT: "12"
@@ -700,7 +714,7 @@ jobs:
           retention-days: 30
 
   test_shards:
-    needs: test_timing_snapshot
+    needs: [runner_pool, test_timing_snapshot]
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
@@ -709,9 +723,7 @@ jobs:
       UNITTEST_SHARD_COUNT: "12"
       UNITTEST_MAX_TESTS_PER_TARGET: "20"
       UNITTEST_MAX_SECONDS_PER_TARGET: "30"
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     strategy:
       fail-fast: false
       matrix:
@@ -766,15 +778,13 @@ jobs:
           retention-days: 30
 
   test:
-    needs: [verified_tree, test_timing_snapshot, test_shards]
+    needs: [runner_pool, verified_tree, test_timing_snapshot, test_shards]
     if: >-
-      always() &&
+      always() && needs.runner_pool.result == 'success' &&
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     env:
       UNITTEST_TIMINGS_CACHE: .ci-cache/unittest-timings/history.json
       UNITTEST_SHARD_COUNT: "12"
@@ -867,14 +877,12 @@ jobs:
         run: uv run --extra dev python -m unittest
 
   postgres_integration:
-    needs: verified_tree
+    needs: [runner_pool, verified_tree]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     # A lock wait without a timeout would otherwise hold a runner for six hours.
     timeout-minutes: 20
     services:
