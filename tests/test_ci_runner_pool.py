@@ -131,31 +131,39 @@ class CIRunnerPoolTests(unittest.TestCase):
             "ci_gate", "Require successful CI path"
         )
         assert step is not None
-        for status in ["failure", "skipped"]:
-            with self.subTest(status=status):
-                result = subprocess.run(
-                    ["bash", "-c", step.run],
-                    env=os.environ
-                    | {
-                        "RUNNER_POOL_RESULT": "success",
-                        "CANDIDATE_CI_RESULT": "success",
-                        "AUDIT_POLICY_RESULT": "success",
-                        "REPOSITORY_PINS_RESULT": "success",
-                        "VERIFIED_TREE": "false",
-                        "BASE_REPOSITORY": "example/control",
-                        "HEAD_REPOSITORY": "example/control",
-                        "STATIC_CHECKS_RESULT": "success",
-                        "CONTAINER_SCAN_RESULT": "success",
-                        "FRONTEND_VALIDATE_RESULT": "success",
-                        "FRONTEND_BROWSER_SMOKE_RESULT": "success",
-                        "TEST_RESULT": status,
-                        "POSTGRES_INTEGRATION_RESULT": "success",
-                    },
-                    capture_output=True,
-                    text=True,
-                )
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(f"test concluded with: {status}", result.stderr)
+        for job, result_key in (
+            ("test", "TEST_RESULT"),
+            ("postgres_integration", "POSTGRES_INTEGRATION_RESULT"),
+        ):
+            for status in ["failure", "skipped", "cancelled", "success"]:
+                with self.subTest(job=job, status=status):
+                    result = subprocess.run(
+                        ["bash", "-c", step.run],
+                        env=os.environ
+                        | {
+                            "RUNNER_POOL_RESULT": "success",
+                            "CANDIDATE_CI_RESULT": "success",
+                            "AUDIT_POLICY_RESULT": "success",
+                            "REPOSITORY_PINS_RESULT": "success",
+                            "VERIFIED_TREE": "false",
+                            "BASE_REPOSITORY": "example/control",
+                            "HEAD_REPOSITORY": "example/control",
+                            "STATIC_CHECKS_RESULT": "success",
+                            "CONTAINER_SCAN_RESULT": "success",
+                            "FRONTEND_VALIDATE_RESULT": "success",
+                            "FRONTEND_BROWSER_SMOKE_RESULT": "success",
+                            "TEST_RESULT": "success",
+                            "POSTGRES_INTEGRATION_RESULT": "success",
+                            result_key: status,
+                        },
+                        capture_output=True,
+                        text=True,
+                    )
+                    if status == "success":
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(f"{job} concluded with: {status}", result.stderr)
 
     def test_runner_label_is_json_encoded(self) -> None:
         label = 'lane"with\\characters'
