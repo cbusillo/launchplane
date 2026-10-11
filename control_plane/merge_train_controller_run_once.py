@@ -3557,8 +3557,8 @@ def _advance_waiting_stack_collapse_record(
             "collapse_id": waiting_collapse_record.plan.collapse_id,
         },
     )
-    # The root-only dry run cannot see the rest of the queue, but landing
-    # admission reads it, so record the dependency holds from the full queue.
+    # The root-only dry run cannot see the rest of the queue. Record its
+    # dependency holds for failed-candidate recovery, which reads the full queue.
     dependency_holds = (
         dependency_not_ready_holds(
             build_merge_train_dry_run_result(policy=policy, snapshot=snapshot, batch_landing=True),

@@ -24,6 +24,7 @@ from tests.support.auth import _StubVerifier
 from tests.support.merge_train import (
     _FakeCollapsedRootStackedMergeTrainSnapshotReader,
     _FakeExpandedMergeTrainSnapshotReader,
+    _FakeFailingMergeTrainGitHubClient,
     _FakeMergeTrainGitHubClient,
     _FakeStackedMergeTrainSnapshotReader,
     _merge_train_service_identity,
@@ -102,6 +103,26 @@ class DependencyRequalificationTests(unittest.IsolatedAsyncioTestCase):
             state.landed = True
             idle = await _post(app, request, "idle")
             self.assertNotIn("candidate", idle)
+
+    async def test_settled_dependency_does_not_replace_a_failed_candidate_on_recovery(self) -> None:
+        state = _DependencyState(mergeable="unknown")
+        async with _controller(state) as (app, store, request):
+            await _post(app, request, "plan_candidate")
+            await _post(app, request, "build_candidate")
+            with patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                _FakeFailingMergeTrainGitHubClient,
+            ):
+                failed = await _post(app, request, "observe_candidate")
+                self.assertEqual(failed["candidate"]["status"], "failed")
+
+            state.mergeable = "mergeable"
+            recovered = await _post(app, request, "observe_candidate")
+            self.assertEqual(_entries(recovered), [2])
+            self.assertEqual(recovered["candidate"]["status"], "passed")
+            self.assertEqual(len(_batch_ids(store)), 1)
+            for action in ("plan_landing", "land_batch"):
+                await _post(app, request, action)
 
     async def test_collapsed_root_candidate_records_the_dependency_hold(self) -> None:
         state = _DependencyState(mergeable="unknown")
