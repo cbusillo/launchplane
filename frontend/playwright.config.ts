@@ -48,7 +48,7 @@ export default defineConfig({
   ],
   webServer: {
     command: "pnpm exec vite --host 127.0.0.1 --port 0 --strictPort",
-    env: { FORCE_COLOR: "0" },
+    env: { FORCE_COLOR: "0", NO_COLOR: "1" },
     // Each runner owns its OS-assigned listener; Playwright passes the captured
     // origin to worker processes before they load this configuration.
     wait: { stdout: /Local:\s+(?<browser_smoke_url>http:\/\/127\.0\.0\.1:\d+)\/ui\// },

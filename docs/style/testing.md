@@ -252,8 +252,10 @@ pnpm --dir frontend exec node --test tests/browser-support/server-isolation.test
 The Playwright suite starts its own Vite development server on an OS-assigned
 loopback port. Playwright captures the listener URL from Vite's startup output
 and passes it to workers; overlapping runner jobs never reuse another job's
-server. The isolation test holds two actual smoke runs open together and checks
-that their browser origins differ. It writes only task-local test artifacts.
+server. The isolation test holds two focused browser probes open together using
+the smoke configuration and checks that their origins differ. It runs as part
+of `test:browser`; the standalone command above is for focused diagnosis.
+It writes only task-local test artifacts.
 
 The suite uses only repo-local
 development fixtures. Product-detail journeys use `?fixture=products`; product
