@@ -17,6 +17,10 @@ from control_plane.workflows.generic_web_deploy_provider import (
 )
 
 
+class OriginalEventDeployEvidenceUnavailable(ValueError):
+    """No saved request has the held reservation's exact fingerprint."""
+
+
 @dataclass(frozen=True)
 class EventDeployRecoveryCoordinates:
     reservation: LaunchplaneIdempotencyRecord
@@ -110,6 +114,10 @@ def resolve_event_deploy_recovery_coordinates(
             == reservation.request_fingerprint
         ):
             matches[envelope.model_dump_json()] = envelope
+    if not matches:
+        raise OriginalEventDeployEvidenceUnavailable(
+            "No saved original event deploy request matches the held reservation."
+        )
     if len(matches) != 1:
         raise ValueError("Original event deploy evidence is absent or ambiguous.")
     return EventDeployRecoveryCoordinates(reservation, next(iter(matches.values())), context)

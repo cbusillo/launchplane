@@ -380,7 +380,9 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             self.assertEqual(code, 403, result)
 
     def test_legacy_saved_plan_requires_exact_fingerprint(self) -> None:
-        self.assertEqual(self.read()[0], 409)
+        code, missing = self.read()
+        self.assertEqual(code, 409, missing)
+        self.assertEqual(missing["error"]["code"], "recovery_original_evidence_unavailable")
         deploy = self.original["deploy"]
         assert isinstance(deploy, dict)
         plan = {
@@ -400,7 +402,24 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             "read_product_reconcile_request",
             return_value=SimpleNamespace(last_plan=plan),
         ):
-            self.assertEqual(self.review(read["recovery_reference"])[0], 409)
+            with patch(
+                "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                side_effect=AssertionError("provider read"),
+            ):
+                code, missing = self.read()
+                self.assertEqual(code, 409, missing)
+                self.assertEqual(missing["error"]["code"], "recovery_original_evidence_unavailable")
+                code, refused = self.review(read["recovery_reference"])
+                self.assertEqual(code, 409, refused)
+                self.assertEqual(refused["error"]["code"], "recovery_original_evidence_unavailable")
+        self.assertEqual(self.store.list_held_provider_target_reservations(), (self.reservation,))
+        for sensitive in (
+            self.reservation.idempotency_key,
+            self.reservation.reconciliation_key,
+            "newer-build",
+            self.manifest.source_commit,
+        ):
+            self.assertNotIn(sensitive, json.dumps([missing, refused]))
 
     def test_retry_preserves_retained_request_and_completes_existing_reservation(self) -> None:
         provider = _RecoveryObservationProvider(
