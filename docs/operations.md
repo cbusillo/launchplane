@@ -548,6 +548,15 @@ explicit path only with separately proven original coordinates. Missing,
 ambiguous, cross-lane or changed evidence refuses; the original request, key and
 provider coordinates remain inside Launchplane.
 
+`recovery_original_evidence_unavailable` (HTTP 409) means no saved original
+request matches the held reservation's fingerprint. This includes legacy
+reservations whose original reconcile inputs were overwritten by a newer build.
+Keep the reservation held. The explicit recovery path requires independently
+proven original coordinates; a current build or a key hash cannot replace them.
+Other changed, cross-lane or ambiguous evidence retains
+`recovery_evidence_conflict`. Neither refusal inspects the provider or changes
+the reservation.
+
 Submit `product`, `instance: "testing"`, `recovery_reference` and `reason` to the
 existing dry-run or provider-evidence POST route, without an `Idempotency-Key`
 header. Apply also requires `expected_recovery_digest` from the reviewed dry run.

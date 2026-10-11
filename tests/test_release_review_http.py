@@ -1,4 +1,6 @@
 import unittest
+
+import click
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -309,6 +311,61 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.store.list_release_review_decision_records(product="example-site"), ()
         )
+
+    async def open_urgent(
+        self, *, actor: str = "operator", github_id: int = 9003, reason: str = "", digest: str = ""
+    ) -> Response:
+        session = self.sessions.issue(_human(login=actor, github_id=github_id))
+        current = build_release_review(store=self.store, profile=profile(), read=github_read)
+        return await _asgi_request(
+            self.app,
+            "POST",
+            "/v1/release-review/urgent-openings",
+            headers=_browser_mutation_headers(self.sessions, session),
+            payload={
+                "product": "example-site",
+                "checklist_digest": digest or current.checklist_digest,
+                "reason": reason,
+            },
+        )
+
+    async def test_only_an_admin_with_a_reason_opens_an_urgent_review(self) -> None:
+        with patch(
+            "control_plane.http_app.publish_release_invitation", return_value=True
+        ) as invitation:
+            for args, status in (
+                ({"actor": "site-owner", "github_id": 9001, "reason": "Urgent."}, 403),
+                ({"actor": "another-user", "github_id": 9002, "reason": "Urgent."}, 403),
+                ({"reason": "   "}, 400),
+                ({"reason": "Urgent.", "digest": "f" * 64}, 409),
+            ):
+                with self.subTest(args=args):
+                    refused = await self.open_urgent(**args)
+                    self.assertEqual(refused.status_code, status, refused.text)
+            invitation.assert_not_called()
+            opened = await self.open_urgent(reason="  Fixes a login security problem. ")
+            self.assertEqual(opened.status_code, 200, opened.text)
+            self.assertEqual(
+                invitation.call_args.kwargs["urgent_reason"], "Fixes a login security problem."
+            )
+            self.assertEqual(
+                invitation.call_args.kwargs["urgent_checklist_digest"],
+                build_release_review(
+                    store=self.store, profile=profile(), read=github_read
+                ).checklist_digest,
+            )
+            invitation.return_value = False
+            unopened = await self.open_urgent(reason="Fixes a login security problem.")
+            self.assertEqual(unopened.status_code, 409, unopened.text)
+            invitation.side_effect = click.ClickException("Response lost after delivery.")
+            uncertain = await self.open_urgent(reason="Fixes a login security problem.")
+            self.assertEqual(uncertain.status_code, 409, uncertain.text)
+            self.assertIn("may already be open", uncertain.text)
+        # Opening asks the Client; it records no decision and starts nothing.
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product="example-site"), ()
+        )
+        self.assertEqual(self.store.list_deployment_records(), ())
 
     async def test_owner_can_reject_after_acceptance(self) -> None:
         await self.post()
