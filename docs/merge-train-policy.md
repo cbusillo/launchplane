@@ -492,6 +492,12 @@ Every fresh snapshot requalifies the update under the existing dependency admiss
 and required-check gates; a new head with pending or unknown checks still cannot
 land. A passing rerun on the same head or a base change resolving conflicts can
 also requalify it. An explicit enqueue label uses the normal block path above.
+A service candidate records each update excluded only for that reason as a
+`held_out` entry with reason `dependency_not_ready`, bound to its head and the
+candidate's base. If the update settles while the candidate builds, checks or
+lands, it waits for the next candidate instead of replacing this one and
+rerunning its checks; landing admission already excludes held-out PR/head pairs.
+A new head or a moved base releases the hold, and the hold posts no PR feedback.
 Every existing block label remains a hold,
 including labels applied by earlier controller versions: no actor or historical
 record is used to guess that a generic hold may be cleared. Those PRs retain the

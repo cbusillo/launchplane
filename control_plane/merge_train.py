@@ -65,6 +65,13 @@ class MergeTrainLabelActor(BaseModel):
 
 # GitHub's code-scanning App opens review threads for its findings.
 CODE_SCANNING_REVIEW_AUTHOR = "github-advanced-security"
+DEPENDENCY_HEAD_CONFLICTS = "dependency update current-head merge conflicts"
+DEPENDENCY_HEAD_MERGEABILITY_UNKNOWN = "dependency update current-head mergeability unknown"
+DEPENDENCY_HEAD_CHECKS_FAILED = "dependency update current-head checks failed"
+# The current-head holds an automatically admitted dependency update requalifies from.
+DEPENDENCY_HEAD_HOLD_REASONS = frozenset(
+    {DEPENDENCY_HEAD_CONFLICTS, DEPENDENCY_HEAD_MERGEABILITY_UNKNOWN, DEPENDENCY_HEAD_CHECKS_FAILED}
+)
 
 
 class MergeTrainReviewConversations(BaseModel):
@@ -717,11 +724,11 @@ def _build_queue_entry(
         ineligible_reasons.append(
             pull_request.client_test_notes_error
             if pull_request.client_test_notes_error
-            else "dependency update current-head merge conflicts"
+            else DEPENDENCY_HEAD_CONFLICTS
             if pull_request.mergeable == "conflicting"
-            else "dependency update current-head mergeability unknown"
+            else DEPENDENCY_HEAD_MERGEABILITY_UNKNOWN
             if pull_request.mergeable == "unknown"
-            else "dependency update current-head checks failed"
+            else DEPENDENCY_HEAD_CHECKS_FAILED
         )
     if repository_policy.enqueue.label_required and label_refusal:
         if not is_dependency_update:
