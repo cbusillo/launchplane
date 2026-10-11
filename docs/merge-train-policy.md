@@ -833,7 +833,7 @@ landed member is blocked against that verified green base. The controller does
 not label both members as individually broken; feedback names the failing
 candidate checks and tests against the base used for that candidate.
 
-Before ordinary planning or failed-candidate reflow creates a candidate, the
+Before ordinary planning, failed-candidate reflow or a smaller isolation retest creates a candidate, the
 controller checks persisted failure history, including superseded records. The
 database scopes that read to the current base commit before loading payloads.
 An identical repository, base branch and SHA, policy key and digest, and ordered
@@ -847,8 +847,12 @@ supersedes an older failure; it permits fresh planning with new checks rather
 than authorizing a landing from historical evidence.
 An existing check, infrastructure or body retry that was retired before its
 checks completed resumes on its recorded retry ref and budget lineage; it is
-not mistaken for an exhausted failed retry. Construction/observation state is
-cleared for fresh validation and new conflict holds are retained. Legacy body
+not mistaken for an exhausted failed retry. Unfinished construction without a
+candidate SHA restarts validation. A retry with a recorded SHA rereads its
+current checks: a concluded failure resumes isolation, and an open retry
+resumes observation at that SHA. A closed retry with no conclusive failure stays
+stopped; it is not reopened or rebuilt. New conflict holds are retained,
+including when recovery blocks a culprit. Legacy body
 retries still require fresh passing evidence on their original SHA before they
 can resume. Reobserving a singleton renews the controller lease before any
 record write and preserves the current holds. Retry-budget reads use the same
