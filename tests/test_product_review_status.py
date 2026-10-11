@@ -356,6 +356,66 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertEqual(github.statuses[0]["state"], "failure")
         self.assertIn("missing", str(github.statuses[0]["description"]))
 
+    def test_engineering_notes_replace_stale_failure_on_the_same_head(self) -> None:
+        github = _GitHub(labels=())
+        github.body = "## Client test notes\n"
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        failed_check_id = github.check_runs[0]["id"]
+
+        github.body = "## Client test notes\nNothing for the Client to test: CI tools only."
+        self._publish(github)
+
+        self.assertEqual(github.statuses[0]["state"], "neutral")
+        self.assertNotIn("Accepted", str(github.statuses[0]["description"]))
+        self.assertEqual(github.check_runs[0]["id"], failed_check_id)
+        self.assertEqual(github.check_runs[0]["head_sha"], github.head_sha)
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            ),
+            (),
+        )
+        self.assertEqual(github.comments, [])
+        writes = tuple(github.writes)
+        self._publish(github)
+        self.assertEqual(tuple(github.writes), writes)
+
+        # The train's acceptance predicate must not mistake the neutral check for
+        # a Client acceptance, even before the next publication.
+        from control_plane.merge_train_github import _owner_review_status
+
+        self.assertEqual(
+            _owner_review_status(
+                {"check_runs": github.check_runs},
+                head_sha=github.head_sha,
+                advisory_app_id=_APP_ID,
+            ),
+            "pending",
+        )
+        # Requiring review again must restore the gate, even without a new head.
+        github.labels = ("owner-review",)
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        github.labels = ()
+        github.body = "## Client test notes\nTry the changed page."
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "pending")
+
+    def test_engineering_notes_preserve_a_current_client_rejection(self) -> None:
+        github = _GitHub()
+        decision = _decision(decision="changes_requested", decided_at="2026-09-20T10:00:00Z")
+        self.store.write_product_review_decision_record(decision)
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "failure")
+
+        github.labels = ()
+        github.body = "## Client test notes\nNothing for the Client to test: CI tools only."
+        self._publish(github)
+
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        self.assertEqual(github.check_runs[0]["conclusion"], "failure")
+
     def test_marked_pull_request_without_an_owner_says_so(self) -> None:
         github = _GitHub()
 
@@ -364,10 +424,10 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertEqual(github.statuses[0]["state"], "pending")
         self.assertEqual(github.statuses[0]["description"], "No Client set for this product")
 
-    def test_unmarked_pull_request_gets_no_status(self) -> None:
+    def test_unmarked_pull_request_without_client_gets_no_status(self) -> None:
         github = _GitHub(labels=("launchplane-preview",))
 
-        self._publish(github, retire_leftovers=True)
+        self._publish(github, owner_set=False, retire_leftovers=True)
 
         self.assertEqual(github.writes, [])
 
@@ -400,9 +460,9 @@ class OwnerReviewStatusTests(unittest.TestCase):
             }
         ]
 
-        self._publish(github, retire_leftovers=True)
+        self._publish(github, owner_set=False, retire_leftovers=True)
         writes_after_first = len(github.writes)
-        self._publish(github, retire_leftovers=True)
+        self._publish(github, owner_set=False, retire_leftovers=True)
 
         self.assertEqual(writes_after_first, 1)
         self.assertEqual(len(github.writes), 1)
@@ -427,7 +487,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
             }
         ]
 
-        self._publish(github, retire_leftovers=True)
+        self._publish(github, owner_set=False, retire_leftovers=True)
 
         self.assertEqual(github.writes, [])
 

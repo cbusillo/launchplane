@@ -68,16 +68,16 @@ records, and the release checklist remains the production Client gate.
 
 ## Client review check
 
-The same Advisory Checks App publishes `launchplane/owner-review` on the marked
-pull request's exact current head. A waiting review is `in_progress`; acceptance
-is completed with `success`, and requested changes with `failure`. The saved
-Launchplane decision remains authoritative. The check writer verifies repository,
+The same Advisory Checks App publishes `launchplane/owner-review` on the pull
+request's exact current head. [Client review](owner-acceptance.md#current-client-review)
+owns its review intent and check semantics; saved Launchplane decisions remain
+authoritative. The check writer verifies repository,
 App, head, output and replay identity; repeated publication reuses the matching
 run. It creates a new in-progress run when an already completed run must wait
 again. The short-lived Checks-only token is revoked after each attempt.
 
 This check is excluded from technical-check aggregation just like engineering
-review. The train's existing separately labelled Client-review gate reads the
+review. The train's Client-review gate reads the
 current-head check pinned to the service's configured Advisory App ID; it does
 not accept another App or a legacy commit status. That preserves the existing
 Client veto and does not grant enqueue, merge or deployment power. Historical
