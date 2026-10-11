@@ -462,6 +462,8 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         labeled_intent = client_test_notes(owner_test_notes(body))
         self.assertFalse(labeled_intent.error)
         self.assertTrue(labeled_intent.review_required)
+        for notes in provider.member_bodies.values():
+            self.assertIn(owner_test_notes(notes), owner_test_notes(body))
 
     def test_both_entries_land_through_one_sha_guarded_protected_merge(self) -> None:
         landed = self.land()
