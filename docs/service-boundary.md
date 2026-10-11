@@ -414,7 +414,9 @@ governed expectation, custody and currentness contract.
     `owner/repo/.github/workflows/file.yml` `workflow_path` without a ref, and
     `binding` (`workflow_ref`, or `job_workflow_ref` for a reusable worker).
     These are comparison inputs, never runtime authority. Empty, wildcard,
-    duplicate or malformed scope is refused. Policy-binding drift returns 409;
+    duplicate or malformed scope is refused; caller workflow paths must belong
+    to the selected repository (reusable worker paths may name another one).
+    Policy-binding drift returns 409;
     authority/storage gaps retain their existing explicit refusals. The route
     is `no-store`, including errors, and writes no denial record or session.
   - Results use input indexes, policy provenance, bounded history coverage,
@@ -423,15 +425,20 @@ governed expectation, custody and currentness contract.
     to both records/digests and the exact set. Only the caller type is returned;
     audit text, identities and selectors stay private. The latest 50 revisions
     are examined; missing baseline, truncation, ambiguity, gaps or excessive
-    rule volume remain explicit. A bounded observation proves the recorded
+    rule volume remain explicit. Unbound set changes stay flagged even when
+    other changes have verified observations; baseline presence is also named.
+    A bounded observation proves the recorded
     transition only. The current audit schema attests neither secret input
     origin nor maintenance independence, so both remain `unknown`, even for a
     human/local caller or an absent set. No historical origin is invented.
   - Unmanaged workflow results classify the active policy's exact repository
     and selected workflow binding across refs. Matching path patterns and
     unrestricted bindings return `potential_dependency` with opaque rule
-    hashes; unclassifiable selectors or the 2,000-rule evidence limit return
-    `unknown`. `no_matching_rule` means only that no unmanaged rule matches that
+    hashes using the existing reconcile/diagnostic hash contract. Unclassifiable
+    selectors (including path globs that might consume a ref separator) or the
+    2,000-rule evidence limit return `unknown`; hashes for confirmed matches
+    may remain alongside that incomplete coverage. `no_matching_rule` means
+    only that no unmanaged rule matches that
     requested path/binding in this policy. Other bindings, repositories,
     managed rules, secret existence and actual delivery use are separate facts.
     This conservative structural evidence does not prove executable access or

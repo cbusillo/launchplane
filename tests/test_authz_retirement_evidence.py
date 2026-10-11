@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import event
 
 from control_plane.authz_retirement_evidence import build_retirement_evidence
+from control_plane.authz_grant_service import _authz_rule_sha256
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.authz_retirement_evidence import (
     AuthzRetirementEvidenceRequest,
@@ -83,6 +84,21 @@ class RetirementEvidenceTests(unittest.TestCase):
         self.assertTrue(
             all("import_origin_not_attested" in item.reason_codes for item in result.managed_sets)
         )
+        schema_three = _record(
+            policy=LaunchplaneAuthzPolicy.model_validate(
+                {
+                    **record.policy.model_dump(mode="json"),
+                    "schema_version": 3,
+                }
+            )
+        )
+        schema_three_result = build_retirement_evidence(
+            active=schema_three,
+            records=(schema_three,),
+            request=_request(schema_three),
+            trace_id="trace",
+        )
+        self.assertEqual(schema_three_result.managed_sets, result.managed_sets)
         serialized = result.model_dump_json()
         for private in (
             "private-product",
@@ -119,6 +135,12 @@ class RetirementEvidenceTests(unittest.TestCase):
             ((), False, "other/product", "no_matching_rule"),
             (("*",), False, "example/product", "unknown"),
             (("malformed@",), False, "example/product", "unknown"),
+            (
+                ("example/product/.github/workflows/obsolete.yml?refs/heads/a@b",),
+                False,
+                "example/product",
+                "unknown",
+            ),
         ):
             with self.subTest(selectors=selectors, managed=managed, repository=repository):
                 record = _record(
@@ -131,6 +153,27 @@ class RetirementEvidenceTests(unittest.TestCase):
                 self.assertEqual(evidence.state, expected)
                 self.assertEqual(bool(evidence.rule_sha256s), expected == "potential_dependency")
                 self.assertNotIn("private.deploy", evidence.model_dump_json())
+
+    def test_dependency_hash_joins_existing_diagnostics_and_reconcile_evidence(self) -> None:
+        record = _record(policy=_workflow_policy())
+        result = build_retirement_evidence(
+            active=record, records=(record,), request=_request(record), trace_id="trace"
+        )
+        self.assertEqual(
+            result.unmanaged_workflows[0].rule_sha256s,
+            (_authz_rule_sha256(record.policy.github_actions[0]),),
+        )
+
+    def test_unknown_selector_coverage_preserves_confirmed_match_hashes(self) -> None:
+        record = _record(
+            policy=_workflow_policy("*", "example/product/.github/workflows/obsolete.yml@*")
+        )
+        result = build_retirement_evidence(
+            active=record, records=(record,), request=_request(record), trace_id="trace"
+        )
+        evidence = result.unmanaged_workflows[0]
+        self.assertEqual(evidence.state, "unknown")
+        self.assertTrue(evidence.rule_sha256s)
 
     def test_reusable_workflow_binding_is_independent_of_caller_binding(self) -> None:
         record = _record(
@@ -214,6 +257,36 @@ class RetirementEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(result.managed_sets[0].observations, ())
 
+    def test_bound_maintenance_does_not_hide_other_unbound_set_changes(self) -> None:
+        baseline = _record(policy=LaunchplaneAuthzPolicy(schema_version=2), status="superseded")
+        imported = _record(policy=_workflow_policy(managed=True), revision=2, status="superseded")
+        payload = imported.policy.model_dump(mode="json")
+        payload["github_actions"][0]["actions"] = ["private.other"]
+        current = _record(policy=LaunchplaneAuthzPolicy.model_validate(payload), revision=3)
+        current.audit = {
+            "operation": "managed_rule_set_reconcile",
+            "mode": "apply",
+            "changed": True,
+            "source": current.source,
+            "managed_set_id": "operator.odoo.test",
+            "previous_policy_record_id": imported.record_id,
+            "previous_revision": imported.revision,
+            "previous_policy_sha256": imported.policy_sha256,
+            "new_policy_record_id": current.record_id,
+            "new_revision": current.revision,
+            "new_policy_sha256": current.policy_sha256,
+            "operator": {"type": "local_operator"},
+        }
+        result = build_retirement_evidence(
+            active=current,
+            records=(current, imported, baseline),
+            request=_request(current),
+            trace_id="trace",
+        )
+        evidence = result.managed_sets[0]
+        self.assertEqual(len(evidence.observations), 1)
+        self.assertIn("maintenance_audit_missing_or_unbound", evidence.reason_codes)
+
     def test_incomplete_ambiguous_and_truncated_history_stays_explicit(self) -> None:
         current = _record(policy=_workflow_policy(managed=True), revision=4)
         earlier = _record(
@@ -278,6 +351,14 @@ class RetirementEvidenceTests(unittest.TestCase):
             },
             {"policy_sha256": "invalid"},
             {"policy": {}},
+            {
+                "workflows": [
+                    {
+                        "repository": "example/typo",
+                        "workflow_path": "example/product/.github/workflows/obsolete.yml",
+                    }
+                ]
+            },
         )
         for changes in invalid_scopes:
             with self.subTest(changes=changes), self.assertRaises(ValidationError):
@@ -291,6 +372,51 @@ class RetirementEvidenceTests(unittest.TestCase):
 
 
 class RetirementEvidenceHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_persisted_history_produces_bound_observation_without_request_writes(
+        self,
+    ) -> None:
+        with _database_app(_operator_read_policy()) as (store, previous, app):
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    **previous.policy.model_dump(mode="json"),
+                    "github_actions": _workflow_policy(managed=True).model_dump(mode="json")[
+                        "github_actions"
+                    ],
+                }
+            )
+            current = _record(policy=policy, revision=previous.revision + 1)
+            current.audit = {
+                "operation": "managed_rule_set_reconcile",
+                "mode": "apply",
+                "changed": True,
+                "source": current.source,
+                "managed_set_id": "operator.odoo.test",
+                "previous_policy_record_id": previous.record_id,
+                "previous_revision": previous.revision,
+                "previous_policy_sha256": previous.policy_sha256,
+                "new_policy_record_id": current.record_id,
+                "new_revision": current.revision,
+                "new_policy_sha256": current.policy_sha256,
+                "operator": {"type": "local_operator"},
+            }
+            written = store.compare_and_write_authz_policy_record(
+                expected_record=previous, replacement_record=current
+            )
+            self.assertEqual(written.status, "written")
+            before = store.list_authz_policy_records()
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/authz-policies/retirement-evidence",
+                    json=_request(current).model_dump(mode="json"),
+                    headers={"Authorization": "Bearer reader-token"},
+                )
+            self.assertEqual(response.status_code, 200, response.text)
+            evidence = response.json()["managed_sets"][0]
+            self.assertEqual(evidence["observations"][0]["revision"], current.revision)
+            self.assertTrue(evidence["observations"][0]["introduced"])
+            self.assertEqual(evidence["import_origin"], "unknown")
+            self.assertEqual(store.list_authz_policy_records(), before)
+
     async def test_existing_operator_read_authority_is_inert_and_redacted(self) -> None:
         with _database_app(_operator_read_policy()) as (store, record, app):
             before = store.list_authz_policy_records()

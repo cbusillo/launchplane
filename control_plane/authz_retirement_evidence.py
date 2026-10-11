@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from fnmatch import fnmatchcase
-import hashlib
-import json
+
+from control_plane.authz_grant_service import AuthzPolicyRule, _authz_rule_sha256
 
 from control_plane.contracts.authz_access_read import (
     AUTHZ_POLICY_ADMINISTRATION_HISTORY_LIMIT,
     AuthzPolicyRecordSummary,
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
-from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule
 from control_plane.contracts.authz_retirement_evidence import (
     AUTHZ_RETIREMENT_MAX_RULES,
     AuthzManagedSetEvidence,
@@ -20,12 +19,10 @@ from control_plane.contracts.authz_retirement_evidence import (
     AuthzUnmanagedWorkflowEvidence,
     AuthzWorkflowEvidenceCandidate,
 )
-from control_plane.service_auth import LaunchplaneAuthzPolicy, ManagedAuthzPolicyRule
+from control_plane.service_auth import LaunchplaneAuthzPolicy
 
 
-def _rules(
-    policy: LaunchplaneAuthzPolicy,
-) -> tuple[ManagedAuthzPolicyRule | OrdinaryAgentPolicyRule, ...]:
+def _rules(policy: LaunchplaneAuthzPolicy) -> tuple[AuthzPolicyRule, ...]:
     return (
         *policy.github_actions,
         *policy.github_humans,
@@ -36,15 +33,12 @@ def _rules(
     )
 
 
-def _fingerprint(rule: ManagedAuthzPolicyRule | OrdinaryAgentPolicyRule) -> str:
-    payload = json.dumps(rule.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
 def _set_rules(record: LaunchplaneAuthzPolicyRecord, set_id: str) -> tuple[str, ...]:
     return tuple(
         sorted(
-            _fingerprint(rule) for rule in _rules(record.policy) if rule.managed_set_id == set_id
+            _authz_rule_sha256(rule)
+            for rule in _rules(record.policy)
+            if rule.managed_set_id == set_id
         )
     )
 
@@ -101,15 +95,19 @@ def _unmanaged_workflow(
             rule.workflow_refs if candidate.binding == "workflow_ref" else rule.job_workflow_refs
         )
         if not selectors:
-            matched.append(_fingerprint(rule))
+            matched.append(_authz_rule_sha256(rule))
             continue
         for selector in selectors:
             path, separator, ref = selector.partition("@")
             if not separator or not ref or "@" in ref:
                 incomplete = True
             elif fnmatchcase(candidate.workflow_path, path):
-                matched.append(_fingerprint(rule))
+                matched.append(_authz_rule_sha256(rule))
                 break
+            elif any(character in path for character in "*?[]"):
+                # A glob can consume the @ separator and part of a git ref.
+                # A path-only mismatch cannot prove the full selector disjoint.
+                incomplete = True
     return AuthzUnmanagedWorkflowEvidence(
         index=index,
         state="unknown"
@@ -153,15 +151,23 @@ def build_retirement_evidence(
             if policy_complete
             else None
         )
-        observations = tuple(
-            observation
-            for current, previous in zip(bounded, bounded[1:])
-            if history_rules_complete
-            and not any(
-                gap in gaps
-                for gap in ("history_active_record_mismatch", "history_revision_gap_or_ambiguity")
-            )
-            if (observation := _maintenance(current, previous, set_id)) is not None
+        observations: list[AuthzSetMaintenanceObservation] = []
+        unbound_change = False
+        if history_rules_complete and not any(
+            gap in gaps
+            for gap in ("history_active_record_mismatch", "history_revision_gap_or_ambiguity")
+        ):
+            for current, previous in zip(bounded, bounded[1:]):
+                observation = _maintenance(current, previous, set_id)
+                if observation is not None:
+                    observations.append(observation)
+                elif _set_rules(previous, set_id) != _set_rules(current, set_id):
+                    unbound_change = True
+        baseline_present = bool(
+            bounded
+            and bounded[-1].revision == 1
+            and history_rules_complete
+            and _set_rules(bounded[-1], set_id)
         )
         managed.append(
             AuthzManagedSetEvidence(
@@ -171,11 +177,16 @@ def build_retirement_evidence(
                 reason_codes=(
                     "import_origin_not_attested",
                     "maintenance_independence_not_attested",
-                    *(("maintenance_audit_missing_or_unbound",) if not observations else ()),
+                    *(
+                        ("maintenance_audit_missing_or_unbound",)
+                        if unbound_change or not observations
+                        else ()
+                    ),
+                    *(("set_present_at_history_baseline",) if baseline_present else ()),
                     *gaps,
                     *(("active_policy_rule_limit_exceeded",) if count is None else ()),
                 ),
-                observations=observations,
+                observations=tuple(observations),
             )
         )
     workflows = tuple(

@@ -21,6 +21,14 @@ class AuthzWorkflowEvidenceCandidate(BaseModel):
     )
     binding: Literal["workflow_ref", "job_workflow_ref"] = "workflow_ref"
 
+    @model_validator(mode="after")
+    def _validate_caller_workflow(self) -> AuthzWorkflowEvidenceCandidate:
+        if self.binding == "workflow_ref" and not self.workflow_path.startswith(
+            self.repository + "/"
+        ):
+            raise ValueError("A caller workflow must belong to the selected repository.")
+        return self
+
 
 class AuthzRetirementEvidenceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
