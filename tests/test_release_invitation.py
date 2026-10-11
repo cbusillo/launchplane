@@ -514,6 +514,33 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(sum("@site-owner" in post.get("body", "") for post in self.posts), 1)
         self.assertIn("**Why now:** Fixes a login security problem.", self.comments[0]["body"])
 
+    def test_changed_engineering_notes_require_a_new_deliberate_opening(self) -> None:
+        self.make_engineering_only()
+        self.assertTrue(self.publish(urgent_reason="Security fix."))
+        accepted = decision(self.store, outcome="accepted", date=self.now.isoformat())
+        self.store.create_release_review_decision_record_if_absent(accepted)
+        self.assertIs(self.publish(), False)
+
+        self.now += timedelta(seconds=1)
+        self.review = self.review.model_copy(update={"checklist_digest": "f" * 64})
+        posts = len(self.posts)
+        self.assertIs(self.publish(ReleaseInvitationBackoff()), False)
+        self.assertEqual(len(self.posts), posts)
+        self.assertIs(
+            self.publish(
+                urgent_reason="Updated security fix.", urgent_digest=accepted.checklist_digest
+            ),
+            False,
+        )
+        self.assertEqual(len(self.posts), posts)
+        self.assertTrue(self.publish(urgent_reason="Updated security fix."))
+        self.assertEqual(len(self.posts), posts + 1)
+        self.assertIn("**Why now:** Updated security fix.", self.comments[-1]["body"])
+        self.assertIn("@site-owner", self.comments[-1]["body"])
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product="example-site"), (accepted,)
+        )
+
     def test_urgent_retry_does_not_send_the_workers_due_reminder(self) -> None:
         self.make_engineering_only()
         self.assertTrue(self.publish(urgent_reason="Security fix."))

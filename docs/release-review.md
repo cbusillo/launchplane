@@ -48,8 +48,10 @@ the worker remembers delivery in memory until the reminder is due or the candida
 changes; a replica restart reads the durable receipt again. Once the single
 reminder is delivered, unchanged candidates need no further GitHub reads. A decision on unchanged
 lane versions is settled only while its checklist digest matches the current checklist; each worker
-rechecks that at most every 30 minutes, and edited test notes that change the checklist send the
-Client a fresh request. This cache never supplies acceptance or bypasses release checks.
+rechecks that at most every 30 minutes. Edited test notes that change the checklist send the
+Client a fresh request when the candidate contains a Client-facing change. An engineering-only
+candidate still waits on testing; an admin can deliberately reopen it with a current reason
+and checklist digest. This cache never supplies acceptance or bypasses release checks.
 
 The product repository keeps one issue for these requests. Launchplane finds it
 by a standalone `release_request_issue_marker(product)` line in the issue body;
