@@ -1065,6 +1065,65 @@ def _advance_active_landing_record(
     active_landing_record: MergeTrainBatchLandingPlanRecord,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object]:
+    history = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
+        repository=request.repository, base_branch=request.base_branch
+    )
+    if history and not _ordinary_landing_terminal_success(active_landing_record):
+        snapshot = github_client.read_merge_train_snapshot(
+            repository=request.repository, base_branch=request.base_branch
+        )
+        review_recovery = original_review_recovery_records(
+            records=history, snapshot=snapshot, ancestry=github_client, raise_on_unavailable=True
+        )
+        affected = {
+            entry.pull_request_number for record in review_recovery for entry in record.plan.entries
+        }
+        if any(
+            entry.pull_request_number in affected
+            for entry in active_landing_record.landing_plan.entries
+        ):
+            if (
+                active_landing_record.ordinary_job_binding is None
+                and active_landing_record.landing_plan.policy_key == repository_policy.policy_key
+                and all(
+                    entry.status == "planned"
+                    for entry in active_landing_record.landing_plan.entries
+                )
+                and lease.record.active_phase in {"select_next_action", "persist_landing_plan"}
+            ):
+                retired = _retire_changed_policy_landing(
+                    request=request,
+                    trace_id=trace_id,
+                    recorded_at=recorded_at,
+                    github_client=github_client,
+                    candidate_store=candidate_store,
+                    landing_store=landing_store,
+                    stack_collapse_store=stack_collapse_store,
+                    admission_store=admission_store,
+                    admission_evaluator=admission_evaluator,
+                    landing_record=active_landing_record,
+                    lease=lease,
+                    retirement_source="original-review-recovery",
+                )
+                details = original_review_recovery_details(review_recovery)
+                if active_landing_record.landing_plan.policy_sha256 != policy_sha256:
+                    details["policy_changed"] = {
+                        "code": "merge_train_stack_collapse_policy_changed",
+                        "record_id": active_landing_record.record_id,
+                        "policy_sha256": active_landing_record.landing_plan.policy_sha256,
+                    }
+                retired["details"] = details
+                return retired
+            return {
+                "repository": request.repository,
+                "base_branch": request.base_branch,
+                "mode": "blocked",
+                "controller_action": "original_review_recovery",
+                "controller_reconciliation_status": "required",
+                "merge_train_batch_landing_plan_record_id": active_landing_record.record_id,
+                "details": original_review_recovery_details(review_recovery),
+            }
+
     if (
         active_landing_record.ordinary_job_binding is None
         and active_landing_record.landing_plan.policy_key == repository_policy.policy_key
@@ -1137,57 +1196,6 @@ def _advance_active_landing_record(
         stack_collapse_record=collapse_record,
         trace_id=trace_id,
     )
-    history = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
-        repository=request.repository, base_branch=request.base_branch
-    )
-    if history and not _ordinary_landing_terminal_success(active_landing_record):
-        snapshot = github_client.read_merge_train_snapshot(
-            repository=request.repository, base_branch=request.base_branch
-        )
-        review_recovery = original_review_recovery_records(
-            records=history, snapshot=snapshot, ancestry=github_client
-        )
-        affected = {
-            entry.pull_request_number for record in review_recovery for entry in record.plan.entries
-        }
-        if any(
-            entry.pull_request_number in affected
-            for entry in active_landing_record.landing_plan.entries
-        ):
-            if (
-                active_landing_record.ordinary_job_binding is None
-                and all(
-                    entry.status == "planned"
-                    for entry in active_landing_record.landing_plan.entries
-                )
-                and lease.record.active_phase in {"select_next_action", "persist_landing_plan"}
-            ):
-                retired = _retire_changed_policy_landing(
-                    request=request,
-                    trace_id=trace_id,
-                    recorded_at=recorded_at,
-                    github_client=github_client,
-                    candidate_store=candidate_store,
-                    landing_store=landing_store,
-                    stack_collapse_store=stack_collapse_store,
-                    admission_store=admission_store,
-                    admission_evaluator=admission_evaluator,
-                    landing_record=active_landing_record,
-                    lease=lease,
-                    retirement_source="original-review-recovery",
-                )
-                retired["details"] = original_review_recovery_details(review_recovery)
-                return retired
-            return {
-                "repository": request.repository,
-                "base_branch": request.base_branch,
-                "mode": "blocked",
-                "controller_action": "original_review_recovery",
-                "controller_reconciliation_status": "required",
-                "merge_train_batch_landing_plan_record_id": active_landing_record.record_id,
-                "details": original_review_recovery_details(review_recovery),
-            }
-
     if not request.mutate:
         result: dict[str, object] = {
             "repository": request.repository,
@@ -1569,7 +1577,10 @@ def _retire_changed_policy_landing(
             "Policy-change recovery requires the exact recorded candidate."
         )
     observed_base_sha, observed_base_tree_sha = _verify_retirement_has_no_effect(
-        github_client=github_client, admission_store=admission_store, plan=plan
+        github_client=github_client,
+        admission_store=admission_store,
+        plan=plan,
+        allow_moved_heads=retirement_source == "original-review-recovery",
     )
     if not request.mutate:
         return {
@@ -1628,6 +1639,7 @@ def _verify_retirement_has_no_effect(
     github_client: GitHubMergeTrainClient,
     admission_store: MergeAdmissionRecordStore,
     plan: MergeTrainBatchLandingPlan,
+    allow_moved_heads: bool = False,
 ) -> tuple[str, str]:
     allow_changed_base = True
     for entry in plan.entries:
@@ -1643,8 +1655,15 @@ def _verify_retirement_has_no_effect(
             )
             if not outcomes or outcomes[0].status != "rejected":
                 allow_changed_base = False
+    if allow_moved_heads:
+        return github_client.verify_unlanded_batch(
+            landing_plan=plan,
+            allow_changed_base=allow_changed_base,
+            allow_moved_heads=True,
+        )
     return github_client.verify_unlanded_batch(
-        landing_plan=plan, allow_changed_base=allow_changed_base
+        landing_plan=plan,
+        allow_changed_base=allow_changed_base,
     )
 
 
@@ -1716,6 +1735,7 @@ def _resume_unrecorded_landing_retirement(
         github_client=github_client,
         admission_store=admission_store,
         plan=landing_record.landing_plan,
+        allow_moved_heads=retirement_source == "original-review-recovery",
     )
     return _record_landing_retirement(
         trace_id=trace_id,

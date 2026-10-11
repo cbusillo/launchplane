@@ -24,7 +24,11 @@ from control_plane.merge_train_controller_run_once import (
     _lineage_change_retires_landing,
     execute_merge_train_controller_with_client,
 )
-from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
+from control_plane.merge_train_github import (
+    GitHubMergeTrainClient,
+    MergeTrainGitHubError,
+    MergeTrainGitHubStaleHeadError,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.http_app_test_support import _post_merge_train_controller_run_once
@@ -294,6 +298,32 @@ class MergeTrainPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.client, "read_merge_train_snapshot", return_value=snapshot):
             next_read = self._run(mutate=False)
         self.assertEqual(next_read.accepted_result["controller_action"], "idle")
+
+    def test_no_dispatch_retirement_can_prove_open_moved_heads_without_discarding_effects(
+        self,
+    ) -> None:
+        self.transport.head_sha = "9" * 40
+        self.transport.contained = False
+        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+            self.client.verify_unlanded_batch(landing_plan=self.landing.landing_plan)
+        observed = self.client.verify_unlanded_batch(
+            landing_plan=self.landing.landing_plan, allow_moved_heads=True
+        )
+        self.assertEqual(observed[0], self.transport.base_sha)
+        for state, merged in (("closed", False), ("closed", True)):
+            self.transport.pr_state = state
+            self.transport.merge_sha = OTHER_SHA if merged else ""
+            with self.assertRaises(MergeTrainGitHubStaleHeadError):
+                self.client.verify_unlanded_batch(
+                    landing_plan=self.landing.landing_plan, allow_moved_heads=True
+                )
+        self.transport.pr_state = "open"
+        self.transport.merge_sha = ""
+        self.transport.contained = True
+        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+            self.client.verify_unlanded_batch(
+                landing_plan=self.landing.landing_plan, allow_moved_heads=True
+            )
 
     def test_completed_old_policy_landing_keeps_fence_when_live_merge_disagrees(self) -> None:
         self._record_completed_landing()

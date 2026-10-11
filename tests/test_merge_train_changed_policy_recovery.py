@@ -89,6 +89,8 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         retirement_unknown: bool = False,
         merge_in_flight: bool = False,
         policy_companion: bool = False,
+        move_after_landing: bool = False,
+        interrupt_retirement: bool = False,
         moved: bool,
         child_changed: bool = False,
         deeper: bool = False,
@@ -230,34 +232,40 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         class Client(_FakeMergeTrainGitHubClient):
             def verify_unlanded_batch(
-                self, *, landing_plan: Any, allow_changed_base: bool = False
+                self,
+                *,
+                landing_plan: Any,
+                allow_changed_base: bool = False,
+                allow_moved_heads: bool = False,
             ) -> tuple[str, str]:
                 if retirement_unknown:
                     raise MergeTrainGitHubError("No-effect proof unavailable", status_code=503)
-                current = {
-                    pr.number: pr
-                    for pr in Reader(transport=graph)
-                    .read_merge_train_snapshot(
-                        repository=landing_plan.repository, base_branch=landing_plan.base_branch
-                    )
-                    .pull_requests
-                }
+                observed = Reader(transport=graph).read_merge_train_snapshot(
+                    repository=landing_plan.repository, base_branch=landing_plan.base_branch
+                )
+                if (
+                    not allow_changed_base
+                    and observed.base_sha != landing_plan.entries[0].expected_base_sha
+                ):
+                    raise MergeTrainGitHubStaleHeadError("No-effect base moved", status_code=409)
+                provider_prs = {pr.number: pr for pr in observed.pull_requests}
                 for entry in landing_plan.entries:
-                    self.assert_no_effect(entry, current)
+                    if entry.status != "planned" or entry.pull_request_number not in provider_prs:
+                        raise MergeTrainGitHubStaleHeadError(
+                            "No-effect PR state is unavailable", status_code=409
+                        )
+                    if (
+                        not allow_moved_heads
+                        and provider_prs[entry.pull_request_number].head_sha
+                        != entry.expected_head_sha
+                    ):
+                        raise MergeTrainGitHubStaleHeadError(
+                            "No-effect head moved", status_code=409
+                        )
                 no_effect_reads.append(
                     tuple(entry.pull_request_number for entry in landing_plan.entries)
                 )
                 return "current-base-main", "base-tree-fixture"
-
-            @staticmethod
-            def assert_no_effect(
-                entry: Any, current: dict[int, MergeTrainPullRequestSnapshot]
-            ) -> None:
-                if (
-                    entry.status != "planned"
-                    or current[entry.pull_request_number].head_sha != entry.expected_head_sha
-                ):
-                    raise MergeTrainGitHubError("No-effect proof does not match")
 
             def land_batch_candidate(self, **kwargs: Any) -> Any:
                 landing_attempts.extend(
@@ -304,8 +312,12 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     if pr.number == pull_request_number
                 )
 
-            def carried_change_requires_individual_landing(self, **kwargs: Any) -> bool:
-                return legacy_code_owned
+            @staticmethod
+            def carried_change_requires_individual_landing(**kwargs: Any) -> bool:
+                return (
+                    legacy_code_owned
+                    and kwargs["repository"] == original_policy.policy.policies[0].repository
+                )
 
             def branch_contains_commit(
                 self, *, repository: str, branch_ref: str, commit_sha: str
@@ -350,6 +362,20 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         class InterruptedStore(FilesystemRecordStore):
             interrupted = False
+
+            retirement_interrupted = False
+
+            def write_merge_train_batch_landing_plan_record(self, record: Any) -> Any:
+                if (
+                    interrupt_retirement
+                    and not self.retirement_interrupted
+                    and record.source.startswith("service:controller:original-review-recovery:")
+                ):
+                    self.retirement_interrupted = True
+                    raise MergeTrainGitHubError(
+                        "Retirement persistence interrupted", status_code=503
+                    )
+                return super().write_merge_train_batch_landing_plan_record(record)
 
             def write_merge_train_stack_collapse_plan_record(
                 self, record: MergeTrainStackCollapsePlanRecord
@@ -532,6 +558,9 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         self.fail("Legacy landing was not prepared")
                     self.assertEqual(landing_attempts, [])
+                if move_after_landing:
+                    graph.parents["late-root-push"] = (graph.heads["feature/root"],)
+                    graph.heads["feature/root"] = "late-root-push"
                 if merge_in_flight:
                     current_state = store.list_merge_train_controller_state_records()[0]
                     landing = store.list_merge_train_batch_landing_plan_records(status="active")[0]
@@ -589,6 +618,13 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                         return
                     for _ in range(12):
                         response = await run()
+                        if interrupt_retirement and response.status_code == 502:
+                            self.assertEqual(landing_attempts, [])
+                            self.assertEqual(
+                                store.list_merge_train_controller_state_records()[0].active_phase,
+                                "retire_stale_policy_landing",
+                            )
+                            continue
                         self.assertEqual(response.status_code, 202, response.text)
                         result = response.json()["result"]
                         if legitimate:
@@ -978,4 +1014,35 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             moved=False,
             preserve_original_review=True,
             policy_companion=True,
+        )
+
+    async def test_moved_prepared_parent_does_not_wedge_unrelated_work(self) -> None:
+        await self._recovery(
+            checkpointed=False,
+            moved=False,
+            preserve_original_review=True,
+            change_policy=False,
+            landing_prepared=True,
+            unrelated=True,
+            move_after_landing=True,
+        )
+
+    async def test_review_retirement_resumes_after_interrupted_record_write(self) -> None:
+        await self._recovery(
+            checkpointed=False,
+            moved=False,
+            preserve_original_review=True,
+            change_policy=False,
+            landing_prepared=True,
+            unrelated=True,
+            interrupt_retirement=True,
+        )
+
+    async def test_changed_policy_prepared_review_hold_releases_unrelated_work(self) -> None:
+        await self._recovery(
+            checkpointed=False,
+            moved=False,
+            preserve_original_review=True,
+            landing_prepared=True,
+            unrelated=True,
         )

@@ -34,6 +34,7 @@ def original_review_recovery_records(
     records: tuple[MergeTrainStackCollapsePlanRecord, ...],
     snapshot: MergeTrainDryRunSnapshot,
     ancestry: CommitAncestryReader,
+    raise_on_unavailable: bool = False,
 ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
     owned = {pr.number: pr for pr in snapshot.pull_requests if pr.requires_individual_landing}
     if not owned:
@@ -48,13 +49,13 @@ def original_review_recovery_records(
         groups.setdefault(stored.plan.collapse_id, []).append(stored)
     cache: dict[tuple[str, str], bool] = {}
 
-    def contains(head: str, child: str) -> bool:
-        if not head or not child:
+    def contains(head: str, child_commit: str) -> bool:
+        if not head or not child_commit:
             raise ValueError("Original-review recovery requires exact commit evidence.")
-        pair = (head, child)
+        pair = (head, child_commit)
         if pair not in cache:
             cache[pair] = ancestry.branch_contains_commit(
-                repository=snapshot.repository, branch_ref=head, commit_sha=child
+                repository=snapshot.repository, branch_ref=head, commit_sha=child_commit
             )
         return cache[pair]
 
@@ -69,7 +70,7 @@ def original_review_recovery_records(
             if parent is None:
                 continue
             try:
-                if contains(snapshot.base_sha, child) or not contains(parent.head_sha, child):
+                if not contains(parent.head_sha, child) or contains(snapshot.base_sha, child):
                     continue
                 if not ancestry.carried_change_requires_individual_landing(
                     repository=snapshot.repository,
@@ -89,10 +90,12 @@ def original_review_recovery_records(
                 # Authentication and shared provider cooldowns remain global;
                 # missing/stale commit or transient comparison evidence holds
                 # this stack without admitting it or wedging unrelated work.
-                if error.status_code in {401, 403} or error.rate_limited:
+                if raise_on_unavailable or error.status_code in {401, 403} or error.rate_limited:
                     raise
             except ValueError:
-                # Legacy rows without exact SHA evidence cannot justify landing.
+                if raise_on_unavailable:
+                    raise
+                # Incomplete evidence cannot justify landing.
                 pass
             blocked.append(record)
             break

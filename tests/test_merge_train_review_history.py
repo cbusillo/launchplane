@@ -188,6 +188,7 @@ class ReviewHistoryTests(unittest.IsolatedAsyncioTestCase):
             def branch_contains_commit(
                 self, *, repository: str, branch_ref: str, commit_sha: str
             ) -> bool:
+                self_test.assertEqual(repository, self_test.repository)
                 if self.error_status:
                     raise MergeTrainGitHubError(
                         "Provider evidence unavailable", status_code=self.error_status
@@ -202,6 +203,7 @@ class ReviewHistoryTests(unittest.IsolatedAsyncioTestCase):
             def pull_request_is_merged(
                 self, *, repository: str, pull_request_number: int, expected_head_sha: str
             ) -> str:
+                self_test.assertEqual(repository, self_test.repository)
                 self_test.assertEqual(pull_request_number, mutation.child_pull_request_number)
                 self_test.assertEqual(expected_head_sha, mutation.child_head_sha)
                 return self.merged

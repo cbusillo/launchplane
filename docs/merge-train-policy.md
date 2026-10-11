@@ -1782,10 +1782,15 @@ PR numbers and heads. Selection excludes the affected stack and dependent base
 refs while unrelated eligible PRs continue. A saved landing with all entries
 still planned, no provider-dispatch checkpoint and fresh no-effect proof is
 retired through the existing retirement/resumption path, retaining its history
-and permitting fresh selection. Partial landings, an in-flight dispatch or
+and permitting fresh selection. Only this no-dispatch recovery can accept
+moved PR heads: current PRs must remain open and unmerged on the protected
+base, the old candidate must be absent from that base, and fresh repeated
+head/base reads must agree. Stored head trees remain immutable proof; this
+never authorizes merging the moved heads. Partial landings, an in-flight dispatch or
 unavailable no-effect proof retain reconciliation. No affected entry is merged
 and no existing admin reconciliation fence is cleared. Dry runs leave collapse history unchanged.
-Missing or stale commit/comparison evidence holds its stack; authentication
+Selection holds a stack on missing or stale commit/comparison evidence;
+an active landing requires positive ancestry evidence before retiring artifacts. Authentication
 failures and shared provider cooldowns retain their normal failure handling.
 When policy and original-review holds coexist, `details.policy_changed` retains
 the separate obsolete-policy inventory.
@@ -1820,3 +1825,9 @@ original review history; it cannot be reopened or treated as current approval.
 A replacement PR for remaining changes requires its own review and admission.
 This recovery does not reland changes already in the protected base, rewrite
 that base, waive approval, grant access, or retire stored evidence.
+
+An original child PR merged at a different head does not prove that the saved
+version landed through its own review. A hold in that case describes the
+unqualified saved version, rather than claiming that the PR is still open.
+Active landing diagnostics name its old policy record; selection diagnostics
+retain the complete separate obsolete-policy inventory.
