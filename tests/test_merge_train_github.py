@@ -2992,6 +2992,38 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 ).read_merge_train_snapshot(repository=profile.repository, base_branch="main")
                 self.assertEqual(snapshot.pull_requests[0].required_checks_status, expected)
 
+    def test_explicit_review_override_still_holds_a_product_without_a_client(self) -> None:
+        profile = SimpleNamespace(
+            is_active=True,
+            repository="example/site",
+            owner=SimpleNamespace(is_set=False, review_label="owner-review"),
+        )
+        reader = GitHubMergeTrainSnapshotReader(
+            transport=RecordingMergeTrainGitHubTransport(responses=()),
+            branch_refresh_store=cast(
+                Any, SimpleNamespace(list_product_profile_records=lambda: (profile,))
+            ),
+        )
+        intent = reader.client_review_intent(
+            labels=("owner-review",),
+            repository=profile.repository,
+            body="## Client test notes\nTry the changed prices.",
+        )
+        self.assertTrue(intent.review_required)
+        self.assertFalse(intent.error)
+        self.assertTrue(
+            reader.client_review_intent(
+                labels=("owner-review",),
+                repository=profile.repository,
+                body="## Client test notes\nNothing for the Client to test: CI only.",
+            ).error
+        )
+        self.assertFalse(
+            reader.client_review_intent(
+                labels=(), repository=profile.repository, body=""
+            ).review_required
+        )
+
     def test_review_label_without_matching_active_profile_creates_no_wait(self) -> None:
         for profiles in (
             (),

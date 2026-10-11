@@ -3189,6 +3189,19 @@ class GitHubMergeTrainSnapshotReader:
             store=cast(ClientReleaseRepositoryStore, self._branch_refresh_store),
             repository=repository,
         )
+        # Preserve the explicit override even before a product has a Client:
+        # a missing Client cannot make a marked change engineering-only.
+        profiles += tuple(
+            profile
+            for profile in cast(
+                ClientReleaseRepositoryStore, self._branch_refresh_store
+            ).list_product_profile_records()
+            if profile.is_active
+            and not profile.owner.is_set
+            and repository_key(profile.repository) == repository_key(repository)
+            and profile.owner.review_label.strip().casefold()
+            in {label.casefold() for label in labels}
+        )
         intents = tuple(
             change_client_review(body=body, labels=labels, review_label=profile.owner.review_label)
             for profile in profiles
