@@ -13,6 +13,13 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan, persisted_cutover
+from control_plane.workflows.odoo_cutover import OdooCutoverProvider
+from control_plane.workflows.odoo_cutover_deployment import (
+    OdooCutoverApplyResult,
+    execute_odoo_cutover_deployment,
+)
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BackupGateEvidence,
@@ -24,10 +31,12 @@ from control_plane.contracts.promotion_record import (
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
+    OdooStableTargetReplacementApplyResult,
 )
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
     execute_odoo_stable_target_replacement_apply,
+    TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
 )
 from control_plane.workflows.odoo_prod_backup_gate import BACKUP_GATE_SOURCE
 from control_plane.workflows.ship import utc_now_timestamp
@@ -42,6 +51,9 @@ from control_plane.workflows.production_promotion_backup import (
 
 class OdooProdPromotionStore(OdooStableTargetReplacementStore, Protocol):
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[DeploymentRecord, ...]: ...
 
     def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
 
@@ -131,6 +143,9 @@ def execute_odoo_prod_promotion(
     request: OdooProdPromotionRequest,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     hold_uncertain_effects: bool = False,
+    cutover_provider: OdooCutoverProvider | None = None,
+    cutover_plan: OdooCutoverPlan | None = None,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> OdooProdPromotionResult:
     del state_dir, database_url
     product = _resolve_product_profile_key(product=request.product, context=request.context)
@@ -149,7 +164,27 @@ def execute_odoo_prod_promotion(
     backup_gate = None
     infrastructure_backup = None
     backup_checkpoint = None
+    recovery = None
     try:
+        if cutover_plan is None:
+            try:
+                cutover_plan = resolve_profile_cutover_plan(
+                    record_store,
+                    product=product,
+                    context=request.context,
+                    instance=request.to_instance,
+                    artifact_id=request.artifact_id,
+                    release_id=request.backup_record_id,
+                )
+            except FileNotFoundError:
+                # Existing approval/backup gates retain their original order for
+                # legacy records. Replacement still requires the real profile.
+                cutover_plan = None
+        if cutover_plan is not None:
+            from control_plane.odoo_cutover_plan import cutover_record_id
+
+            promotion_record_id = "promotion-cutover-" + cutover_record_id(cutover_plan)
+        recovery = persisted_cutover(record_store, cutover_plan)
         infrastructure_backup = require_production_promotion_backup(
             record_store=record_store,
             product=product,
@@ -157,9 +192,21 @@ def execute_odoo_prod_promotion(
             instance=request.to_instance,
             promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
             backup_record_id=request.infrastructure_backup_record_id,
+            cutover_recovery=recovery,
         )
         artifact_manifest = record_store.read_artifact_manifest(request.artifact_id)
         source_tuple = _read_source_tuple(record_store=record_store, request=request)
+        if any(
+            item.odoo_cutover is not None
+            and item.odoo_cutover.step not in {"complete", "rolled_back"}
+            and (cutover_plan is None or item.odoo_cutover.plan != cutover_plan)
+            for item in record_store.list_deployment_records(
+                context_name=request.context, instance_name=request.to_instance
+            )
+        ):
+            raise click.ClickException(
+                "Unfinished cutover requires its persisted plan/provider or coherent recovery; in-place promotion is refused."
+            )
         backup_gate = record_store.read_backup_gate_record(request.backup_record_id)
         if (
             backup_gate.source != BACKUP_GATE_SOURCE
@@ -187,28 +234,67 @@ def execute_odoo_prod_promotion(
             promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
             backup_record_id=request.infrastructure_backup_record_id,
             pending_promotion=pending_record,
+            cutover_recovery=recovery,
         ) as backup_checkpoint:
-            replacement_result = execute_odoo_stable_target_replacement_apply(
-                control_plane_root=control_plane_root,
-                record_store=record_store,
-                request=OdooStableTargetReplacementApplyRequest(
-                    product=product,
-                    instance=request.to_instance,
-                    artifact_id=request.artifact_id,
-                    source_git_ref=request.source_git_ref or artifact_manifest.source_commit,
-                    allow_empty_data=True,
-                    verify_health=request.verify_health,
-                    verify_canonical=request.verify_health,
-                    verify_logo=request.verify_health,
-                    timeout_seconds=request.timeout_seconds,
-                    health_timeout_seconds=request.health_timeout_seconds,
-                    no_cache=request.no_cache,
-                ),
-                hold_uncertain_effects=hold_uncertain_effects,
-                provider_effect_checkpoint=_checkpoint_chain(
+            replacement_result: OdooCutoverApplyResult | OdooStableTargetReplacementApplyResult
+            if cutover_plan is not None:
+                plan = cutover_plan
+                if cutover_provider is None and cutover_provider_factory is not None:
+                    cutover_provider = cutover_provider_factory(plan)
+                if cutover_provider is None:
+                    raise click.ClickException(
+                        "Two-slot provider/runtime binding is unavailable; refusing in-place fallback."
+                    )
+                production_tuple = record_store.read_release_tuple_record(
+                    context_name=request.context, channel_name=request.to_instance
+                )
+                if (
+                    plan.candidate != artifact_manifest
+                    or plan.production
+                    != record_store.read_artifact_manifest(production_tuple.artifact_id)
+                    and production_tuple.artifact_id != plan.candidate.artifact_id
+                    or plan.new.binding.product_id != product
+                    or plan.new.binding.environment_id != request.to_instance
+                ):
+                    raise click.ClickException(
+                        "Two-slot plan does not match current production/accepted candidate authority."
+                    )
+                # Preserve the existing worker authorization/recovery-pin boundary
+                # before the private provider begins any release effects.
+                cutover_checkpoint = _checkpoint_chain(
                     provider_effect_checkpoint, backup_checkpoint
-                ),
-            )
+                )
+                cutover_checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+                replacement_result = execute_odoo_cutover_deployment(
+                    plan=plan,
+                    record_store=record_store,
+                    provider=cutover_provider,
+                    context=request.context,
+                    instance=request.to_instance,
+                    checkpoint=cutover_checkpoint,
+                )
+            else:
+                replacement_result = execute_odoo_stable_target_replacement_apply(
+                    control_plane_root=control_plane_root,
+                    record_store=record_store,
+                    request=OdooStableTargetReplacementApplyRequest(
+                        product=product,
+                        instance=request.to_instance,
+                        artifact_id=request.artifact_id,
+                        source_git_ref=request.source_git_ref or artifact_manifest.source_commit,
+                        allow_empty_data=True,
+                        verify_health=request.verify_health,
+                        verify_canonical=request.verify_health,
+                        verify_logo=request.verify_health,
+                        timeout_seconds=request.timeout_seconds,
+                        health_timeout_seconds=request.health_timeout_seconds,
+                        no_cache=request.no_cache,
+                    ),
+                    hold_uncertain_effects=hold_uncertain_effects,
+                    provider_effect_checkpoint=_checkpoint_chain(
+                        provider_effect_checkpoint, backup_checkpoint
+                    ),
+                )
         infrastructure_backup.evidence.update(backup_checkpoint.evidence)
         deployment_record = _read_deployment_record_if_present(
             record_store=record_store,
@@ -248,6 +334,12 @@ def execute_odoo_prod_promotion(
             error_message=replacement_result.error_message,
         )
     except click.ClickException as error:
+        if recovery is not None and recovery.step in {"complete", "rolled_back"}:
+            # A stable release key owns its completed audit record. A refused
+            # replay must not replace that history with a new failure record.
+            raise
+        if recovery is not None and recovery.step not in {"complete", "rolled_back"}:
+            raise RuntimeError("Cutover remains unfinished; retain its recovery hold.") from error
         from control_plane.lane_movement import LaneMovementRefused
 
         if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable":

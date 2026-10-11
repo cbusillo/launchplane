@@ -53,6 +53,335 @@ from tests.test_production_backup_provider import BackupHost, _binding, setup_me
 
 
 class ProductionPromotionBackupTests(unittest.TestCase):
+    def test_interrupted_cutover_resumes_through_real_backup_guard_without_new_capture(
+        self,
+    ) -> None:
+        from control_plane.contracts.backup_gate_record import BackupGateRecord
+        from control_plane.contracts.environment_inventory import EnvironmentInventory
+        from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane, OdooSlotCoordinates
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+        from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan
+        from control_plane.workflows.odoo_prod_backup_gate import (
+            BACKUP_GATE_SOURCE,
+            OdooProdBackupGateResult,
+        )
+        from tests.test_odoo_cutover import IsolatedCutoverProvider
+        from tests.support.profiles import _odoo_preview_profile_payload
+
+        store = self.capture()
+        provider = IsolatedCutoverProvider(self.root / "cutover")
+        self.addCleanup(provider.engine.dispose)
+        pair = provider.cutover
+        old_identity = pair.old.runtime_identity.model_copy(
+            update={"product": "example-product", "context": "example-product", "instance": "prod"}
+        )
+        config = OdooCutoverLane(
+            route_id=pair.route_id,
+            host=pair.host,
+            database=pair.old.binding.database,
+            database_uuid=old_identity.database_uuid,
+            prepared_origin="http://prepared:8080",
+            slots=(
+                OdooSlotCoordinates(
+                    **pair.old.model_dump(include={"slot_id", "compose_id", "private_url"})
+                ),
+                OdooSlotCoordinates(
+                    **pair.new.model_dump(include={"slot_id", "compose_id", "private_url"})
+                ),
+            ),
+            writers=pair.writers,
+        )
+        profile = _odoo_preview_profile_payload("example-product")
+        profile["production_use"] = "prelaunch"
+        profile["preview"] = {"enabled": False}
+        profile["lanes"] = [
+            {
+                "instance": "prod",
+                "context": "example-product",
+                "base_url": "http://fixture.invalid",
+                "health_url": "http://fixture.invalid/launchplane/health",
+                "odoo_cutover": config.model_dump(mode="json"),
+            }
+        ]
+        store.write_product_profile_record(LaunchplaneProductProfileRecord.model_validate(profile))
+        for manifest in (pair.production, pair.candidate):
+            store.write_artifact_manifest(manifest)
+        for instance, manifest in (("prod", pair.production), ("testing", pair.candidate)):
+            store.write_release_tuple_record(
+                ReleaseTupleRecord(
+                    tuple_id=instance,
+                    context="example-product",
+                    channel=instance,
+                    artifact_id=manifest.artifact_id,
+                    repo_shas={"example/site": manifest.source_commit},
+                    provenance="ship",
+                    minted_at=datetime.now(UTC).isoformat(),
+                )
+            )
+        store.write_environment_inventory(
+            EnvironmentInventory(
+                context="example-product",
+                instance="prod",
+                source_git_ref=pair.production.source_commit,
+                runtime_identity=old_identity,
+                deploy=DeploymentEvidence(
+                    deploy_mode="atomic-two-slot",
+                    target_type="compose",
+                    target_name="old",
+                    status="pass",
+                ),
+                deployment_record_id="old",
+                updated_at=datetime.now(UTC).isoformat(),
+            )
+        )
+        request = OdooProdPromotionRunRequest(
+            context="example-product",
+            product="example-product",
+            request_id="accepted-cutover",
+            infrastructure_backup_record_id="backup-example",
+        )
+        plan = resolve_profile_cutover_plan(
+            store,
+            product=request.product,
+            context=request.context,
+            instance="prod",
+            artifact_id=pair.candidate.artifact_id,
+            release_id=request.request_id,
+        )
+        assert plan is not None
+        provider.cutover = plan
+        provider.target = plan.old
+        provider.binding = plan.old.binding
+        provider.plan = provider.plan.model_copy(update={"binding": plan.old.binding})
+        inputs = _inputs_result().model_copy(
+            update={
+                "context": request.context,
+                "artifact_id": plan.candidate.artifact_id,
+                "source_git_ref": plan.candidate.source_commit,
+                "request_id": request.request_id,
+                "backup_record_id": "logical-cutover",
+                "release_tuple_id": "testing",
+                "image_repository": plan.candidate.image.repository,
+                "image_digest": plan.candidate.image.digest,
+            }
+        )
+
+        def capture_logical(**kwargs: object) -> OdooProdBackupGateResult:
+            store.write_backup_gate_record(
+                BackupGateRecord(
+                    record_id="logical-cutover",
+                    context=request.context,
+                    instance="prod",
+                    created_at=datetime.now(UTC).isoformat(),
+                    source=BACKUP_GATE_SOURCE,
+                    status="pass",
+                    evidence={"coherent_fixture_capture": "verified"},
+                )
+            )
+            return OdooProdBackupGateResult(
+                context=request.context,
+                instance="prod",
+                backup_record_id="logical-cutover",
+                backup_status="pass",
+            )
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.resolve_odoo_prod_promotion_inputs",
+                return_value=inputs,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.execute_odoo_prod_backup_gate",
+                side_effect=capture_logical,
+            ) as capture,
+        ):
+            from control_plane.workflows.odoo_stable_operation_worker import (
+                _execute_prod_promotion_operation,
+                DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+            )
+            from control_plane.durable_operation_authorization import (
+                capture_durable_operation_authorization,
+            )
+            from control_plane.contracts.odoo_prod_promotion_operation import (
+                OdooProdPromotionOperationRecord,
+                build_odoo_prod_promotion_operation_id,
+                odoo_prod_promotion_request_fingerprint,
+            )
+            from tests.test_odoo_prod_promotion_operation import (
+                _operation,
+                _policy_record,
+                _ADMINISTRATOR_POLICY,
+            )
+            from tests.http_app_test_support import _github_human_identity
+
+            policy = _policy_record(_ADMINISTRATOR_POLICY)
+            original = _operation()
+            operation = type(original).model_validate(
+                original.model_copy(
+                    update={
+                        "product": request.product,
+                        "context": request.context,
+                        "request": request,
+                        "operation_id": build_odoo_prod_promotion_operation_id(
+                            product=request.product,
+                            context=request.context,
+                            idempotency_key=original.idempotency_key,
+                            idempotency_scope=original.idempotency_scope,
+                        ),
+                        "request_fingerprint": odoo_prod_promotion_request_fingerprint(request),
+                        "authorization": capture_durable_operation_authorization(
+                            identity=_github_human_identity(),
+                            action=ODOO_PROMOTION_BACKUP_ACTION,
+                            product=request.product,
+                            context=request.context,
+                            instances=("prod",),
+                            policy_record=policy,
+                            authorized_at=datetime.now(UTC).isoformat(),
+                        ),
+                    }
+                ).model_dump()
+            )
+            store.create_odoo_prod_promotion_operation_record_if_no_active_lane(operation)
+
+            def claim(*, reconcile: bool = False) -> OdooProdPromotionOperationRecord | None:
+                arguments = dict(
+                    lease_owner="cutover-worker",
+                    lease_expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+                    claimed_at=datetime.now(UTC).isoformat(),
+                )
+                if reconcile:
+                    return store.claim_odoo_cutover_reconciliation_record(
+                        **arguments, max_attempts=DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS
+                    )
+                return store.claim_next_odoo_prod_promotion_operation_record(**arguments)
+
+            def work(current: OdooProdPromotionOperationRecord | None, denial: str = "") -> bool:
+                assert current is not None
+                from control_plane.durable_operation_authorization import (
+                    DurableOperationAuthorizationGuard,
+                )
+                from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+
+                boundary = ["start"]
+                original_check = DurableOperationAuthorizationGuard.recheck_provider_effect
+
+                def recheck(guard: DurableOperationAuthorizationGuard, effect: str) -> None:
+                    boundary[0] = effect
+                    original_check(guard, effect)
+
+                def read_policy(_store: object) -> LaunchplaneAuthzPolicyRecord:
+                    if boundary[0] == denial:
+                        raise RuntimeError("fixture policy read unavailable")
+                    return policy
+
+                with (
+                    patch.object(
+                        DurableOperationAuthorizationGuard, "recheck_provider_effect", recheck
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_operation_worker.read_active_authz_policy_record",
+                        side_effect=read_policy,
+                    ),
+                ):
+                    return _execute_prod_promotion_operation(
+                        record_store=store,
+                        control_plane_root_path=self.root,
+                        operation=current,
+                        lease_owner="cutover-worker",
+                        lease_seconds=300,
+                        heartbeat_seconds=5,
+                        cutover_provider_factory=lambda plan: provider,
+                    )
+
+            provider.uncertain_switch = True
+            self.assertTrue(work(claim()))
+            held = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+            self.assertEqual(held.status, "reconciliation_required")
+            deployment = store.read_deployment_record(
+                plan.new.runtime_identity.deployment_record_id
+            )
+            assert deployment.odoo_cutover is not None
+            self.assertEqual(deployment.odoo_cutover.step, "switching")
+            from control_plane.workflows.odoo_prod_promotion_run import (
+                ODOO_LOGICAL_BACKUP_EFFECT,
+                ODOO_PROD_DEPLOY_EFFECT,
+            )
+            from control_plane.workflows.odoo_prod_rollback import (
+                resolve_odoo_prod_rollback_target,
+                execute_odoo_prod_rollback,
+                OdooProdRollbackRequest,
+            )
+
+            target = resolve_odoo_prod_rollback_target(
+                record_store=store, request=OdooProdRollbackRequest(context=request.context)
+            )
+            self.assertEqual(target.artifact_id, plan.production.artifact_id)
+            for denial in (
+                "start",
+                ODOO_LOGICAL_BACKUP_EFFECT,
+                ODOO_PROD_DEPLOY_EFFECT,
+                "start",
+                ODOO_PROD_DEPLOY_EFFECT,
+            ):
+                before = list(provider.actions)
+                self.assertTrue(work(claim(reconcile=True), denial))
+                self.assertEqual(
+                    store.read_odoo_prod_promotion_operation_record(operation.operation_id).status,
+                    "reconciliation_required",
+                )
+                self.assertEqual(provider.actions, before)
+                self.assertEqual(capture.call_count, 1)
+                self.assertEqual(
+                    store.read_odoo_prod_promotion_operation_record(operation.operation_id).attempt,
+                    held.attempt,
+                )
+            resumed = claim(reconcile=True)
+            self.assertIsNotNone(resumed)
+            with patch(
+                "control_plane.workflows.production_promotion_backup.datetime", wraps=datetime
+            ) as clock:
+                clock.now.return_value = datetime.now(UTC) + timedelta(days=2)
+                self.assertTrue(work(resumed))
+            completed = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+            self.assertEqual(completed.status, "pass")
+            assert completed.result is not None
+            self.assertEqual(completed.result.run_status, "pass")
+            self.assertEqual(provider.maintenance_count, 1)
+            self.assertEqual(capture.call_count, 1)
+            self.assertEqual(
+                store.read_environment_inventory(
+                    context_name=request.context, instance_name="prod"
+                ).runtime_identity,
+                plan.new.runtime_identity,
+            )
+            rolled = execute_odoo_prod_rollback(
+                control_plane_root=self.root,
+                record_store=store,
+                product=request.product,
+                request=OdooProdRollbackRequest(context=request.context),
+                cutover_provider=provider,
+            )
+            self.assertEqual(rolled.rollback_status, "pass")
+            self.assertEqual(
+                store.read_release_tuple_record(
+                    context_name=request.context, channel_name="prod"
+                ).artifact_id,
+                plan.production.artifact_id,
+            )
+            switched = store.read_deployment_record(rolled.deployment_record_id)
+            self.assertTrue(switched.deploy.started_at and switched.deploy.finished_at)
+            next_plan = resolve_profile_cutover_plan(
+                store,
+                product=request.product,
+                context=request.context,
+                instance="prod",
+                artifact_id=plan.candidate.artifact_id,
+                release_id="next-accepted-release",
+            )
+            assert next_plan is not None
+            self.assertEqual(next_plan.old.runtime_identity, plan.old.runtime_identity)
+
     def setUp(self) -> None:
         setup_memory_files(self)
         directory = TemporaryDirectory()

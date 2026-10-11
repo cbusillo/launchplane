@@ -36,6 +36,8 @@ from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from requests.exceptions import RequestException
 from sqlalchemy.exc import SQLAlchemyError
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane import authz_grant_service as control_plane_authz_grant_service
 from control_plane import authz_activation_preflight as control_plane_authz_activation_preflight
 from control_plane import authz_policy_activation as control_plane_authz_policy_activation
@@ -4107,6 +4109,7 @@ def create_launchplane_fastapi_app(
     engineering_review_target_resolver: EngineeringReviewTargetResolver | None = None,
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
     health_monitor_scheduler: HealthMonitorScheduler | None = None,
+    odoo_cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
         control_plane_root_path or FilePath(__file__).resolve().parent.parent
@@ -10022,6 +10025,7 @@ def create_launchplane_fastapi_app(
                     control_plane_root=resolved_control_plane_root,
                     record_store=record_store,
                     request=rollback_request,
+                    cutover_provider_factory=odoo_cutover_provider_factory,
                 )
         except OdooProdRollbackTargetMissingError as error:
             raise _launchplane_http_error(
@@ -10176,6 +10180,7 @@ def create_launchplane_fastapi_app(
                     database_url=getattr(record_store, "database_url", database_url),
                     record_store=record_store,
                     request=promotion_request,
+                    cutover_provider_factory=odoo_cutover_provider_factory,
                 )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
@@ -10462,6 +10467,7 @@ def create_launchplane_fastapi_app(
                     database_url=getattr(record_store, "database_url", database_url),
                     record_store=record_store,
                     request=run_request,
+                    cutover_provider_factory=odoo_cutover_provider_factory,
                 )
         except OdooProdPromotionRouteDependencyError:
             return driver_route_dependency_not_found_response(

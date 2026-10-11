@@ -11,6 +11,33 @@ from control_plane.contracts.runtime_identity import (
 
 
 class RuntimeIdentityTests(unittest.TestCase):
+    def test_odoo_source_alias_and_exact_cutover_identity(self) -> None:
+        expected = RuntimeIdentity(
+            context="fixture",
+            instance="isolated",
+            deployment_record_id="deployment",
+            artifact_id="artifact",
+            source_git_ref="a" * 40,
+            slot="candidate",
+            release_id="release",
+            image_digest="sha256:" + "b" * 64,
+            database_uuid="database-uuid",
+        )
+        payload = expected.model_dump()
+        payload["source_revision"] = payload.pop("source_git_ref")
+        self.assertEqual(
+            runtime_identity_from_health_payload({"runtime_identity": payload}), expected
+        )
+        for name in ("source_revision", "slot", "release_id", "image_digest", "database_uuid"):
+            changed = dict(payload)
+            changed[name] = "sha256:" + "c" * 64 if name == "image_digest" else "foreign"
+            observed = runtime_identity_from_health_payload({"runtime_identity": changed})
+            self.assertEqual(
+                compare_runtime_identity(expected=expected, observed=observed)[0], "mismatch"
+            )
+        payload["source_git_ref"] = "different"
+        self.assertIsNone(runtime_identity_from_health_payload({"runtime_identity": payload}))
+
     def test_runtime_identity_env_serializes_non_secret_identity(self) -> None:
         identity = RuntimeIdentity(
             product="sellyouroutboard",

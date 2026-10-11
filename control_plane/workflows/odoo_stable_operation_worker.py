@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.workflows.odoo_cutover import OdooCutoverProvider
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
@@ -361,6 +365,8 @@ class OdooStableOperationWorkerStore(Protocol):
 class OdooProdPromotionOperationWorkerStore(Protocol):
     """Database-backed stores also run queued Odoo prod promotions."""
 
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
+
     def list_odoo_prod_promotion_operation_records(
         self,
         *,
@@ -555,6 +561,7 @@ def run_odoo_stable_operation_worker_once(
     lease_seconds: int = DEFAULT_ODOO_STABLE_WORKER_LEASE_SECONDS,
     heartbeat_seconds: int = DEFAULT_ODOO_STABLE_WORKER_HEARTBEAT_SECONDS,
     max_attempts: int = DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> OdooStableOperationWorkerResult:
     normalized_lease_owner = lease_owner.strip()
     if not normalized_lease_owner:
@@ -701,11 +708,23 @@ def run_odoo_stable_operation_worker_once(
         if promotion_store is not None
         else None
     )
+    if (
+        promotion_operation is None
+        and cutover_provider_factory is not None
+        and isinstance(record_store, PostgresRecordStore)
+    ):
+        promotion_operation = record_store.claim_odoo_cutover_reconciliation_record(
+            lease_owner=normalized_lease_owner,
+            lease_expires_at=claim_expires_at,
+            claimed_at=claim_started_at,
+            max_attempts=max_attempts,
+        )
     if promotion_store is not None and promotion_operation is not None:
         terminal_write_committed = _execute_prod_promotion_operation(
             record_store=promotion_store,
             control_plane_root_path=control_plane_root_path,
             operation=promotion_operation,
+            cutover_provider_factory=cutover_provider_factory,
             lease_owner=normalized_lease_owner,
             lease_seconds=lease_seconds,
             heartbeat_seconds=heartbeat_seconds,
@@ -731,6 +750,7 @@ def run_odoo_stable_operation_worker_once(
             record_store=rollback_store,
             control_plane_root_path=control_plane_root_path,
             operation=rollback_operation,
+            cutover_provider_factory=cutover_provider_factory,
             lease_owner=normalized_lease_owner,
             lease_seconds=lease_seconds,
             heartbeat_seconds=heartbeat_seconds,
@@ -859,6 +879,7 @@ def run_odoo_stable_operation_worker_loop(
     lease_seconds: int = DEFAULT_ODOO_STABLE_WORKER_LEASE_SECONDS,
     heartbeat_seconds: int = DEFAULT_ODOO_STABLE_WORKER_HEARTBEAT_SECONDS,
     max_attempts: int = DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
     poll_seconds: int = DEFAULT_ODOO_STABLE_WORKER_POLL_SECONDS,
     error_backoff_seconds: int = DEFAULT_ODOO_STABLE_WORKER_ERROR_BACKOFF_SECONDS,
     max_consecutive_errors: int = DEFAULT_ODOO_STABLE_WORKER_MAX_CONSECUTIVE_ERRORS,
@@ -949,6 +970,7 @@ def run_odoo_stable_operation_worker_loop(
                     lease_seconds=lease_seconds,
                     heartbeat_seconds=heartbeat_seconds,
                     max_attempts=max_attempts,
+                    cutover_provider_factory=cutover_provider_factory,
                 )
             except Exception:
                 error_count += 1
@@ -1495,6 +1517,7 @@ def _run_release_operation(
     boundary_effects: frozenset[str],
     run: Callable[[Callable[[str], None], Callable[[str], None]], Any],
     terminal: Callable[[Any, Any], Any],
+    retain_denied_hold: Callable[[], bool] = lambda: False,
 ) -> bool:
     """Lease, heartbeat, authority checks, and the terminal write for a queued release.
 
@@ -1556,6 +1579,24 @@ def _run_release_operation(
             }
         )
 
+    def denied_hold(error: DurableOperationAuthorizationDeniedError) -> Any:
+        return read_current().model_copy(
+            update={
+                "status": "reconciliation_required",
+                "updated_at": _utc_now_timestamp(),
+                "finished_at": "",
+                "lease_owner": "",
+                "lease_expires_at": "",
+                "heartbeat_at": "",
+                "result": None,
+                # An authority refusal ran no recovery effects. Preserve the
+                # budget for actual provider attempts after authority returns.
+                "attempt": max(operation.attempt - 1, 0),
+                "error_code": error.code,
+                "error_message": "Unfinished cutover recovery was denied; retain the lane hold without effects.",
+            }
+        )
+
     try:
         authorization_guard.authorize_execution()
         result = run(checkpoint_phase, checkpoint_provider_effect)
@@ -1563,12 +1604,17 @@ def _run_release_operation(
             raise authorization_guard.denial_error
     except DurableOperationAuthorizationDeniedError as error:
         logging.warning("%s operation %s was denied: %s", label, operation.operation_id, error)
-        terminal_operation = failed(str(error), error.code)
+        if retain_denied_hold():
+            terminal_operation = denied_hold(error)
+        else:
+            terminal_operation = failed(str(error), error.code)
     except Exception as error:
         logging.exception(
             "%s operation %s failed before producing a result.", label, operation.operation_id
         )
-        if (
+        if authorization_guard.denial_error is not None and retain_denied_hold():
+            terminal_operation = denied_hold(authorization_guard.denial_error)
+        elif (
             isinstance(error, LaneMovementRefused)
             and error.code == "source_order_unavailable"
             and not odoo_release_wrote_production(read_current())
@@ -1610,7 +1656,38 @@ def _execute_prod_promotion_operation(
     lease_owner: str,
     lease_seconds: int,
     heartbeat_seconds: int,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> bool:
+    def retain_denied_cutover_hold() -> bool:
+        known_write = odoo_release_wrote_production(operation)
+        if cutover_provider_factory is None:
+            return False
+        if not known_write:
+            known_write = odoo_release_wrote_production(
+                record_store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+            )
+        if not known_write:
+            return False
+        from control_plane.odoo_cutover_plan import cutover_identity
+
+        try:
+            deployment = record_store.read_deployment_record(
+                "deployment-cutover-"
+                + cutover_identity(
+                    operation.product,
+                    operation.context,
+                    operation.instance,
+                    operation.request.request_id,
+                )
+            )
+        except Exception:
+            # A failed read after the known effect cannot establish completion.
+            return True
+        return deployment.odoo_cutover is not None and deployment.odoo_cutover.step not in {
+            "complete",
+            "rolled_back",
+        }
+
     def run(
         checkpoint_phase: Callable[[str], None],
         checkpoint_provider_effect: Callable[[str], None],
@@ -1634,6 +1711,7 @@ def _execute_prod_promotion_operation(
             phase_checkpoint=checkpoint_phase,
             provider_effect_checkpoint=before_effect,
             hold_uncertain_effects=True,
+            cutover_provider_factory=cutover_provider_factory,
         )
 
     def terminal(
@@ -1693,6 +1771,7 @@ def _execute_prod_promotion_operation(
         ),
         run=run,
         terminal=terminal,
+        retain_denied_hold=retain_denied_cutover_hold,
     )
 
 
@@ -1704,6 +1783,7 @@ def _execute_prod_rollback_operation(
     lease_owner: str,
     lease_seconds: int,
     heartbeat_seconds: int,
+    cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> bool:
     def run(
         checkpoint_phase: Callable[[str], None],
@@ -1728,6 +1808,7 @@ def _execute_prod_rollback_operation(
             target=operation.target,
             provider_effect_checkpoint=before_effect,
             hold_uncertain_effects=True,
+            cutover_provider_factory=cutover_provider_factory,
         )
 
     def terminal(

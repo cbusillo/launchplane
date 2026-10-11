@@ -2843,6 +2843,10 @@ function runtimeIdentity(
     deployed_at: OBSERVED_AT,
     preview_id: "",
     preview_generation_id: "",
+    slot: "",
+    release_id: "",
+    image_digest: "",
+    database_uuid: "",
   };
 }
 
