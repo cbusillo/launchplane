@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 import hashlib
 import json
 from typing import Protocol
@@ -194,6 +195,19 @@ def _ordinary_no_op_lifecycle_queue_matches(
     return live_queue_identity == expected_without_target
 
 
+@dataclass
+class _BatchEvidenceMemo:
+    active: bool = False
+    snapshots: dict[tuple[str, str], MergeTrainDryRunSnapshot] = field(default_factory=dict)
+    entries: dict[tuple[str, int, int], MergeTrainStructuralEntryObservation] = field(
+        default_factory=dict
+    )
+
+    def clear(self) -> None:
+        self.snapshots.clear()
+        self.entries.clear()
+
+
 @dataclass(frozen=True)
 class LiveMergeAdmissionEvaluator:
     store: object
@@ -201,6 +215,42 @@ class LiveMergeAdmissionEvaluator:
     technical_check_client: MergeAdmissionTechnicalCheckReader
     policy_record_provider: Callable[[], MergeTrainPolicyRecord] | None = None
     snapshot_reader: MergeTrainSnapshotReader | None = None
+    _batch_memo: _BatchEvidenceMemo = field(
+        default_factory=_BatchEvidenceMemo, init=False, repr=False, compare=False
+    )
+
+    @contextmanager
+    def reuse_batch_evidence(self) -> Iterator[Callable[[], None]]:
+        """Share one live queue snapshot and member evidence across a batch's evaluations.
+
+        Each evaluation of a protected batch otherwise rereads the whole open
+        queue and every member, so a pass costs members x open pull requests
+        provider reads (#3069). The yielded callable drops the shared reads;
+        the caller invokes it before the evaluation that must be fresh.
+        """
+        memo = self._batch_memo
+        if memo.active:
+            raise RuntimeError("Batch evidence reuse is already active for this evaluator.")
+        memo.active = True
+        try:
+            yield memo.clear
+        finally:
+            memo.active = False
+            memo.clear()
+
+    def _read_snapshot(
+        self, snapshot_reader: MergeTrainSnapshotReader, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        memo = self._batch_memo
+        key = (repository, base_branch)
+        if memo.active and key in memo.snapshots:
+            return memo.snapshots[key].model_copy(deep=True)
+        snapshot = snapshot_reader.read_merge_train_snapshot(
+            repository=repository, base_branch=base_branch
+        )
+        if memo.active:
+            memo.snapshots[key] = snapshot.model_copy(deep=True)
+        return snapshot
 
     def __post_init__(self) -> None:
         if self.snapshot_reader is None and not isinstance(
@@ -246,7 +296,8 @@ class LiveMergeAdmissionEvaluator:
                 if self.policy_record_provider is not None
                 else resolve_merge_train_policy_record(self.store)
             )
-            snapshot = snapshot_reader.read_merge_train_snapshot(
+            snapshot = self._read_snapshot(
+                snapshot_reader,
                 repository=landing_plan.repository,
                 base_branch=landing_plan.base_branch,
             )
@@ -444,17 +495,24 @@ class LiveMergeAdmissionEvaluator:
         pull_request_number: int,
         position: int,
     ) -> MergeTrainStructuralEntryObservation:
+        memo = self._batch_memo
+        key = (repository, pull_request_number, position)
+        if memo.active and key in memo.entries:
+            return memo.entries[key]
         target_reference = RepositoryTargetReference(
             repository=repository,
             pull_request_number=pull_request_number,
         )
         repository_evidence = self.repository_evidence_provider.resolve(target_reference)
-        return MergeTrainStructuralEntryObservation(
+        observation = MergeTrainStructuralEntryObservation(
             position=position,
             pull_request_number=pull_request_number,
             head_sha=repository_evidence.target.head_sha,
             head_tree_sha=repository_evidence.target.tree_sha,
         )
+        if memo.active:
+            memo.entries[key] = observation
+        return observation
 
     def _policy_fingerprints(
         self,

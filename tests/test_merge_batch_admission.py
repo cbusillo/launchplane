@@ -1,5 +1,6 @@
 import unittest
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -187,6 +188,54 @@ class ProtectedBatchGuardTests(unittest.TestCase):
         self.assertTrue(all(outcome.status == "landed" for outcome in outcomes))
         self.assertTrue(all(outcome.observed_at == reconciled_at for outcome in outcomes))
         self.assertEqual({outcome.merge_commit_sha for outcome in outcomes}, {provider.merge_sha})
+
+    def test_only_the_final_admission_reads_fresh_batch_evidence(self) -> None:
+        fixture = self.fixture
+        events: list[str] = []
+
+        class ReusingEvaluator:
+            @contextmanager
+            def reuse_batch_evidence(self) -> Iterator[Callable[[], None]]:
+                events.append("reuse")
+                yield lambda: events.append("refresh")
+                events.append("end")
+
+            @staticmethod
+            def evaluate(**kwargs: Any) -> Any:
+                position = kwargs["entry"].position
+                events.append(f"evaluate:{position}")
+                return fixture._evaluate(
+                    after_first_landing=False,
+                    target_position=position,
+                    base_tree=fixture.plan.entries[0].recorded_candidate_parent_tree_sha,
+                )
+
+        self.guard.evaluator = ReusingEvaluator()
+        provider = _BatchProvider(self.fixture.candidate_record.candidate)
+        provider.number = 9000
+        client = GitHubMergeTrainClient(transport=provider)
+        client.ensure_batch_pull_request(candidate=provider.candidate)
+
+        def checkpoint(_plan: Any, entry: Any, phase: str) -> None:
+            if phase == "merge_entry":
+                self.fixture.controller = self.fixture.controller.model_copy(
+                    update={"active_pull_request_number": entry.pull_request_number}
+                )
+                self.store.write_merge_train_controller_state_record(self.fixture.controller)
+
+        landed = client.land_batch_candidate(
+            landing_plan=self.guard.landing_plan_record.landing_plan,
+            admission_guard=self.guard,
+            recorded_at="2026-08-11T03:02:00Z",
+            checkpoint=checkpoint,
+        )
+
+        self.assertTrue(all(entry.status == "merged" for entry in landed.entries))
+        self.assertEqual(len(provider.merge_calls), 1)
+        self.assertEqual(
+            events,
+            ["reuse", "evaluate:1", "evaluate:2", "evaluate:1", "refresh", "evaluate:2", "end"],
+        )
 
     def test_unready_second_member_does_not_append_prefix_admissions_each_pass(self) -> None:
         fixture = self.fixture
