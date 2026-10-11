@@ -21,11 +21,12 @@ block product reconciliation. Existing poll/backoff admission still applies.
 A controller mutation pass continues through candidate planning, construction,
 and already-passed checks to landing planning and execution. Observing pending
 checks stops the pass; branch updates and stack collapse start CI and also stop
-it. Refusals, reconciliation and landing outcomes end the pass. Each action
-re-reads policy and admission and acquires the normal controller lease;
-disabling or disarming a target takes effect before the next action. A pass
-allows at most 16 actions per target, then yields to the other trains. Dry-run
-and level1 passes still run once. The HTTP controller and GitHub runner remain
+it. A finished landing continues to the next queued batch, which builds against
+the new base; an unfinished landing, refusals and reconciliation end the pass.
+Each action re-reads policy and admission and acquires the normal controller
+lease; disabling or disarming a target takes effect before the next action. A
+pass allows at most 16 actions per target, then yields to the other trains.
+Dry-run and level1 passes still run once. The HTTP controller and GitHub runner remain
 one-action interfaces; this progression belongs to the in-service worker.
 
 The App must already deliver these events to the receiver with its configured

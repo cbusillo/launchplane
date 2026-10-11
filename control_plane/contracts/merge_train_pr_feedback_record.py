@@ -32,6 +32,7 @@ class MergeTrainPrFeedbackRecord(BaseModel):
     comment_markdown: str
     source: str
     recorded_at: str
+    created_at_ns: int = Field(default=0, ge=0)
     policy_key: str = ""
     policy_sha256: str = ""
     controller_action: str = ""
@@ -41,6 +42,10 @@ class MergeTrainPrFeedbackRecord(BaseModel):
     comment_id: int = 0
     comment_url: str = ""
     error_message: str = ""
+    delivery_attempts: int = Field(default=1, ge=0)
+    retryable: bool = True
+    retry_at: str = ""
+    provider_retry_at: str = ""
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeTrainPrFeedbackRecord":
