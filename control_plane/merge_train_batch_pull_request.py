@@ -151,19 +151,22 @@ def _batch_owner_test_notes(
         )
         body = detail.get("body")
         notes = owner_test_notes(body if isinstance(body, str) else "")
-        raw_labels = detail.get("labels", ())
-        labels = (
-            tuple(str(label.get("name", "")) for label in raw_labels if isinstance(label, dict))
-            if isinstance(raw_labels, (list, tuple))
-            else ()
-        )
-        intent = GitHubMergeTrainSnapshotReader(
-            transport=client.transport, branch_refresh_store=client._branch_refresh_store
-        ).client_review_intent(labels=labels, repository=candidate.repository, body=str(body or ""))
-        if not intent.explicit_override and pure_dependabot_update(
+        if pure_dependabot_update(
             detail, read=lambda path: client.transport.request(method="GET", path=path)
         ):
-            notes = DEPENDENCY_UPDATE_NOTES
+            raw_labels = detail.get("labels", ())
+            labels = (
+                tuple(str(label.get("name", "")) for label in raw_labels if isinstance(label, dict))
+                if isinstance(raw_labels, (list, tuple))
+                else ()
+            )
+            intent = GitHubMergeTrainSnapshotReader(
+                transport=client.transport, branch_refresh_store=client._branch_refresh_store
+            ).client_review_intent(
+                labels=labels, repository=candidate.repository, body=str(body or "")
+            )
+            if not intent.explicit_override:
+                notes = DEPENDENCY_UPDATE_NOTES
         sections.append(
             f"{heading}\n\n"
             + (
