@@ -214,6 +214,12 @@ def _container_identity(container: dict[str, Any], container_name: str) -> tuple
 
 
 def _feedback_event(*, controller_action: str, result: dict[str, Any]) -> str:
+    if result.get("reason_code") == "base_checks_not_green":
+        return (
+            "waiting"
+            if _as_dict(result.get("details")).get("base_checks_status") == "pending"
+            else "blocked"
+        )
     candidate = _as_dict(result.get("candidate"))
     landing_plan = _as_dict(result.get("landing_plan"))
     candidate_status = _string(candidate.get("status"))
@@ -308,6 +314,8 @@ def _feedback_message(
             return f"Launchplane needs attention before the train can continue: {detail}"
         return "Launchplane needs attention before the train can continue."
     if event == "waiting":
+        if result.get("reason_code") == "base_checks_not_green":
+            return f"Launchplane is waiting for the base checks: {_blocking_detail(result)}"
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
         if selected.get("owner_review_required") is True and "candidate" not in result:
             return (
