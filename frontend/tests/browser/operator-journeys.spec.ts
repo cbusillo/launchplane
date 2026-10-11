@@ -25,7 +25,7 @@ const screenshotRoot = resolve(
 );
 
 test.describe("operator journeys", () => {
-  test("anonymous operator receives the authentication prompt", async ({
+  test("anonymous operator receives the authentication prompt", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     await page.route("**/v1/auth/session", async (route) => {
@@ -227,7 +227,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator sees an honest empty product inventory", async ({
+  test("operator sees an honest empty product inventory", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -254,7 +254,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator sees an honest product inventory error", async ({
+  test("operator sees an honest product inventory error", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -278,7 +278,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator enters the product workspace by keyboard", async ({
+  test("operator enters the product workspace by keyboard", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -433,11 +433,10 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator sees silenced incident state at narrow width", async ({
+  test("operator sees silenced incident state at both widths", { tag: "@responsive" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
-    await page.setViewportSize({ width: 390, height: 844 });
 
     await page.goto(
       "/ui/products/atlas-commerce/environments/prod?fixture=products&incident=silenced",
@@ -462,7 +461,7 @@ test.describe("operator journeys", () => {
     await captureScreenshot(
       page,
       testInfo,
-      "environment-incident-silenced-narrow",
+      "environment-incident-silenced",
     );
     diagnostics.assertClean();
   });
@@ -551,7 +550,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator can review recent product activity", async ({
+  test("operator can review recent product activity", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -574,7 +573,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator can diagnose recorded environment evidence", async ({
+  test("operator can diagnose recorded environment evidence", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -600,7 +599,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator sees an honest blocked action", async ({ page }, testInfo) => {
+  test("operator sees an honest blocked action", { tag: "@layout" }, async ({ page }, testInfo) => {
     const diagnostics = monitorBrowser(page);
 
     await page.goto(
@@ -651,7 +650,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator inspects mixed action readiness without executing a route", async ({
+  test("operator inspects mixed action readiness without executing a route", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -729,7 +728,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator sees ready immutable workflow preflight evidence", async ({
+  test("operator sees ready immutable workflow preflight evidence", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -758,7 +757,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator sees unsupported action readiness without execution", async ({
+  test("operator sees unsupported action readiness without execution", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -791,7 +790,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator sees readiness authorization denial with trace evidence", async ({
+  test("operator sees readiness authorization denial with trace evidence", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -818,7 +817,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator sees readiness service failure without stale evidence", async ({
+  test("operator sees readiness service failure without stale evidence", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -841,7 +840,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator sees a distinct empty readiness contract", async ({
+  test("operator sees a distinct empty readiness contract", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -861,7 +860,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator sees a distinct readiness loading state", async ({
+  test("operator sees a distinct readiness loading state", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -896,7 +895,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator reaches confirmation without applying a change", async ({
+  test("operator reaches confirmation without applying a change", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -951,7 +950,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("operator previews a new Owner without saving", async ({
+  test("operator previews a new Owner without saving", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
@@ -1152,7 +1151,7 @@ test.describe("operator journeys", () => {
     diagnostics.assertClean();
   });
 
-  test("privileged-operation approval remains human-governed and redacted", async ({
+  test("privileged-operation approval remains human-governed and redacted", { tag: "@layout" }, async ({
     page,
   }, testInfo) => {
     const diagnostics = monitorBrowser(page);
