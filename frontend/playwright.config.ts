@@ -9,10 +9,10 @@ export default defineConfig({
   testDir: "./tests/browser",
   testMatch: "**/*.spec.ts",
   outputDir: resolve(artifactRoot, "test-results"),
-  // Each test mocks its own API reads in a fresh browser context, so tests
-  // share no state; CI runs one worker per runner core.
+  // Tests mock their own API reads in fresh contexts. CI runners can share a
+  // host, so keep browser fan-out bounded independently of its CPU count.
   fullyParallel: true,
-  workers: process.env.CI ? "100%" : undefined,
+  workers: process.env.CI ? 4 : undefined,
   retries: 0,
   forbidOnly: Boolean(process.env.CI),
   reporter: "line",
@@ -20,7 +20,7 @@ export default defineConfig({
     timeout: 10_000,
   },
   use: {
-    baseURL: "http://127.0.0.1:4173",
+    baseURL: process.env.BROWSER_SMOKE_URL,
     colorScheme: "dark",
     locale: "en-US",
     reducedMotion: "reduce",
@@ -47,8 +47,11 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm exec vite --host 127.0.0.1 --port 4173 --strictPort",
-    url: "http://127.0.0.1:4173/ui/",
+    command: "pnpm exec vite --host 127.0.0.1 --port 0 --strictPort",
+    env: { FORCE_COLOR: "0", NO_COLOR: "1" },
+    // Each runner owns its OS-assigned listener; Playwright passes the captured
+    // origin to worker processes before they load this configuration.
+    wait: { stdout: /Local:\s+(?<browser_smoke_url>http:\/\/127\.0\.0\.1:\d+)\/ui\// },
     reuseExistingServer: false,
     timeout: 120_000,
   },
