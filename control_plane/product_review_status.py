@@ -31,6 +31,7 @@ from control_plane.github_app_identity import (
     revoke_installation_token,
 )
 from control_plane.client_test_notes import change_client_review
+from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane.product_review import ProductReviewStore
 from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
@@ -73,6 +74,7 @@ class _PullRequestFacts:
     body: str = ""
     head_ref: str = ""
     head_repository: str = ""
+    pure_dependency_update: bool = False
 
 
 def owner_review_status(
@@ -202,6 +204,7 @@ class OwnerReviewStatusPublisher:
                         body=facts.body,
                         labels=facts.labels,
                         review_label=profile.owner.review_label,
+                        pure_dependency_update=facts.pure_dependency_update,
                     )
                     synthetic = not intent.explicit_override and recorded_train_candidate(
                         store=store,
@@ -321,7 +324,11 @@ class OwnerReviewStatusPublisher:
             if isinstance(raw_repository_id, int) and not isinstance(raw_repository_id, bool)
             else ""
         )
+        dependency_only = pure_dependabot_update(
+            payload, read=lambda path: self.api_request(path=path, token=token)
+        )
         return _PullRequestFacts(
+            pure_dependency_update=dependency_only,
             head_sha=head_sha.strip().lower(),
             labels=labels,
             repository_id=repository_id,
@@ -343,7 +350,10 @@ class OwnerReviewStatusPublisher:
         token: str,
     ) -> OwnerReviewStatus:
         intent = change_client_review(
-            body=facts.body, labels=facts.labels, review_label=profile.owner.review_label
+            body=facts.body,
+            labels=facts.labels,
+            review_label=profile.owner.review_label,
+            pure_dependency_update=facts.pure_dependency_update,
         )
         if not intent.review_required:
             decisions = store.list_product_review_decision_records(

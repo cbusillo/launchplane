@@ -411,6 +411,33 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         self.assertNotIn("Passed.", notes)
         self.assertNotIn("Dependency bump", notes)
 
+    def test_batch_carries_derived_notes_for_a_pure_dependabot_member(self) -> None:
+        from control_plane.client_test_notes import client_test_notes
+        from control_plane.merge_train_batch_pull_request import _batch_owner_test_notes
+
+        class DependabotProvider(_BatchProvider):
+            def pull_request(self, number: int) -> dict[str, object]:
+                return super().pull_request(number) | {
+                    "user": {"login": "dependabot[bot]", "type": "Bot"},
+                    "labels": [],
+                }
+
+            def request(
+                self, *, method: str, path: str, body: dict[str, object] | None = None
+            ) -> object:
+                if "/compare/" in path:
+                    return {"files": [{"filename": "uv.lock", "status": "modified"}]}
+                return super().request(method=method, path=path, body=body)
+
+        provider = DependabotProvider(self.guard.candidate_record.candidate)
+        body = _batch_owner_test_notes(
+            client=GitHubMergeTrainClient(transport=provider),
+            candidate=self.guard.candidate_record.candidate,
+        )
+        intent = client_test_notes(owner_test_notes(body))
+        self.assertFalse(intent.error)
+        self.assertFalse(intent.review_required)
+
     def test_both_entries_land_through_one_sha_guarded_protected_merge(self) -> None:
         landed = self.land()
         self.assertEqual([entry.status for entry in landed.entries], ["merged", "merged"])

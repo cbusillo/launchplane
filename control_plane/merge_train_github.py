@@ -52,6 +52,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
     MergeTrainStructuralProvenance,
 )
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
+from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.release_review_shared import repository_key
 from control_plane.client_release_repositories import (
     ClientReleaseRepositoryStore,
@@ -2205,6 +2206,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 labels=_labels(pull_request.get("labels")),
                 repository=repository_path,
                 body=str(pull_request.get("body") or ""),
+                pull_request=pull_request,
             )
             if require_client_review
             else ClientTestNotes(False)
@@ -2392,6 +2394,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             labels=_labels(pull_request.get("labels")),
             repository=repository_path,
             body=str(pull_request.get("body") or ""),
+            pull_request=pull_request,
         )
         if intent.error:
             raise MergeTrainGitHubStaleHeadError(intent.error, status_code=409)
@@ -3061,7 +3064,10 @@ class GitHubMergeTrainSnapshotReader:
             else None
         )
         review_intent = self.client_review_intent(
-            labels=labels, repository=base_repository, body=str(source.get("body") or "")
+            labels=labels,
+            repository=base_repository,
+            body=str(source.get("body") or ""),
+            pull_request=source,
         )
         if not review_intent.explicit_override and recorded_train_candidate(
             store=self._branch_refresh_store,
@@ -3379,7 +3385,12 @@ class GitHubMergeTrainSnapshotReader:
         return "repo_admin" if str(payload.get("permission") or "") == "admin" else "unknown"
 
     def client_review_intent(
-        self, *, labels: tuple[str, ...], repository: str, body: str
+        self,
+        *,
+        labels: tuple[str, ...],
+        repository: str,
+        body: str,
+        pull_request: dict[str, object] | None = None,
     ) -> ClientTestNotes:
         if not callable(getattr(self._branch_refresh_store, "list_product_profile_records", None)):
             return ClientTestNotes(False)
@@ -3400,8 +3411,20 @@ class GitHubMergeTrainSnapshotReader:
             and profile.owner.review_label.strip().casefold()
             in {label.casefold() for label in labels}
         )
+        dependency_only = (
+            bool(profiles)
+            and pull_request is not None
+            and pure_dependabot_update(
+                pull_request, read=lambda path: self.transport.request(method="GET", path=path)
+            )
+        )
         intents = tuple(
-            change_client_review(body=body, labels=labels, review_label=profile.owner.review_label)
+            change_client_review(
+                body=body,
+                labels=labels,
+                review_label=profile.owner.review_label,
+                pure_dependency_update=dependency_only,
+            )
             for profile in profiles
         )
         return ClientTestNotes(

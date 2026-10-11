@@ -23,6 +23,7 @@ from control_plane.merge_admission import (
 from control_plane.merge_train import review_conversations_reason
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
+    GitHubMergeTrainSnapshotReader,
     MERGE_REF_READ_DELAYS_SECONDS,
     MergeTrainGitHubError,
     MergeTrainGitHubStaleHeadError,
@@ -36,6 +37,7 @@ from control_plane.merge_train_github import (
     _validated_model_update,
     _wait_for_branch_sha,
 )
+from control_plane.dependency_update_review import DEPENDENCY_UPDATE_NOTES, pure_dependabot_update
 from control_plane.release_review_github import (
     missing_owner_test_notes,
     nest_owner_test_notes,
@@ -149,6 +151,19 @@ def _batch_owner_test_notes(
         )
         body = detail.get("body")
         notes = owner_test_notes(body if isinstance(body, str) else "")
+        raw_labels = detail.get("labels", ())
+        labels = (
+            tuple(str(label.get("name", "")) for label in raw_labels if isinstance(label, dict))
+            if isinstance(raw_labels, (list, tuple))
+            else ()
+        )
+        intent = GitHubMergeTrainSnapshotReader(
+            transport=client.transport, branch_refresh_store=client._branch_refresh_store
+        ).client_review_intent(labels=labels, repository=candidate.repository, body=str(body or ""))
+        if not intent.explicit_override and pure_dependabot_update(
+            detail, read=lambda path: client.transport.request(method="GET", path=path)
+        ):
+            notes = DEPENDENCY_UPDATE_NOTES
         sections.append(
             f"{heading}\n\n"
             + (

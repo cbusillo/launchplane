@@ -3609,6 +3609,36 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             tuple(self.owner_review_status_calls), calls_before_refusal + (("site", 5),)
         )
 
+    def test_pure_dependabot_without_build_requests_no_client_review(self) -> None:
+        payload = _profile()
+        payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        self.github.pull_request.update(
+            {
+                "body": "Bumps a dependency.",
+                "user": {"login": "dependabot[bot]", "type": "Bot"},
+                "head": {"sha": PR_HEAD, "repo": {"full_name": REPOSITORY}},
+                "base": {"sha": DEPLOYABLE, "repo": {"full_name": REPOSITORY}},
+            }
+        )
+        read = self.github.get_json
+        with patch.object(
+            self.github,
+            "get_json",
+            side_effect=lambda path: (
+                {"files": [{"filename": "uv.lock", "status": "modified"}]}
+                if "/compare/" in path
+                else read(path)
+            ),
+        ):
+            result = self.reconcile_preview()
+        self.assertEqual(result["reason"], "no_verified_build")
+        self.assertIs(result["owner_review_requested"], False)
+        self.assertNotIn("@site-owner", self.comment_body())
+        self.assertEqual(self.provider.applied, [])
+
     def test_notes_status_refreshes_without_a_verified_build_or_comment_change(self) -> None:
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}

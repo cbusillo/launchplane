@@ -39,6 +39,7 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
+from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane import secrets
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
@@ -1434,6 +1435,7 @@ def _plan_preview_target(
         body=str(pull_request.get("body") or ""),
         labels=_labels(pull_request),
         review_label=profile.owner.review_label,
+        pure_dependency_update=pure_dependabot_update(pull_request, read=transport.get_json),
     )
     if not intent.explicit_override and recorded_train_candidate(
         store=record_store,
