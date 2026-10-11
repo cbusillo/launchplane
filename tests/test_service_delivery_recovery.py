@@ -158,33 +158,42 @@ class ServiceDeliveryRecoveryTests(unittest.TestCase):
     def test_concurrent_duplicates_commit_once_and_return_one_receipt(self) -> None:
         for request, execute in self.cases():
             with self.subTest(operation=execute.__name__):
-                apply = self.prepare(request, execute)
-                barrier = Barrier(2)
-                write = self.store.write_product_authority_bundle
+                self.assert_concurrent_replay(request, execute)
 
-                def simultaneous(bundle: ProductAuthorityBundle) -> None:
-                    barrier.wait(timeout=30)
-                    write(bundle)
+    def test_concurrent_unchanged_selection_replays_unique_receipt(self) -> None:
+        self.assert_concurrent_replay(
+            DeliveryGitHubAppConfigurationRequest(
+                app_id=76, integration="existing-delivery", reason="Confirm the existing selection."
+            ),
+            apply_delivery_github_configuration,
+        )
 
-                def run(index: int) -> ApplyResult:
-                    return execute(
-                        store=self.store,
-                        request=apply,
-                        actor="github:42",
-                        trace_id=f"concurrent-{index}",
-                        idempotency_key="original-key",
-                    )
+    def assert_concurrent_replay(self, request: OriginalRequest, execute: Executor) -> None:
+        apply = self.prepare(request, execute)
+        barrier = Barrier(2)
+        write = self.store.write_product_authority_bundle
 
-                with (
-                    patch.object(
-                        self.store, "write_product_authority_bundle", side_effect=simultaneous
-                    ),
-                    ThreadPoolExecutor(max_workers=2) as pool,
-                ):
-                    futures = [pool.submit(run, index) for index in range(2)]
-                    results = [future.result(timeout=60) for future in futures]
-                self.assertEqual(results[0], results[1])
-                self.assertEqual(self.recover(apply).state, "completed")
+        def simultaneous(bundle: ProductAuthorityBundle) -> None:
+            barrier.wait(timeout=30)
+            write(bundle)
+
+        def run(index: int) -> ApplyResult:
+            return execute(
+                store=self.store,
+                request=apply,
+                actor="github:42",
+                trace_id=f"concurrent-{index}",
+                idempotency_key="original-key",
+            )
+
+        with (
+            patch.object(self.store, "write_product_authority_bundle", side_effect=simultaneous),
+            ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            futures = [pool.submit(run, index) for index in range(2)]
+            results = [future.result(timeout=60) for future in futures]
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(self.recover(apply).state, "completed")
 
     def test_corrupt_completion_is_not_accepted(self) -> None:
         request, execute = self.cases()[0]

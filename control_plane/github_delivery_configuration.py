@@ -6,6 +6,7 @@ import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy.exc import IntegrityError
 
 from control_plane.delivery_apply_receipt import (
     delivery_request_fingerprint,
@@ -204,7 +205,7 @@ def apply_delivery_github_configuration(
             bundle.model_copy(update={"idempotency_record": receipt})
         )
         return summary
-    except (ValueError, FileNotFoundError):
+    except (ValueError, FileNotFoundError, IntegrityError):
         if request.mode == "apply":
             previous = read_delivery_apply_receipt(
                 store=store,

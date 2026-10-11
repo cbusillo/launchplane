@@ -6,6 +6,7 @@ import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy.exc import IntegrityError
 
 from control_plane.delivery_apply_receipt import (
     delivery_request_fingerprint,
@@ -170,7 +171,7 @@ def read_service_github_delivery(
     ):
         try:
             record, binding = _key_binding(store, integration)
-        except (ValueError, FileNotFoundError):
+        except (ValueError, FileNotFoundError, IntegrityError):
             continue
         keys.append(
             ExistingDeliveryKey(
@@ -349,7 +350,7 @@ def apply_service_token_retirement(
             bundle.model_copy(update={"idempotency_record": receipt})
         )
         return result
-    except (ValueError, FileNotFoundError):
+    except (ValueError, FileNotFoundError, IntegrityError):
         if request.mode == "apply":
             previous = read_delivery_apply_receipt(
                 store=store,
