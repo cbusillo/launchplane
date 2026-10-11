@@ -832,6 +832,64 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         (feedback,) = self.store.list_preview_pr_feedback_records()
         self.assertIn("no Client is set", feedback.comment_markdown)
 
+    async def test_ready_train_preview_does_not_publish_a_duplicate_client_review(self) -> None:
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from control_plane.workflows.preview_pr_feedback import pull_request_client_review
+
+        payload = product_profile_payload("verireel")
+        payload["owner"] = {"github_login": "site-owner", "github_id": str(_OWNER_GITHUB_ID)}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        candidate = SimpleNamespace(
+            candidate_ref="refs/heads/launchplane/train/every/verireel/main/batch",
+            candidate_sha=_HEAD_SHA,
+            base_branch="main",
+        )
+        publisher = Mock(spec=OwnerReviewStatusPublisher)
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(_preview_pr_feedback_identity()),
+            authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+            control_plane_root_path=self.root,
+            record_store_factory=lambda: self.store,
+            owner_review_status_publisher=publisher,
+        )
+        with (
+            patch(
+                "control_plane.http_app.pull_request_client_review",
+                side_effect=pull_request_client_review,
+            ),
+            patch.object(
+                self.store,
+                "list_merge_train_batch_candidate_records",
+                return_value=(SimpleNamespace(candidate=candidate),),
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.launchplane_github_token",
+                return_value=nullcontext("test-token"),
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.github_api_request",
+                return_value={
+                    "body": "## Owner test notes\n### #12 Feature\nTry the price list.",
+                    "head": {
+                        "ref": candidate.candidate_ref.removeprefix("refs/heads/"),
+                        "sha": _HEAD_SHA,
+                        "repo": {"full_name": "every/verireel"},
+                    },
+                    "base": {"ref": "main"},
+                    "labels": [],
+                },
+            ),
+        ):
+            response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+        self.assertEqual(response.status_code, 202, response.json())
+        publisher.publish.assert_not_called()
+        (feedback,) = self.store.list_preview_pr_feedback_records()
+        self.assertNotIn("review the preview", feedback.comment_markdown)
+
     async def test_ready_feedback_separates_invalid_notes_from_read_failures(self) -> None:
         from control_plane.client_test_notes import ClientTestNotesRequired
 

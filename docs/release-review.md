@@ -177,7 +177,7 @@ URLs. Missing test notes and commits without a merged pull request are
 visible checklist blockers. The [Client notes contract](owner-acceptance.md)
 owns valid engineering-only declarations and supported historical spellings.
 Previously merged notes in the bare or malformed new form must be corrected
-on their source PR before the Client can accept the release; the visible
+on the PR named in the blocker (the batch PR for batch landings) before the Client can accept the release; the visible
 checklist blocker names that PR. The changed checklist needs fresh acceptance.
 Previous preview acceptance is an annotation, never release approval.
 Changes to existing shared Odoo addon sources appear in separate Client checklist

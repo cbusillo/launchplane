@@ -22776,7 +22776,11 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         feedback_store.write_preview_pr_feedback_record(feedback_record)
-        if feedback_request.status == "ready" and owner_profile is not None:
+        if (
+            feedback_request.status == "ready"
+            and owner_profile is not None
+            and owner_review_requested
+        ):
             # Best-effort: the delivered comment never depends on the status.
             try:
                 product_review_store = require_product_review_store(record_store)
