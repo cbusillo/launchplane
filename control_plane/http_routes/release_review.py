@@ -321,7 +321,7 @@ def register_release_review_routes(
                 status_code=409,
                 trace_id=trace_id,
                 code="temporary_hotfix_rollback_in_progress",
-                message="The Client's request for changes is rolling the site back. Reload once it finishes.",
+                message="The Client's request for changes is rolling the site back, or its rollback stopped and needs an admin rollback. Reload once production has left the rejected fix.",
             )
         if current.reviewing_temporary_hotfix and envelope.decision == "overridden":
             raise common.http_error(

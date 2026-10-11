@@ -9,7 +9,7 @@ production back to their last accepted release.
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import patch
 
 from httpx2 import Response
@@ -67,8 +67,8 @@ class TemporaryHotfixRehearsal(unittest.IsolatedAsyncioTestCase):
     def _admission(self, **kwargs: object) -> object:
         return test_client_release.ClientReleaseTests._admission(cast(Any, self), **kwargs)
 
-    def finish(self, operation_id: str) -> None:
-        test_client_release.ClientReleaseTests.finish(cast(Any, self), operation_id)
+    def finish(self, operation_id: str, status: Literal["pass", "fail"] = "pass") -> None:
+        test_client_release.ClientReleaseTests.finish(cast(Any, self), operation_id, status)
 
     def set_prod(self, artifact_id: str) -> None:
         test_client_release.ClientReleaseTests.set_prod(cast(Any, self), artifact_id)
@@ -274,16 +274,17 @@ class TemporaryHotfixRehearsal(unittest.IsolatedAsyncioTestCase):
     async def test_client_rejection_rolls_back_to_their_last_accepted_release(self) -> None:
         hotfix = await self.ship_hotfix()
         client = _human(login="site-owner", github_id=CLIENT_ID)
-        # A lost release record keeps the hotfix under review; the retry republishes
-        # the same rejection, still carrying its rollback.
+        # Lost release records keep the hotfix under review, even when the Client
+        # edits their reason; the retry republishes a rejection still carrying rollback.
         self.publisher.return_value = ""
-        unpublished = await self.post(
-            client, "changes_requested", "The fix broke search.", hotfix.checklist_digest
-        )
-        self.assertEqual(unpublished.status_code, 200, unpublished.text)
-        self.assertEqual(self.advance(), (), "an unpublished rejection rolls nothing back")
+        for reason in ("Search is broken.", "The fix broke search."):
+            unpublished = await self.post(
+                client, "changes_requested", reason, hotfix.checklist_digest
+            )
+            self.assertEqual(unpublished.status_code, 200, unpublished.text)
+            self.assertEqual(self.advance(), (), "an unpublished rejection rolls nothing back")
+            self.assertTrue((await self.read(client))["reviewing_temporary_hotfix"])
         pending = self.newest()
-        self.assertTrue((await self.read(client))["reviewing_temporary_hotfix"])
         self.publisher.return_value = "https://github.com/example/site/issues/100"
         rejected = await self.post(
             client, "changes_requested", "The fix broke search.", hotfix.checklist_digest
@@ -320,6 +321,24 @@ class TemporaryHotfixRehearsal(unittest.IsolatedAsyncioTestCase):
         view = await self.read(client)
         self.assertFalse(view["reviewing_temporary_hotfix"])
         self.assertEqual(view["release_run"]["state"], "passed")
+
+    async def test_a_stopped_rollback_keeps_the_rejection_until_production_leaves_the_fix(
+        self,
+    ) -> None:
+        hotfix = await self.ship_hotfix()
+        client = _human(login="site-owner", github_id=CLIENT_ID)
+        rejected = await self.post(client, "changes_requested", "Broken.", hotfix.checklist_digest)
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        (rollback_id,) = self.advance()
+        self.finish(rollback_id, "fail")
+        self.move_testing()
+        refused = await self.post(client, "accepted")
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertIn("temporary_hotfix_rollback_in_progress", refused.text)
+        # An admin rollback takes production off the rejected fix; decisions resume.
+        self.set_prod("artifact-prod")
+        resumed = await self.post(client, "accepted")
+        self.assertEqual(resumed.status_code, 200, resumed.text)
 
     async def test_only_the_director_can_start_a_hotfix(self) -> None:
         client = _human(login="site-owner", github_id=CLIENT_ID)

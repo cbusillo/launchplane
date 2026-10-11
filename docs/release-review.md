@@ -410,9 +410,12 @@ shows that exact checklist (`reviewing_temporary_hotfix: true`) with the reason:
 The review links the live site, because testing may already carry newer work.
 Until production no longer runs the rejected candidate, every new decision
 returns `409 temporary_hotfix_rollback_in_progress`, including the admin
-override and another hotfix. If the rejection's release record could not be
-published, the review stays open, and the Client's retry republishes that same
-rejection with its rollback.
+override and another hotfix. If the rollback stops (it fails, or its provider
+outcome needs reconciliation), the existing admin rollback or reconciliation
+path takes production off the rejected fix, and decisions resume. If a Client
+decision's release record could not be published, the review stays open on the
+same hotfix, even when the Client edits their reason, and a rejection keeps its
+rollback.
 
 The admin override is refused while a live hotfix awaits the Client. The
 Director keeps seeing the current testing candidate, so a further hotfix binds

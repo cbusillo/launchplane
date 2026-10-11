@@ -369,9 +369,10 @@ def is_hotfix_rejection(decision: ReleaseReviewDecisionRecord) -> bool:
 
 
 def rejection_rollback_pending(store: object, profile: LaunchplaneProductProfileRecord) -> bool:
-    """The Client's published rejection is still taking production off the hotfix.
+    """The Client's published rejection still has production on the rejected hotfix.
 
-    It stays authoritative until production no longer runs the rejected candidate.
+    It stays authoritative until production no longer runs that candidate: after its
+    rollback, or after an admin rollback when the automatic one stopped.
     """
 
     if not isinstance(store, PostgresRecordStore):
@@ -379,16 +380,11 @@ def rejection_rollback_pending(store: object, profile: LaunchplaneProductProfile
     latest = store.list_release_review_decision_records(product=profile.product, limit=1)
     if not latest or not is_hotfix_rejection(latest[0]) or not latest[0].release_issue_url:
         return False
-    run = read_client_release_run(store=store, profile=profile, decision=latest[0])
     try:
         production = release_version(store=store, profile=profile, instance="prod")
     except (FileNotFoundError, ValueError):
         return True
-    return (
-        run is not None
-        and run.state in {"waiting", "running"}
-        and production == latest[0].checklist.candidate
-    )
+    return production == latest[0].checklist.candidate
 
 
 def live_temporary_hotfix(
@@ -396,21 +392,25 @@ def live_temporary_hotfix(
 ) -> ReleaseReviewDecisionRecord | None:
     """The live temporary hotfix still awaiting the Client's published decision.
 
-    An unpublished rejection keeps the review open, so retrying it republishes the
-    same rollback decision.
+    Unpublished Client decisions on it keep the review open, so a retry, even with
+    an edited reason, records against the same hotfix and keeps a rejection's rollback.
     """
 
     if not isinstance(store, PostgresRecordStore):
         return None
-    latest = store.list_release_review_decision_records(product=profile.product, limit=2)
-    if not latest:
-        return None
-    hotfix = latest[0]
-    if is_hotfix_rejection(hotfix) and not hotfix.release_issue_url and len(latest) > 1:
-        if latest[1].checklist_digest != hotfix.checklist_digest:
-            return None
-        hotfix = latest[1]
-    if hotfix.decision != "temporary_hotfix":
+    unpublished: list[ReleaseReviewDecisionRecord] = []
+    hotfix: ReleaseReviewDecisionRecord | None = None
+    for decision in store.list_release_review_decision_records(product=profile.product):
+        if decision.decision != "temporary_hotfix" and not decision.release_issue_url:
+            unpublished.append(decision)
+            continue
+        hotfix = decision
+        break
+    if (
+        hotfix is None
+        or hotfix.decision != "temporary_hotfix"
+        or any(decision.checklist_digest != hotfix.checklist_digest for decision in unpublished)
+    ):
         return None
     run = read_client_release_run(store=store, profile=profile, decision=hotfix)
     try:
