@@ -351,7 +351,7 @@ test("an old receipt check cannot erase a newer uncertain Save after returning t
   await panel.getByRole("button", { name: "Preview change", exact: true }).click();
   await panel.getByRole("button", { name: "Save", exact: true }).click();
   await expect(panel.getByRole("button", { name: "Retry save", exact: true })).toBeEnabled();
-  const key = await page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane.browser-operation.atlas-commerce-owner-apply")!).identity.idempotencyKey);
+  const key = await page.evaluate(() => JSON.parse(sessionStorage.getItem(`launchplane.browser-operation.v2.${encodeURIComponent("atlas-commerce:owner:apply")}`)!).identity.idempotencyKey);
   expect(key).not.toBe("old-key");
   await oldCheck!.fulfill({ json: { trace_id: "late-old-check", product: "atlas-commerce", field: "owner",
     idempotency_key: "old-key", state: "completed", original_trace_id: "old-completion" } }).catch(() => {});
@@ -359,7 +359,7 @@ test("an old receipt check cannot erase a newer uncertain Save after returning t
   await expect(panel.getByRole("button", { name: "Retry save", exact: true })).toBeEnabled();
   await page.reload();
   await expect(panel.getByLabel("GitHub login")).toBeDisabled();
-  expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane.browser-operation.atlas-commerce-owner-apply")!).identity.idempotencyKey)).toBe(key);
+  expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem(`launchplane.browser-operation.v2.${encodeURIComponent("atlas-commerce:owner:apply")}`)!).identity.idempotencyKey)).toBe(key);
   expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane:product-profile-draft:atlas-commerce:owner")!).request.github_login)).toBe("newer-client");
 });
 

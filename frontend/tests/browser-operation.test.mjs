@@ -213,3 +213,110 @@ test("receipt reconciliation settles only the retained uncertain identity", asyn
   const next = await prepareBrowserOperation("demo:owner:apply", { mode: "apply", next: true }, resetBrowserOperation(settled));
   assert.notEqual(next.identity.idempotencyKey, uncertain.identity.idempotencyKey);
 });
+
+async function dispatchedOperation(scope, request) {
+  const prepared = await prepareBrowserOperation(scope, request, createBrowserOperationState());
+  return markBrowserOperationDispatched(beginBrowserOperation(prepared));
+}
+
+test("punctuation-distinct products keep separate recovery", async () => {
+  const storage = memoryStorage();
+  const firstScope = "example-site:testing:runtime-settings:apply";
+  const secondScope = "example_site:testing:runtime-settings:apply";
+  const first = await dispatchedOperation(firstScope, { product: "example-site" });
+  persistBrowserOperationState(firstScope, first, storage);
+
+  const second = recoverBrowserOperationState(secondScope, storage);
+  assert.equal(second.identity, null);
+  assert.equal(second.requiresIdempotencyContinuity, false);
+  const secondDraft = await prepareBrowserOperation(
+    secondScope,
+    { product: "example_site" },
+    second,
+  );
+  assert.equal(secondDraft.phase, "ready");
+
+  const returned = recoverBrowserOperationState(firstScope, storage);
+  assert.equal(returned.phase, "uncertain");
+  assert.equal(returned.requiresIdempotencyContinuity, true);
+  assert.deepEqual(returned.identity, first.identity);
+  await assert.rejects(
+    prepareBrowserOperation(firstScope, { product: "example-site", changed: true }, returned),
+    /previous result is uncertain/,
+  );
+});
+
+test("a pre-upgrade record keeps its shared guard until its operation settles", async () => {
+  const storage = memoryStorage();
+  const ownerScope = "example-site:testing:runtime-settings:apply";
+  const twinScope = "example_site:testing:runtime-settings:apply";
+  const legacyKey = "launchplane.browser-operation.example-site-testing-runtime-settings-apply";
+  const legacy = await dispatchedOperation(ownerScope, { product: "example-site" });
+  storage.setItem(legacyKey, JSON.stringify(legacy));
+
+  const owner = recoverBrowserOperationState(ownerScope, storage);
+  assert.equal(owner.phase, "uncertain");
+  assert.equal(owner.requiresIdempotencyContinuity, true);
+  assert.deepEqual(owner.identity, legacy.identity);
+
+  // Navigating to the punctuation twin persists what it recovered; the owner's guard stays.
+  const twin = recoverBrowserOperationState(twinScope, storage);
+  persistBrowserOperationState(twinScope, twin, storage);
+  persistBrowserOperationState(ownerScope, owner, storage);
+  assert.deepEqual(recoverBrowserOperationState(ownerScope, storage).identity, legacy.identity);
+  assert.equal(recoverBrowserOperationState(ownerScope, storage).requiresIdempotencyContinuity, true);
+
+  const settled = reconcileBrowserOperation(owner, legacy.identity, {
+    trace_id: "replay",
+    original_trace_id: "original",
+    replayed: true,
+  });
+  persistBrowserOperationState(ownerScope, settled, storage);
+  assert.equal(storage.getItem(legacyKey), null);
+  assert.equal(recoverBrowserOperationState(ownerScope, storage).identity, null);
+  assert.equal(recoverBrowserOperationState(twinScope, storage).identity, null);
+});
+
+test("another scope's own operation never removes a pre-upgrade record", async () => {
+  const storage = memoryStorage();
+  const ownerScope = "example-site:testing:runtime-settings:apply";
+  const otherScope = "example_site:testing:runtime-settings:apply";
+  const legacyKey = "launchplane.browser-operation.example-site-testing-runtime-settings-apply";
+  const legacy = await dispatchedOperation(ownerScope, { product: "example-site" });
+  storage.setItem(legacyKey, JSON.stringify(legacy));
+
+  const other = await dispatchedOperation(otherScope, { product: "example_site" });
+  persistBrowserOperationState(otherScope, other, storage);
+  persistBrowserOperationState(
+    otherScope,
+    completeBrowserOperation(other, { trace_id: "other" }),
+    storage,
+  );
+
+  assert.notEqual(storage.getItem(legacyKey), null);
+  assert.deepEqual(recoverBrowserOperationState(ownerScope, storage).identity, legacy.identity);
+});
+
+test("a retry waiting to dispatch keeps the original key after reload", async () => {
+  const storage = memoryStorage();
+  const legacyKey = "launchplane.browser-operation.example-site-testing-runtime-settings-apply";
+  for (const [scope, seed] of [
+    ["example-site:testing:runtime-settings:apply", null],
+    ["example-site:testing:runtime-settings:apply", legacyKey],
+  ]) {
+    const original = await dispatchedOperation(scope, { product: "example-site" });
+    const uncertain = cancelBrowserOperation(original);
+    if (seed) storage.setItem(seed, JSON.stringify(uncertain));
+    else persistBrowserOperationState(scope, uncertain, storage);
+
+    for (const retry of [retryBrowserOperation(uncertain), beginBrowserOperation(retryBrowserOperation(uncertain))]) {
+      persistBrowserOperationState(scope, retry, storage);
+      const recovered = recoverBrowserOperationState(scope, storage);
+      assert.equal(recovered.phase, "uncertain");
+      assert.equal(recovered.requiresIdempotencyContinuity, true);
+      assert.deepEqual(recovered.identity, original.identity);
+    }
+    persistBrowserOperationState(scope, createBrowserOperationState(), storage);
+    storage.removeItem(legacyKey);
+  }
+});
