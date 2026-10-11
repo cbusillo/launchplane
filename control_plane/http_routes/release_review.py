@@ -23,6 +23,7 @@ from control_plane.client_release import (
     ClientReleaseRunView,
     live_temporary_hotfix,
     read_client_release_run,
+    rejection_rollback_pending,
     rejection_rollback_target,
     release_start_for_acceptance,
 )
@@ -207,13 +208,21 @@ def register_release_review_routes(
         )
         # The Client reviews the live hotfix's exact checklist; the Director keeps seeing
         # what testing carries now, so a further fix binds the right candidate.
+        newest = (
+            cast(ReleaseReviewStore, store).list_release_review_decision_records(
+                product=profile.product, limit=1
+            )
+            if hotfix is not None
+            else ()
+        )
         review = (
             ReleaseReviewStatus(
                 approved=True,
                 checklist_complete=True,
                 checklist=hotfix.checklist,
                 checklist_digest=hotfix.checklist_digest,
-                latest_decision=hotfix,
+                # The hotfix, or the Client's rejection of it awaiting publication.
+                latest_decision=newest[0] if newest else hotfix,
             )
             if hotfix is not None and not director
             else dependencies.current_review(store, profile, trace_id)
@@ -306,6 +315,13 @@ def register_release_review_routes(
                 trace_id=trace_id,
                 code="temporary_hotfix_in_progress",
                 message="An urgent temporary fix is going live now. Reload in a few minutes to review it.",
+            )
+        if rejection_rollback_pending(record_store, profile):
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="temporary_hotfix_rollback_in_progress",
+                message="The Client's request for changes is rolling the site back. Reload once it finishes.",
             )
         if current.reviewing_temporary_hotfix and envelope.decision == "overridden":
             raise common.http_error(

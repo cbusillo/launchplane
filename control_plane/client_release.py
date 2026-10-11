@@ -364,17 +364,54 @@ def rejection_rollback_target(
     return None
 
 
+def is_hotfix_rejection(decision: ReleaseReviewDecisionRecord) -> bool:
+    return decision.decision == "changes_requested" and decision.release_start == "rollback"
+
+
+def rejection_rollback_pending(store: object, profile: LaunchplaneProductProfileRecord) -> bool:
+    """The Client's published rejection is still taking production off the hotfix.
+
+    It stays authoritative until production no longer runs the rejected candidate.
+    """
+
+    if not isinstance(store, PostgresRecordStore):
+        return False
+    latest = store.list_release_review_decision_records(product=profile.product, limit=1)
+    if not latest or not is_hotfix_rejection(latest[0]) or not latest[0].release_issue_url:
+        return False
+    run = read_client_release_run(store=store, profile=profile, decision=latest[0])
+    try:
+        production = release_version(store=store, profile=profile, instance="prod")
+    except (FileNotFoundError, ValueError):
+        return True
+    return (
+        run is not None
+        and run.state in {"waiting", "running"}
+        and production == latest[0].checklist.candidate
+    )
+
+
 def live_temporary_hotfix(
     store: object, profile: LaunchplaneProductProfileRecord
 ) -> ReleaseReviewDecisionRecord | None:
-    """The newest decision when it is a temporary hotfix now live and awaiting the Client."""
+    """The live temporary hotfix still awaiting the Client's published decision.
+
+    An unpublished rejection keeps the review open, so retrying it republishes the
+    same rollback decision.
+    """
 
     if not isinstance(store, PostgresRecordStore):
         return None
-    latest = store.list_release_review_decision_records(product=profile.product, limit=1)
-    if not latest or latest[0].decision != "temporary_hotfix":
+    latest = store.list_release_review_decision_records(product=profile.product, limit=2)
+    if not latest:
         return None
     hotfix = latest[0]
+    if is_hotfix_rejection(hotfix) and not hotfix.release_issue_url and len(latest) > 1:
+        if latest[1].checklist_digest != hotfix.checklist_digest:
+            return None
+        hotfix = latest[1]
+    if hotfix.decision != "temporary_hotfix":
+        return None
     run = read_client_release_run(store=store, profile=profile, decision=hotfix)
     try:
         production = release_version(store=store, profile=profile, instance="prod")

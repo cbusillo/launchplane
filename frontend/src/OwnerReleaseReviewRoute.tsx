@@ -129,14 +129,14 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const releaseStarts = !!response && response.release_on_acceptance !== "held";
   const liveSite = response ? safeExternalUrl(response.live_site_url) : null;
   const liveSiteName = response ? `${response.display_name}${liveSite ? ` (${liveSite.host})` : ""}` : "";
-  const incomplete = !checklist || !testingUrl || response?.review.checklist_complete !== true;
   const reviewingHotfix = !!response?.reviewing_temporary_hotfix;
+  const incomplete = !checklist || !(reviewingHotfix || testingUrl) || response?.review.checklist_complete !== true;
   const hasChanges = !!checklist && checklist.production.source_commit !== checklist.candidate.source_commit;
   return <section className="owner-review-page">
     <div className="owner-review-intro">
       <p className="eyebrow">Release decision</p>
       <h1 data-route-heading tabIndex={-1}>Review this release</h1>
-      <p>Review the changes proposed for production. Open the testing site and check each item below before recording your decision.</p>
+      <p>{response?.reviewing_temporary_hotfix ? "An urgent temporary fix is already live. Open the live site and check each item below before recording your decision." : "Review the changes proposed for production. Open the testing site and check each item below before recording your decision."}</p>
     </div>
     {error ? <p role="alert" className="owner-review-alert">{error}</p> : null}
     {!response && !error ? <p role="status">Loading the release checklist…</p> : null}
@@ -144,7 +144,10 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       <h2>{response.display_name}</h2>
       <p className="owner-review-state">{response.viewer_is_owner ? "Reviewing as the Client" : response.can_override ? "Reviewing as an admin" : "Viewing this release · read only"}</p>
       {!response.owner_github_login ? <p role="alert">No Client set for this product. Ask an admin to name one.</p> : null}
-      {testingUrl ? <a className="button button-primary owner-review-preview" href={testingUrl.toString()} target="_blank" rel="noreferrer">Open the testing site</a> : null}
+      {response.reviewing_temporary_hotfix
+        // The urgent fix runs on the live site; testing may already carry newer work.
+        ? liveSite ? <a className="button button-primary owner-review-preview" href={liveSite.toString()} target="_blank" rel="noreferrer">Open the live site</a> : null
+        : testingUrl ? <a className="button button-primary owner-review-preview" href={testingUrl.toString()} target="_blank" rel="noreferrer">Open the testing site</a> : null}
       {latestDecision ? <section className="owner-review-latest" aria-label="Latest release decision">
         <h3>{DECISION_HEADINGS[latestDecision.decision]}</h3>
         {latestDecision.decision === "temporary_hotfix"

@@ -185,6 +185,23 @@ class TemporaryHotfixRehearsal(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return cast(dict[str, Any], response.json())
 
+    def move_testing(self) -> None:
+        """Newer work lands on testing after the hotfix."""
+
+        newer = "d" * 40
+        self.store.write_artifact_manifest(
+            self.store.read_artifact_manifest("artifact-testing").model_copy(
+                update={"artifact_id": "artifact-newer", "source_commit": newer}
+            )
+        )
+        self.store.write_release_tuple_record(
+            self.store.read_release_tuple_record(
+                context_name="example-site", channel_name="testing"
+            ).model_copy(
+                update={"artifact_id": "artifact-newer", "repo_shas": {"example/site": newer}}
+            )
+        )
+
     def newest(self) -> ReleaseReviewDecisionRecord:
         return self.store.list_release_review_decision_records(product=PRODUCT, limit=1)[0]
 
@@ -239,19 +256,7 @@ class TemporaryHotfixRehearsal(unittest.IsolatedAsyncioTestCase):
 
     async def test_newer_testing_work_waits_until_the_client_decides_the_hotfix(self) -> None:
         hotfix = await self.ship_hotfix()
-        newer = "d" * 40
-        self.store.write_artifact_manifest(
-            self.store.read_artifact_manifest("artifact-testing").model_copy(
-                update={"artifact_id": "artifact-newer", "source_commit": newer}
-            )
-        )
-        self.store.write_release_tuple_record(
-            self.store.read_release_tuple_record(
-                context_name="example-site", channel_name="testing"
-            ).model_copy(
-                update={"artifact_id": "artifact-newer", "repo_shas": {"example/site": newer}}
-            )
-        )
+        self.move_testing()
         self.assertEqual(live_temporary_hotfix(self.store, profile()), hotfix)
         with (
             patch.dict(
@@ -269,12 +274,37 @@ class TemporaryHotfixRehearsal(unittest.IsolatedAsyncioTestCase):
     async def test_client_rejection_rolls_back_to_their_last_accepted_release(self) -> None:
         hotfix = await self.ship_hotfix()
         client = _human(login="site-owner", github_id=CLIENT_ID)
+        # A lost release record keeps the hotfix under review; the retry republishes
+        # the same rejection, still carrying its rollback.
+        self.publisher.return_value = ""
+        unpublished = await self.post(
+            client, "changes_requested", "The fix broke search.", hotfix.checklist_digest
+        )
+        self.assertEqual(unpublished.status_code, 200, unpublished.text)
+        self.assertEqual(self.advance(), (), "an unpublished rejection rolls nothing back")
+        pending = self.newest()
+        self.assertTrue((await self.read(client))["reviewing_temporary_hotfix"])
+        self.publisher.return_value = "https://github.com/example/site/issues/100"
         rejected = await self.post(
             client, "changes_requested", "The fix broke search.", hotfix.checklist_digest
         )
         self.assertEqual(rejected.status_code, 200, rejected.text)
         rejection = self.newest()
+        self.assertEqual(rejection.record_id, pending.record_id)
         self.assertEqual(rejection.release_start, "rollback")
+        # Until production leaves the rejected hotfix, no newer decision replaces it,
+        # even on newer work testing now carries.
+        self.move_testing()
+        for identity, outcome in (
+            (client, "accepted"),
+            (_human(login="operator", github_id=4242), "overridden"),
+            (_director(), "temporary_hotfix"),
+        ):
+            with self.subTest(outcome=outcome):
+                refused = await self.post(identity, outcome, "Reason")
+                self.assertEqual(refused.status_code, 409, refused.text)
+                self.assertIn("temporary_hotfix_rollback_in_progress", refused.text)
+        self.assertEqual(self.newest().record_id, rejection.record_id)
 
         (rollback_id,) = self.advance()
         rollback = self.store.read_odoo_prod_rollback_operation_record(rollback_id)

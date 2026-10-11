@@ -407,6 +407,13 @@ shows that exact checklist (`reviewing_temporary_hotfix: true`) with the reason:
   uses the existing paths: an Odoo rollback operation, or generic web's fenced
   rollback. This rollback runs even while releases are held.
 
+The review links the live site, because testing may already carry newer work.
+Until production no longer runs the rejected candidate, every new decision
+returns `409 temporary_hotfix_rollback_in_progress`, including the admin
+override and another hotfix. If the rejection's release record could not be
+published, the review stays open, and the Client's retry republishes that same
+rejection with its rollback.
+
 The admin override is refused while a live hotfix awaits the Client. The
 Director keeps seeing the current testing candidate, so a further hotfix binds
 the right version. A later hotfix replaces the pending review, and a rejection
