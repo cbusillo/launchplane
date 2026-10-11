@@ -8,17 +8,21 @@ from unittest.mock import patch
 
 from fastapi import FastAPI
 
+from control_plane.contracts.merge_train_batch import MergeTrainBatchHeldOutEntry
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train_controller_feedback import build_feedback_payloads
+from control_plane.merge_train_controller_run_once import _surviving_held_out_entries
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _post_merge_train_controller_run_once
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.support.auth import _StubVerifier
 from tests.support.merge_train import (
+    _FakeCollapsedRootStackedMergeTrainSnapshotReader,
     _FakeExpandedMergeTrainSnapshotReader,
     _FakeMergeTrainGitHubClient,
+    _FakeStackedMergeTrainSnapshotReader,
     _merge_train_service_identity,
     _merge_train_service_policy,
     _seed_merge_train_policy,
@@ -60,6 +64,99 @@ class DependencyRequalificationTests(unittest.IsolatedAsyncioTestCase):
             state.landed = True
             idle = await _post(app, request, "idle")
             self.assertNotIn("candidate", idle)
+
+    async def test_collapsed_root_candidate_records_the_dependency_hold(self) -> None:
+        state = _DependencyState(mergeable="unknown")
+        collapsed = False
+
+        class Reader(_FakeStackedMergeTrainSnapshotReader):
+            def read_merge_train_snapshot(
+                self, *, repository: str, base_branch: str
+            ) -> MergeTrainDryRunSnapshot:
+                stacked = (
+                    _FakeCollapsedRootStackedMergeTrainSnapshotReader
+                    if collapsed
+                    else _FakeStackedMergeTrainSnapshotReader
+                )
+                snapshot = stacked(transport=self.transport).read_merge_train_snapshot(
+                    repository=repository, base_branch=base_branch
+                )
+                root = next(pr for pr in snapshot.pull_requests if pr.number == 1)
+                dependency = root.model_copy(
+                    update={
+                        "number": 9,
+                        "url": f"https://github.com/{repository}/pull/9",
+                        "head_ref": "dependabot/patch",
+                        "labels": (),
+                        "label_actors": (),
+                        "actor_id": 42,
+                        "actor_role": "trusted_automation",
+                        "dependency_update_class": "patch_or_minor",
+                        "created_at": "2026-05-01T00:00:00Z",
+                        "head_sha": state.head_sha,
+                        "mergeable": state.mergeable,
+                    }
+                )
+                return snapshot.model_copy(
+                    update={"pull_requests": (dependency, *snapshot.pull_requests)}
+                )
+
+        async with _controller(state, Reader) as (app, _, request):
+            await _post(app, request, "plan_stack_collapse")
+            await _post(app, request, "execute_stack_collapse")
+            collapsed = True
+            admitted = await _post(app, request, "admit_collapsed_root")
+        self.assertEqual(_entries(admitted), [1])
+        self.assertEqual(
+            [
+                (hold["pull_request_number"], hold["reason"])
+                for hold in admitted["candidate"]["held_out"]
+            ],
+            [(9, "dependency_not_ready")],
+        )
+
+    def test_unsettled_dependency_hold_lasts_until_its_head_or_base_moves(self) -> None:
+        snapshot = _FakeExpandedMergeTrainSnapshotReader(
+            transport=object()
+        ).read_merge_train_snapshot(repository="cbusillo/sellyouroutboard", base_branch="main")
+        dependency, green = snapshot.pull_requests
+        dependency = dependency.model_copy(
+            update={
+                "labels": (),
+                "label_actors": (),
+                "actor_id": 42,
+                "actor_role": "trusted_automation",
+                "dependency_update_class": "patch_or_minor",
+                "mergeable": "unknown",
+            }
+        )
+        hold = MergeTrainBatchHeldOutEntry(
+            pull_request_number=dependency.number,
+            head_sha=dependency.head_sha,
+            reason="dependency_not_ready",
+            probe_base_sha=snapshot.base_sha,
+        )
+        policy = _dependency_policy_record().policy
+        cases = (
+            ("unsettled", dependency, snapshot.base_sha, (hold,)),
+            ("settled", dependency.model_copy(update={"mergeable": "mergeable"}), None, (hold,)),
+            ("new_head", dependency.model_copy(update={"head_sha": "new-head"}), None, ()),
+            ("moved_base", dependency, "moved-base", ()),
+        )
+        for case, pull_request, base_sha, expected in cases:
+            with self.subTest(case=case):
+                current = snapshot.model_copy(
+                    update={
+                        "base_sha": base_sha or snapshot.base_sha,
+                        "pull_requests": (pull_request, green),
+                    }
+                )
+                self.assertEqual(
+                    _surviving_held_out_entries(
+                        policy=policy, snapshot=current, held_out=(hold,), batch_landing=True
+                    ),
+                    expected,
+                )
 
     async def _assert_candidate_kept(self, *, settled: str, position: str) -> None:
         state = _DependencyState(
@@ -124,7 +221,7 @@ class _DependencyState:
 
 @asynccontextmanager
 async def _controller(
-    state: _DependencyState,
+    state: _DependencyState, reader: type | None = None
 ) -> AsyncIterator[tuple[FastAPI, FilesystemRecordStore, dict[str, str]]]:
     class Reader(_FakeExpandedMergeTrainSnapshotReader):
         def read_merge_train_snapshot(
@@ -156,34 +253,16 @@ async def _controller(
     with (
         TemporaryDirectory() as directory,
         patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
-        patch("control_plane.merge_train_github.GitHubMergeTrainSnapshotReader", Reader),
+        patch("control_plane.merge_train_github.GitHubMergeTrainSnapshotReader", reader or Reader),
         patch(
             "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
             _FakeMergeTrainGitHubClient,
         ),
     ):
         state_dir = Path(directory) / "state"
-        record = build_test_merge_train_policy_record()
+        record = _dependency_policy_record()
         repository_policy = record.policy.policies[0]
-        repository_policy = repository_policy.model_copy(
-            update={
-                "enqueue": repository_policy.enqueue.model_copy(
-                    update={
-                        "dependency_update_github_user_ids": (42,),
-                        "trusted_automation_github_user_ids": (42,),
-                    }
-                ),
-            }
-        )
-        _seed_merge_train_policy(
-            state_dir,
-            policy=MergeTrainPolicyRecord(
-                record_id=record.record_id,
-                source=record.source,
-                updated_at=record.updated_at,
-                policy=record.policy.model_copy(update={"policies": (repository_policy,)}),
-            ),
-        )
+        _seed_merge_train_policy(state_dir, policy=record)
         store = FilesystemRecordStore(state_dir)
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_merge_train_service_identity()),
@@ -191,6 +270,27 @@ async def _controller(
             record_store_factory=lambda: store,
         )
         yield app, store, {"repository": repository_policy.repository, "base_branch": "main"}
+
+
+def _dependency_policy_record() -> MergeTrainPolicyRecord:
+    record = build_test_merge_train_policy_record()
+    repository_policy = record.policy.policies[0]
+    repository_policy = repository_policy.model_copy(
+        update={
+            "enqueue": repository_policy.enqueue.model_copy(
+                update={
+                    "dependency_update_github_user_ids": (42,),
+                    "trusted_automation_github_user_ids": (42,),
+                }
+            ),
+        }
+    )
+    return MergeTrainPolicyRecord(
+        record_id=record.record_id,
+        source=record.source,
+        updated_at=record.updated_at,
+        policy=record.policy.model_copy(update={"policies": (repository_policy,)}),
+    )
 
 
 async def _post(

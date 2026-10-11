@@ -578,7 +578,7 @@ def build_merge_train_batch_candidate(
             *held_out,
             *(
                 hold
-                for hold in _dependency_not_ready_holds(dry_run_result, normalized_base_sha)
+                for hold in dependency_not_ready_holds(dry_run_result, normalized_base_sha)
                 if hold.pull_request_number not in held
             ),
         )
@@ -615,9 +615,10 @@ def build_merge_train_batch_candidate(
     )
 
 
-def _dependency_not_ready_holds(
+def dependency_not_ready_holds(
     dry_run_result: MergeTrainDryRunResult, base_sha: str
 ) -> tuple[MergeTrainBatchHeldOutEntry, ...]:
+    """Hold each dependency head excluded only for its own checks or mergeability."""
     return tuple(
         MergeTrainBatchHeldOutEntry(
             pull_request_number=entry.number,

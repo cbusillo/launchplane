@@ -19,6 +19,7 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_candidate_record,
     build_merge_train_batch_landing_plan,
     build_merge_train_batch_landing_plan_record,
+    dependency_not_ready_holds,
 )
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerLeaseLostError,
@@ -3345,12 +3346,23 @@ def _advance_waiting_stack_collapse_record(
             "collapse_id": waiting_collapse_record.plan.collapse_id,
         },
     )
+    # The root-only dry run cannot see the rest of the queue, but landing
+    # admission reads it, so record the dependency holds from the full queue.
+    dependency_holds = (
+        dependency_not_ready_holds(
+            build_merge_train_dry_run_result(policy=policy, snapshot=snapshot, batch_landing=True),
+            root_snapshot.base_sha,
+        )
+        if lease.record.ordinary_job_binding is None
+        else ()
+    )
     candidate = build_merge_train_batch_candidate(
         ordinary_job_binding=lease.record.ordinary_job_binding,
         dry_run_result=dry_run_result,
         base_sha=root_snapshot.base_sha,
         policy_sha256=policy_sha256,
         created_at=recorded_at,
+        held_out=dependency_holds,
         stack_collapse_root=MergeTrainStackCollapseRootProof(
             collapse_record_id=waiting_collapse_record.record_id,
             collapse_id=waiting_collapse_record.plan.collapse_id,
@@ -5014,8 +5026,9 @@ def _surviving_held_out_entries(
     only while every member of the candidate retesting without it
     (``isolating_entries``) is still queued at the same head; planning without
     that candidate releases it. A dependency-not-ready hold lasts while its base
-    and head are unchanged, so a head that settles mid-candidate waits for the
-    next base instead of replacing the candidate.
+    and head are unchanged, whether or not the head has settled yet, so a head
+    that settles mid-candidate waits for the next base instead of replacing the
+    candidate.
     """
     if not held_out:
         return ()
@@ -5030,13 +5043,21 @@ def _surviving_held_out_entries(
     preceding: list[tuple[int, str]] = []
     surviving: list[MergeTrainBatchHeldOutEntry] = []
     for entry in queue:
-        if not entry.eligible:
-            continue
         hold = holds.get(entry.number)
-        if (
+        unchanged = (
             hold is not None
             and hold.head_sha == entry.head_sha
             and hold.probe_base_sha == snapshot.base_sha
+        )
+        if not entry.eligible:
+            # A dependency still waiting on its own head stays held, so later
+            # rewrites of the hold list cannot drop it before it settles.
+            if unchanged and hold is not None and hold.reason == "dependency_not_ready":
+                surviving.append(hold)
+            continue
+        if (
+            unchanged
+            and hold is not None
             and (
                 isolation_active
                 if hold.reason == "failure_isolation"
