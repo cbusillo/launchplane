@@ -3639,8 +3639,9 @@ export type ProductPublicIngressSummary = {
 };
 
 export type ProductReviewCarry = {
+    comparison_base_sha: string;
     head_sha: string;
-    reason: 'merge_train_base_refresh';
+    reason: 'merge_train_base_refresh' | 'unchanged_patch_base_update';
     record_id: string;
     refresh_record_ids: Array<string>;
 };

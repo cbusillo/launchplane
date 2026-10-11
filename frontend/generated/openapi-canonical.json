@@ -20621,6 +20621,38 @@
         "title": "OdooStableOperationWorkerStatusResponseModel",
         "type": "object"
       },
+      "OdooStableRouteBindingRefreshEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmation": {
+            "default": "",
+            "title": "Confirmation",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "title": "OdooStableRouteBindingRefreshEnvelope",
+        "type": "object"
+      },
       "OdooStableTargetReplacementOperationStatusResponse": {
         "additionalProperties": false,
         "properties": {
@@ -34170,15 +34202,23 @@
       },
       "ProductReviewCarry": {
         "additionalProperties": false,
-        "description": "Where a carried acceptance came from: the Client decided on another head.\n\n`merge_train_base_refresh`: the merge train only merged the base branch into the\npull request, and the pull request's change against its base adds and removes\nthe same lines.",
+        "description": "The source acceptance and immutable evidence for an unchanged feature patch.",
         "properties": {
+          "comparison_base_sha": {
+            "default": "",
+            "title": "Comparison Base Sha",
+            "type": "string"
+          },
           "head_sha": {
             "title": "Head Sha",
             "type": "string"
           },
           "reason": {
-            "const": "merge_train_base_refresh",
             "default": "merge_train_base_refresh",
+            "enum": [
+              "merge_train_base_refresh",
+              "unchanged_patch_base_update"
+            ],
             "title": "Reason",
             "type": "string"
           },
@@ -34187,18 +34227,17 @@
             "type": "string"
           },
           "refresh_record_ids": {
+            "default": [],
             "items": {
               "type": "string"
             },
-            "minItems": 1,
             "title": "Refresh Record Ids",
             "type": "array"
           }
         },
         "required": [
           "record_id",
-          "head_sha",
-          "refresh_record_ids"
+          "head_sha"
         ],
         "title": "ProductReviewCarry",
         "type": "object"
@@ -87546,6 +87585,106 @@
           }
         },
         "summary": "Dry-run or apply one externally managed route-binding reconcile"
+      }
+    },
+    "/v1/route-bindings/odoo-stable/controller/run-once": {
+      "post": {
+        "operationId": "run_odoo_stable_route_binding_refresh",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OdooStableRouteBindingRefreshEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan or apply bounded remaining Odoo stable route-binding evidence refresh"
       }
     },
     "/v1/route-bindings/odoo-testing/controller/run-once": {

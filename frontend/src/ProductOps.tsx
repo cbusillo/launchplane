@@ -19,7 +19,8 @@ import { formatTime } from "./format";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
-import { environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { previewInventoryPresentation } from "./preview-inventory";
+import { environmentEvidenceDeadlines, environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -274,20 +275,19 @@ export function ProductWorkspaceRoute({
   );
 }
 
-export function useEvidenceExpiry(environments: Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring">[]) {
+export function useEvidenceExpiry(environments: Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring" | "topology">[]) {
   const [tick, setTick] = useState(0);
-  const nextExpiry = Math.min(...environments.flatMap(environment => [
-    environment.provenance.stale_after,
-    ...environment.health_monitoring.checks.map(check => check.provenance.stale_after),
-  ]).map(value => Date.parse(value)).filter(value => Number.isFinite(value) && value >= Date.now()));
+  const nextExpiry = Math.min(...environments.flatMap(environmentEvidenceDeadlines).map(value => Date.parse(value)).filter(value => Number.isFinite(value) && value >= Date.now()));
   useEffect(() => {
     const update = () => setTick(value => value + 1);
     const timer = Number.isFinite(nextExpiry)
       ? window.setTimeout(update, Math.min(nextExpiry - Date.now() + 1, 2_147_483_647)) : undefined;
     window.addEventListener("focus", update);
+    document.addEventListener("visibilitychange", update);
     return () => {
       window.clearTimeout(timer);
       window.removeEventListener("focus", update);
+      document.removeEventListener("visibilitychange", update);
     };
   }, [nextExpiry, tick]);
 }
@@ -319,9 +319,7 @@ function ProductDirectoryRow({ product }: { product: ProductSiteOverview }) {
         <span className="directory-preview">
           <span className="lane-name">Previews</span>
           <strong>
-            {product.preview.enabled
-              ? `${product.preview.active_count} active`
-              : "Not enabled"}
+            {previewInventoryPresentation(product.preview).headline}
           </strong>
           <EvidenceBadge compact state={product.preview.trust_state} />
         </span>
@@ -480,11 +478,7 @@ function ProductWorkspace({
         <SignalTile
           label="Previews"
           state={product.preview.trust_state}
-          value={
-            product.preview.enabled
-              ? `${product.preview.active_count} active`
-              : "Not enabled"
-          }
+          value={previewInventoryPresentation(product.preview).headline}
         />
         <SignalTile
           label="Warnings"
@@ -740,20 +734,7 @@ function EnvironmentRow({
 
 function PreviewSummary({ product }: { product: ProductSiteOverview }) {
   const preview = product.preview;
-  const title = !preview.enabled
-    ? "Preview environments are not enabled"
-    : preview.trust_state === "missing"
-      ? "Preview inventory evidence is missing"
-      : preview.active_count
-        ? `${preview.active_count} active preview${preview.active_count === 1 ? "" : "s"}`
-        : "No active previews";
-  const detail = !preview.enabled
-    ? "This product profile does not expose preview lifecycle capability."
-    : preview.trust_state === "missing"
-      ? "Launchplane cannot determine whether previews exist without inventory evidence."
-      : preview.active_count
-        ? "Active preview inventory is recorded under this product workspace."
-        : "The inventory read completed without an active preview environment.";
+  const { headline, detail } = previewInventoryPresentation(preview);
 
   return (
     <section className="summary-panel preview-summary" id="preview-summary">
@@ -762,7 +743,7 @@ function PreviewSummary({ product }: { product: ProductSiteOverview }) {
       </div>
       <div>
         <p className="eyebrow">Preview inventory</p>
-        <h2>{title}</h2>
+        <h2>{headline}</h2>
         <p>{detail}</p>
       </div>
       <EvidenceBadge
@@ -1213,8 +1194,7 @@ function ingressHeadline(environment: ProductEnvironmentSummary): string {
     : `${trustLabel(environment.trust_state)} evidence`;
 }
 
-function signalHeadline(environment: ProductEnvironmentSummary | null): string {
-  const tone = environmentOperationalTone(environment);
+export function signalHeadline(environment: ProductEnvironmentSummary | null, tone = environmentOperationalTone(environment)): string {
   if (tone === "danger") {
     return "Needs attention";
   }

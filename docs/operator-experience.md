@@ -197,6 +197,12 @@ Empty states are part of the product contract:
 Loading, empty, blocked, missing, unsupported, and error are different states
 and must not share a reassuring generic placeholder.
 
+The directory, workspace signal and preview detail use the preview summary's
+trust decision for the same inventory claim. Missing evidence means inventory
+unknown even when a count is recorded; zero recorded is not verified empty.
+Recorded counts remain labelled recorded, stale and unsupported evidence retain
+their uncertainty, and only verified inventory uses active or empty wording.
+
 ## Responsive Product Contract
 
 Desktop layouts optimize for fast comparison across testing, production, and
@@ -523,6 +529,12 @@ includes both its displayed integration and binding key so repeated binding-key
 names remain unambiguous; the server resolves that pair against the stored
 profile rather than trusting it as target authority. The browser does not send a
 raw context picker or checked-in product defaults.
+The generic product-config API uses the same credential-value validator as the
+form: password-bearing URLs/DSNs and recognized credentials cannot become plain
+runtime settings, even under a neutral or declared key. Managed secrets remain
+the supported encrypted path. Both entrypoints enforce the existing rule that
+the Director's agent cannot add undeclared settings to a live product; declared settings
+and non-live site settings remain supported within the caller's existing scope.
 
 Every form request stays bound to the profile used to construct it through
 planning and commit. Conflicting profile snapshots refuse the request before
@@ -694,8 +706,11 @@ their read resources once a minute after a completed read. Hidden tabs pause
 automatic reads and catch up on focus or visibility return when due. Pending
 reads do not overlap; access-denied and missing resources require a manual retry.
 Evidence still expires at its recorded deadline while a read is delayed or
-failed. Only a new service response with fresh passing health and current runtime
-identity can restore green. Automatic reads do not reset action, settings, or
+failed, including recorded route authority, nested ingress/TLS ownership and
+observed TLS proof. A fresh health/identity observation cannot prolong expired
+applicable topology proof. Focus or visibility return re-evaluates the cached
+deadlines immediately. Only a new service response with fresh applicable proof,
+passing health and current runtime identity can restore green. Automatic reads do not reset action, settings, or
 promotion resources; the manual Refresh remains available.
 
 Each Delivery Governance or transitional engineering child route owns an
