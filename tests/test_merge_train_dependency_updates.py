@@ -2,7 +2,7 @@ import unittest
 
 from control_plane.merge_train_dependency_updates import classify_dependency_update
 
-# Shapes copied from real Dependabot commits (2026-09-30).
+# Representative Dependabot commit shapes.
 INDIRECT_PATCH = """build(deps-dev): bump brace-expansion from 5.0.9 to 5.0.12 in /frontend
 
 Bumps [brace-expansion](https://github.com/juliangruber/brace-expansion) from 5.0.9 to 5.0.12.
@@ -71,6 +71,19 @@ updated-dependencies:
 
 Signed-off-by: dependabot[bot] <support@github.com>"""
 
+SCOPED_MINOR = """build(deps): bump the routine-version-updates group
+
+Updates `@types/react` from 19.2.14 to 19.3.0
+
+---
+updated-dependencies:
+- dependency-name: "@types/react"
+  dependency-version: 19.3.0
+  dependency-type: direct:development
+  update-type: version-update:semver-minor
+...
+"""
+
 
 class DependencyUpdateClassificationTests(unittest.TestCase):
     def test_within_major_updates_qualify(self) -> None:
@@ -85,6 +98,25 @@ class DependencyUpdateClassificationTests(unittest.TestCase):
             .replace("dependency-version: 2025.2", "dependency-version: '2025.2'")
         )
         self.assertEqual(classify_dependency_update([message]), "patch_or_minor")
+
+    def test_quoted_scoped_names_qualify_with_matching_version_proof(self) -> None:
+        for name in ('"@types/react"', "'@types/react'"):
+            message = SCOPED_MINOR.replace('"@types/react"', name)
+            with self.subTest(name=name):
+                self.assertEqual(classify_dependency_update([message]), "patch_or_minor")
+
+    def test_quoted_names_do_not_bypass_version_proof(self) -> None:
+        major = SCOPED_MINOR.replace("19.3.0", "20.0.0")
+        missing_version = SCOPED_MINOR.replace("  dependency-version: 19.3.0\n", "")
+        for message in (major, missing_version):
+            with self.subTest(message=message):
+                self.assertEqual(classify_dependency_update([message]), "needs_review")
+
+    def test_incomplete_name_quotes_do_not_match_unquoted_version_proof(self) -> None:
+        for name in ('"@types/react', "'@types/react", "\"@types/react'"):
+            message = SCOPED_MINOR.replace('"@types/react"', name)
+            with self.subTest(name=name):
+                self.assertEqual(classify_dependency_update([message]), "needs_review")
 
     def test_major_version_needs_review(self) -> None:
         self.assertEqual(classify_dependency_update([MAJOR]), "needs_review")

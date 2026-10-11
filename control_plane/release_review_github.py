@@ -1,10 +1,12 @@
 """GitHub adapter for the actual commits in a release, independent of milestones."""
 
 import re
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qs, quote, urlsplit
 
+from control_plane.client_test_notes import _markdown_lines, change_client_review
+from control_plane.client_test_notes import owner_test_notes as owner_test_notes
 from control_plane.contracts.release_review import ReleaseReviewItem
 from control_plane.contracts.preview_record import PreviewRecord
 
@@ -22,31 +24,6 @@ def recorded_preview_hosts(records: Iterable[PreviewRecord], *, repository: str)
         if (host := urlsplit(record.canonical_url).hostname)
     )
 
-
-_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-_HEADING = re.compile(r"^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
-
-
-def _markdown_lines(body: str) -> Iterator[tuple[str, re.Match[str] | None, str]]:
-    """Yield each line, its heading match outside fenced code, and the open fence.
-
-    Fences follow CommonMark: three or more backticks or tildes, closed only by
-    the same character repeated at least as many times with nothing after it.
-    """
-    fence = ""
-    for line in body.splitlines():
-        fence_match = _FENCE.match(line)
-        if fence_match:
-            marker, rest = fence_match[1], fence_match[2]
-            if not fence and not (marker[0] == "`" and "`" in rest):
-                fence = marker
-            elif fence and marker[0] == fence[0] and len(marker) >= len(fence) and not rest.strip():
-                fence = ""
-        heading = _HEADING.match(line) if not fence else None
-        yield line, heading, fence
-
-
-TEST_NOTES_HEADINGS = frozenset({"client test notes", "owner test notes"})
 
 _NOTE_LINK = re.compile(
     r"!?\[[^]\n]*]\((?P<markdown>https?://[^\s)]+|/ui/owner-review\?[^\s)]+)\)"
@@ -85,28 +62,6 @@ def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tu
 
     displayed = _NOTE_LINK.sub(replace, notes).strip()
     return displayed, changed
-
-
-def owner_test_notes(body: str) -> str:
-    """Collect Client test notes sections, ignoring headings inside fenced examples.
-
-    Pull requests written before the role words changed say "Owner test notes"; both
-    headings are read.
-    """
-    lines: list[str] = []
-    collecting = False
-    level = 0
-    for line, heading, _fence in _markdown_lines(body):
-        if heading:
-            if heading[2].strip().casefold() in TEST_NOTES_HEADINGS:
-                collecting = True
-                level = len(heading[1])
-                continue
-            if collecting and len(heading[1]) <= level:
-                collecting = False
-        if collecting:
-            lines.append(line)
-    return "\n".join(lines).strip()
 
 
 # Batch PRs written before the role words changed say "Owner"; both are read.
@@ -150,6 +105,7 @@ def read_release_changes(
     candidate_commit: str,
     read: GitHubRead,
     preview_hosts: tuple[str, ...] = (),
+    review_label: str = "owner-review",
 ) -> tuple[tuple[ReleaseReviewItem, ...], tuple[str, ...]]:
     repository_path = quote(repository)
     commits: list[str] = []
@@ -230,7 +186,17 @@ def read_release_changes(
                 notes, preview_era_notes = release_test_notes(
                     owner_test_notes(pull.get("body") or ""), preview_hosts=preview_hosts
                 )
+                intent = change_client_review(
+                    body=str(pull.get("body") or ""),
+                    labels=(
+                        str(label.get("name") or "")
+                        for label in pull.get("labels", ())
+                        if isinstance(label, dict)
+                    ),
+                    review_label=review_label,
+                )
                 item = ReleaseReviewItem(
+                    client_test_notes_error=intent.error,
                     pull_request_number=number,
                     title=title,
                     url=f"https://github.com/{repository}/pull/{number}",

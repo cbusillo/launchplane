@@ -262,10 +262,12 @@ def _target_shapes(
             )
             return tuple(("preview", number) for number in numbers if number is not None)
         return ()
-    retargeted = action == "edited" and _mapping(_mapping(payload, "changes"), "base") is not None
-    if event_name == "pull_request" and (action in _PREVIEW_PULL_REQUEST_ACTIONS or retargeted):
-        # A retarget adds no commit, so only this event says again whether an
-        # acceptance carried on the old base still applies.
+    changes = _mapping(payload, "changes")
+    review_edited = action == "edited" and any(
+        _mapping(changes, field) is not None for field in ("base", "body")
+    )
+    if event_name == "pull_request" and (action in _PREVIEW_PULL_REQUEST_ACTIONS or review_edited):
+        # Base and notes edits can change review intent without a new commit.
         number = _positive_int(payload, "number")
         return (("preview", number),) if number is not None else ()
     return ()

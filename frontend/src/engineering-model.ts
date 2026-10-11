@@ -1,6 +1,7 @@
 import type {
   EveryCodeWorkRequestSummary,
   GitHubIssueInboxReadModel,
+  MergeTrainControllerRecordSummary,
   MergeTrainControllerStatusReadModel,
   MergeTrainPolicyTarget,
   WorkGraphQueueItem,
@@ -182,18 +183,43 @@ export function mergeTrainControllerTone(
     (expectedPolicySha256 &&
       status.current_policy_sha256 !== expectedPolicySha256) ||
     status.controller_state?.status === "reconcile_required" ||
-    status.controller_records.some((record) => record.policy_status === "stale") ||
+    mergeTrainStaleAttentionRecords(status).length > 0 ||
     status.controller_diagnostics?.reconciliation_status === "required"
   ) {
     return "blocked";
   }
-  if (status.controller_state?.status === "running") {
+  if (
+    status.controller_state?.status === "running" ||
+    status.controller_state?.reconciliation_status === "adopted" ||
+    status.controller_diagnostics?.reconciliation_status === "adopted"
+  ) {
     return "pending";
   }
   if (!status.controller_state && !status.controller_diagnostics) {
     return "unknown";
   }
   return "pass";
+}
+
+export function mergeTrainActiveRecordIds(
+  status: MergeTrainControllerStatusReadModel,
+): Set<string> {
+  return new Set(
+    [
+      status.controller_state?.active_record_id,
+      status.controller_diagnostics?.active_record_id,
+    ].filter((id): id is string => Boolean(id)),
+  );
+}
+
+export function mergeTrainStaleAttentionRecords(
+  status: MergeTrainControllerStatusReadModel,
+): MergeTrainControllerRecordSummary[] {
+  const activeIds = mergeTrainActiveRecordIds(status);
+  return status.controller_records.filter(
+    (record) => record.policy_status === "stale" &&
+      (record.historical !== true || activeIds.has(record.record_id)),
+  );
 }
 
 export function scalarEvidence(

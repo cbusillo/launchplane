@@ -32,6 +32,7 @@ from control_plane.merge_admission import (
     MergeAdmissionDeniedError,
     MergeAdmissionEvaluation,
 )
+from control_plane.merge_train_release_hold import MergeTrainReleaseHold
 from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
@@ -85,6 +86,7 @@ from tests.http_app_test_support import (
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 from tests.support.openapi import openapi_document, openapi_response
 from tests.support.auth import _identity, _local_operator_policy, _StubVerifier
+from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from tests.support.merge_train import (
     _AdmissionInvokingMergeTrainGitHubClient,
     _BlockedAdmissionMergeTrainGitHubClient,
@@ -3016,11 +3018,18 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await _post_merge_train_controller_run_once(app, request_payload)
                 await _post_merge_train_controller_run_once(app, request_payload)
-            with patch(
-                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
-                _FakeFailingMergeTrainGitHubClient,
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeFailingMergeTrainGitHubClient,
+                ),
             ):
-                await _post_merge_train_controller_run_once(app, request_payload)
+                failed_response = await _post_merge_train_controller_run_once(app, request_payload)
+                self.assertEqual(failed_response.json()["result"]["candidate"]["status"], "failed")
             with (
                 patch(
                     "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
@@ -3133,7 +3142,107 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             [1],
         )
 
-    async def test_held_out_entry_stays_out_when_the_queue_changes(self) -> None:
+    async def _controller_results(self, steps: list[tuple[type, Any]]) -> list[dict[str, Any]]:
+        """Run one controller pass per (snapshot reader, release hold reader) step."""
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "repository": "cbusillo/sellyouroutboard",
+                "base_branch": "main",
+                "mutate": True,
+            }
+            results = []
+            for reader, hold_reader in steps:
+                with (
+                    patch(
+                        "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader", reader
+                    ),
+                    patch(
+                        "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                        _FakeMergeTrainGitHubClient,
+                    ),
+                    patch(
+                        "control_plane.http_app.merge_train_release_hold_reader",
+                        return_value=hold_reader,
+                    ),
+                ):
+                    response = await _post_merge_train_controller_run_once(app, request_payload)
+                    self.assertEqual(response.status_code, 202, response.text)
+                    results.append(response.json()["result"])
+        return results
+
+    async def test_pull_requests_that_join_wait_for_the_next_candidate(self) -> None:
+        class ArrivalsReader(_FakeExpandedMergeTrainSnapshotReader):
+            def read_merge_train_snapshot(
+                self, *, repository: str, base_branch: str
+            ) -> MergeTrainDryRunSnapshot:
+                snapshot = super().read_merge_train_snapshot(
+                    repository=repository, base_branch=base_branch
+                )
+                ahead = snapshot.pull_requests[0].model_copy(
+                    update={
+                        "number": 3,
+                        "url": f"https://github.com/{repository}/pull/3",
+                        "created_at": "2026-05-08T09:00:00Z",
+                        "head_sha": "head-3",
+                        "head_ref": "feature/older",
+                    }
+                )
+                return snapshot.model_copy(
+                    update={"pull_requests": (ahead, *snapshot.pull_requests)}
+                )
+
+        results = await self._controller_results(
+            [(_FakeMergeTrainSnapshotReader, None), (ArrivalsReader, None)]
+        )
+
+        self.assertEqual(
+            [result["controller_action"] for result in results],
+            ["plan_candidate", "build_candidate"],
+        )
+        self.assertNotIn("superseded_merge_train_batch_candidate_record_id", results[-1])
+        self.assertEqual(
+            [entry["pull_request_number"] for entry in results[-1]["candidate"]["entries"]], [1]
+        )
+
+    async def test_a_running_client_release_holds_the_train_without_dropping_its_candidate(
+        self,
+    ) -> None:
+        def held(repository: str) -> MergeTrainReleaseHold:
+            self.assertEqual(repository, "cbusillo/sellyouroutboard")
+            return MergeTrainReleaseHold(product="sellyouroutboard")
+
+        results = await self._controller_results(
+            [
+                (_FakeMergeTrainSnapshotReader, None),
+                (_FakeMergeTrainSnapshotReader, held),
+                (_FakeMergeTrainSnapshotReader, None),
+            ]
+        )
+
+        self.assertEqual(
+            [result["controller_action"] for result in results],
+            ["plan_candidate", "release_hold", "build_candidate"],
+        )
+        self.assertEqual(results[1]["blocking_reason"]["code"], "product_release_in_progress")
+        self.assertNotIn("candidate", results[1])
+        self.assertEqual(results[-1]["candidate"]["batch_id"], results[0]["candidate"]["batch_id"])
+
+    async def test_held_out_entry_stays_out_and_a_new_arrival_waits_for_the_next_candidate(
+        self,
+    ) -> None:
         third_queued = {"value": False}
 
         class GrowingQueueReader(_FakeExpandedMergeTrainSnapshotReader):
@@ -3206,11 +3315,11 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [result["controller_action"] for result in results],
-            ["plan_candidate", "candidate_failed", "plan_candidate", "plan_candidate"],
+            ["plan_candidate", "candidate_failed", "plan_candidate", "build_candidate"],
         )
-        replanned = results[-1]["candidate"]
-        self.assertEqual([entry["pull_request_number"] for entry in replanned["entries"]], [1, 3])
-        self.assertEqual([entry["pull_request_number"] for entry in replanned["held_out"]], [2])
+        built = results[-1]["candidate"]
+        self.assertEqual([entry["pull_request_number"] for entry in built["entries"]], [1])
+        self.assertEqual([entry["pull_request_number"] for entry in built["held_out"]], [2])
 
     async def test_planning_holds_out_a_conflicting_entry_and_the_rest_lands(self) -> None:
         probe_executor = _PairConflictProbeExecutor(conflicting_pair=(1, 2))
@@ -4047,7 +4156,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             failed_payload["records"]["merge_train_batch_candidate_record_id"],
         )
 
-    async def test_keeps_checked_failed_candidate_terminal_with_unchanged_queue(self) -> None:
+    async def test_blocks_lone_failed_candidate_member_and_names_its_failure(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
@@ -4088,20 +4197,29 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                     _FakeMergeTrainSnapshotReader,
                 ),
             ):
+                _FakeFailingMergeTrainGitHubClient.labels_added = []
                 failed_response = await _post_merge_train_controller_run_once(app, request_payload)
-                terminal_response = await _post_merge_train_controller_run_once(
-                    app, request_payload
-                )
+                block_response = await _post_merge_train_controller_run_once(app, request_payload)
+            remaining = store.list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main", status="active"
+            )
 
         failed_payload = failed_response.json()
-        terminal_payload = terminal_response.json()
+        block_payload = block_response.json()
         self.assertTrue(failed_payload["result"]["candidate"]["candidate_sha"])
-        self.assertEqual(terminal_response.status_code, 202)
-        self.assertEqual(terminal_payload["result"]["controller_action"], "candidate_failed")
-        self.assertEqual(
-            terminal_payload["records"]["merge_train_batch_candidate_record_id"],
-            failed_payload["records"]["merge_train_batch_candidate_record_id"],
-        )
+        self.assertEqual(block_response.status_code, 202)
+        result = block_payload["result"]
+        self.assertEqual(result["controller_action"], "block")
+        self.assertEqual(result["reason_code"], "candidate_failure_isolated")
+        self.assertEqual(result["block_result"]["status"], "blocked")
+        self.assertEqual(_FakeFailingMergeTrainGitHubClient.labels_added, [(1, "merge-blocked")])
+        # The failed lineage is retired so the next pass plans the rest of the queue.
+        self.assertEqual(remaining, ())
+        feedback = build_feedback_payloads(response=block_payload)
+        self.assertEqual([item["pull_request_number"] for item in feedback], [1])
+        message = cast(str, feedback[0]["message"])
+        self.assertIn("test_shard (0)", message)
+        self.assertIn("`tests.test_widget.WidgetTests.test_renders`", message)
 
     async def test_recovers_failed_candidate_when_rerun_checks_pass(self) -> None:
         with (

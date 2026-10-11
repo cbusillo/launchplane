@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -281,6 +282,27 @@ def _evaluate_live(
     held_out: tuple[MergeTrainBatchHeldOutEntry, ...] = (),
     target_conversations: MergeTrainReviewConversations | None = None,
 ) -> MergeAdmissionEvaluation:
+    _, evaluate = _live_evaluator(
+        store=store,
+        provider=provider,
+        evidence=evidence,
+        extra_pull_requests=extra_pull_requests,
+        held_out=held_out,
+        target_conversations=target_conversations,
+    )
+    return evaluate()
+
+
+def _live_evaluator(
+    *,
+    store: FilesystemRecordStore,
+    provider: _EvidenceProvider,
+    evidence: RepositoryEvidence,
+    extra_pull_requests: tuple[MergeTrainPullRequestSnapshot, ...] = (),
+    held_out: tuple[MergeTrainBatchHeldOutEntry, ...] = (),
+    target_conversations: MergeTrainReviewConversations | None = None,
+    snapshot_reader: _StaticSnapshotReader | None = None,
+) -> tuple[LiveMergeAdmissionEvaluator, Callable[[], MergeAdmissionEvaluation]]:
     policy_record = build_test_merge_train_policy_record(repository=OWNER_REPOSITORY)
     candidate_record, landing_record, controller_state, _ = _guard_records(
         policy_sha256=policy_record.policy_sha256,
@@ -298,7 +320,8 @@ def _evaluate_live(
         repository_evidence_provider=provider,
         technical_check_client=_PassingTechnicalCheckClient(),
         policy_record_provider=lambda: policy_record,
-        snapshot_reader=_StaticSnapshotReader(
+        snapshot_reader=snapshot_reader
+        or _StaticSnapshotReader(
             MergeTrainDryRunSnapshot(
                 repository=OWNER_REPOSITORY,
                 base_branch="main",
@@ -314,29 +337,33 @@ def _evaluate_live(
             )
         ),
     )
-    with (
-        patch(
-            "control_plane.merge_admission_live.read_active_authz_policy_record",
-            return_value=_authz_policy_record(),
-        ),
-        patch(
-            "control_plane.merge_admission_live.require_engineering_review_decision_store",
-            return_value=_EmptyEngineeringReviewStore(),
-        ),
-    ):
-        return evaluator.evaluate(
-            candidate_record=candidate_record,
-            landing_plan_record=landing_record,
-            entry=landing_record.landing_plan.entries[0],
-            observed_base_sha=OWNER_BASE_SHA,
-            observed_base_tree_sha="5" * 40,
-            observed_head_sha=evidence.target.head_sha,
-            observed_head_tree_sha=evidence.target.tree_sha,
-            controller_state=controller_state,
-            expected_lease_owner=controller_state.lease_owner,
-            stack_collapse_record=None,
-            evaluated_at="2026-08-11T03:01:00Z",
-        )
+
+    def evaluate() -> MergeAdmissionEvaluation:
+        with (
+            patch(
+                "control_plane.merge_admission_live.read_active_authz_policy_record",
+                return_value=_authz_policy_record(),
+            ),
+            patch(
+                "control_plane.merge_admission_live.require_engineering_review_decision_store",
+                return_value=_EmptyEngineeringReviewStore(),
+            ),
+        ):
+            return evaluator.evaluate(
+                candidate_record=candidate_record,
+                landing_plan_record=landing_record,
+                entry=landing_record.landing_plan.entries[0],
+                observed_base_sha=OWNER_BASE_SHA,
+                observed_base_tree_sha="5" * 40,
+                observed_head_sha=evidence.target.head_sha,
+                observed_head_tree_sha=evidence.target.tree_sha,
+                controller_state=controller_state,
+                expected_lease_owner=controller_state.lease_owner,
+                stack_collapse_record=None,
+                evaluated_at="2026-08-11T03:01:00Z",
+            )
+
+    return evaluator, evaluate
 
 
 class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
@@ -481,6 +508,55 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                         with self.assertRaisesRegex(MergeAdmissionDeniedError, "Live merge queue"):
                             evaluate()
 
+    def test_batch_evidence_reuse_reads_the_queue_once_until_refreshed(self) -> None:
+        evidence = _repository_evidence()
+        snapshot = MergeTrainDryRunSnapshot(
+            repository=OWNER_REPOSITORY,
+            base_branch="main",
+            base_sha=OWNER_BASE_SHA,
+            pull_requests=(
+                _queued_pull_request(
+                    number=2022,
+                    head_sha=evidence.target.head_sha,
+                    created_at="2026-08-11T03:00:00Z",
+                ),
+            ),
+        )
+        snapshot_reader = _StaticSnapshotReader(snapshot)
+        resolutions: list[int] = []
+
+        class CountingProvider(_EvidenceProvider):
+            def resolve(self, target: RepositoryTargetReference) -> RepositoryEvidence:
+                resolutions.append(target.pull_request_number)
+                return super().resolve(target)
+
+        with TemporaryDirectory() as directory:
+            evaluator, evaluate = _live_evaluator(
+                store=FilesystemRecordStore(state_dir=Path(directory)),
+                provider=CountingProvider(evidence),
+                evidence=evidence,
+                snapshot_reader=snapshot_reader,
+            )
+            with evaluator.reuse_batch_evidence() as refresh:
+                self.assertEqual(evaluate().readiness.state, "ready")
+                self.assertEqual(evaluate().readiness.state, "ready")
+                self.assertEqual((snapshot_reader.read_count, len(resolutions)), (1, 1))
+                # A refresh rereads both the queue and member evidence.
+                refresh()
+                evaluate()
+                self.assertEqual((snapshot_reader.read_count, len(resolutions)), (2, 2))
+                # A queue change after the shared read is seen once refreshed.
+                snapshot_reader.snapshot = snapshot.model_copy(update={"base_sha": "f" * 40})
+                refresh()
+                with self.assertRaisesRegex(MergeAdmissionDeniedError, "Live merge queue"):
+                    evaluate()
+                self.assertEqual(snapshot_reader.read_count, 3)
+            snapshot_reader.snapshot = snapshot
+            # Outside a batch scope every evaluation reads fresh again.
+            evaluate()
+            evaluate()
+        self.assertEqual((snapshot_reader.read_count, len(resolutions)), (5, 4))
+
     def test_a_conversation_opened_after_planning_blocks_with_its_own_reason(self) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
@@ -497,59 +573,31 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
         self.assertEqual(blocked.exception.reason_code, "pull_request_conversations_unresolved")
         self.assertIn("PR #2022", str(blocked.exception))
 
-    def test_a_pull_request_queued_behind_the_plan_does_not_block_landing(self) -> None:
-        # A newer PR labeled while the batch lands waits for the next candidate (#2637).
-        with TemporaryDirectory() as directory:
-            store = FilesystemRecordStore(state_dir=Path(directory))
-            evidence = _repository_evidence()
-            result = _evaluate_live(
-                store=store,
-                provider=_EvidenceProvider(evidence),
-                evidence=evidence,
-                extra_pull_requests=(
-                    _queued_pull_request(
-                        number=2030, head_sha="e" * 40, created_at="2026-08-11T03:00:30Z"
-                    ),
-                ),
-            )
-        self.assertEqual(result.readiness.state, "ready")
-
-    def test_held_out_pull_request_ahead_of_the_plan_is_excluded_only_at_its_recorded_head(
-        self,
-    ) -> None:
-        held_out = MergeTrainBatchHeldOutEntry(pull_request_number=2021, head_sha="d" * 40)
+    def test_a_pull_request_that_joined_the_queue_does_not_block_landing(self) -> None:
+        # A PR labeled while the batch lands waits for the next candidate,
+        # wherever it sorts (#2637, #3327); so does a conflict hold-out.
         cases = (
-            ("unchanged", held_out.pull_request_number, held_out.head_sha, True),
-            ("head_changed", held_out.pull_request_number, "e" * 40, False),
-            ("different_pr_same_head", 2020, held_out.head_sha, False),
+            ("behind", 2030, "e" * 40, "2026-08-11T03:00:30Z"),
+            ("ahead", 2020, "e" * 40, "2026-08-11T02:59:00Z"),
+            ("held_out_changed_head", 2021, "e" * 40, "2026-08-11T02:59:00Z"),
         )
-        for case, number, head_sha, admitted in cases:
+        held_out = MergeTrainBatchHeldOutEntry(pull_request_number=2021, head_sha="d" * 40)
+        for case, number, head_sha, created_at in cases:
             with self.subTest(case=case), TemporaryDirectory() as directory:
                 store = FilesystemRecordStore(state_dir=Path(directory))
                 evidence = _repository_evidence()
-
-                def evaluate() -> MergeAdmissionEvaluation:
-                    return _evaluate_live(
-                        store=store,
-                        provider=_EvidenceProvider(evidence),
-                        evidence=evidence,
-                        extra_pull_requests=(
-                            _queued_pull_request(
-                                number=number,
-                                head_sha=head_sha,
-                                created_at="2026-08-11T02:59:00Z",
-                            ),
+                result = _evaluate_live(
+                    store=store,
+                    provider=_EvidenceProvider(evidence),
+                    evidence=evidence,
+                    extra_pull_requests=(
+                        _queued_pull_request(
+                            number=number, head_sha=head_sha, created_at=created_at
                         ),
-                        held_out=(held_out,),
-                    )
-
-                if admitted:
-                    result = evaluate()
-                    self.assertEqual(result.readiness.state, "ready")
-                else:
-                    with self.assertRaises(MergeAdmissionDeniedError) as denied:
-                        evaluate()
-                    self.assertEqual(denied.exception.reason_code, "landing_lineage_changed")
+                    ),
+                    held_out=(held_out,),
+                )
+                self.assertEqual(result.readiness.state, "ready")
 
 
 class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
@@ -698,7 +746,7 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
             )
         self.assertEqual(denied.exception.reason_code, "landing_lineage_changed")
 
-    def test_live_queue_is_rediscovered_and_inserted_pr_refuses_admission(self) -> None:
+    def test_live_queue_is_rediscovered_and_a_moved_planned_head_refuses_admission(self) -> None:
         candidate_record, landing_record, controller_state, _ = _guard_records()
         snapshot_reader = _StaticSnapshotReader(
             MergeTrainDryRunSnapshot(
@@ -707,13 +755,8 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                 base_sha=BASE_SHA,
                 pull_requests=(
                     _queued_pull_request(
-                        number=2082,
-                        head_sha="d" * 40,
-                        created_at="2026-08-11T02:59:00Z",
-                    ),
-                    _queued_pull_request(
                         number=2083,
-                        head_sha=HEAD_SHA,
+                        head_sha="d" * 40,
                         created_at="2026-08-11T03:00:00Z",
                     ),
                 ),

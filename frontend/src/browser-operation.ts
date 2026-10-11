@@ -80,9 +80,19 @@ export function recoverBrowserOperationState(
   if (!storage) {
     return createBrowserOperationState();
   }
-  const key = browserOperationStorageKey(scope);
+  let key = browserOperationStorageKey(scope);
   try {
-    const value = storage.getItem(key);
+    let value = storage.getItem(key);
+    if (value) {
+      const stored = JSON.parse(value) as Partial<StoredBrowserOperationState>;
+      if (stored.scope !== scope) {
+        storage.removeItem(key);
+        return createBrowserOperationState();
+      }
+    } else {
+      key = legacyBrowserOperationStorageKey(scope);
+      value = storage.getItem(key);
+    }
     if (!value) {
       return createBrowserOperationState();
     }
@@ -98,7 +108,12 @@ export function recoverBrowserOperationState(
       storage.removeItem(key);
       return createBrowserOperationState();
     }
-    if (candidate.phase !== "submitting" && candidate.phase !== "uncertain") {
+    // A retry still waiting to dispatch keeps the original key's guard as well.
+    if (
+      candidate.phase !== "submitting" &&
+      candidate.phase !== "uncertain" &&
+      candidate.requiresIdempotencyContinuity !== true
+    ) {
       storage.removeItem(key);
       return createBrowserOperationState();
     }
@@ -134,11 +149,15 @@ export function persistBrowserOperationState(
   }
   const key = browserOperationStorageKey(scope);
   try {
-    if (
-      state.identity &&
-      (state.phase === "submitting" || state.requiresIdempotencyContinuity)
-    ) {
-      storage.setItem(key, JSON.stringify(state));
+    const continuing =
+      state.identity !== null &&
+      (state.phase === "submitting" || state.requiresIdempotencyContinuity);
+    if (persistLegacyOperation(scope, state, continuing, storage)) {
+      return;
+    }
+    if (continuing) {
+      const stored: StoredBrowserOperationState = { ...state, scope };
+      storage.setItem(key, JSON.stringify(stored));
     } else {
       storage.removeItem(key);
     }
@@ -147,9 +166,54 @@ export function persistBrowserOperationState(
   }
 }
 
+// Recovery checks the stored scope, so distinct scopes never share a record.
+interface StoredBrowserOperationState extends BrowserOperationState {
+  scope: string;
+}
+
 function browserOperationStorageKey(scope: string): string {
+  return `launchplane.browser-operation.v2.${encodeURIComponent(scope)}`;
+}
+
+// Records saved before scopes were exact live under this lossy key, which punctuation-
+// distinct scopes share, and hold no scope. They are still recovered so an uncertain
+// operation from before the upgrade keeps its guard against a duplicate apply.
+function legacyBrowserOperationStorageKey(scope: string): string {
   const normalizedScope = scope.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
   return `launchplane.browser-operation.${normalizedScope || "operation"}`;
+}
+
+// A pre-upgrade operation stays in its shared slot, exactly as before this change, so
+// the scope that owns it keeps its guard; it leaves that slot only once it settles,
+// which takes evidence about its own idempotency key.
+function persistLegacyOperation(
+  scope: string,
+  state: BrowserOperationState,
+  continuing: boolean,
+  storage: BrowserOperationStorage,
+): boolean {
+  if (!state.identity) {
+    return false;
+  }
+  const key = legacyBrowserOperationStorageKey(scope);
+  const value = storage.getItem(key);
+  if (!value) {
+    return false;
+  }
+  try {
+    const legacy = JSON.parse(value) as Partial<BrowserOperationState>;
+    if (legacy.identity?.idempotencyKey !== state.identity.idempotencyKey) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  if (continuing) {
+    storage.setItem(key, JSON.stringify(state));
+  } else {
+    storage.removeItem(key);
+  }
+  return true;
 }
 
 export async function browserOperationIdentity(

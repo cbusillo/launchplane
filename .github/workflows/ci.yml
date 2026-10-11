@@ -10,6 +10,10 @@ name: CI
   schedule:
     - cron: "17 9 * * *"
 
+env:
+  LAUNCHPLANE_CI_POSTGRES_IMAGE: &postgres_test_image postgres:17@sha256:0af65001d05296a2ead57ac4a6412433d8913d1bb5d0c88435a7d1e1ee5cb04b
+  BROWSER_SMOKE_IMAGE: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+
 permissions:
   contents: read
 
@@ -22,8 +26,72 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' || (startsWith(github.ref, 'refs/heads/launchplane/train/') && !github.event.created && !github.event.forced) }}
 
 jobs:
-  repository_pins:
+  candidate_ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      delegated: ${{ steps.route.outputs.delegated }}
+      sha: ${{ steps.route.outputs.sha }}
+      branch: ${{ steps.route.outputs.branch }}
+    steps:
+      - name: Route candidate CI
+        id: route
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          delegated=false
+          if [ "${EVENT_NAME}" = "pull_request" ] && jq -e --arg repository "${REPOSITORY}" '
+            .pull_request.head.repo.full_name == $repository and
+            (.pull_request.head.ref | startswith("launchplane/train/")) and
+            (.pull_request.head.sha | test("^[0-9a-f]{40}$"))
+            ' "${GITHUB_EVENT_PATH}" >/dev/null; then
+            delegated=true
+            jq -r '"sha=" + .pull_request.head.sha, "branch=" + .pull_request.head.ref' \
+              "${GITHUB_EVENT_PATH}" >> "${GITHUB_OUTPUT}"
+          fi
+          echo "delegated=${delegated}" >> "${GITHUB_OUTPUT}"
+
+  runner_pool:
+    needs: candidate_ci
+    if: needs.candidate_ci.outputs.delegated == 'false'
+    runs-on: >-
+      ${{ fromJSON(
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/heads/launchplane/train/')) ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'launchplane/train/'))) &&
+      '["self-hosted","launchplane-candidate"]' || '["ubuntu-latest"]') }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      runner: ${{ steps.select.outputs.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select CI runner pool
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          RUNNER_LABEL: ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+        run: bash scripts/select-ci-runner.sh
+
+  repository_pins:
+    needs: candidate_ci
+    if: needs.candidate_ci.outputs.delegated == 'false'
+    runs-on: >-
+      ${{ fromJSON(
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/heads/launchplane/train/')) ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'launchplane/train/'))) &&
+      '["self-hosted","launchplane-candidate"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -43,7 +111,15 @@ jobs:
           --repo-root . --revision "$PIN_REVISION" --repository "$PIN_REPOSITORY"
 
   audit_policy:
-    runs-on: ubuntu-latest
+    needs: candidate_ci
+    if: needs.candidate_ci.outputs.delegated == 'false'
+    runs-on: >-
+      ${{ fromJSON(
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/heads/launchplane/train/')) ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'launchplane/train/'))) &&
+      '["self-hosted","launchplane-candidate"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     outputs:
       python_gate: ${{ steps.policy.outputs.python_gate }}
@@ -96,10 +172,18 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
   verified_tree:
+    needs: candidate_ci
+    if: needs.candidate_ci.outputs.delegated == 'false'
     # Train base pushes can reuse the same commit's successful main CI. Main
     # also reuses an up-to-date PR tree; new candidate combinations run full CI.
     name: verified-tree
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/heads/launchplane/train/')) ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'launchplane/train/'))) &&
+      '["self-hosted","launchplane-candidate"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     permissions:
       checks: read
@@ -168,14 +252,12 @@ jobs:
           echo "verified=${verified}" >> "${GITHUB_OUTPUT}"
 
   static_checks:
-    needs: [verified_tree, audit_policy]
+    needs: [runner_pool, verified_tree, audit_policy]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -273,14 +355,12 @@ jobs:
           fi
 
   container_scan:
-    needs: [verified_tree, audit_policy]
+    needs: [runner_pool, verified_tree, audit_policy]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     permissions:
       contents: read
       packages: read
@@ -310,21 +390,17 @@ jobs:
           password: ${{ github.token }}
 
       - name: Build runtime image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: .
-          load: true
-          tags: ${{ env.LAUNCHPLANE_CI_IMAGE_TAG }}
-          pull: true
-          no-cache-filters: runtime
-          cache-from: >-
-            type=gha,scope=launchplane-ci
+        env:
+          LAUNCHPLANE_CI_BUILDER: ${{ steps.buildx.outputs.name }}
+        run: bash scripts/build-ci-runtime-image.sh
 
       - name: Verify runtime worker clients
         run: |
           docker run --rm --entrypoint ssh "$LAUNCHPLANE_CI_IMAGE_TAG" -V
           docker run --rm --entrypoint gh "$LAUNCHPLANE_CI_IMAGE_TAG" --version
+
+      - name: Qualify packaged service Compose restart
+        run: exec bash scripts/qualify-service-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG" "$LAUNCHPLANE_CI_POSTGRES_IMAGE"
 
       - name: Qualify ordinary worker Compose lifecycle
         run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
@@ -399,21 +475,17 @@ jobs:
           version: v5.3.1
 
       - name: Build runtime image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: .
-          load: true
-          tags: ${{ env.LAUNCHPLANE_CI_IMAGE_TAG }}
-          pull: true
-          no-cache-filters: runtime
-          cache-from: >-
-            type=gha,scope=launchplane-ci
+        env:
+          LAUNCHPLANE_CI_BUILDER: ${{ steps.buildx.outputs.name }}
+        run: bash scripts/build-ci-runtime-image.sh
 
       - name: Verify runtime worker clients
         run: |
           docker run --rm --entrypoint ssh "$LAUNCHPLANE_CI_IMAGE_TAG" -V
           docker run --rm --entrypoint gh "$LAUNCHPLANE_CI_IMAGE_TAG" --version
+
+      - name: Qualify packaged service Compose restart
+        run: exec bash scripts/qualify-service-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG" "$LAUNCHPLANE_CI_POSTGRES_IMAGE"
 
       - name: Qualify ordinary worker Compose lifecycle
         run: bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
@@ -462,14 +534,12 @@ jobs:
         run: docker image rm "$LAUNCHPLANE_CI_IMAGE_TAG" || true
 
   frontend_validate:
-    needs: verified_tree
+    needs: [runner_pool, verified_tree]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -570,7 +640,13 @@ jobs:
   frontend_browser_smoke:
     needs: verified_tree
     if: needs.verified_tree.outputs.verified != 'true'
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/heads/launchplane/train/')) ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'launchplane/train/'))) &&
+      '["self-hosted","launchplane-candidate"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -602,11 +678,8 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
 
-      - name: Install Chromium
-        run: pnpm --dir frontend exec playwright install --with-deps chromium
-
       - name: Run browser smoke
-        run: pnpm --dir frontend test:browser
+        run: bash scripts/run-browser-smoke-container.sh
 
       - name: Upload browser evidence
         if: always()
@@ -618,14 +691,12 @@ jobs:
           retention-days: 14
 
   test_timing_snapshot:
-    needs: verified_tree
+    needs: [runner_pool, verified_tree]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     env:
       UNITTEST_TIMINGS_CACHE: .ci-cache/unittest-timings/history.json
       UNITTEST_SHARD_COUNT: "12"
@@ -691,7 +762,7 @@ jobs:
           retention-days: 30
 
   test_shards:
-    needs: test_timing_snapshot
+    needs: [runner_pool, test_timing_snapshot]
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
@@ -700,9 +771,7 @@ jobs:
       UNITTEST_SHARD_COUNT: "12"
       UNITTEST_MAX_TESTS_PER_TARGET: "20"
       UNITTEST_MAX_SECONDS_PER_TARGET: "30"
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     strategy:
       fail-fast: false
       matrix:
@@ -757,15 +826,15 @@ jobs:
           retention-days: 30
 
   test:
-    needs: [verified_tree, test_timing_snapshot, test_shards]
+    needs: [runner_pool, verified_tree, test_timing_snapshot, test_shards]
+    # Report shard failures, but release the runner queue on superseding pushes.
     if: >-
-      always() &&
+      !cancelled() && needs.runner_pool.result == 'success' &&
+      needs.verified_tree.result == 'success' &&
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     env:
       UNITTEST_TIMINGS_CACHE: .ci-cache/unittest-timings/history.json
       UNITTEST_SHARD_COUNT: "12"
@@ -858,19 +927,17 @@ jobs:
         run: uv run --extra dev python -m unittest
 
   postgres_integration:
-    needs: verified_tree
+    needs: [runner_pool, verified_tree]
     if: >-
       needs.verified_tree.outputs.verified != 'true' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
     # A lock wait without a timeout would otherwise hold a runner for six hours.
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:17@sha256:0af65001d05296a2ead57ac4a6412433d8913d1bb5d0c88435a7d1e1ee5cb04b
+        image: *postgres_test_image
         env:
           POSTGRES_USER: launchplane_test
           POSTGRES_DB: launchplane_root
@@ -904,10 +971,23 @@ jobs:
         run: uv run --extra dev launchplane ci postgres-integration
 
   ci_gate:
-    name: ci-gate
-    runs-on: ubuntu-latest
+    # A routing-only PR check must never supersede the push's required ci-gate.
+    name: >-
+      ${{ github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'launchplane/train/') &&
+      'candidate-ci-delegated' || 'ci-gate' }}
+    runs-on: >-
+      ${{ fromJSON(
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/heads/launchplane/train/')) ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'launchplane/train/'))) &&
+      '["self-hosted","launchplane-candidate"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 5
     needs:
+      - candidate_ci
+      - runner_pool
       - repository_pins
       - audit_policy
       - verified_tree
@@ -922,14 +1002,27 @@ jobs:
       - test_fork
       - postgres_integration
     if: >-
-      always() &&
+      !cancelled() &&
       (github.event_name == 'pull_request' || github.event_name == 'push' ||
       github.event_name == 'schedule')
     permissions:
       actions: read
       contents: read
     steps:
+      - name: Report delegated candidate CI
+        if: needs.candidate_ci.outputs.delegated == 'true'
+        env:
+          CANDIDATE_SHA: ${{ needs.candidate_ci.outputs.sha }}
+          CANDIDATE_BRANCH: ${{ needs.candidate_ci.outputs.branch }}
+        run: |
+          set -euo pipefail
+          echo "Full CI runs on the push of ${CANDIDATE_BRANCH} at ${CANDIDATE_SHA}." \
+            >> "${GITHUB_STEP_SUMMARY}"
+          echo 'This routing check is not ci-gate and supplies no validation evidence. The candidate push must pass the required ci-gate before landing.' \
+            >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Report CI time against budget
+        if: needs.candidate_ci.outputs.delegated != 'true'
         # Reports only; a slow run is a signal to fix a lane, not a failure.
         continue-on-error: true
         env:
@@ -969,7 +1062,10 @@ jobs:
           fi
 
       - name: Require successful CI path
+        if: needs.candidate_ci.outputs.delegated != 'true'
         env:
+          RUNNER_POOL_RESULT: ${{ needs.runner_pool.result }}
+          CANDIDATE_CI_RESULT: ${{ needs.candidate_ci.result }}
           BASE_REPOSITORY: ${{ github.repository }}
           HEAD_REPOSITORY: >-
             ${{ github.event.pull_request.head.repo.full_name || github.repository }}
@@ -988,6 +1084,14 @@ jobs:
           VERIFIED_TREE: ${{ needs.verified_tree.outputs.verified }}
         run: |
           set -euo pipefail
+          if [ "${RUNNER_POOL_RESULT}" != "success" ]; then
+            echo "runner_pool concluded with: ${RUNNER_POOL_RESULT}" >&2
+            exit 1
+          fi
+          if [ "${CANDIDATE_CI_RESULT}" != "success" ]; then
+            echo "candidate_ci concluded with: ${CANDIDATE_CI_RESULT}" >&2
+            exit 1
+          fi
           if [ "${AUDIT_POLICY_RESULT}" != "success" ]; then
             echo "audit_policy concluded with: ${AUDIT_POLICY_RESULT}" >&2
             exit 1
