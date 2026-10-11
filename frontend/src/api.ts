@@ -1102,3 +1102,19 @@ export function retireServiceGitHubTokens(
   };
   return requestGeneratedPost(request, options.signal, options.onDispatch);
 }
+
+export function applyProductExpectedConfig(
+  payload: import("./generated/openapi.ts").ApplyProductExpectedConfigData["body"],
+  options: BrowserOperationOptions,
+): Promise<import("./generated/openapi.ts").AcceptedEvidenceResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.productExpectedConfigApply, "POST", payload,
+    options.signal, options.idempotencyKey, options.onDispatch);
+}
+
+export function applyProductStableLaneRepair(
+  payload: import("./generated/openapi.ts").ApplyProductStableLaneRepairData["body"],
+  options: BrowserOperationOptions,
+): Promise<import("./generated/openapi.ts").AcceptedEvidenceResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.productStableLaneRepairApply, "POST", payload,
+    options.signal, options.idempotencyKey, options.onDispatch);
+}

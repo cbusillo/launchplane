@@ -730,3 +730,33 @@ fixture mode, which cannot supply authoritative service evidence.
 Leaving the panel cancels its receipt check and profile refresh. A late response
 from an unmounted panel cannot reconcile or clear a later operation's stored key
 or reviewed request. Return to the product to check the retained original again.
+
+### Signed-in non-production setup
+
+On a product's **Overview**, an administrator can open **Set up a
+non-production environment**. **Add environment** uses the existing stable-lane
+repair endpoint: choose a context already owned by the product, enter the new
+non-production environment name and its prepared HTTPS origin, and run the
+service dry run. Review the exact service result and confirm **Apply reviewed
+change**. The target records must already exist and agree with that origin;
+missing or changed target authority is a visible service refusal, not permission
+to create or guess a target. The apply is bound to the reviewed plan digest.
+
+After the environment exists, **Declare managed-secret fields** selects that
+lane and accepts one or more binding keys and integrations. Context and instance
+come from the selected product lane. Run the dry run, review the service's added
+and unchanged declarations, confirm the scope, and apply. This is add-only
+expected-config metadata; it contains no secret values. Both operations read
+back the product profile before reporting success. Edits invalidate the review;
+an uncertain apply preserves its original request and idempotency key for retry.
+
+**Open <environment> managed secrets** reaches the existing password-entry
+screen. The signed-in administrator supplies values there through its separate
+reviewed secret-write flow. Declarations do not prove runtime delivery, health,
+or release readiness. Setup does not release or activate the product.
+
+These endpoints use the existing authenticated browser mutation boundary,
+including same-origin and single-use CSRF checks and current action authority.
+Read-only users and Clients do not receive these setup controls. Existing agent
+policy checks and the Live-product local-operator refusal remain in force; this
+UI adds no grant or credential authority.

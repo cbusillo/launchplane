@@ -1,4 +1,6 @@
 import type {
+  ApplyProductExpectedConfigData,
+  ApplyProductStableLaneRepairData,
   ApplyProductEnvironmentConfigData,
   ApplyProductImageRepositoryData,
   ApplyProductProductionUseData,
@@ -28,6 +30,8 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  productExpectedConfigApply: "/v1/product-profiles/expected-config/apply" satisfies ApplyProductExpectedConfigData["url"],
+  productStableLaneRepairApply: "/v1/product-profiles/stable-lane-repair/apply" satisfies ApplyProductStableLaneRepairData["url"],
   serviceGitHubDeliveryConfigure: "/v1/service/github-delivery/configuration" satisfies ConfigureLaunchplaneGithubDeliveryData["url"],
   serviceGitHubTokenRetire: "/v1/service/github-delivery/token-retirement" satisfies RetireServiceGithubTokensData["url"],
   ownerSecretSubmit: "/v1/owner-secret-inputs/submit" satisfies SubmitOwnerSecretInputData["url"],

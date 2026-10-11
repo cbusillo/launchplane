@@ -3262,3 +3262,22 @@
   border: 1px solid var(--border); border-radius: 6px;
   background: var(--surface); color: var(--text-strong); font: inherit;
 }
+
+.product-setup-panel { border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-top: 24px; }
+.product-setup-panel details { margin: 18px 0; }
+.product-setup-panel summary { cursor: pointer; font-weight: 650; }
+.setup-change fieldset { border: 0; padding: 0; margin: 16px 0; display: grid; gap: 14px; min-width: 0; }
+.setup-change label { display: grid; gap: 6px; }
+.setup-change input, .setup-change select { width: 100%; min-width: 0; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: inherit; }
+.setup-change input[type="checkbox"] { width: auto; }
+.setup-binding-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.setup-binding-row button { grid-column: 1 / -1; justify-self: start; }
+.setup-change pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.setup-review { padding: 16px 0; }
+.setup-change button { margin: 6px 0; }
+@media (max-width: 640px) { .setup-binding-row { grid-template-columns: 1fr; } .product-setup-panel { padding: 16px; } }
+.setup-change .setup-confirmation { display: flex; align-items: flex-start; gap: 10px; margin: 14px 0; }
+.setup-diff-table { overflow-x: auto; }
+.setup-diff-table table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.setup-diff-table th, .setup-diff-table td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.product-setup-panel { scroll-margin-top: 90px; }

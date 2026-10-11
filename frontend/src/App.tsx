@@ -337,6 +337,8 @@ export function App() {
       ) : null}
       {route.kind === "product-workspace" ? (
         <ProductWorkspaceRoute
+          admin={authState.identity.role === "admin"}
+          onApplied={refreshProducts}
           fixtureMode={fixtureMode}
           fixtureResource={fixtureMode ? productsResource : null}
           key={`workspace:${route.product}:${fixtureMode}`}

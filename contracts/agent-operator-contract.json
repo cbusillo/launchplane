@@ -544,7 +544,7 @@
       {
         "idempotency": "apply",
         "identity_dependencies": [
-          "read_write_identity"
+          "read_browser_mutation_identity"
         ],
         "method": "POST",
         "modes": [
@@ -566,7 +566,7 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
-        "schema_fingerprint_sha256": "31b99d73df6ce6efcf92c2c2384780949b46b225e8379ad9dc3d08e0d5a0b8e3",
+        "schema_fingerprint_sha256": "f64fe34af73a634067fdf22d69ffab0696639b330c48a2ad57359214245cfb89",
         "supported_surfaces": [
           "protected_workflow",
           "operator_ui",
@@ -626,8 +626,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "ede632460946a5b980227f079923703fff64003c"
+    "source_commit_sha": "8f1f3963db325130fe6952bd5dbe082fd7df8e4e"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "2926ccf90b6afeb66331da6af80017ae74cc15d746cb8656c22725c8f59bbd0b"
+  "semantic_digest_sha256": "7314ab3f866fc6a6f508869eb649d0b9c09ce6521e19438d3fe915d5b787e8c2"
 }

@@ -17,6 +17,7 @@ import { LaunchplaneApiError, readProduct } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
+import { ProductSetupPanel } from "./ProductSetupPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
@@ -147,11 +148,15 @@ export function ProductIndexRoute({
 }
 
 export function ProductWorkspaceRoute({
+  admin,
+  onApplied,
   fixtureMode,
   fixtureResource,
   productKey,
   refreshToken,
 }: {
+  admin: boolean;
+  onApplied: () => void;
   fixtureMode: DevFixtureMode;
   fixtureResource: ResourceState<ProductSiteOverview[]> | null;
   productKey: string;
@@ -264,6 +269,8 @@ export function ProductWorkspaceRoute({
 
   return (
     <ProductWorkspace
+      admin={admin}
+      onApplied={onApplied}
       fixtureMode={fixtureMode}
       product={expireProductEvidence(resource.data)}
       refreshError={resource.status === "error" ? resource.error : ""}
@@ -364,6 +371,8 @@ function DirectoryLane({
 }
 
 function ProductWorkspace({
+  admin,
+  onApplied,
   fixtureMode,
   product,
   refreshError,
@@ -371,6 +380,8 @@ function ProductWorkspace({
   traceId,
   updating,
 }: {
+  admin: boolean;
+  onApplied: () => void;
   fixtureMode: DevFixtureMode;
   product: ProductSiteOverview;
   refreshError: string;
@@ -440,6 +451,7 @@ function ProductWorkspace({
       </header>
 
       <ProductWorkspaceNav product={product} route={route} />
+      {admin && !fixtureMode ? <a href="#product-setup-title">Environment setup</a> : null}
 
       <a className="mobile-next-inspection" href={`#${inspection.targetId}`}>
         <span>
@@ -547,6 +559,7 @@ function ProductWorkspace({
       </div>
 
       <ProductOwnerPanel fixtureMode={fixtureMode} product={product.product} />
+      {admin && !fixtureMode ? <ProductSetupPanel key={product.product} product={product.product} onApplied={onApplied} /> : null}
 
       <ProductDiagnostics product={product} />
     </article>
