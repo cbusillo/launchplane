@@ -1753,8 +1753,6 @@ jobs:
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
-    env:
-      DOCKER_CONFIG: ${{ runner.temp }}/launchplane-preflight-registry-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -1769,7 +1767,11 @@ jobs:
       - name: Authenticate the existing image read
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        run: |
+          set -euo pipefail
+          registry_config="$(mktemp -d "$RUNNER_TEMP/launchplane-preflight-registry-XXXXXX")"
+          printf 'DOCKER_CONFIG=%s\n' "$registry_config" >> "$GITHUB_ENV"
+          printf '%s' "$GITHUB_TOKEN" | DOCKER_CONFIG="$registry_config" docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Read scrubbed Launchplane stored records
         uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         timeout-minutes: 1
