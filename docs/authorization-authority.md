@@ -132,7 +132,11 @@ coverage of recorded products; they include Root-owned repository inventory,
 classification, work-request and policy membership metadata. Global effective-access,
 candidate-policy diagnostics and policy-retirement evidence require the recorded
 product scopes they inspect. Service-only metadata at the root context requires
-the Launchplane product scope; supplying another product cannot borrow it. Snapshot inventory for Launchplane itself uses its own scope; ambiguous
+the Launchplane product scope; supplying another product cannot borrow it.
+Denial explanations additionally require the recorded denial's product and context.
+Workflow retirement probes also require the products in matching policy rules,
+including products not yet recorded; unbounded selectors require explicit authority.
+Snapshot inventory for Launchplane itself uses its own scope; ambiguous
 product context ownership fails closed.
 
 Source delivery installs no grant. After the deployed source is qualified,

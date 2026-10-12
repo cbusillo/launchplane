@@ -19614,6 +19614,34 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Retirement evidence includes policy scopes outside this reader's coverage.",
             )
+        if not active_record.policy.allows(
+            identity=identity,
+            action=AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and any(
+            not rule.products
+            or any(
+                not active_record.policy.agent_read_role_allows(
+                    identity=identity,
+                    product=product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                )
+                for product in rule.products
+            )
+            for rule in active_record.policy.github_actions
+            if not rule.managed_set_id
+            and any(
+                rule.repository.casefold() == candidate.repository.casefold()
+                for candidate in payload.workflows
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow policy scopes are outside this reader's coverage.",
+            )
         expected = (payload.policy_record_id, payload.policy_revision, payload.policy_sha256)
         actual = (active_record.record_id, active_record.revision, active_record.policy_sha256)
         if expected != actual:
@@ -20080,6 +20108,22 @@ def create_launchplane_fastapi_app(
                 trace_id=request_trace_id,
                 code="authz_denial_not_found",
                 message="Authorization denial evidence was not found.",
+            )
+        if not active_record.policy.allows(
+            identity=identity,
+            action=AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not active_record.policy.agent_read_role_allows(
+            identity=identity,
+            product=denial_record.product,
+            context=denial_record.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=request_trace_id,
+                code="authorization_denied",
+                message="Authorization denial evidence is outside this reader's scope.",
             )
         return AuthzDenialExplanationResponse(
             trace_id=denial_record.trace_id,

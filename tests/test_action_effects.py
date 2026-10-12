@@ -600,6 +600,48 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.status_code, 403, result.text)
                 self.assertNotIn(foreign.repository, result.text)
 
+    async def test_denial_explanation_requires_the_denied_product_scope(self) -> None:
+        foreign = LaunchplaneProductProfileRecord.model_validate(
+            product_profile_payload("foreign-site")
+        )
+        with _database_app(reader_policy()) as (store, _, app):
+            store.write_product_profile_record(foreign)
+            headers = {"Authorization": "Bearer reader-token"}
+            async with lifespan_client(app) as client:
+                denied = await client.get(
+                    f"/v1/product-profiles/{foreign.product}", headers=headers
+                )
+                self.assertEqual(denied.status_code, 403, denied.text)
+                explained = await client.get(
+                    f"/v1/authz-diagnostics/denials/{denied.json()['trace_id']}",
+                    headers=headers,
+                )
+                self.assertEqual(explained.status_code, 403, explained.text)
+                self.assertNotIn(foreign.product, explained.text)
+
+    async def test_retirement_evidence_checks_products_in_unrecorded_workflow_rules(self) -> None:
+        from tests.test_authz_retirement_evidence import _workflow_policy
+
+        repository = "example/future-product"
+        workflow = f"{repository}/.github/workflows/deploy.yml"
+        rules = _workflow_policy(f"{workflow}@refs/heads/main", repository=repository)
+        policy = reader_policy().model_copy(update={"github_actions": rules.github_actions})
+        with _database_app(policy) as (store, record, app):
+            self.assertNotIn("private-product", store.list_recorded_product_scopes())
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/authz-policies/retirement-evidence",
+                    headers={"Authorization": "Bearer reader-token"},
+                    json={
+                        "policy_record_id": record.record_id,
+                        "policy_revision": record.revision,
+                        "policy_sha256": record.policy_sha256,
+                        "workflows": [{"repository": repository, "workflow_path": workflow}],
+                    },
+                )
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertNotIn(repository, response.text)
+
     async def test_denied_intent_cannot_introduce_an_aggregate_product_scope(self) -> None:
         with _database_app(reader_policy()) as (store, _, app):
             headers = {"Authorization": "Bearer reader-token"}
