@@ -53,7 +53,6 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 "PREVIOUS_RUNTIME_RESPONSE_FILE": str(runtime),
                 "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
                 "LAUNCHPLANE_DOKPLOY_TARGET_ID": "compose-test",
-                "OMIT_EVERY_CODE_ENV": "false",
                 "OMIT_TERMINAL_AGENT_ENV": "false",
                 "OMIT_OWNER_AGENT_ENV": "false",
                 "OMIT_NPMPLUS_ENV": "false",
@@ -353,6 +352,34 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
             {"expected": "1", "desired": "absent"},
         )
 
+    def test_self_deploy_ignores_retired_every_code_credentials(self) -> None:
+        retired = {
+            "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "retired-worker-token",
+            "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": "retired-webhook-secret",
+            "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN": "retired-github-token",
+            "LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR": "retired-actor",
+        }
+        payload = self._render(
+            "Render Launchplane self deploy request",
+            {
+                "BOOTSTRAP_SECRET_OPERATION": "preserve",
+                "ORDINARY_AGENT_WORKERS": "preserve",
+                "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "absent",
+                "DEPLOYMENT_MARKER": "deploy-marker",
+                "DEPLOY_IMAGE_REFERENCE": "ghcr.io/example/service@sha256:" + ("b" * 64),
+                "IMAGE_REPOSITORY": "ghcr.io/example/service",
+                "LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS": "true",
+                "OMIT_EVERY_CODE_ENV": "false",
+                **retired,
+            },
+        )
+        deploy = cast(dict[str, object], payload["deploy"])
+        oauth_env = cast(dict[str, str], deploy["oauth_env"])
+        self.assertTrue(retired.keys().isdisjoint(oauth_env))
+        removals = cast(list[str], deploy.get("oauth_env_removals", []))
+        self.assertTrue(retired.keys().isdisjoint(removals))
+        self.assertEqual(oauth_env["LAUNCHPLANE_DEPLOYMENT_MARKER"], "deploy-marker")
+
     def test_self_deploy_removes_unset_public_ingress_token_and_omitted_npmplus_env(
         self,
     ) -> None:
@@ -478,7 +505,6 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
                         "DISPATCH_IMAGE_REFERENCE": "",
                         "DISPATCH_SELF_DEPLOY_IDEMPOTENCY_KEY": "",
                         "DISPATCH_SUPERSEDES_DEPLOYMENT_MARKER": repair,
-                        "OMIT_EVERY_CODE_ENV": "false",
                         "OMIT_TERMINAL_AGENT_ENV": "false",
                         "OMIT_OWNER_AGENT_ENV": "false",
                         "OMIT_NPMPLUS_ENV": "false",

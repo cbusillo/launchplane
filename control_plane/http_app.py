@@ -28729,7 +28729,7 @@ def create_launchplane_fastapi_app(
     register_production_backup_authority_write_routes(
         app,
         dependencies=ProductionBackupAuthorityWriteRouteDependencies(
-            read_write_identity=read_bearer_identity,
+            read_write_identity=read_operator_mutation_identity,
             get_record_store=get_record_store,
             next_trace_id=next_trace_id,
             authorization_allows=resolved_authz_policy_runtime.allows,

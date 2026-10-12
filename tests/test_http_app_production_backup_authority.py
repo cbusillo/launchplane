@@ -1,18 +1,29 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from typing import Any
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.production_backup_authority import ProductionBackupAuthorityWriteEnvelope
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
+from control_plane.http_routes.mutation_support import idempotency_scope, request_fingerprint
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.support.auth import _StubVerifier, _identity
 from tests.support.http import get as http_get
 from tests.support.http import request as http_request
-from tests.test_production_backup_authority import _dry_run_envelope
+from tests.test_production_backup_authority import _dry_run_envelope, _policy
 from tests.test_production_backup_migration import _request
+from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
+from tests.http_app_test_support import (
+    _browser_mutation_headers,
+    _github_human_identity,
+    _github_human_product_config_policy,
+    _github_oauth_config,
+    _RejectingVerifier,
+)
 
 
 _WORKFLOW_REF = "example/example-product/.github/workflows/promote.yml@refs/heads/main"
@@ -50,6 +61,292 @@ def _authz_policy() -> LaunchplaneAuthzPolicy:
 
 
 class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_browser_cannot_revise_a_target_used_by_an_unauthorized_lane(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite3'}"
+            )
+            store.ensure_schema()
+            self.addCleanup(store.close)
+            draft = _dry_run_envelope()
+            for target in draft.targets:
+                store.write_production_backup_target_record(target)
+            other = _policy().model_dump(mode="json") | {
+                "product": "other-product",
+                "context": "other-product",
+                "policy_id": "",
+                "record_id": "",
+                "policy_digest": "",
+            }
+            store.write_production_backup_policy_record(type(_policy()).model_validate(other))
+            revised_targets = tuple(
+                type(target).model_validate(
+                    target.model_dump(mode="json")
+                    | {
+                        "target_revision": 2,
+                        "record_id": "",
+                        "target_digest": "",
+                        "supersedes_record_id": target.record_id,
+                        "effective_at": "2026-10-01T00:00:00Z",
+                        "destination": target.destination.model_dump(mode="json")
+                        | {
+                            "host": "different-host.example.invalid",
+                        },
+                    }
+                )
+                for target in draft.targets
+            )
+            draft = draft.model_copy(
+                update={
+                    "targets": revised_targets,
+                    "expected_current_target_record_ids": {
+                        target.target_id: target.record_id for target in draft.targets
+                    },
+                }
+            )
+            sessions = HumanSessionManager(
+                config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+            )
+            session = sessions.issue(_github_human_identity())
+            policy = _github_human_product_config_policy(
+                action="production_backup_authority.write",
+                product="example-product",
+                context="example-product",
+                instances=("prod",),
+                schema_version=2,
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+                human_session_manager=sessions,
+            )
+            response = await http_request(
+                app,
+                "POST",
+                "/v1/production-backup-authority/apply",
+                headers=_browser_mutation_headers(sessions, session),
+                payload=draft.model_dump(mode="json"),
+            )
+            self.assertEqual(response.status_code, 403, response.text)
+            self.assertTrue(
+                all(
+                    target.target_revision == 1
+                    for target in store.list_production_backup_target_records()
+                )
+            )
+            wide_policy = policy.model_copy(
+                update={
+                    "github_humans": tuple(
+                        rule.model_copy(
+                            update={
+                                "products": ("example-product", "other-product"),
+                                "contexts": ("example-product", "other-product"),
+                            }
+                        )
+                        for rule in policy.github_humans
+                    )
+                }
+            )
+            wide_app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=wide_policy,
+                record_store_factory=lambda: store,
+                human_session_manager=sessions,
+            )
+            allowed = await http_request(
+                wide_app,
+                "POST",
+                "/v1/production-backup-authority/apply",
+                headers=_browser_mutation_headers(sessions, session),
+                payload=draft.model_dump(mode="json"),
+            )
+            self.assertEqual(allowed.status_code, 200, allowed.text)
+            # Simulate a foreign policy becoming visible only inside the locked write.
+            with patch.object(store, "list_production_backup_policy_records", return_value=()):
+                locked = await http_request(
+                    app,
+                    "POST",
+                    "/v1/production-backup-authority/apply",
+                    headers=_browser_mutation_headers(sessions, session)
+                    | {"Idempotency-Key": "locked-shared-target"},
+                    payload=draft.model_dump(mode="json")
+                    | {
+                        "mode": "apply",
+                        "reviewed_authority_digest": allowed.json()["result"]["authority_digest"],
+                    },
+                )
+            self.assertEqual(locked.status_code, 403, locked.text)
+            self.assertTrue(
+                all(
+                    target.target_revision == 1
+                    for target in store.list_production_backup_target_records()
+                )
+            )
+
+            unlocked = await http_request(
+                wide_app,
+                "POST",
+                "/v1/production-backup-authority/apply",
+                headers=_browser_mutation_headers(sessions, session)
+                | {"Idempotency-Key": "locked-shared-target"},
+                payload=draft.model_dump(mode="json")
+                | {
+                    "mode": "apply",
+                    "reviewed_authority_digest": allowed.json()["result"]["authority_digest"],
+                },
+            )
+            self.assertEqual(unlocked.status_code, 200, unlocked.text)
+
+    async def test_browser_approval_preserves_csrf_scope_digest_and_replay(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite3'}"
+            )
+            store.ensure_schema()
+            self.addCleanup(store.close)
+            sessions = HumanSessionManager(
+                config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+            )
+            session = sessions.issue(_github_human_identity())
+            policy = _github_human_product_config_policy(
+                actions=("production_backup_authority.read", "production_backup_authority.write"),
+                product="example-product",
+                context="example-product",
+                instances=("prod",),
+                schema_version=2,
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+                human_session_manager=sessions,
+            )
+            route = "/v1/production-backup-authority/apply"
+            draft = _dry_run_envelope().model_dump(mode="json")
+            refused = await http_request(
+                app,
+                "POST",
+                route,
+                headers={"Cookie": sessions.session_cookie_header(session)},
+                payload=draft,
+            )
+            self.assertEqual(refused.status_code, 403)
+            self.assertEqual(refused.json()["error"]["code"], "browser_mutation_denied")
+            other_lane = draft | {
+                "policy": draft["policy"]
+                | {
+                    "context": "other-context",
+                    "policy_id": "",
+                    "record_id": "",
+                    "policy_digest": "",
+                }
+            }
+            refused = await http_request(
+                app,
+                "POST",
+                route,
+                headers=_browser_mutation_headers(sessions, session),
+                payload=other_lane,
+            )
+            self.assertEqual(refused.status_code, 403)
+            self.assertEqual(refused.json()["error"]["code"], "authorization_denied")
+            dry = await http_request(
+                app,
+                "POST",
+                route,
+                headers=_browser_mutation_headers(sessions, session),
+                payload=draft,
+            )
+            self.assertEqual(dry.status_code, 200, dry.text)
+            self.assertEqual(store.list_production_backup_policy_records(), ())
+            self.assertEqual(store.list_production_backup_target_records(), ())
+            digest = dry.json()["result"]["authority_digest"]
+            request = draft | {"mode": "apply", "reviewed_authority_digest": digest}
+            changed_policy = draft["policy"] | {
+                "reason": "Changed after review",
+                "policy_digest": "",
+            }
+            refused = await http_request(
+                app,
+                "POST",
+                route,
+                headers=_browser_mutation_headers(sessions, session)
+                | {"Idempotency-Key": "changed"},
+                payload=request | {"policy": changed_policy},
+            )
+            self.assertEqual(refused.status_code, 409)
+            self.assertEqual(store.list_production_backup_policy_records(), ())
+            prepare = store.prepare_db_only_mutation
+            original_committed = False
+
+            def original_finishes_after_retry_preflight(**kwargs: Any) -> Any:
+                nonlocal original_committed
+                preflight = prepare(**kwargs)
+                if not original_committed:
+                    original_committed = True
+                    original_envelope = ProductionBackupAuthorityWriteEnvelope.model_validate(
+                        request
+                    )
+                    original_payload = original_envelope.model_dump(mode="json", exclude_none=True)
+                    store.compare_and_apply_production_backup_authority(
+                        envelope=original_envelope,
+                        mutation=DbOnlyMutationRequest(
+                            scope=idempotency_scope(_github_human_identity()),
+                            route_path=route,
+                            idempotency_key="browser-backup-approval",
+                            request_fingerprint=request_fingerprint(original_payload),
+                            lease_owner="original-request",
+                            response_status_code=200,
+                            response_trace_id="original-request",
+                            response_payload={},
+                        ),
+                        response_payload_builder=lambda result: {
+                            "status": "ok",
+                            "trace_id": "original-request",
+                            "result": result.model_dump(mode="json"),
+                        },
+                    )
+                return preflight
+
+            # First replay races the original commit; the second is already durable.
+            for _ in range(2):
+                with patch.object(
+                    store,
+                    "prepare_db_only_mutation",
+                    side_effect=original_finishes_after_retry_preflight,
+                ):
+                    result = await http_request(
+                        app,
+                        "POST",
+                        route,
+                        headers=_browser_mutation_headers(sessions, session)
+                        | {"Idempotency-Key": "browser-backup-approval"},
+                        payload=request,
+                    )
+                self.assertEqual(result.status_code, 200, result.text)
+                self.assertTrue(result.json().get("replayed"))
+            self.assertEqual(len(store.list_production_backup_policy_records()), 1)
+            self.assertEqual(
+                len(store.list_production_backup_target_records()), len(draft["targets"])
+            )
+            revoked_app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                human_session_manager=sessions,
+            )
+            revoked_retry = await http_request(
+                revoked_app,
+                "POST",
+                route,
+                headers=_browser_mutation_headers(sessions, session)
+                | {"Idempotency-Key": "browser-backup-approval"},
+                payload=request,
+            )
+            self.assertEqual(revoked_retry.status_code, 403)
+            self.assertEqual(len(store.list_production_backup_policy_records()), 1)
+
     async def test_read_dry_run_apply_replay_and_redaction(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             database_path = Path(temporary_directory) / "launchplane.sqlite3"
