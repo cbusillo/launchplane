@@ -65,6 +65,74 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             ),
         )
 
+    def test_safety_checkpoint_refusal_keeps_its_reason_after_an_earlier_effect(self) -> None:
+        from control_plane.workflows.odoo_stable_target_replacement import (
+            OdooTargetReplacementStageError,
+        )
+        from control_plane.contracts.odoo_target_replacement_failures import deploy_blocked_code
+
+        refusal = OdooTargetReplacementStageError(
+            deploy_blocked_code("backup_restore_proof_required"), "proof changed"
+        )
+
+        def checkpoint(phase: str) -> None:
+            if phase == dokploy_post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER:
+                raise refusal
+
+        def runner(**kwargs: object) -> dict[str, str]:
+            before_effect = cast(Callable[[str], None], kwargs["before_provider_mutation"])
+            before_effect("post_deploy_target_update")
+            before_effect(dokploy_post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
+            self.fail("The refused restore schedule must not start")
+
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.workflows.odoo_post_deploy.dokploy_source.read_control_plane_dokploy_source_of_truth",
+                return_value=self._source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
+                return_value=("fixture", "fixture"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
+                side_effect=runner,
+            ),
+        ):
+            store = FilesystemRecordStore(state_dir=Path(directory) / "state")
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="opw",
+                    instance="testing",
+                    config_parameters=(
+                        OdooConfigParameterOverride(
+                            key="web.base.url",
+                            value=OdooOverrideValue(
+                                source="literal", value="https://fixture.example.test"
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-10-12T00:00:00Z",
+                    source_label="test",
+                )
+            )
+            with self.assertRaises(OdooTargetReplacementStageError) as caught:
+                execute_odoo_post_deploy(
+                    control_plane_root=Path(directory),
+                    record_store=store,
+                    request=OdooPostDeployRequest(context="opw", instance="testing"),
+                    provider_effect_checkpoint=checkpoint,
+                    hold_uncertain_effects=True,
+                )
+            self.assertEqual(
+                store.read_odoo_instance_override_record(
+                    context_name="opw", instance_name="testing"
+                ).last_apply.status,
+                "fail",
+            )
+        self.assertIs(caught.exception, refusal)
+
     def test_execute_applies_deploy_phase_overrides_through_post_deploy_runner(self) -> None:
         captured_runs: list[dict[str, object]] = []
         with TemporaryDirectory() as temporary_directory_name:

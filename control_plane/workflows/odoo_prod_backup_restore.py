@@ -58,9 +58,9 @@ from control_plane.durable_operation_authorization import DurableOperationAuthor
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
-from control_plane.workflows.odoo_prod_backup_gate import (
-    BACKUP_VERIFICATION_SOURCE,
-    VERIFIABLE_BACKUP_GATE_SOURCES,
+from control_plane.workflows.odoo_backup_proof import (
+    odoo_backup_paths,
+    read_odoo_backup_restore_proof,
 )
 from control_plane.workflows.odoo_verification import (
     OdooVerificationEvidence,
@@ -176,7 +176,7 @@ def build_odoo_prod_backup_restore_plan(
         label="ODOO_BACKUP_ROOT",
         blockers=blockers,
     )
-    expected_paths = _backup_paths(
+    expected_paths = odoo_backup_paths(
         backup_root=backup_root,
         database_name=database_name,
         backup_record_id=request.backup_record_id,
@@ -251,36 +251,18 @@ def build_odoo_prod_backup_restore_plan(
         if live_image_reference and live_image_reference != image_reference:
             blockers.append("Live target image reference differs from current artifact authority.")
 
-    backup_record = _read_backup_record(
+    proof = read_odoo_backup_restore_proof(
         record_store=record_store,
-        record_id=request.backup_record_id,
-        sources=VERIFIABLE_BACKUP_GATE_SOURCES,
         context=request.context,
         instance=request.instance,
-        label="backup gate",
-        blockers=blockers,
-    )
-    if backup_record is not None:
-        _validate_backup_gate_paths(
-            record=backup_record,
-            expected_paths=expected_paths,
-            blockers=blockers,
-        )
-    verification_record = _read_backup_record(
-        record_store=record_store,
-        record_id=request.verification_record_id,
-        sources=frozenset({BACKUP_VERIFICATION_SOURCE}),
-        context=request.context,
-        instance=request.instance,
-        label="backup verification",
-        blockers=blockers,
-    )
-    verification_evidence = _verification_evidence(
-        record=verification_record,
-        backup_record=backup_record,
+        backup_record_id=request.backup_record_id,
+        verification_record_id=request.verification_record_id,
         expected_paths=expected_paths,
-        blockers=blockers,
     )
+    backup_record = proof.backup_record
+    verification_record = proof.verification_record
+    verification_evidence = proof.evidence
+    blockers.extend(proof.blockers)
 
     base_url = lane.base_url.strip().rstrip("/")
     parsed_base_url = urlparse(base_url)
@@ -1405,177 +1387,6 @@ def _normalized_absolute_path(
         blockers.append(f"DB-backed {label} is missing or path-unsafe.")
         return ""
     return path.as_posix()
-
-
-def _backup_paths(
-    *,
-    backup_root: str,
-    database_name: str,
-    backup_record_id: str,
-    filestore_path: str,
-) -> dict[str, str]:
-    if not backup_root or not database_name:
-        return {}
-    backup_dir = f"{backup_root}/{database_name}/{backup_record_id}"
-    return {
-        "database_name": database_name,
-        "filestore_path": filestore_path,
-        "backup_root": backup_root,
-        "backup_dir": backup_dir,
-        "database_dump_path": f"{backup_dir}/{database_name}.dump",
-        "filestore_archive_path": f"{backup_dir}/{database_name}-filestore.tar.gz",
-        "manifest_path": f"{backup_dir}/manifest.json",
-    }
-
-
-def _read_backup_record(
-    *,
-    record_store: OdooProdBackupRestoreStore,
-    record_id: str,
-    sources: frozenset[str],
-    context: str,
-    instance: str,
-    label: str,
-    blockers: list[str],
-) -> BackupGateRecord | None:
-    try:
-        record = record_store.read_backup_gate_record(record_id)
-    except FileNotFoundError:
-        blockers.append(f"Exact passing Odoo {label} record was not found.")
-        return None
-    if (
-        record.record_id != record_id
-        or record.context != context
-        or record.instance != instance
-        or record.source not in sources
-        or not record.required
-        or record.status != "pass"
-    ):
-        blockers.append(f"Odoo {label} record does not match exact production authority.")
-    return record
-
-
-def _validate_backup_gate_paths(
-    *, record: BackupGateRecord, expected_paths: dict[str, str], blockers: list[str]
-) -> None:
-    required_keys = (
-        "database_name",
-        "filestore_path",
-        "backup_root",
-        "backup_dir",
-        "database_dump_path",
-        "filestore_archive_path",
-        "manifest_path",
-    )
-    if any(record.evidence.get(key) != expected_paths.get(key) for key in required_keys):
-        blockers.append("Backup-gate paths differ from current DB-backed restore authority.")
-
-
-def _verification_evidence(
-    *,
-    record: BackupGateRecord | None,
-    backup_record: BackupGateRecord | None,
-    expected_paths: dict[str, str],
-    blockers: list[str],
-) -> dict[str, object]:
-    defaults: dict[str, object] = {
-        "verification_nonce": "",
-        "verification_status": "",
-        "manifest_status": "",
-        "sha256_status": "",
-        "pg_restore_status": "",
-        "tar_status": "",
-        "staging_space_status": "",
-        "database_dump_sha256": "",
-        "filestore_archive_sha256": "",
-        "database_dump_size": 0,
-        "filestore_archive_size": 0,
-        "pg_restore_entry_count": 0,
-        "filestore_member_count": 0,
-        "filestore_unpacked_size": 0,
-        "data_volume_free_bytes": 0,
-        "staging_required_bytes": 0,
-    }
-    if record is None:
-        return defaults
-    evidence = record.evidence
-    if backup_record is None or evidence.get("backup_record_id") != backup_record.record_id:
-        blockers.append("Backup verification record does not bind the exact backup gate.")
-    if (
-        backup_record is not None
-        and evidence.get("backup_record_created_at") != backup_record.created_at
-    ):
-        blockers.append("Backup verification record does not bind backup creation evidence.")
-    required_path_keys = (
-        "database_name",
-        "filestore_path",
-        "backup_root",
-        "backup_dir",
-        "database_dump_path",
-        "filestore_archive_path",
-        "manifest_path",
-    )
-    if any(evidence.get(key) != expected_paths.get(key) for key in required_path_keys):
-        blockers.append("Backup verification paths differ from DB-backed restore authority.")
-    if evidence.get("verification_status") != "pass" or evidence.get("failure_code"):
-        blockers.append("Backup verification evidence is not passing.")
-    verification_nonce = evidence.get("verification_nonce", "")
-    if not isinstance(verification_nonce, str) or not re.fullmatch(
-        r"[0-9a-f]{64}", verification_nonce
-    ):
-        blockers.append("Backup verification evidence does not include its request nonce.")
-        verification_nonce = ""
-    for status_key in (
-        "manifest_status",
-        "sha256_status",
-        "pg_restore_status",
-        "tar_status",
-        "staging_space_status",
-    ):
-        if evidence.get(status_key) != "pass":
-            blockers.append(f"Backup verification {status_key} is not passing.")
-    database_digest = evidence.get("database_dump_sha256", "")
-    filestore_digest = evidence.get("filestore_archive_sha256", "")
-    if not re.fullmatch(r"[0-9a-f]{64}", database_digest):
-        blockers.append("Backup verification database dump hash is invalid.")
-    if not re.fullmatch(r"[0-9a-f]{64}", filestore_digest):
-        blockers.append("Backup verification filestore archive hash is invalid.")
-    parsed: dict[str, object] = {
-        "verification_nonce": verification_nonce,
-        "verification_status": str(evidence.get("verification_status", "")),
-        "manifest_status": str(evidence.get("manifest_status", "")),
-        "sha256_status": str(evidence.get("sha256_status", "")),
-        "pg_restore_status": str(evidence.get("pg_restore_status", "")),
-        "tar_status": str(evidence.get("tar_status", "")),
-        "staging_space_status": str(evidence.get("staging_space_status", "")),
-        "database_dump_sha256": database_digest,
-        "filestore_archive_sha256": filestore_digest,
-    }
-    for key in (
-        "database_dump_size",
-        "filestore_archive_size",
-        "pg_restore_entry_count",
-        "filestore_member_count",
-        "filestore_unpacked_size",
-        "data_volume_free_bytes",
-        "staging_required_bytes",
-    ):
-        try:
-            value = int(evidence.get(key, "0"))
-        except ValueError:
-            value = 0
-        if value < 1:
-            blockers.append(f"Backup verification {key} must be positive.")
-        parsed[key] = value
-    data_volume_free_bytes = parsed["data_volume_free_bytes"]
-    staging_required_bytes = parsed["staging_required_bytes"]
-    if (
-        not isinstance(data_volume_free_bytes, int)
-        or not isinstance(staging_required_bytes, int)
-        or data_volume_free_bytes < staging_required_bytes
-    ):
-        blockers.append("Backup verification staging-space evidence is insufficient.")
-    return parsed
 
 
 def _filestore_database_path(*, filestore_path: str, database_name: str) -> str:

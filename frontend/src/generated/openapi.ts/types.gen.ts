@@ -3252,11 +3252,10 @@ export type ProductObservedTopology = {
 export type ProductOdooEnvironmentExtension = {
     allowed_rebuild_sources: Array<string>;
     data_authority: string;
+    destructive_replacement_proof_required: boolean;
     prelaunch_rebuild_allowed: boolean;
     prelaunch_rebuild_approval_issue_url: string;
     prelaunch_rebuild_data_source_mode: string;
-    requires_backup_before_destroy: boolean;
-    requires_restore_proof: boolean;
     requires_runtime_identity: boolean;
     rollback_artifact_id: string;
     rollback_deployment_record_id: string;
@@ -3266,8 +3265,6 @@ export type ProductOdooEnvironmentExtension = {
 export type ProductOdooLaneDataPolicy = {
     allowed_rebuild_sources: Array<'empty' | 'upstream_restore'>;
     data_authority: 'unknown' | 'resettable' | 'restorable' | 'authoritative';
-    requires_backup_before_destroy: boolean;
-    requires_restore_proof: boolean;
     requires_runtime_identity: boolean;
     upstream_source: string;
 };

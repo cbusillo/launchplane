@@ -1058,6 +1058,61 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(operation.lease_owner, "worker-a")
             execute_mock.assert_called_once()
 
+    def test_replacement_rechecks_revoked_authority_after_backup_and_before_restore(self) -> None:
+        from control_plane.workflows.odoo_stable_target_replacement import (
+            TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
+            TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE,
+        )
+
+        for boundary in (
+            TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
+            TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE,
+        ):
+            with self.subTest(boundary=boundary), TemporaryDirectory() as directory:
+                self.authorization_policy_read_mock.return_value = self.authorization_policy_record
+                store = FilesystemRecordStore(state_dir=Path(directory) / "state")
+                payload = _replacement_payload("operation-cm-prod")
+                request = cast(dict[str, object], payload["request"])
+                payload.update(
+                    instance="prod",
+                    authorization=_PROD_REPLACEMENT_AUTHORIZATION,
+                    request={**request, "instance": "prod", "data_source_mode": "upstream_restore"},
+                )
+                store.write_odoo_stable_target_replacement_operation_record(
+                    OdooStableTargetReplacementOperationRecord.model_validate(payload)
+                )
+                effects: list[str] = []
+
+                def execute(**kwargs: object) -> object:
+                    checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
+                    checkpoint("backup_schedule_upsert")
+                    effects.append("backup")
+                    if boundary == TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE:
+                        checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+                        effects.append("target")
+                    self.authorization_policy_read_mock.return_value = (
+                        durable_operation_policy_record(revision=43)
+                    )
+                    checkpoint(boundary)
+                    effects.append("refused-effect")
+                    raise AssertionError("Revoked authority reached the destructive effect")
+
+                with patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply",
+                    side_effect=execute,
+                ):
+                    run_odoo_stable_operation_worker_once(
+                        record_store=store,
+                        control_plane_root_path=Path(directory),
+                        lease_owner="worker-a",
+                    )
+                operation = store.read_odoo_stable_target_replacement_operation_record(
+                    "operation-cm-prod"
+                )
+                self.assertEqual(operation.error_code, "operation_authorization_revoked")
+                self.assertIn("backup", effects)
+                self.assertNotIn("refused-effect", effects)
+
     def test_worker_executes_target_replacement_and_writes_terminal_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

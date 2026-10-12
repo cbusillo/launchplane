@@ -1349,8 +1349,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertEqual(prod_odoo.data_authority, "restorable")
         self.assertEqual(prod_odoo.allowed_rebuild_sources, ("upstream_restore",))
         self.assertEqual(prod_odoo.upstream_source, "example-site/prod/upstream")
-        self.assertTrue(detail_odoo.requires_backup_before_destroy)
-        self.assertTrue(detail_odoo.requires_restore_proof)
+        self.assertFalse(detail_odoo.destructive_replacement_proof_required)
         self.assertTrue(detail_odoo.requires_runtime_identity)
 
     def test_public_summary_and_topology_choose_replacement_check_and_its_incident(self) -> None:
