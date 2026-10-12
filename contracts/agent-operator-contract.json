@@ -602,7 +602,7 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
-        "schema_fingerprint_sha256": "31b99d73df6ce6efcf92c2c2384780949b46b225e8379ad9dc3d08e0d5a0b8e3",
+        "schema_fingerprint_sha256": "7d101406aac2ae680fc45afd78e30980dd0739e72e1c700906eba710fbc097b0",
         "supported_surfaces": [
           "protected_workflow",
           "operator_ui",
@@ -662,8 +662,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "129b876a0ddd97178e10bfafff4c4c4af0ccede1"
+    "source_commit_sha": "7dcb31b0c83c52e3484e7690353837669ecacd50"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "297033c087fb258f282252f7c05027e40eb878025dd902f9ce7175e086d69625"
+  "semantic_digest_sha256": "74016867fd3809b0cea5b304b3cea6d5bd9ddfcc24fe0028a8d70f06a01953fc"
 }

@@ -16,6 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { LaunchplaneApiError, readProduct } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
+import { ProductDisplayNamePanel } from "./ProductDisplayNamePanel";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductWebsiteCleanupPanel } from "./ProductWebsiteCleanupPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
@@ -150,6 +151,7 @@ export function ProductIndexRoute({
 }
 
 export function ProductWorkspaceRoute({
+  onSaved,
   fixtureMode,
   fixtureResource,
   productKey,
@@ -157,6 +159,7 @@ export function ProductWorkspaceRoute({
 }: {
   fixtureMode: DevFixtureMode;
   fixtureResource: ResourceState<ProductSiteOverview[]> | null;
+  onSaved: () => void;
   productKey: string;
   refreshToken: number;
 }) {
@@ -267,7 +270,7 @@ export function ProductWorkspaceRoute({
 
   return (
     <ProductWorkspace
-      onSaved={() => setRetryToken(value => value + 1)}
+      onSaved={() => { setRetryToken(value => value + 1); onSaved(); }}
       fixtureMode={fixtureMode}
       refreshToken={refreshToken}
       product={expireProductEvidence(resource.data)}
@@ -550,6 +553,7 @@ function ProductWorkspace({
 
       <PreviewInventory key={product.product} product={product} refreshToken={refreshToken} />
 
+      <ProductDisplayNamePanel key={`name:${product.product}`} fixtureMode={fixtureMode} product={product.product} onSaved={onSaved} />
       <ProductOwnerPanel fixtureMode={fixtureMode} product={product.product} />
       <ProductWebsiteCleanupPanel key={`website:${product.product}`} fixtureMode={fixtureMode} product={product.product} onSaved={onSaved} />
 

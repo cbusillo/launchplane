@@ -8,6 +8,8 @@ import type {
   ApplyProductHealthMonitoringData,
   ApplyProductHealthMonitoringResponse,
   ApplyProductEnvironmentConfigData,
+  ApplyProductDisplayNameData,
+  ApplyProductDisplayNameResponse,
   ApplyProductWebsiteCleanupData,
   ApplyProductWebsiteCleanupResponse,
   ApplyProductEnvironmentConfigResponse,
@@ -649,7 +651,7 @@ export function readProductProfile(
 
 export function readProductProfileMutationReceipt(
   product: string,
-  field: "owner" | "image-repository" | "production-use" | "website-cleanup",
+  field: "owner" | "image-repository" | "production-use" | "website-cleanup" | "display-name",
   operationKey: string,
   signal?: AbortSignal,
 ): Promise<ReadProductProfileMutationReceiptResponse> {
@@ -677,6 +679,17 @@ export function applyProductOwner(
     options.signal,
     generatedIdempotencyKey(request.headers),
     options.onDispatch,
+  );
+}
+
+export function applyProductDisplayName(
+  product: string,
+  payload: ApplyProductDisplayNameData["body"],
+  options: BrowserOperationOptions,
+): Promise<ApplyProductDisplayNameResponse> {
+  return requestJson<ApplyProductDisplayNameResponse>(
+    BROWSER_WRITE_ROUTES.productDisplayName.replace("{product}", encodeURIComponent(product)),
+    "POST", payload, options.signal, options.idempotencyKey, options.onDispatch,
   );
 }
 

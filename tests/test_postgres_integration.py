@@ -3670,6 +3670,8 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             ("reservation", False),
             ("backup-claim", True),
             ("backup-claim", False),
+            ("testing-replacement-claim", True),
+            ("testing-replacement-claim", False),
         ):
             with (
                 self.subTest(kind=admission_kind, admission_first=admission_first),
@@ -3685,6 +3687,19 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         methodName="runTest"
                     )._operation_record()
                     store.write_verireel_prod_backup_gate_operation_record(specimen)
+                elif admission_kind == "testing-replacement-claim":
+                    from control_plane.contracts.odoo_stable_target_replacement_operation import (
+                        OdooStableTargetReplacementOperationRecord,
+                    )
+                    from tests.test_odoo_stable_target_replacement_operation import (
+                        _operation_payload,
+                    )
+
+                    store.write_odoo_stable_target_replacement_operation_record(
+                        OdooStableTargetReplacementOperationRecord.model_validate(
+                            _operation_payload()
+                        )
+                    )
                 held = threading.Event()
                 release = threading.Event()
                 timestamp = store._database_mutation_timestamp
@@ -3697,6 +3712,14 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     return timestamp(session)
 
                 def admit() -> Any:
+                    if admission_kind == "testing-replacement-claim":
+                        return store.claim_next_odoo_stable_target_replacement_operation_record(
+                            lease_owner="worker",
+                            lease_expires_at=(
+                                datetime.now(timezone.utc) + timedelta(minutes=1)
+                            ).isoformat(),
+                            claimed_at=datetime.now(timezone.utc).isoformat(),
+                        )
                     if admission_kind == "backup-claim":
                         return store.claim_next_verireel_prod_backup_gate_operation_record(
                             lease_owner="worker",
@@ -3763,7 +3786,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                             self.assertEqual(record.state, "draining")
                             record_id = (
                                 reservation.operation_id
-                                if admission_kind == "backup-claim"
+                                if admission_kind != "reservation"
                                 else reservation.record.record_id
                             )
                             self.assertEqual(running, (record_id,))
@@ -3772,7 +3795,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                             _, running, dispatch = initial.result(10)
                             self.assertTrue(dispatch)
                             self.assertFalse(running)
-                            if admission_kind == "backup-claim":
+                            if admission_kind != "reservation":
                                 self.assertIsNone(contender.result(10))
                             else:
                                 with self.assertRaises(ServiceDeployDraining):

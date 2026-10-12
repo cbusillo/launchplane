@@ -3036,6 +3036,14 @@ export type ProductDesiredTopology = {
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
 
+export type ProductDisplayNameRequest = {
+    display_name: string;
+    mode?: 'dry-run' | 'apply';
+    reason: string;
+    reviewed_plan_sha256?: string;
+    schema_version?: 1;
+};
+
 export type ProductEnvironmentConfigStatus = {
     base_driver_id: string;
     context: string;
@@ -3667,7 +3675,7 @@ export type ProductProfileListResponse = {
 };
 
 export type ProductProfileMutationReceipt = {
-    field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup';
+    field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup' | 'display-name';
     idempotency_key: string;
     original_trace_id: string;
     product: string;
@@ -5518,7 +5526,7 @@ export type ReadProductProfileMutationReceiptData = {
     };
     path: {
         product: string;
-        field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup';
+        field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup' | 'display-name';
     };
     query: {
         operation_key: string;
@@ -6605,6 +6613,37 @@ export type ApplyProductHealthMonitoringResponses = {
 };
 
 export type ApplyProductHealthMonitoringResponse = ApplyProductHealthMonitoringResponses[keyof ApplyProductHealthMonitoringResponses];
+
+export type ApplyProductDisplayNameData = {
+    body: ProductDisplayNameRequest;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/product-profiles/{product}/display-name';
+};
+
+export type ApplyProductDisplayNameErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ApplyProductDisplayNameError = ApplyProductDisplayNameErrors[keyof ApplyProductDisplayNameErrors];
+
+export type ApplyProductDisplayNameResponses = {
+    202: AcceptedEvidenceResponse;
+};
+
+export type ApplyProductDisplayNameResponse = ApplyProductDisplayNameResponses[keyof ApplyProductDisplayNameResponses];
 
 export type ApplyProductImageRepositoryData = {
     body: {

@@ -621,6 +621,25 @@ change stays locked until the Save settles. If the reviewed request cannot be
 stored and read back, Save sends nothing and asks the admin to restore session
 storage and retry. A confirmed Save removes the retained draft.
 
+## Product Display Name
+
+The product overview's **Display name** panel lets a signed-in administrator
+review and apply the name used in the sidebar and workspace. Enter the new
+name and a reason, select **Preview name change**, inspect the before/after
+names, then select **Apply name change**. The page reads the profile back and
+refreshes the product directory. It reports an unconfirmed read separately
+from an accepted apply.
+
+`POST /v1/product-profiles/{product}/display-name` requires the existing
+`product_profile.write` permission and browser mutation protections. Dry-run
+writes nothing; apply requires the reviewed plan digest and an idempotency key.
+Only `display_name` and mutation provenance change. Product identity, lanes,
+history, Client and release authority remain owned by their existing records.
+Concurrent profile edits invalidate the review. An uncertain apply retains its
+original draft/key and exposes **Retry original name change** and **Check
+original operation** using the scoped profile mutation receipt; reading the
+current name alone does not settle an uncertain write.
+
 ## No-website Profile Cleanup
 
 The product workspace's **Public website** panel previews and applies
