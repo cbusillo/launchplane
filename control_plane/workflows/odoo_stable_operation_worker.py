@@ -77,6 +77,12 @@ from control_plane.odoo_release_recovery import (
     require_odoo_release_recovery_pin,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_replacement_recovery import (
+    TestingRecoveryStore,
+    guard_testing_replacement,
+    recover_stranded_testing_replacements,
+    service_testing_operation,
+)
 from control_plane.release_invitation import ReleaseInvitationBackoff
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
@@ -631,6 +637,10 @@ def run_odoo_stable_operation_worker_once(
         + recovered_replacement_ids
         + recovered_promotion_ids
         + recovered_rollback_ids
+    )
+    recovered_operation_ids += recover_stranded_testing_replacements(
+        cast(TestingRecoveryStore, record_store),
+        control_plane_root_path,
     )
     claim_started_at = _utc_now_timestamp()
     claim_expires_at = _timestamp_after(claim_started_at, seconds=lease_seconds)
@@ -2065,6 +2075,56 @@ def _execute_target_replacement_operation(
     lease_seconds: int,
     heartbeat_seconds: int,
 ) -> bool:
+    if not service_testing_operation(operation):
+        return _execute_target_replacement_with_checkpoint(
+            record_store=record_store,
+            control_plane_root_path=control_plane_root_path,
+            operation=operation,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+            heartbeat_seconds=heartbeat_seconds,
+        )
+
+    def authorize_effect(name: str) -> None:
+        # The normal authorization guard below also checks active product authority.
+        authorization = operation.authorization
+        assert authorization is not None
+        if not launchplane_reconcile_authorization_allows(
+            authorization=authorization,
+            product=operation.product,
+            context=operation.context,
+            instances=(operation.instance,),
+            record_store=record_store,
+        ):
+            raise RuntimeError("Testing replacement no longer has service authority.")
+
+    with guard_testing_replacement(
+        cast(TestingRecoveryStore, record_store),
+        operation,
+        lease_owner,
+        authorize_effect,
+    ) as checkpoint:
+        return _execute_target_replacement_with_checkpoint(
+            record_store=record_store,
+            control_plane_root_path=control_plane_root_path,
+            operation=operation,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+            heartbeat_seconds=heartbeat_seconds,
+            execution_checkpoint=checkpoint,
+        )
+
+
+def _execute_target_replacement_with_checkpoint(
+    *,
+    record_store: OdooStableOperationWorkerStore,
+    control_plane_root_path: Path,
+    operation: OdooStableTargetReplacementOperationRecord,
+    lease_owner: str,
+    lease_seconds: int,
+    heartbeat_seconds: int,
+    execution_checkpoint: Callable[[str], None] | None = None,
+) -> bool:
     stop_event = Event()
     heartbeat_lost_event = Event()
     heartbeat_thread = _start_target_replacement_heartbeat(
@@ -2104,7 +2164,15 @@ def _execute_target_replacement_operation(
             control_plane_root=control_plane_root_path,
             record_store=cast(OdooStableTargetReplacementStore, record_store),
             request=operation.request,
-            provider_effect_checkpoint=authorization_guard.checkpoint_provider_effect,
+            provider_effect_checkpoint=(
+                execution_checkpoint or authorization_guard.checkpoint_provider_effect
+            ),
+            hold_uncertain_effects=execution_checkpoint is not None,
+            before_records_commit=(
+                (lambda: execution_checkpoint("target_replacement_records_commit"))
+                if execution_checkpoint is not None
+                else None
+            ),
         )
         if authorization_guard.denial_error is not None:
             raise authorization_guard.denial_error
@@ -2182,6 +2250,25 @@ def _execute_target_replacement_operation(
             "Odoo stable target replacement operation %s lost its lease before terminal write.",
             operation.operation_id,
         )
+    if execution_checkpoint is not None and terminal_operation.status != "pass":
+        current = cast(
+            TestingRecoveryStore, record_store
+        ).read_odoo_stable_target_replacement_operation_record(operation.operation_id)
+        if current.recovery_journal is not None and current.recovery_journal.effects:
+            terminal_operation = current.model_copy(
+                update={
+                    "status": "reconciliation_required",
+                    "updated_at": _utc_now_timestamp(),
+                    "finished_at": "",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
+                    "result": None,
+                    "cancellation": None,
+                    "error_code": "operation_reconciliation_required",
+                    "error_message": "Testing provider effects require proved-safe reconciliation before retry.",
+                }
+            )
     return record_store.complete_odoo_stable_target_replacement_operation_record(
         record=terminal_operation,
         lease_owner=lease_owner,

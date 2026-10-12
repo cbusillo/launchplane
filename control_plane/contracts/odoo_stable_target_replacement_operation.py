@@ -16,6 +16,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyResult,
 )
 from control_plane.contracts.promotion_record import ENV_KEY_NAMES_MAX, env_key_names
+from control_plane.contracts.testing_replacement_recovery import TestingReplacementRecoveryJournal
 
 OdooStableTargetReplacementOperationStatus = Literal[
     "pending",
@@ -90,6 +91,9 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     # Launchplane's fixed description of error_code, when it has one.
     error_description: str = ""
     runner_trace_id: str = ""
+    recovery_journal: TestingReplacementRecoveryJournal | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _validate_record(self) -> "OdooStableTargetReplacementOperationRecord":
