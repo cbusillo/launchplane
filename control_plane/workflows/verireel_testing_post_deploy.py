@@ -148,13 +148,17 @@ def recorded_verireel_testing_qualification(
         ):
             return "missing"
         return "fail"
-    if record.post_deploy_update.status == "pass" and all(
-        evidence.get(key) == "pass"
-        for key in (
-            "migration_status",
-            "creator_verification_status",
-            "admin_verification_status",
-            "cleanup_status",
+    if (
+        record.post_deploy_update.status == "pass"
+        and evidence.get("authority_digest") == authority_digest
+        and all(
+            evidence.get(key) == "pass"
+            for key in (
+                "migration_status",
+                "creator_verification_status",
+                "admin_verification_status",
+                "cleanup_status",
+            )
         )
     ):
         return "pass"

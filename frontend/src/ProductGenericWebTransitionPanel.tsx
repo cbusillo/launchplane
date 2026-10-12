@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Layers } from "lucide-react";
-import { applyProductGenericWebTransition, readProductProfile, readProductProfileMutationReceipt } from "./api";
+import { applyProductGenericWebTransition, readAuthSession, readProductProfile, readProductProfileMutationReceipt } from "./api";
 import { recoverBrowserOperationState } from "./browser-operation";
 import { type DevFixtureMode } from "./dev-fixture-loader";
 import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
@@ -63,6 +63,7 @@ export function ProductGenericWebTransitionPanel({ product, fixtureMode, onSaved
   const [definition, setDefinition] = useState(review ? JSON.stringify({ lanes: review.request.lanes, preview: review.request.preview }, null, 2) : "");
   const [reviewedDefinition, setReviewedDefinition] = useState(review ? definition : "");
   const [reason, setReason] = useState(review?.request.reason ?? "");
+  const [admin, setAdmin] = useState(false);
   const [current, setCurrent] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -78,7 +79,7 @@ export function ProductGenericWebTransitionPanel({ product, fixtureMode, onSaved
     failureCertainty: profileApplyFailureCertainty, failureFor: productConfigOperationFailure,
   });
   const busy = checking || isOperationBusy(preview.state) || isOperationBusy(apply.state);
-  const locked = busy || apply.state.requiresIdempotencyContinuity;
+  const locked = busy || !admin || apply.state.requiresIdempotencyContinuity;
   const matches = Boolean(review && review.request.reason === reason.trim() && definition === reviewedDefinition);
   function startRead(): AbortController { readAbort.current?.abort(); const controller = new AbortController(); readAbort.current = controller; return controller; }
   async function refresh(signal: AbortSignal): Promise<LaunchplaneProductProfileRecord | null> {
@@ -90,7 +91,9 @@ export function ProductGenericWebTransitionPanel({ product, fixtureMode, onSaved
   useEffect(() => {
     if (fixtureMode) return;
     const controller = startRead();
-    void refresh(controller.signal).then(profile => {
+    void Promise.all([readAuthSession(controller.signal), refresh(controller.signal)]).then(([session, profile]) => {
+      if (controller.signal.aborted) return;
+      setAdmin(session.identity.role === "admin");
       if (profile && !review) setDefinition(JSON.stringify(declarations(profile), null, 2));
     }).catch(failure => { if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Profile could not be read."); });
     return () => { controller.abort(); readAbort.current?.abort(); };
@@ -145,10 +148,12 @@ export function ProductGenericWebTransitionPanel({ product, fixtureMode, onSaved
       if (receipt.state !== "completed" || receipt.product !== product || receipt.field !== "generic-web-transition" || receipt.idempotency_key !== identity.idempotencyKey || !receipt.original_trace_id) {
         setNotice("No matching completed receipt. Keep this tab and key; another change remains locked."); return;
       }
-      await refresh(controller.signal);
-      if (controller.signal.aborted) return;
+      const profile = await refresh(controller.signal);
+      if (!profile || controller.signal.aborted) return;
+      const matchesOriginal = review && profile.driver_id === "generic-web" && stable(declarations(profile)) === stable({ lanes: review.request.lanes, preview: review.request.preview });
       if (apply.reconcile(identity, { trace_id: receipt.trace_id, original_trace_id: receipt.original_trace_id, replayed: true })) {
         setReview(null); try { sessionStorage.removeItem(storageKey); } catch { /* Receipt settled the operation. */ }
+        if (!matchesOriginal) setError("The original transition completed, but current declarations differ from its review. Review the current profile before another change.");
         setNotice("Original profile transition completed. Current profile read again; testing qualification remains separate."); onSaved();
       }
     } catch (failure) { if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Original operation could not be checked."); }
@@ -161,6 +166,7 @@ export function ProductGenericWebTransitionPanel({ product, fixtureMode, onSaved
     </div></header>
     <p>Current driver: <output>{current ?? (fixtureMode ? "Unavailable in fixtures" : "Reading profile…")}</output></p>
     <p>Apply changes profile declarations. The next testing reconcile qualifies the declared lifecycle. Production keeps its recorded deployment until an accepted release.</p>
+    {!admin && current !== null && !fixtureMode ? <p>A signed-in administrator reviews and applies these declarations.</p> : null}
     <fieldset disabled={locked || Boolean(fixtureMode) || current === null}>
       <div className="product-config-field"><label htmlFor="product-generic-web-declarations">Lane and preview declarations</label><textarea id="product-generic-web-declarations" rows={12} value={definition} onChange={event => { setDefinition(event.target.value); setNotice(""); }} /></div>
       <ReasonField reason={reason} onChange={value => { setReason(value); setNotice(""); }} />
@@ -175,7 +181,7 @@ export function ProductGenericWebTransitionPanel({ product, fixtureMode, onSaved
     </div> : null}
     <div className="product-config-actions">
       <button className="button" type="button" disabled={locked || current === null || !definition || !reason.trim() || Boolean(fixtureMode)} onClick={() => void reviewTransition()}>Review shared-web transition</button>
-      <button className="button button-primary" type="button" disabled={busy || !matches || !review?.changed} onClick={() => void save()}>{apply.state.requiresIdempotencyContinuity ? "Retry original transition" : "Apply shared-web profile"}</button>
+      <button className="button button-primary" type="button" disabled={busy || !admin || !matches || !review?.changed} onClick={() => void save()}>{apply.state.requiresIdempotencyContinuity ? "Retry original transition" : "Apply shared-web profile"}</button>
       {apply.state.requiresIdempotencyContinuity ? <button className="button" type="button" disabled={busy} onClick={() => void checkOriginal()}>Check original operation</button> : null}
       {current !== null ? <button className="button" type="button" disabled={busy || Boolean(fixtureMode)} onClick={() => void readBack()}>Read profile again</button> : null}
     </div>

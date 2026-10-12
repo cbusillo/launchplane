@@ -1665,6 +1665,46 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual(repeated.last_plan["reason"], "already_deployed")
         qualify.assert_called_once()
 
+    def test_passed_legacy_testing_is_requalified_after_declaring_shared_lifecycle(self) -> None:
+        from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+
+        self.prepare_unqualified_verireel_testing()
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=self._testing_qualification_evidence,
+        ) as qualify:
+            self.request()
+            legacy = self.reconcile()
+            profile = self.store.read_product_profile_record("site")
+            self.store.write_product_profile_record(
+                profile.model_copy(
+                    update={
+                        "driver_id": "generic-web",
+                        "lanes": tuple(
+                            lane.model_copy(
+                                update={
+                                    "generic_web_extensions": GenericWebLaneExtensions(
+                                        verification_extension="verireel-testing"
+                                    )
+                                }
+                            )
+                            if lane.instance == "testing"
+                            else lane
+                            for lane in profile.lanes
+                        ),
+                    }
+                )
+            )
+            self.request()
+            transitioned = self.reconcile()
+            self.request()
+            repeated = self.reconcile()
+        self.assertEqual(transitioned["action"], "deploy")
+        self.assertEqual(transitioned["post_deploy_status"], "pass")
+        self.assertNotEqual(legacy["deployment_record_id"], transitioned["deployment_record_id"])
+        self.assertEqual(repeated["reason"], "already_deployed")
+        self.assertEqual(qualify.call_count, 2)
+
     def setUp(self) -> None:
         super().setUp()
         encryption_key = patch.dict(

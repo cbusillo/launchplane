@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-async function arrange(page: import("@playwright/test").Page, failure: "none" | "uncertain" | "stale" = "none") {
+async function arrange(page: import("@playwright/test").Page, failure: "none" | "uncertain" | "uncertain-changed" | "stale" = "none") {
   await page.goto("/ui/products/atlas-commerce?fixture=products");
   const { products, fixtureIdentity } = await page.evaluate(async () => {
     const fixtures = await import("/ui/src/dev-fixtures.ts");
@@ -27,7 +27,8 @@ async function arrange(page: import("@playwright/test").Page, failure: "none" | 
         await route.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "stale", message: "Review a new profile." } } }); return;
       }
       stored = { ...stored, driver_id: "generic-web", lanes: body.lanes.map((lane: { context: string; instance: string; extensions: typeof stored.lanes[0]["generic_web_extensions"] }) => ({ context: lane.context, instance: lane.instance, generic_web_extensions: lane.extensions })), preview: body.preview };
-      if (failure === "uncertain") { await route.abort("failed"); return; }
+      if (failure === "uncertain-changed") stored = { ...stored, preview: { ...stored.preview, app_name_suffix: "-concurrent" } };
+      if (failure === "uncertain" || failure === "uncertain-changed") { await route.abort("failed"); return; }
     }
     await route.fulfill({ status: 202, json: { status: "accepted", trace_id: "transition", records: { product_profile: "atlas-commerce" }, result: {
       product: "atlas-commerce", driver_before: "verireel", driver_after: "generic-web", changed: true, applied: body.mode === "apply", plan_sha256: "a".repeat(64), lanes: body.lanes, preview: body.preview,
@@ -57,7 +58,8 @@ test("shared-web review, draft invalidation, apply and exact readback", { tag: "
   await expect(apply).toBeDisabled();
   await panel.getByRole("button", { name: "Review shared-web transition" }).click();
   await apply.click();
-  await expect(panel.locator("p[role=status]")).toContainText("Shared-web profile applied and read back");
+  await expect(panel.locator("p[role=status]")).toBeVisible();
+  await expect(panel.locator("output")).toHaveText("generic-web");
   expect(requests).toHaveLength(1);
   expect(requests[0].key).toBeTruthy();
   expect(requests[0].body.reviewed_plan_sha256).toBeTruthy();
@@ -80,7 +82,8 @@ test("lost transition response survives reload and settles only from original re
   const reloaded = page.getByRole("region", { name: "Shared web driver", exact: true });
   await expect(reloaded.getByRole("button", { name: "Retry original transition" })).toBeEnabled();
   await reloaded.getByRole("button", { name: "Check original operation" }).click();
-  await expect(reloaded.locator("p[role=status]")).toContainText("Original profile transition completed");
+  await expect(reloaded.locator("p[role=status]")).toBeVisible();
+  await expect(reloaded.locator("output")).toHaveText("generic-web");
   await expect(reloaded.getByLabel("Lane and preview declarations")).toBeEnabled();
   expect(requests).toEqual([first]);
 });
@@ -92,5 +95,17 @@ test("a stale transition refreshes the profile and requires another review", asy
   await expect(panel.getByText("Current driver: generic-web", { exact: true })).toBeVisible();
   await expect(panel.getByRole("button", { name: "Apply shared-web profile" })).toBeDisabled();
   await expect(panel.getByRole("button", { name: "Review shared-web transition" })).toBeEnabled();
+  expect(requests).toHaveLength(1);
+});
+
+
+test("a completed original receipt exposes later declaration changes", async ({ page }) => {
+  const { panel, requests } = await arrange(page, "uncertain-changed");
+  await panel.getByRole("button", { name: "Review shared-web transition" }).click();
+  await panel.getByRole("button", { name: "Apply shared-web profile" }).click();
+  await panel.getByRole("button", { name: "Check original operation" }).click();
+  await expect(panel.getByRole("alert")).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Apply shared-web profile" })).toBeDisabled();
+  await expect(panel.getByLabel("Lane and preview declarations")).toBeEnabled();
   expect(requests).toHaveLength(1);
 });

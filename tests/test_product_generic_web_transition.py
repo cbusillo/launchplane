@@ -110,19 +110,21 @@ class GenericWebTransitionTests(unittest.TestCase):
         ):
             with self.subTest(lanes=lanes), self.assertRaises(ValueError):
                 build_generic_web_transition_plan(before, valid.model_copy(update={"lanes": lanes}))
-        if any(lane.instance == "prod" for lane in valid.lanes):
-            lanes = tuple(
-                item.model_copy(
-                    update={
-                        "extensions": item.extensions.model_copy(
-                            update={"verification_extension": "verireel-testing"}
-                        )
-                    }
-                )
-                for item in valid.lanes
+        production = next(item for item in valid.lanes if item.instance == "prod")
+        lanes = tuple(
+            item.model_copy(
+                update={
+                    "extensions": item.extensions.model_copy(
+                        update={"verification_extension": "verireel-testing"}
+                    )
+                }
             )
-            with self.assertRaises(ValueError):
-                build_generic_web_transition_plan(before, valid.model_copy(update={"lanes": lanes}))
+            if item == production
+            else item
+            for item in valid.lanes
+        )
+        with self.assertRaises(ValueError):
+            build_generic_web_transition_plan(before, valid.model_copy(update={"lanes": lanes}))
 
     def test_implicit_transport_inactive_product_and_unreviewed_apply_refuse(self) -> None:
         before = profile()
@@ -157,6 +159,18 @@ class GenericWebTransitionTests(unittest.TestCase):
             build_generic_web_transition_plan(
                 before.model_copy(update={"driver_id": "odoo"}), valid
             )
+
+    def test_partial_preview_preserves_unmentioned_resource_suffix(self) -> None:
+        before = profile()
+        before = before.model_copy(
+            update={"preview": before.preview.model_copy(update={"app_name_suffix": "-app"})}
+        )
+        request = ProductGenericWebTransitionRequest.model_validate(
+            {**draft(before), "preview": {"data_transport_mode": "none"}}
+        )
+        plan, after = build_generic_web_transition_plan(before, request)
+        self.assertEqual(after.preview.app_name_suffix, before.preview.app_name_suffix)
+        self.assertEqual(plan.preview.app_name_suffix, before.preview.app_name_suffix)
 
 
 class GenericWebTransitionHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -252,6 +266,33 @@ class GenericWebTransitionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.json()["error"]["code"], "stale")
         self.assertEqual(self.store.read_product_profile_record("example-site"), raced)
         self.assertEqual((await self.post(body, "stale")).json()["error"]["code"], "stale")
+
+    async def test_optional_preview_round_trip_applies_the_normalized_review(self) -> None:
+        before = self.store.read_product_profile_record("example-site")
+        before = before.model_copy(
+            update={
+                "preview": before.preview.model_copy(
+                    update={"data_transport_mode": "none", "app_name_suffix": "-app"}
+                )
+            }
+        )
+        self.store.write_product_profile_record(before)
+        request = draft(before)
+        request.pop("preview")
+        dry = await self.post(request)
+        self.assertEqual(dry.status_code, 202, dry.text)
+        body = {
+            **request,
+            "lanes": dry.json()["result"]["lanes"],
+            "preview": dry.json()["result"]["preview"],
+            "mode": "apply",
+            "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+        }
+        applied = await self.post(body, "normalized")
+        self.assertEqual(applied.status_code, 202, applied.text)
+        after = self.store.read_product_profile_record("example-site")
+        self.assertEqual(after.driver_id, dry.json()["result"]["driver_after"])
+        self.assertEqual(after.preview, before.preview)
 
     async def test_missing_csrf_nonadmin_and_unrelated_fields_refuse(self) -> None:
         before = self.store.read_product_profile_record("example-site")

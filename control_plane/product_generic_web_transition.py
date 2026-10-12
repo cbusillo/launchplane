@@ -94,7 +94,7 @@ def build_generic_web_transition_plan(
         raise ValueError("The testing verification extension requires the recorded testing lane.")
     preview = profile.preview
     if request.preview is not None:
-        preview = preview.model_copy(update=request.preview.model_dump())
+        preview = preview.model_copy(update=request.preview.model_dump(exclude_unset=True))
     if preview.data_transport_mode == "driver" and not preview.transport_extension:
         raise ValueError("Driver preview transport requires an explicit shared-web extension.")
     replacement = LaunchplaneProductProfileRecord.model_validate(
@@ -115,10 +115,16 @@ def build_generic_web_transition_plan(
             raise ValueError(
                 "The existing lane qualification must have a supported shared-web declaration."
             )
+    preview_declaration = GenericWebPreviewDeclaration.model_validate(
+        {
+            field: getattr(replacement.preview, field)
+            for field in GenericWebPreviewDeclaration.model_fields
+        }
+    )
     fingerprint = {
         "profile": profile.model_dump(mode="json"),
         "lanes": [item.model_dump(mode="json") for item in request.lanes],
-        "preview": request.preview.model_dump(mode="json") if request.preview is not None else None,
+        "preview": preview_declaration.model_dump(mode="json"),
         "reason": request.reason,
     }
     digest = hashlib.sha256(
@@ -129,12 +135,7 @@ def build_generic_web_transition_plan(
             product=profile.product,
             driver_before=profile.driver_id,
             lanes=request.lanes,
-            preview=GenericWebPreviewDeclaration.model_validate(
-                {
-                    field: getattr(preview, field)
-                    for field in GenericWebPreviewDeclaration.model_fields
-                }
-            ),
+            preview=preview_declaration,
             changed=profile != replacement,
             reason=request.reason,
             plan_sha256=digest,
