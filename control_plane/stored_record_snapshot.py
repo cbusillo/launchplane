@@ -15,6 +15,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import LargeBinary, Text, case, cast, func, select, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.sql import ColumnElement
 
 from control_plane.contracts.authz_policy_record import (
@@ -61,6 +62,8 @@ class SnapshotUnavailable(ValueError):
 def snapshot_failure_diagnostics(error: Exception) -> dict[str, Any]:
     """Emit code-owned field paths and classifications without record inputs."""
     result: dict[str, Any] = {"error_type": type(error).__name__}
+    if isinstance(error, DBAPIError) and getattr(error.orig, "sqlstate", None) == "57014":
+        result["reason"] = "snapshot_statement_time_limit"
     if isinstance(error, SnapshotUnavailable):
         result["reason"] = str(error)
         for key in ("rows_exported", "source_row_bytes", "scrubbed_bytes"):
@@ -271,7 +274,7 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
             if remaining <= 0:
                 raise refuse("snapshot_time_limit")
             if engine.dialect.name == "postgresql":
-                statement_timeout = max(1, min(remaining, 15000) // 1000 * 1000)
+                statement_timeout = min(remaining, 15000) // 1000 * 1000 or remaining
                 connection.execute(text(f"SET LOCAL statement_timeout = '{statement_timeout}ms'"))
             # Bound one raw row before the driver decodes its JSON. Cumulative
             # raw history is not the response size: free text shrinks on scrubbing.
@@ -386,7 +389,7 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
                     if remaining <= 0:
                         raise refuse("snapshot_time_limit")
                     if engine.dialect.name == "postgresql":
-                        next_timeout = max(1, min(remaining, 15000) // 1000 * 1000)
+                        next_timeout = min(remaining, 15000) // 1000 * 1000 or remaining
                         if next_timeout < statement_timeout:
                             connection.execute(
                                 text(f"SET LOCAL statement_timeout = '{next_timeout}ms'")

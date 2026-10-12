@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+from itertools import chain, repeat
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -297,6 +298,35 @@ class StoredRecordSnapshotTests(unittest.TestCase):
             diagnostics = json.dumps(snapshot_failure_diagnostics(error))
         self.assertNotIn("plaintext-sentinel", diagnostics)
         self.assertNotIn("unexpected-private-key", diagnostics)
+
+    def test_expired_export_budget_reports_time_without_record_inputs(self) -> None:
+        from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
+
+        with patch(
+            "control_plane.stored_record_snapshot.time.monotonic",
+            side_effect=chain([0], repeat(1_000_000)),
+        ):
+            with self.assertRaises(ValueError) as raised:
+                self.store.export_stored_record_snapshot()
+        diagnostics = snapshot_failure_diagnostics(raised.exception)
+        self.assertEqual(diagnostics["reason"], "snapshot_time_limit")
+        self.assertEqual(diagnostics["rows_exported"], 0)
+        self.assertNotIn("plaintext-sentinel", json.dumps(diagnostics))
+
+    def test_database_statement_timeout_reports_reason_without_sql_or_inputs(self) -> None:
+        from sqlalchemy.exc import OperationalError
+        from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
+
+        class QueryCanceled(Exception):
+            sqlstate = "57014"
+
+        error = OperationalError(
+            "private-sql", {"private-key": "plaintext-sentinel"}, QueryCanceled("private-value")
+        )
+        diagnostics = snapshot_failure_diagnostics(error)
+        self.assertEqual(diagnostics["reason"], "snapshot_statement_time_limit")
+        self.assertNotIn("private", json.dumps(diagnostics))
+        self.assertNotIn("plaintext-sentinel", json.dumps(diagnostics))
 
     def test_train_run_history_samples_latest_without_deleting_source_records(self) -> None:
         earlier = _merge_train_run_record(recorded_at="2026-05-09T02:05:00Z")
