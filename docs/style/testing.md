@@ -273,6 +273,18 @@ self-hosted candidate lanes. Shared-host CPU count is not a per-job browser
 budget. Local runs retain Playwright's default concurrency; use its `--workers`
 option for a measured diagnostic comparison.
 
+Browser smoke runs on main pushes when CI needs fresh proof. The verified-tree
+shortcut above can reuse a previously successful tree; it does not selectively
+skip browser coverage. Keep that reuse rather than duplicating a full browser
+run for the same tree. For a clock-sensitive flake, install Playwright's clock
+before loading the page, pause at a safely future time, and await the rendered
+response state before advancing to the next read. Repeat the unchanged behavior
+assertions under the CI worker count, for example:
+
+```bash
+pnpm --dir frontend exec playwright test sidebar-freshness --repeat-each=30 --workers=4
+```
+
 The suite uses only repo-local
 development fixtures. Product-detail journeys use `?fixture=products`; product
 inventory boundaries use `?fixture=empty` and `?fixture=error`. Anonymous

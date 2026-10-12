@@ -47,11 +47,12 @@ class HealthMonitorStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             async with lifespan_client(app) as client:
                 testing_response = await client.get(
-                    "/v1/service/health-monitor/status?instance=testing&slots=1",
+                    f"/v1/service/health-monitor/status?instance=testing&slots=1"
+                    f"&end_slot={monitor_slot(now, 'testing')}",
                     headers={"Authorization": "Bearer local-operator-token"},
                 )
                 prod_response = await client.get(
-                    "/v1/service/health-monitor/status?slots=1",
+                    f"/v1/service/health-monitor/status?slots=1&end_slot={monitor_slot(now)}",
                     headers={"Authorization": "Bearer local-operator-token"},
                 )
             self.assertEqual(testing_response.status_code, 200)
@@ -93,7 +94,8 @@ class HealthMonitorStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             async with lifespan_client(app) as client:
                 response = await client.get(
-                    "/v1/service/health-monitor/status?slots=1",
+                    # Read the receipt we wrote even if setup crosses a minute boundary.
+                    f"/v1/service/health-monitor/status?slots=1&end_slot={monitor_slot(now)}",
                     headers={"Authorization": "Bearer local-operator-token"},
                 )
                 oversized = await client.get(
