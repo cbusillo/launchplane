@@ -32,7 +32,10 @@ class ApplicationLifecycleSnapshot(BaseModel):
     originals: dict[str, dict[str, JsonValue] | None] = Field(default_factory=dict)
     managed_names: tuple[str, ...] = ()
     mode: Literal["deploy", "rollback"] = "deploy"
-    state: Literal["prepared", "held", "qualified"] = "prepared"
+    state: Literal["prepared", "held", "qualified", "restored", "restore_failed"] = "prepared"
+    previous_owned_names: tuple[str, ...] = ()
+    current_originals: dict[str, dict[str, JsonValue] | None] = Field(default_factory=dict)
+    restore_current_on_pre_image_failure: bool = False
     resume_from_hold: bool = False
     restore_declared: bool = False
 
@@ -41,6 +44,8 @@ class ApplicationLifecycleSnapshot(BaseModel):
 
     @property
     def owned_names(self) -> tuple[str, ...]:
+        if self.state in {"restored", "restore_failed"}:
+            return self.previous_owned_names
         if self.mode == "rollback":
             return tuple(name for name, payload in self.originals.items() if payload is not None)
         return tuple(item.name for item in self.extensions.schedules)
@@ -140,10 +145,10 @@ def application_snapshot_for_deploy(
                     if previous_record.artifact_identity is not None:
                         previous_artifact = previous_record.artifact_identity.artifact_id
                         previous_source = previous_record.source_git_ref
+    receipts: list[ApplicationLifecycleSnapshot] = []
     if callable(getattr(store, "list_deployment_records", None)):
         # A paused attempt may not have deployed an image or written inventory.
         # Receipts carry capture time independently of provider deployment times.
-        receipts = []
         for record in cast(_ApplicationLifecycleRecordLister, store).list_deployment_records(
             context_name=context,
             instance_name=instance,
@@ -175,16 +180,30 @@ def application_snapshot_for_deploy(
     source = read_snapshot(rollback_source_deployment_record_id) or prior
     if rollback:
         target = read_snapshot(rollback_target_deployment_record_id)
-        if source is None and target is None and not extensions.configured:
+        if source is None and target is None and not receipts:
+            # Declaring future extensions does not make historical image-only
+            # rollbacks acquire new maintenance or scheduling behavior.
             return None
         originals: dict[str, dict[str, JsonValue] | None] = {}
         restore_declared = False
         target_extensions = GenericWebLaneExtensions()
-        if source is not None and (source.previous_artifact_id, source.previous_source_git_ref) == (
-            artifact_id,
-            source_git_ref,
-        ):
-            originals = dict(source.originals)
+        baseline = next(
+            (
+                item
+                for item in sorted(
+                    [item for item in (source, *receipts) if item is not None],
+                    key=lambda item: item.captured_at,
+                    reverse=True,
+                )
+                if (item.previous_artifact_id, item.previous_source_git_ref)
+                == (artifact_id, source_git_ref)
+            ),
+            None,
+        )
+        if baseline is not None:
+            originals = dict(
+                baseline.current_originals if baseline.mode == "rollback" else baseline.originals
+            )
         elif (
             source is not None
             and source.mode == "rollback"
@@ -205,6 +224,27 @@ def application_snapshot_for_deploy(
             raise click.ClickException(
                 "Rollback has no artifact-bound application lifecycle receipt."
             )
+        restore_current = source is None or source.state in {
+            "qualified",
+            "restored",
+            "restore_failed",
+        }
+        current_originals: dict[str, dict[str, JsonValue] | None] = {}
+        if source is not None and source.state in {"restored", "restore_failed"}:
+            current_originals = dict(
+                source.current_originals if source.mode == "rollback" else source.originals
+            )
+        if (
+            source is not None
+            and source.mode == "rollback"
+            and (source.artifact_id, source.source_git_ref) == (artifact_id, source_git_ref)
+        ):
+            previous_artifact, previous_source = (
+                source.previous_artifact_id,
+                source.previous_source_git_ref,
+            )
+            if source.state != "qualified":
+                current_originals = dict(source.current_originals)
         names = set(originals)
         if source is not None:
             names.update(source.owned_names)
@@ -220,25 +260,33 @@ def application_snapshot_for_deploy(
             target_id=target_id,
             artifact_id=artifact_id,
             source_git_ref=source_git_ref,
-            previous_artifact_id=artifact_id,
-            previous_source_git_ref=source_git_ref,
+            previous_artifact_id=previous_artifact,
+            previous_source_git_ref=previous_source,
             extensions=target_extensions,
+            previous_owned_names=source.owned_names if source else (),
+            current_originals=current_originals,
+            restore_current_on_pre_image_failure=restore_current,
             originals=originals,
             managed_names=tuple(sorted(names)),
             mode="rollback",
             restore_declared=restore_declared,
         )
 
-    held = prior is not None and prior.state != "qualified"
+    held = prior is not None and prior.state in {"prepared", "held"}
+    carry_baseline = prior is not None and prior.state in {"prepared", "held", "restore_failed"}
     previous_names = (
         prior.managed_names
-        if held and prior is not None
+        if carry_baseline and prior is not None
         else (prior.owned_names if prior is not None else ())
     )
     if not extensions.configured and not previous_names:
         return None
-    originals = dict(prior.originals) if held and prior is not None else {}
-    if held and prior is not None:
+    originals = (
+        dict(prior.current_originals if prior.mode == "rollback" else prior.originals)
+        if carry_baseline and prior is not None
+        else {}
+    )
+    if carry_baseline and prior is not None:
         previous_artifact, previous_source = (
             prior.previous_artifact_id,
             prior.previous_source_git_ref,
@@ -258,6 +306,9 @@ def application_snapshot_for_deploy(
         originals=originals,
         managed_names=tuple(sorted(names)),
         resume_from_hold=held,
+        previous_owned_names=(prior.previous_owned_names if carry_baseline else prior.owned_names)
+        if prior
+        else (),
     )
 
 

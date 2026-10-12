@@ -145,6 +145,8 @@ class DokployApplicationLifecycle:
         for name in self.snapshot.managed_names:
             observed = self._read(name)
             self.observed[name] = observed
+            if self.snapshot.mode == "rollback" and name not in self.snapshot.current_originals:
+                self.snapshot.current_originals[name] = observed
             if self.snapshot.mode == "deploy" and name not in self.snapshot.originals:
                 self.snapshot.originals[name] = observed
         if self.snapshot.restore_declared:
@@ -217,10 +219,11 @@ class DokployApplicationLifecycle:
         )
 
     def restore(self) -> None:
-        self._restore(canary=False)
+        self._restore(canary=False, current=self.snapshot.mode == "rollback")
 
-    def _restore(self, *, canary: bool) -> None:
-        for name, original in self.snapshot.originals.items():
+    def _restore(self, *, canary: bool, current: bool = False) -> None:
+        originals = self.snapshot.current_originals if current else self.snapshot.originals
+        for name, original in originals.items():
             if original is None:
                 self._delete(name)
                 continue

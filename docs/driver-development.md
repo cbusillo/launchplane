@@ -451,3 +451,11 @@ A reservation keeps its original lifecycle declaration. Changing a declaration
 requires a new operation after exact recovery of the previous attempt; refusal
 does not erase that attempt's receipt. Held snapshots remain available even
 when the interrupted attempt never reached environment inventory.
+
+A refusal before an image change records whether schedule undo succeeded. A
+restored attempt does not make the still-running release unqualified. Standalone
+rollback keeps a separate snapshot of the current jobs so a pre-image refusal
+restores them; rollback after a failed promotion keeps jobs paused. Older rollback
+targets reuse the historical receipt that actually captured that artifact's
+baseline, rather than borrowing the current artifact's declarations. A profile
+declaration alone does not add lifecycle work to a pre-extension rollback.

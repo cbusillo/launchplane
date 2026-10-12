@@ -19,6 +19,7 @@ from control_plane.generic_web_deploy_provider_adapter import (
 )
 from control_plane.workflows.generic_web_application_snapshot import (
     ApplicationLifecycleSnapshot,
+    application_snapshot_for_deploy,
     recorded_application_lifecycle,
 )
 from control_plane.workflows.generic_web_application_lifecycle import (
@@ -334,6 +335,95 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         self.assertNotEqual(result.deployment_record_id, first_record_id)
         self.assertNotIn("billing-recovery", self.schedules)
         self.assertEqual(self.schedules["unrelated"], unrelated)
+
+    def test_future_declarations_do_not_run_maintenance_on_a_pre_extension_rollback(self) -> None:
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        provider = _LifecycleDeployProvider(target_id="app-123")
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=_GenericWebDeployStore(profile),
+            request=_request(),
+            deploy_provider=provider,
+            rollback=True,
+        )
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(result.post_deploy_status, "skipped")
+        self.assertEqual(self.commands, [])
+        self.assertEqual(self.schedules["billing-recovery"], self.original)
+
+    def test_older_rollback_uses_the_matching_historical_baseline(self) -> None:
+        _result, store = self._deploy()
+        first = store.deployments[0]
+        receipt = recorded_application_lifecycle(first)
+        assert receipt is not None
+        receipt.previous_artifact_id = "older-artifact"
+        receipt.previous_source_git_ref = "older-source"
+        store.write_deployment_record(
+            first.model_copy(
+                update={
+                    "post_deploy_update": first.post_deploy_update.model_copy(
+                        update={"evidence": receipt.evidence()}
+                    )
+                }
+            )
+        )
+        assert first.artifact_identity is not None
+        current = ApplicationLifecycleSnapshot(
+            product=store.profile.product,
+            context=first.context,
+            instance=first.instance,
+            provider_id="dokploy",
+            target_id="app-123",
+            artifact_id="current-artifact",
+            source_git_ref="current-source",
+            previous_artifact_id=first.artifact_identity.artifact_id,
+            previous_source_git_ref=first.source_git_ref,
+            extensions=self.extensions,
+            originals={"billing-recovery": self.schedules["billing-recovery"]},
+            managed_names=("billing-recovery",),
+            state="qualified",
+        )
+        second = first.model_copy(
+            update={
+                "record_id": "current",
+                "artifact_identity": first.artifact_identity.model_copy(
+                    update={"artifact_id": current.artifact_id}
+                ),
+                "source_git_ref": current.source_git_ref,
+                "post_deploy_update": first.post_deploy_update.model_copy(
+                    update={"evidence": current.evidence()}
+                ),
+            }
+        )
+        store.write_deployment_record(second)
+        inventory = store.inventories[0].model_copy(
+            update={
+                "deployment_record_id": second.record_id,
+                "artifact_identity": second.artifact_identity,
+                "source_git_ref": second.source_git_ref,
+            }
+        )
+        store.write_environment_inventory(inventory)
+        snapshot = application_snapshot_for_deploy(
+            store=store,
+            product=store.profile.product,
+            context=first.context,
+            instance=first.instance,
+            provider_id="dokploy",
+            target_id="app-123",
+            artifact_id=receipt.previous_artifact_id,
+            source_git_ref=receipt.previous_source_git_ref,
+            deployment_record_id="older-rollback",
+            extensions=self.extensions,
+            rollback=True,
+        )
+        assert snapshot is not None
+        self.assertEqual(snapshot.originals["billing-recovery"], self.original)
+        self.assertNotEqual(
+            snapshot.originals["billing-recovery"], current.originals["billing-recovery"]
+        )
 
     def test_declared_lifecycle_runs_on_shared_driver_in_order(self) -> None:
         result, store = self._deploy()

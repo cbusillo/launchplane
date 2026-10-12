@@ -759,14 +759,19 @@ def execute_generic_web_deploy(
                 if (
                     image_effect_attempted
                     or application_lifecycle.snapshot.resume_from_hold
-                    or application_lifecycle.snapshot.mode == "rollback"
+                    or (
+                        application_lifecycle.snapshot.mode == "rollback"
+                        and not application_lifecycle.snapshot.restore_current_on_pre_image_failure
+                    )
                 ):
+                    application_lifecycle.snapshot.state = "held"
                     application_lifecycle.hold()
                 else:
+                    application_lifecycle.snapshot.state = "restore_failed"
                     application_lifecycle.restore()
+                    application_lifecycle.snapshot.state = "restored"
             except click.ClickException as restore_error:
                 exc = click.ClickException(f"{exc}\n{restore_error}")
-            application_lifecycle.snapshot.state = "held"
             post_deploy_update = PostDeployUpdateEvidence(
                 attempted=application_lifecycle.effect_attempted,
                 status="fail" if application_lifecycle.effect_attempted else "skipped",

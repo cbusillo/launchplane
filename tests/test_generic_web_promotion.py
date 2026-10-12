@@ -36,6 +36,7 @@ from control_plane.generic_web_promotion_http import (
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
     GenericWebDeployResult,
+    execute_generic_web_deploy,
 )
 from control_plane.workflows.generic_web_deploy_provider import (
     DokployGenericWebDeployProvider,
@@ -1206,7 +1207,15 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
     def test_initial_pre_image_refusal_does_not_rollback_unchanged_production(self) -> None:
         self._check_maintenance_failure("initial_preflight")
 
-    def _check_maintenance_failure(self, failure: str) -> None:
+    def test_repeated_pre_image_refusal_keeps_jobs_enabled_on_unchanged_release(self) -> None:
+        self._check_maintenance_failure("initial_preflight", repeats=2)
+
+    def test_standalone_rollback_pre_image_refusal_restores_the_current_qualified_jobs(
+        self,
+    ) -> None:
+        self._check_maintenance_failure("standalone_preflight")
+
+    def _check_maintenance_failure(self, failure: str, *, repeats: int = 1) -> None:
         from control_plane.contracts.generic_web_extensions import (
             GenericWebLaneExtensions,
             GenericWebMaintenanceCommand,
@@ -1230,7 +1239,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
                 if failure == "initial_preflight":
                     raise click.ClickException("initial image preflight refused")
                 if (
-                    failure == "rollback_preflight"
+                    failure in {"rollback_preflight", "standalone_preflight"}
                     and runtime_identity.artifact_id == _PREVIOUS_ARTIFACT
                 ):
                     raise click.ClickException("rollback preflight refused")
@@ -1295,7 +1304,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
             assert provider.running is not None
             command = str(payload["command"])
             executed.append((command, provider.running.artifact_id))
-            if command == "./new-migration":
+            if command == "./new-migration" and failure != "standalone_preflight":
                 raise click.ClickException("migration failed")
 
         with (
@@ -1311,7 +1320,39 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
             patch.object(api, "upsert_dokploy_application_schedule", side_effect=upsert),
             patch.object(api, "run_dokploy_schedule", side_effect=run),
         ):
-            result = self._promote(store, provider)
+            for _attempt in range(repeats):
+                result = self._promote(store, provider)
+                if failure == "initial_preflight":
+                    self.assertEqual(schedules["billing"], original)
+            if failure == "standalone_preflight":
+                self.assertEqual(result.promotion_status, "pass")
+                current = dict(schedules["billing"])
+                rollback = execute_generic_web_deploy(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=GenericWebDeployRequest(
+                        product=store.profile.product,
+                        instance="prod",
+                        artifact_id=_PREVIOUS_ARTIFACT,
+                        source_git_ref="previous",
+                    ),
+                    deploy_provider=provider,
+                    recorded_artifact=True,
+                    rollback=True,
+                    rollback_target_deployment_record_id=_PREVIOUS_DEPLOYMENT,
+                )
+                self.assertEqual(rollback.deploy_status, "fail")
+                self.assertFalse(rollback.image_effect_attempted)
+                self.assertEqual(schedules["billing"], current)
+                self.assertEqual(
+                    [command for command, _ in executed], ["./new-migration", "./new-billing"]
+                )
+                receipt = recorded_application_lifecycle(
+                    store.read_deployment_record(rollback.deployment_record_id)
+                )
+                assert receipt is not None
+                self.assertEqual(receipt.state, "restored")
+                return
         self.assertEqual(result.promotion_status, "fail")
         if failure == "initial_preflight":
             self.assertEqual(result.rollback_status, "skipped")
