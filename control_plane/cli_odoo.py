@@ -628,6 +628,12 @@ def odoo_ownership_check(workspace_root: Path | None, output_format: str) -> Non
     help="Confirmation phrase required by the lane prelaunch rebuild policy.",
 )
 @click.option(
+    "--backup-record-id", default="", help="Exact Odoo backup for destructive replacement."
+)
+@click.option(
+    "--verification-record-id", default="", help="Exact passing verification of that backup."
+)
+@click.option(
     "--control-plane-root",
     type=click.Path(path_type=Path, file_okay=False),
     default=None,
@@ -641,6 +647,8 @@ def odoo_targets_replacement_plan(
     allow_empty_data: bool,
     data_source_mode: str,
     confirmation: str,
+    backup_record_id: str,
+    verification_record_id: str,
     control_plane_root: Path | None,
 ) -> None:
     launchplane_root = control_plane_root or _control_plane_root()
@@ -658,6 +666,8 @@ def odoo_targets_replacement_plan(
                     Literal["existing", "empty", "upstream_restore"], data_source_mode
                 ),
                 confirmation=confirmation,
+                backup_record_id=backup_record_id,
+                verification_record_id=verification_record_id,
             ),
             dokploy_config_reader=partial(_read_dokploy_config, database_url=database_url),
         )

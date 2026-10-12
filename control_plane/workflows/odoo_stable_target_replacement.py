@@ -4,7 +4,7 @@ import re
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol
 
 import click
@@ -21,6 +21,7 @@ from control_plane.contracts.artifact_identity import (
     artifact_manifest_matches_image_repository,
 )
 from control_plane.runtime_platform_credentials import PlatformCredentialRefusedError
+from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import RecordFailure
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -63,6 +64,10 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     artifact_odoo_version,
     merge_odoo_install_modules,
     missing_required_odoo_modules_from_artifact,
+)
+from control_plane.workflows.odoo_backup_proof import (
+    odoo_backup_paths,
+    read_odoo_backup_restore_proof,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
@@ -128,6 +133,8 @@ def _failure_stage(code: str) -> Iterator[None]:
 class OdooStableTargetReplacementStore(
     RuntimeKeySafetyPolicyReadStore, control_plane_secrets.SecretBindingSelectionStore, Protocol
 ):
+    def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
+
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def read_dokploy_target_record(
@@ -348,6 +355,7 @@ class OdooStableTargetReplacementPlan(BaseModel):
     allow_empty_data: bool = False
     data_source_mode: Literal["existing", "empty", "upstream_restore"] = "existing"
     approval_issue_url: str = ""
+    backup_restore_evidence: dict[str, str] = Field(default_factory=dict)
     retired_provider_keys: tuple[str, ...] = ()
     # Names of the settings the replacement would give the app, from the site's
     # records and the provider env; never values.
@@ -937,6 +945,78 @@ def _assert_prelaunch_rebuild_policy_allows_request(
     return policy.approval_issue_url
 
 
+def _replacement_backup_proof(
+    *,
+    record_store: OdooStableTargetReplacementStore,
+    request: OdooStableTargetReplacementRequest,
+) -> dict[str, str]:
+    # Read current authority on each boundary; the plan is not permission to
+    # destroy data after the lane or its proof has changed.
+    profile = record_store.read_product_profile_record(request.product)
+    lane = _read_lane(profile=profile, instance=request.instance)
+    if request.data_source_mode == "existing":
+        return {}
+    if not profile.odoo_replacement_proof_required(lane):
+        return {}
+    if not request.backup_record_id or not request.verification_record_id:
+        raise click.ClickException(
+            "Destructive replacement requires exact backup_record_id and verification_record_id. "
+            "Capture and verify the lane backup through the supported Odoo backup workflows."
+        )
+    target = record_store.read_dokploy_target_record(
+        context_name=lane.context,
+        instance_name=lane.instance,
+    )
+    values = _resolve_recorded_runtime_values(
+        record_store=record_store,
+        target_record=target,
+        context=lane.context,
+        instance=lane.instance,
+    )
+    database_name = values.get("ODOO_DB_NAME", "").strip()
+    backup_root = values.get("ODOO_BACKUP_ROOT", "").strip()
+    filestore_path = values.get("ODOO_FILESTORE_PATH", "") or "/volumes/data/filestore"
+    if (
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", database_name)
+        or database_name in {"postgres", "template0", "template1"}
+        or any(
+            not PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts
+            for path in (backup_root, filestore_path)
+        )
+    ):
+        raise click.ClickException(
+            "Backup proof requires current DB-backed database and path authority."
+        )
+    proof = read_odoo_backup_restore_proof(
+        record_store=record_store,
+        context=lane.context,
+        instance=lane.instance,
+        backup_record_id=request.backup_record_id,
+        verification_record_id=request.verification_record_id,
+        expected_paths=odoo_backup_paths(
+            backup_root=backup_root,
+            database_name=database_name,
+            backup_record_id=request.backup_record_id,
+            filestore_path=filestore_path,
+        ),
+    )
+    if proof.blockers:
+        raise click.ClickException(
+            "Destructive replacement backup/restore proof refused: " + "; ".join(proof.blockers)
+        )
+    return {
+        "backup_record_id": request.backup_record_id,
+        "backup_verification_record_id": request.verification_record_id,
+        "backup_verification_nonce": str(proof.evidence["verification_nonce"]),
+        "backup_created_at": proof.backup_record.created_at if proof.backup_record else "",
+        "backup_verification_created_at": proof.verification_record.created_at
+        if proof.verification_record
+        else "",
+        "database_dump_sha256": str(proof.evidence["database_dump_sha256"]),
+        "filestore_archive_sha256": str(proof.evidence["filestore_archive_sha256"]),
+    }
+
+
 def _build_ship_request(
     *,
     plan: OdooStableTargetReplacementPlan,
@@ -1295,6 +1375,13 @@ def build_odoo_stable_target_replacement_plan(
     if isinstance(target_record, DokployTargetRecord) and target_record.target_type != "compose":
         block("target_not_compose", "Odoo stable replacement currently requires a compose target.")
     approval_issue_url = ""
+    backup_restore_evidence: dict[str, str] = {}
+    try:
+        backup_restore_evidence = _replacement_backup_proof(
+            record_store=record_store, request=request
+        )
+    except (click.ClickException, FileNotFoundError) as error:
+        block("backup_restore_proof_required", str(error))
     if request.data_source_mode != "existing" and not request.allow_empty_data:
         block(
             "allow_empty_data_required",
@@ -1337,7 +1424,9 @@ def build_odoo_stable_target_replacement_plan(
             )
         except click.ClickException as error:
             block("prelaunch_rebuild_policy_refused", str(error))
-        if current_target.required_volume_keys_missing and not request.allow_empty_data:
+        if current_target.required_volume_keys_missing and (
+            request.data_source_mode == "existing" or not request.allow_empty_data
+        ):
             block(
                 "volume_env_keys_missing",
                 "Current target is missing required Odoo volume env keys: "
@@ -1559,6 +1648,7 @@ def build_odoo_stable_target_replacement_plan(
         allow_empty_data=request.allow_empty_data,
         data_source_mode=request.data_source_mode,
         approval_issue_url=approval_issue_url,
+        backup_restore_evidence=backup_restore_evidence,
         retired_provider_keys=tuple(sorted(retired_provider_keys)),
         delivered_runtime_keys=delivered_runtime_keys,
         blockers=blockers_tuple,
@@ -1629,6 +1719,8 @@ def execute_odoo_stable_target_replacement_apply(
                 artifact_id=request.artifact_id,
                 source_git_ref=request.source_git_ref,
                 expected_current_artifact_id=request.expected_current_artifact_id,
+                backup_record_id=request.backup_record_id,
+                verification_record_id=request.verification_record_id,
             ),
             dokploy_request=dokploy_request,
         )
@@ -1779,6 +1871,28 @@ def execute_odoo_stable_target_replacement_apply(
         image_reference=image_reference,
     )
     runtime_source: dict[str, str] = {}
+
+    def check_backup_proof() -> None:
+        with _failure_stage(deploy_blocked_code("backup_restore_proof_required")):
+            try:
+                current_proof = _replacement_backup_proof(
+                    record_store=record_store, request=request
+                )
+            except FileNotFoundError as error:
+                raise click.ClickException(
+                    "Replacement backup authority is unavailable."
+                ) from error
+            if current_proof != plan.backup_restore_evidence:
+                raise click.ClickException(
+                    "Replacement backup/restore proof changed after planning."
+                )
+            runtime_source.update(current_proof)
+
+    def restore_effect_checkpoint(phase: str) -> None:
+        if provider_effect_checkpoint is not None:
+            provider_effect_checkpoint(phase)
+        check_backup_proof()
+
     odoo_override_record = _read_odoo_instance_override_record(
         record_store=record_store,
         context=plan.context,
@@ -2106,6 +2220,7 @@ def execute_odoo_stable_target_replacement_apply(
                 )
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+        check_backup_proof()
         production_write_started = True
         raw_compose_evidence = dokploy_compose.sync_dokploy_compose_raw_source(
             host=host,
@@ -2382,6 +2497,7 @@ def execute_odoo_stable_target_replacement_apply(
         "restore" if plan.data_source_mode == "upstream_restore" else "deploy"
     )
     try:
+        check_backup_proof()
         with _failure_stage("post_deploy_setup_failed"):
             post_deploy_result = execute_odoo_post_deploy(
                 control_plane_root=control_plane_root,
@@ -2392,7 +2508,7 @@ def execute_odoo_stable_target_replacement_apply(
                     phase=post_deploy_phase,
                 ),
                 run_destructive_restore=plan.data_source_mode == "upstream_restore",
-                provider_effect_checkpoint=provider_effect_checkpoint,
+                provider_effect_checkpoint=restore_effect_checkpoint,
                 hold_uncertain_effects=hold_uncertain_effects,
                 allow_historical_sender_contract=allow_historical_sender_contract,
                 schedule_execution_timeout_seconds=(
@@ -2413,6 +2529,22 @@ def execute_odoo_stable_target_replacement_apply(
                 attempted=True, status="fail", detail="Post-deploy outcome requires reconciliation."
             ),
             destination_health=HealthcheckEvidence(status="skipped"),
+        )
+        raise
+    except OdooTargetReplacementStageError as error:
+        _write_failed_deployment(
+            record_store=record_store,
+            ship_request=ship_request,
+            deployment_record_id=deployment_record_id,
+            started_at=started_at,
+            resolved_target=resolved_target,
+            runtime_source=runtime_source,
+            runtime_identity=runtime_identity,
+            post_deploy_update=PostDeployUpdateEvidence(
+                attempted=True, status="fail", detail="Post-deploy safety validation failed."
+            ),
+            destination_health=HealthcheckEvidence(status="skipped"),
+            failure=_deploy_step_failure(error),
         )
         raise
     post_deploy_evidence = PostDeployUpdateEvidence(
@@ -2460,7 +2592,7 @@ def execute_odoo_stable_target_replacement_apply(
                 ),
                 run_destructive_restore=False,
                 allow_historical_sender_contract=allow_historical_sender_contract,
-                provider_effect_checkpoint=provider_effect_checkpoint,
+                provider_effect_checkpoint=restore_effect_checkpoint,
             )
         post_deploy_evidence = PostDeployUpdateEvidence(
             attempted=True,

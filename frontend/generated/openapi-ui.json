@@ -26976,6 +26976,11 @@
             "title": "Data Authority",
             "type": "string"
           },
+          "destructive_replacement_proof_required": {
+            "default": true,
+            "title": "Destructive Replacement Proof Required",
+            "type": "boolean"
+          },
           "prelaunch_rebuild_allowed": {
             "default": false,
             "title": "Prelaunch Rebuild Allowed",
@@ -26990,16 +26995,6 @@
             "default": "",
             "title": "Prelaunch Rebuild Data Source Mode",
             "type": "string"
-          },
-          "requires_backup_before_destroy": {
-            "default": true,
-            "title": "Requires Backup Before Destroy",
-            "type": "boolean"
-          },
-          "requires_restore_proof": {
-            "default": true,
-            "title": "Requires Restore Proof",
-            "type": "boolean"
           },
           "requires_runtime_identity": {
             "default": true,
@@ -27027,11 +27022,10 @@
         "required": [
           "allowed_rebuild_sources",
           "data_authority",
+          "destructive_replacement_proof_required",
           "prelaunch_rebuild_allowed",
           "prelaunch_rebuild_approval_issue_url",
           "prelaunch_rebuild_data_source_mode",
-          "requires_backup_before_destroy",
-          "requires_restore_proof",
           "requires_runtime_identity",
           "rollback_artifact_id",
           "rollback_deployment_record_id",
@@ -27064,16 +27058,6 @@
             "title": "Data Authority",
             "type": "string"
           },
-          "requires_backup_before_destroy": {
-            "default": true,
-            "title": "Requires Backup Before Destroy",
-            "type": "boolean"
-          },
-          "requires_restore_proof": {
-            "default": true,
-            "title": "Requires Restore Proof",
-            "type": "boolean"
-          },
           "requires_runtime_identity": {
             "default": true,
             "title": "Requires Runtime Identity",
@@ -27090,8 +27074,6 @@
         "required": [
           "allowed_rebuild_sources",
           "data_authority",
-          "requires_backup_before_destroy",
-          "requires_restore_proof",
           "requires_runtime_identity",
           "upstream_source"
         ]

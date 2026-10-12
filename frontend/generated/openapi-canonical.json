@@ -31855,6 +31855,11 @@
             "title": "Data Authority",
             "type": "string"
           },
+          "destructive_replacement_proof_required": {
+            "default": true,
+            "title": "Destructive Replacement Proof Required",
+            "type": "boolean"
+          },
           "prelaunch_rebuild_allowed": {
             "default": false,
             "title": "Prelaunch Rebuild Allowed",
@@ -31869,16 +31874,6 @@
             "default": "",
             "title": "Prelaunch Rebuild Data Source Mode",
             "type": "string"
-          },
-          "requires_backup_before_destroy": {
-            "default": true,
-            "title": "Requires Backup Before Destroy",
-            "type": "boolean"
-          },
-          "requires_restore_proof": {
-            "default": true,
-            "title": "Requires Restore Proof",
-            "type": "boolean"
           },
           "requires_runtime_identity": {
             "default": true,
@@ -31929,16 +31924,6 @@
             ],
             "title": "Data Authority",
             "type": "string"
-          },
-          "requires_backup_before_destroy": {
-            "default": true,
-            "title": "Requires Backup Before Destroy",
-            "type": "boolean"
-          },
-          "requires_restore_proof": {
-            "default": true,
-            "title": "Requires Restore Proof",
-            "type": "boolean"
           },
           "requires_runtime_identity": {
             "default": true,
@@ -63503,6 +63488,11 @@
                         "title": "Artifact Id",
                         "type": "string"
                       },
+                      "backup_record_id": {
+                        "default": "",
+                        "title": "Backup Record Id",
+                        "type": "string"
+                      },
                       "confirmation": {
                         "default": "",
                         "title": "Confirmation",
@@ -63579,6 +63569,11 @@
                           }
                         ],
                         "title": "Timeout Seconds"
+                      },
+                      "verification_record_id": {
+                        "default": "",
+                        "title": "Verification Record Id",
+                        "type": "string"
                       },
                       "verify_canonical": {
                         "default": true,
@@ -63729,6 +63724,11 @@
                         "title": "Artifact Id",
                         "type": "string"
                       },
+                      "backup_record_id": {
+                        "default": "",
+                        "title": "Backup Record Id",
+                        "type": "string"
+                      },
                       "confirmation": {
                         "default": "",
                         "title": "Confirmation",
@@ -63775,6 +63775,11 @@
                           "replace-and-cutover"
                         ],
                         "title": "Strategy",
+                        "type": "string"
+                      },
+                      "verification_record_id": {
+                        "default": "",
+                        "title": "Verification Record Id",
                         "type": "string"
                       }
                     },
@@ -79277,16 +79282,6 @@
                         ],
                         "title": "Data Authority",
                         "type": "string"
-                      },
-                      "requires_backup_before_destroy": {
-                        "default": true,
-                        "title": "Requires Backup Before Destroy",
-                        "type": "boolean"
-                      },
-                      "requires_restore_proof": {
-                        "default": true,
-                        "title": "Requires Restore Proof",
-                        "type": "boolean"
                       },
                       "requires_runtime_identity": {
                         "default": true,

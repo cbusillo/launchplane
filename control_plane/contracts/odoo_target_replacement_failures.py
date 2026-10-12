@@ -12,6 +12,7 @@ DEPLOY_FAILED_CODE = "deploy_failed"
 _DEPLOY_FAILED_DESCRIPTION = "The deploy step failed."
 
 DEPLOY_BLOCKED_DESCRIPTIONS: dict[str, str] = {
+    "backup_restore_proof_required": "The exact backup and restore proof is missing, invalid or changed.",
     "provider_target_unreadable": (
         "Launchplane could not read the lane's Dokploy target before writing its settings."
     ),

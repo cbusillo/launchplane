@@ -409,8 +409,7 @@ class ProductOdooEnvironmentExtension(BaseModel):
     data_authority: str = "unknown"
     allowed_rebuild_sources: tuple[str, ...] = ()
     upstream_source: str = ""
-    requires_backup_before_destroy: bool = True
-    requires_restore_proof: bool = True
+    destructive_replacement_proof_required: bool = True
     requires_runtime_identity: bool = True
     # Prod only: what a rollback with no artifact chosen would deploy.
     rollback_artifact_id: str = ""
@@ -2897,8 +2896,7 @@ def _environment_driver_extensions(
             data_authority=lane.odoo_data_policy.data_authority,
             allowed_rebuild_sources=lane.odoo_data_policy.allowed_rebuild_sources,
             upstream_source=lane.odoo_data_policy.upstream_source,
-            requires_backup_before_destroy=lane.odoo_data_policy.requires_backup_before_destroy,
-            requires_restore_proof=lane.odoo_data_policy.requires_restore_proof,
+            destructive_replacement_proof_required=(profile.odoo_replacement_proof_required(lane)),
             requires_runtime_identity=lane.odoo_data_policy.requires_runtime_identity,
             rollback_artifact_id=(
                 rollback_deployment.artifact_identity.artifact_id

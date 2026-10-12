@@ -1975,5 +1975,24 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("Direct local DB mutation is restricted", result.output)
 
 
+class OdooSafeguardCompatibilityTests(unittest.TestCase):
+    def test_legacy_flags_cannot_change_authoritative_protection(self) -> None:
+        from control_plane.contracts.product_profile_record import ProductOdooLaneDataPolicy
+
+        for value in (True, False):
+            policy = ProductOdooLaneDataPolicy.model_validate(
+                {
+                    "data_authority": "authoritative",
+                    "allowed_rebuild_sources": ["upstream_restore"],
+                    "upstream_source": "recorded-source",
+                    "requires_backup_before_destroy": value,
+                    "requires_restore_proof": value,
+                }
+            )
+            rewritten = ProductOdooLaneDataPolicy.model_validate(policy.model_dump())
+            self.assertTrue(rewritten.destructive_replacement_proof_required)
+            self.assertTrue(rewritten.allows_rebuild_source("upstream_restore"))
+
+
 if __name__ == "__main__":
     unittest.main()
