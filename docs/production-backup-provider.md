@@ -246,3 +246,37 @@ before granting or using shared capture. An old worker cannot read schema-v3
 operations and must never receive them. Do not run the legacy and shared backup
 flows for the same guest during migration; the shared source lock does not
 control legacy host commands.
+
+## Reusing stored worker credentials and checking without capture
+
+Production → Actions → **Production backup credentials** reads only configured
+`launchplane_worker` binding metadata stored exactly for that product's lane.
+Select the existing capture SSH credential and host verification binding, then
+**Preview credential bindings** and **Use these existing credentials**. This
+renames those binding references to the shared worker's expected names; it does
+not decrypt, copy, rotate or create a secret/version, change the host, or deliver
+anything to the application. The encrypted record remains the single source.
+
+The metadata GET is `/v1/products/{product}/environments/prod/backup-worker-bindings`;
+its `/apply` POST uses existing `product_config.plan`/`product_config.apply`
+authority, a reviewed metadata digest and atomic idempotency receipt. Rotation,
+binding collisions, disabled/non-worker/non-lane sources and changes before
+commit refuse. If a response is lost, retain the original request/key and use
+**Retry original credential rebinding**; a fresh request is not a recovery path.
+
+**Check capture boundary and PBS** calls
+`GET /v1/production-backup-authority/preflight` with product, context, instance
+and promotion action, under existing `production_backup_authority.read`.
+Launchplane internally resolves the same exact-lane worker credentials and
+runs only `launchplane-backup-boundary` and the bound `pvesm status` check.
+The response reports policy revision, exact capture-only boundary agreement and
+active PBS reachability, without coordinates or credential/provider output.
+Authority and credential metadata are rechecked after the reads. It creates no
+capture operation, snapshot, archive, retention change or promotion evidence.
+This checks the service execution surface using the shared resolver/provider;
+separately confirm the installed backup worker's revision before real capture.
+
+The typed policy and targets already supply the host/login/guest/storage tuple,
+snapshot prefix and retention. Do not create generic topology environment keys
+from retired product-prefixed settings. Legacy settings can be retired only
+after their consumer/parity evidence is accounted for by the owning rollout.

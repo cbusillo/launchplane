@@ -271,6 +271,15 @@ export type AuthzManagedRuleChange = {
     previous_rule_sha256: string;
 };
 
+export type BackupCredentialBindingRequest = {
+    bindings: {
+        [key: string]: string;
+    };
+    mode?: 'dry-run' | 'apply';
+    reason: string;
+    reviewed_plan_sha256?: string;
+};
+
 export type BackupGateEvidence = {
     evidence: {
         [key: string]: string;
@@ -5588,6 +5597,35 @@ export type ReadProductionBackupAuthorityResponses = {
 
 export type ReadProductionBackupAuthorityResponse = ReadProductionBackupAuthorityResponses[keyof ReadProductionBackupAuthorityResponses];
 
+export type QualifyProductionBackupPreflightData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query: {
+        product: string;
+        context: string;
+        instance: string;
+        promotion_action: string;
+    };
+    url: '/v1/production-backup-authority/preflight';
+};
+
+export type QualifyProductionBackupPreflightErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type QualifyProductionBackupPreflightError = QualifyProductionBackupPreflightErrors[keyof QualifyProductionBackupPreflightErrors];
+
+export type QualifyProductionBackupPreflightResponses = {
+    200: AcceptedEvidenceResponse;
+};
+
+export type QualifyProductionBackupPreflightResponse = QualifyProductionBackupPreflightResponses[keyof QualifyProductionBackupPreflightResponses];
+
 export type ReadProductionBackupGateOperationData = {
     body?: never;
     headers?: {
@@ -5775,6 +5813,32 @@ export type ListProductEnvironmentsResponses = {
 };
 
 export type ListProductEnvironmentsResponse = ListProductEnvironmentsResponses[keyof ListProductEnvironmentsResponses];
+
+export type ReadBackupWorkerBindingsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/environments/prod/backup-worker-bindings';
+};
+
+export type ReadBackupWorkerBindingsErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadBackupWorkerBindingsError = ReadBackupWorkerBindingsErrors[keyof ReadBackupWorkerBindingsErrors];
+
+export type ReadBackupWorkerBindingsResponses = {
+    200: AcceptedEvidenceResponse;
+};
+
+export type ReadBackupWorkerBindingsResponse = ReadBackupWorkerBindingsResponses[keyof ReadBackupWorkerBindingsResponses];
 
 export type ReadProductEnvironmentData = {
     body?: never;
@@ -6818,6 +6882,33 @@ export type EnqueueProductionBackupGateResponses = {
 };
 
 export type EnqueueProductionBackupGateResponse = EnqueueProductionBackupGateResponses[keyof EnqueueProductionBackupGateResponses];
+
+export type RebindBackupWorkerCredentialsData = {
+    body: BackupCredentialBindingRequest;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/environments/prod/backup-worker-bindings/apply';
+};
+
+export type RebindBackupWorkerCredentialsErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type RebindBackupWorkerCredentialsError = RebindBackupWorkerCredentialsErrors[keyof RebindBackupWorkerCredentialsErrors];
+
+export type RebindBackupWorkerCredentialsResponses = {
+    202: AcceptedEvidenceResponse;
+};
+
+export type RebindBackupWorkerCredentialsResponse = RebindBackupWorkerCredentialsResponses[keyof RebindBackupWorkerCredentialsResponses];
 
 export type ApplyProductEnvironmentConfigData = {
     body: {

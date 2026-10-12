@@ -136,6 +136,8 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/production-backup-authority": "read_production_backup_authority",
+    "/v1/production-backup-authority/preflight": "qualify_production_backup_preflight",
+    "/v1/products/{product}/environments/prod/backup-worker-bindings": "read_backup_worker_bindings",
     "/v1/service/github-delivery": "read_service_github_delivery_controls",
     "/v1/auth/session": "read_human_auth_session",
     "/v1/drivers": "read_driver_descriptors",
@@ -197,6 +199,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/production-backup-authority/apply": "apply_production_backup_authority",
+    "/v1/products/{product}/environments/prod/backup-worker-bindings/apply": "rebind_backup_worker_credentials",
     # POST carries the original typed request for an inert receipt lookup.
     "/v1/service/delivery/apply-receipt": "read_service_delivery_apply_receipt",
     "/v1/product-profiles/stable-lane-repair/apply": "apply_product_stable_lane_repair",

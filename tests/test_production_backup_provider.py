@@ -8,6 +8,10 @@ from typing import Callable, Iterator
 import unittest
 from unittest.mock import patch
 
+from control_plane.contracts.production_backup_authority import (
+    ProxmoxGuestBackupDestinationReference,
+    ProxmoxStorageBackupDestinationReference,
+)
 from control_plane.contracts.production_backup_gate import (
     ProductionBackupGateRequest,
     ProductionBackupGateWorkerRequest,
@@ -58,6 +62,16 @@ def setup_memory_files(test_case: unittest.TestCase) -> None:
 
 class BackupHost:
     def __init__(self, *, after_snapshot: Callable[[], None] | None = None) -> None:
+        binding = _binding()
+        source = binding.source_target.destination
+        destination = binding.destination_target.destination
+        assert isinstance(source, ProxmoxGuestBackupDestinationReference)
+        assert isinstance(destination, ProxmoxStorageBackupDestinationReference)
+        self.source = source
+        self.storage = destination.storage_id
+        self.prefix = binding.policy.fast_snapshot.snapshot_prefix
+        self.guest_command = "pct" if source.guest_kind == "lxc" else "qm"
+        self.archive_kind = "ct" if source.guest_kind == "lxc" else "vm"
         self.commands: list[list[str]] = []
         self.snapshot = ""
         self.old_snapshots: list[str] = []
@@ -71,29 +85,44 @@ class BackupHost:
             output = json.dumps(
                 {
                     "schema_version": 1,
-                    "guest_kind": "lxc",
-                    "guest_id": "101",
-                    "storage_id": "pbs-production",
-                    "snapshot_prefix": "example-predeploy",
+                    "guest_kind": self.source.guest_kind,
+                    "guest_id": self.source.guest_id,
+                    "storage_id": self.storage,
+                    "snapshot_prefix": self.prefix,
                     "restore_allowed": False,
                 }
             )
-        elif args == ["pvesm", "status", "--storage", "pbs-production"]:
-            output = "pbs-production pbs active 100 10 90 10%"
-        elif args[:3] == ["pct", "snapshot", "101"]:
+        elif args == ["pvesm", "status", "--storage", self.storage]:
+            output = f"{self.storage} pbs active 100 10 90 10%"
+        elif args[:3] == [self.guest_command, "snapshot", self.source.guest_id]:
             self.snapshot = args[3]
             if self.after_snapshot is not None:
                 self.after_snapshot()
             output = ""
-        elif args == ["pct", "listsnapshot", "101"]:
+        elif args == [self.guest_command, "listsnapshot", self.source.guest_id]:
             output = "\n".join(
                 f"`-> {name} 2026-09-26" for name in [self.snapshot, *self.old_snapshots]
             )
-        elif args == ["vzdump", "101", "--mode", "snapshot", "--storage", "pbs-production"]:
-            output = "INFO: creating Proxmox Backup Server archive 'ct/101/2026-09-26T10:00:00Z'"
-        elif args == ["pvesm", "list", "pbs-production", "--vmid", "101", "--content", "backup"]:
-            output = "pbs-production:backup/ct/101/2026-09-26T10:00:00Z pbs backup 1000 101"
-        elif args[:3] == ["pct", "delsnapshot", "101"]:
+        elif args == [
+            "vzdump",
+            self.source.guest_id,
+            "--mode",
+            "snapshot",
+            "--storage",
+            self.storage,
+        ]:
+            output = f"INFO: creating Proxmox Backup Server archive '{self.archive_kind}/{self.source.guest_id}/2026-09-26T10:00:00Z'"
+        elif args == [
+            "pvesm",
+            "list",
+            self.storage,
+            "--vmid",
+            self.source.guest_id,
+            "--content",
+            "backup",
+        ]:
+            output = f"{self.storage}:backup/{self.archive_kind}/{self.source.guest_id}/2026-09-26T10:00:00Z pbs backup 1000 {self.source.guest_id}"
+        elif args[:3] == [self.guest_command, "delsnapshot", self.source.guest_id]:
             if self.fail_retention:
                 return subprocess.CompletedProcess(command, 1, stdout="", stderr="private-error")
             self.old_snapshots.remove(args[3])
