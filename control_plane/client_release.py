@@ -272,7 +272,9 @@ def release_start_for_acceptance(
     ):
         return ""
     if mode == "director_standing":
-        return "promote" if profile.driver_id == "generic-web" else ""
+        if profile.driver_id != "generic-web":
+            return ""
+        mode = "promote_with_rollback_drill"
     if mode == "promote_with_rollback_drill" and _product_drill_passed(store, profile):
         return "promote"
     return mode
@@ -840,7 +842,7 @@ def _record_standing_acceptance(
             actor_github_id=profile.owner.github_id,
             actor_github_login=profile.owner.github_login,
             decided_at=decided_at,
-            release_start="promote",
+            release_start=release_start_for_acceptance(store=store, profile=profile),
             acceptance_source="director_standing",
         )
     decision = store.create_release_review_decision_record_if_absent(decision)
