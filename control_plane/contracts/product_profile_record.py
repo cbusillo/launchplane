@@ -136,9 +136,24 @@ class ProductOdooLaneDataPolicy(BaseModel):
     data_authority: OdooDataAuthority = "unknown"
     allowed_rebuild_sources: tuple[OdooRebuildSourceMode, ...] = ()
     upstream_source: str = ""
-    requires_backup_before_destroy: bool = True
-    requires_restore_proof: bool = True
     requires_runtime_identity: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_legacy_safeguards(cls, value: object) -> object:
+        # Stored settings never enforced these claims. Read old records without
+        # carrying them forward as configurable protection or exemptions.
+        if isinstance(value, dict):
+            return {
+                key: item
+                for key, item in value.items()
+                if key not in {"requires_backup_before_destroy", "requires_restore_proof"}
+            }
+        return value
+
+    @property
+    def destructive_replacement_proof_required(self) -> bool:
+        return self.data_authority in {"unknown", "authoritative"}
 
     @model_validator(mode="after")
     def _validate_policy(self) -> "ProductOdooLaneDataPolicy":
@@ -152,10 +167,6 @@ class ProductOdooLaneDataPolicy(BaseModel):
             raise ValueError("unknown Odoo data authority cannot allow rebuild sources")
         if "upstream_restore" in self.allowed_rebuild_sources and not self.upstream_source:
             raise ValueError("Odoo data policy allowing upstream_restore requires upstream_source")
-        if self.data_authority == "authoritative" and not self.requires_backup_before_destroy:
-            raise ValueError("authoritative Odoo data policy requires backup before destroy")
-        if self.data_authority == "authoritative" and not self.requires_restore_proof:
-            raise ValueError("authoritative Odoo data policy requires restore proof")
         return self
 
     def allows_rebuild_source(self, source: str) -> bool:
@@ -689,6 +700,11 @@ class LaunchplaneProductProfileRecord(BaseModel):
     @property
     def is_active(self) -> bool:
         return self.lifecycle_state == "active"
+
+    def odoo_replacement_proof_required(self, lane: ProductLaneProfile) -> bool:
+        return lane.odoo_data_policy.destructive_replacement_proof_required or (
+            self.production_use == "live" and lane.instance == "prod"
+        )
 
     def validate_write_contract(self) -> "LaunchplaneProductProfileRecord":
         for lane in self.lanes:

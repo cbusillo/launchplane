@@ -1134,6 +1134,7 @@ PLAN_BLOCKER_DESCRIPTIONS: dict[str, str] = {
     "volume_authority_unresolved": (
         "Launchplane could not resolve the lane's stored Odoo volume settings."
     ),
+    "backup_restore_proof_required": "Destructive replacement needs exact verified backup and restore proof.",
     "prelaunch_rebuild_policy_refused": "The lane's prelaunch rebuild policy refused the request.",
     "volume_env_keys_missing": "The current target is missing required Odoo volume settings.",
     "volume_authority_drift": (

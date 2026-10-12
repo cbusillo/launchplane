@@ -7,6 +7,7 @@ from typing import Literal, Protocol, cast
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane.contracts.odoo_instance_override_record import (
     OdooInstanceOverrideRecord,
@@ -19,6 +20,7 @@ from control_plane.contracts.public_hosts import resolve_public_base_url
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
 from control_plane.contracts.odoo_target_replacement_failures import (
     OdooProviderEffectUncertainError,
+    OdooProviderSafetyRefusedError,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy import api as dokploy_api
@@ -304,6 +306,8 @@ def execute_odoo_post_deploy(
             error,
             (
                 dokploy_api.DokployDeploymentFailed,
+                OdooProviderSafetyRefusedError,
+                DurableOperationAuthorizationDeniedError,
                 dokploy_post_deploy.OdooPostDeployReadbackFailure,
             ),
         ) or (
@@ -322,6 +326,10 @@ def execute_odoo_post_deploy(
                 status="fail",
                 detail=str(error),
             )
+        if isinstance(
+            error, (OdooProviderSafetyRefusedError, DurableOperationAuthorizationDeniedError)
+        ):
+            raise
         if uncertain:
             raise OdooProviderEffectUncertainError(
                 "Odoo post-deploy provider effect requires reconciliation."

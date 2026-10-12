@@ -6,12 +6,20 @@ description and env-key names; never the check's message, which can carry
 provider text that names targets, hosts and databases.
 """
 
+import click
+
+
+class OdooProviderSafetyRefusedError(click.ClickException):
+    """A typed precondition refused a provider effect; preserve its reason."""
+
+
 DEPLOY_BLOCKED_PREFIX = "deploy_blocked."
 # Any other failure inside the deploy step, after the checks passed.
 DEPLOY_FAILED_CODE = "deploy_failed"
 _DEPLOY_FAILED_DESCRIPTION = "The deploy step failed."
 
 DEPLOY_BLOCKED_DESCRIPTIONS: dict[str, str] = {
+    "backup_restore_proof_required": "The exact backup and restore proof is missing, invalid or changed.",
     "provider_target_unreadable": (
         "Launchplane could not read the lane's Dokploy target before writing its settings."
     ),
