@@ -3667,7 +3667,7 @@ export type ProductProfileListResponse = {
 };
 
 export type ProductProfileMutationReceipt = {
-    field: 'owner' | 'image-repository' | 'production-use';
+    field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup';
     idempotency_key: string;
     original_trace_id: string;
     product: string;
@@ -4104,6 +4104,13 @@ export type ProductTopologyWarning = {
     domain_name: string;
     scope: 'authority' | 'placement' | 'domains' | 'ingress' | 'tls' | 'observation';
     severity: 'info' | 'warning' | 'error';
+};
+
+export type ProductWebsiteCleanupRequest = {
+    mode?: 'dry-run' | 'apply';
+    reason: string;
+    reviewed_plan_sha256?: string;
+    schema_version?: 1;
 };
 
 export type ProductionBackupAuthorityStatus = {
@@ -5510,7 +5517,7 @@ export type ReadProductProfileMutationReceiptData = {
     };
     path: {
         product: string;
-        field: 'owner' | 'image-repository' | 'production-use';
+        field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup';
     };
     query: {
         operation_key: string;
@@ -6709,6 +6716,37 @@ export type ApplyProductProductionUseResponses = {
 };
 
 export type ApplyProductProductionUseResponse = ApplyProductProductionUseResponses[keyof ApplyProductProductionUseResponses];
+
+export type ApplyProductWebsiteCleanupData = {
+    body: ProductWebsiteCleanupRequest;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/product-profiles/{product}/website-cleanup';
+};
+
+export type ApplyProductWebsiteCleanupErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ApplyProductWebsiteCleanupError = ApplyProductWebsiteCleanupErrors[keyof ApplyProductWebsiteCleanupErrors];
+
+export type ApplyProductWebsiteCleanupResponses = {
+    202: AcceptedEvidenceResponse;
+};
+
+export type ApplyProductWebsiteCleanupResponse = ApplyProductWebsiteCleanupResponses[keyof ApplyProductWebsiteCleanupResponses];
 
 export type WriteProductReviewDecisionData = {
     body: ProductReviewDecisionEnvelope;
