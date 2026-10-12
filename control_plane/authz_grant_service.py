@@ -12,6 +12,7 @@ from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.action_effects import AGENT_READ_ROLE_ACTION
 from control_plane.authz_scope import (
     exact_instance_workflow_authz_actions,
     instance_pinned_workflow_authz_actions,
@@ -52,6 +53,7 @@ from control_plane.contracts.authz_access_read import (
     AuthzPolicyPrincipalType,
     AuthzReachableAdministratorSummary,
     EffectiveAccessDecision,
+    EffectiveAccessEvaluateRequest,
     EffectiveAccessRequestSummary,
 )
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule
@@ -63,6 +65,7 @@ from control_plane.contracts.product_owner import (
 )
 from control_plane.service_auth import (
     AuthorizationTarget,
+    AuthzEvaluation,
     AuthzInstanceSelectors,
     GitHubActionsIdentity,
     GitHubActionsPolicyRule,
@@ -1240,6 +1243,10 @@ def preview_authz_candidate_policy(
     caller_identity: AuthzApplyingIdentity,
     request: AuthzPolicyCandidatePreviewRequest,
     trace_id: str,
+    probe_evaluator: Callable[
+        [LaunchplaneAuthzPolicy, EffectiveAccessEvaluateRequest], AuthzEvaluation
+    ]
+    | None = None,
 ) -> AuthzPolicyCandidatePreviewResponse:
     submitted_candidate_sha256 = authz_policy_sha256(request.candidate_policy)
     candidate_policy = validate_authz_candidate_policy(request.candidate_policy)
@@ -1259,6 +1266,16 @@ def preview_authz_candidate_policy(
         policy=candidate_policy,
         caller_identity=caller_identity,
     )
+    if (
+        request.probes
+        and probe_evaluator is None
+        and any(
+            AGENT_READ_ROLE_ACTION in rule.actions
+            for policy in (active_record.policy, candidate_policy)
+            for rule in (*policy.local_operators, *policy.terminal_agents)
+        )
+    ):
+        raise AuthzPolicyRequestError("Agent read-role probes require a record-scoped evaluator.")
     probe_results: list[AuthzPolicyCandidateProbeResult] = []
     for probe in request.probes:
         target = (
@@ -1266,22 +1283,21 @@ def preview_authz_candidate_policy(
             if probe.target_scope == "instance"
             else AuthorizationTarget(scope="context")
         )
-        active_evaluation = active_record.policy.evaluate(
-            identity=probe.identity(),
-            action=probe.action,
-            product=probe.product,
-            context=probe.context,
-            target=target,
-            record_context=False,
-        )
-        candidate_evaluation = candidate_policy.evaluate(
-            identity=probe.identity(),
-            action=probe.action,
-            product=probe.product,
-            context=probe.context,
-            target=target,
-            record_context=False,
-        )
+
+        def evaluate(policy: LaunchplaneAuthzPolicy) -> AuthzEvaluation:
+            if probe_evaluator is not None:
+                return probe_evaluator(policy, probe)
+            return policy.evaluate(
+                identity=probe.identity(),
+                action=probe.action,
+                product=probe.product,
+                context=probe.context,
+                target=target,
+                record_context=False,
+            )
+
+        active_evaluation = evaluate(active_record.policy)
+        candidate_evaluation = evaluate(candidate_policy)
         delta: AuthzPolicyCandidateProbeDelta
         if active_evaluation.decision == candidate_evaluation.decision:
             delta = (

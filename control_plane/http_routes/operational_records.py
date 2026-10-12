@@ -806,6 +806,31 @@ def register_managed_secret_read_routes(
                 code="not_found",
                 message=str(error),
             ) from error
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="secret.list",
+            product=LAUNCHPLANE_SERVICE_CONTEXT,
+            context=context,
+            target=AuthorizationTarget(
+                scope="instance" if instance else "context",
+                instances=(instance,) if instance else (),
+            ),
+            inherit_agent_read_role=False,
+        ):
+            statuses = tuple(
+                status
+                for status in statuses
+                if dependencies.authorization_allows(
+                    identity=identity,
+                    action="secret.list",
+                    product=LAUNCHPLANE_SERVICE_CONTEXT,
+                    context=status.context,
+                    target=AuthorizationTarget(
+                        scope="instance" if status.instance else "context",
+                        instances=(status.instance,) if status.instance else (),
+                    ),
+                )
+            )
         return SecretStatusListResponse(
             trace_id=trace_id,
             context=context,
@@ -857,6 +882,31 @@ def register_managed_secret_read_routes(
                 else ()
             ),
         )
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="secret.list",
+            product=LAUNCHPLANE_SERVICE_CONTEXT,
+            context=context,
+            target=AuthorizationTarget(
+                scope="instance" if instance else "context",
+                instances=(instance,) if instance else (),
+            ),
+            inherit_agent_read_role=False,
+        ):
+            records = tuple(
+                record
+                for record in records
+                if dependencies.authorization_allows(
+                    identity=identity,
+                    action="secret.list",
+                    product=LAUNCHPLANE_SERVICE_CONTEXT,
+                    context=record.context,
+                    target=AuthorizationTarget(
+                        scope="instance" if record.instance else "context",
+                        instances=(record.instance,) if record.instance else (),
+                    ),
+                )
+            )
         return RuntimeSettingsResponse(
             trace_id=trace_id,
             context=context,
