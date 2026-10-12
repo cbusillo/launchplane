@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { applyProductHealthMonitoring, readAuthSession, readProductProfile } from "./api";
 import type { ApplyProductHealthMonitoringData, ProductEnvironmentDetail, ProductHealthMonitoringPlan, ProductLaneProfile } from "./generated/openapi.ts";
 import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
@@ -17,6 +17,8 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
   const [admin, setAdmin] = useState(false);
   const [loading, setLoading] = useState(!fixtureMode);
   const [checkName, setCheckName] = useState("");
+  const checkNameRef = useRef(checkName);
+  checkNameRef.current = checkName;
   const [intent, setIntent] = useState<MonitoringRequest["monitoring_intent"]>("prelaunch");
   const [enabled, setEnabled] = useState(false);
   const [identityRequired, setIdentityRequired] = useState(false);
@@ -62,11 +64,12 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
         if (!current) throw new Error("This environment has no recorded monitoring profile.");
         setLane(current);
         setAdmin(session.identity.role === "admin");
-        const first = current.health_monitoring?.checks.find(item => item.kind === "public_http" || item.kind === "private_http");
-        setCheckName(first?.name ?? "");
+        const supportedChecks = current.health_monitoring?.checks.filter(item => item.kind === "public_http" || item.kind === "private_http");
+        const selected = supportedChecks?.find(item => item.name === checkNameRef.current) ?? supportedChecks?.[0];
+        setCheckName(selected?.name ?? "");
         setIntent(current.health_monitoring?.monitoring_intent ?? "prelaunch");
-        setEnabled(first?.enabled ?? false);
-        setIdentityRequired(first?.require_runtime_identity ?? false);
+        setEnabled(selected?.enabled ?? false);
+        setIdentityRequired(selected?.require_runtime_identity ?? false);
       }).catch(error => {
         if (!controller.signal.aborted) setProfileError(error instanceof Error ? error.message : "Monitoring profile unavailable.");
       }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
@@ -186,6 +189,6 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
     </div> : null}
     {failure ? <p role="alert">{failure.message} {failure.traceId ? `Trace: ${failure.traceId}` : ""}</p> : null}
     {profileError ? <p role="alert">{profileError}</p> : null}
-    {message ? <p role="status">{message}</p> : null}
+    {message ? <p role="status" aria-label="Monitoring change result">{message}</p> : null}
   </section>;
 }

@@ -51,6 +51,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
           error: { code: "stale", message: "Stored profile changed after review." } } });
         lane.health_monitoring = { monitoring_intent: body.monitoring_intent, checks: [{ ...lane.health_monitoring.checks[0],
           enabled: body.enabled, require_runtime_identity: body.require_runtime_identity }] };
+        if (outcome === "private") lane.health_monitoring.checks.unshift({ ...lane.health_monitoring.checks[0], name: "background-health" });
       } else plans.push(body);
       return route.fulfill({ status: 202, json: { status: "accepted", trace_id: "monitoring", records: {},
         result: { status: "ok", mode: body.mode, product: body.product, context: body.context, instance: body.instance,
@@ -92,7 +93,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
       return;
     }
     if (outcome === "removed-check") {
-      await expect(panel.getByRole("status")).toContainText("stored check changed or was removed");
+      await expect(panel.getByRole("status", { name: "Monitoring change result" })).toContainText("stored check changed or was removed");
       await expect(panel.getByRole("button", { name: "Apply reviewed monitoring" })).toHaveCount(0);
       expect(applies).toHaveLength(0);
       lane.health_monitoring.checks = [];
@@ -102,7 +103,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
     }
     if (outcome === "endpoint-changed") {
       await expect(panel.getByRole("button", { name: "Apply reviewed monitoring" })).toHaveCount(0);
-      await expect(panel.getByRole("status")).toContainText("stored private endpoint changed");
+      await expect(panel.getByRole("status", { name: "Monitoring change result" })).toContainText("stored private endpoint changed");
       expect(applies).toHaveLength(0);
       return;
     }
@@ -141,7 +142,8 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
       return;
     }
     await expect(panel).toHaveAttribute("aria-busy", "false");
-    await expect(panel.getByRole("status")).toContainText(outcome === "readback-failed" ? "readback not confirmed" : "saved and read back");
+    await expect(panel.getByRole("status", { name: "Monitoring change result" })).toContainText(outcome === "readback-failed" ? "readback not confirmed" : "saved and read back");
+    if (outcome === "private") await expect(panel.getByLabel("Stored check")).toHaveValue("public-ingress");
     await expect(page.getByRole("status", { name: "Lane status" })).toHaveText(initialLaneStatus);
     expect(applies[0].key).toBeTruthy();
     expect(applies[0].body).toEqual({ ...plans.at(-1), mode: "apply", reviewed_plan_sha256: "a".repeat(64) });
