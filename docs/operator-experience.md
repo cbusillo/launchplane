@@ -605,6 +605,39 @@ change stays locked until the Save settles. If the reviewed request cannot be
 stored and read back, Save sends nothing and asks the admin to restore session
 storage and retry. A confirmed Save removes the retained draft.
 
+## No-website Profile Cleanup
+
+The product workspace's **Public website** panel previews and applies
+`POST /v1/product-profiles/{product}/website-cleanup` using the existing signed-in
+admin `product_profile.write` authority and browser CSRF protection. It works
+only when every recorded lane declares private monitoring. Public or unknown
+intent refuses cleanup rather than inferring that the product has no website.
+
+Enter a reason, select **Preview no-website cleanup**, and review the before/after
+diff. **Apply no-website cleanup** atomically clears lane base/health URLs,
+disables and clears public HTTP checks, and records the existing
+`public_website=none` fact. Private endpoints/checks, Client, production use,
+release holds, provider records and historical observations are preserved.
+Withdraw only obsolete URLs: these fields also supply release testing links,
+URL-based public promotion probes, Odoo URL-based diagnostics, web restart,
+production restore and ingress route edits. This panel has no undo; restoring
+public declarations uses the product-profile service configuration described in
+[records.md](records.md). Private endpoints remain the source for private monitoring. This control
+does not introduce a private production-promotion adapter; existing gated-release
+readiness remains a separate requirement before releasing a private product.
+Private failures, identity mismatch, incidents and expired evidence still block
+green. This is a profile declaration, not a runtime setting or deployment.
+
+The plan digest binds the entire current profile, exact diff and reason. Apply
+refuses a stale review and compares the profile again inside the transaction
+that commits the response receipt. The browser preserves the reviewed request
+and original idempotency key before dispatch. An uncertain Apply locks another
+change, including after reload. Retry keeps the same payload/key;
+**Check original operation** reads the caller/product/route/key-bound completion
+receipt and refreshes the profile before unlocking. A missing or pending receipt
+does not settle the operation. A successful Apply reads the profile back and
+refreshes product evidence; it does not assert that the lanes are green.
+
 ## Cleanup Safety
 
 Legacy cleanup is an admin or maintenance action, not a primary product flow.

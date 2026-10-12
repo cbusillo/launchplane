@@ -1,4 +1,5 @@
 import type {
+  ApplyProductWebsiteCleanupData,
   RestartLaneServiceData,
   ReadServiceDeliveryApplyReceiptData,
   ApplyProductEnvironmentConfigData,
@@ -31,6 +32,7 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  productWebsiteCleanup: "/v1/product-profiles/{product}/website-cleanup" satisfies ApplyProductWebsiteCleanupData["url"],
   laneServiceRestart: "/v1/drivers/odoo/service-restart" satisfies RestartLaneServiceData["url"],
   serviceDeliveryReceiptRead: "/v1/service/delivery/apply-receipt" satisfies ReadServiceDeliveryApplyReceiptData["url"],
   serviceGitHubDeliveryConfigure: "/v1/service/github-delivery/configuration" satisfies ConfigureLaunchplaneGithubDeliveryData["url"],
