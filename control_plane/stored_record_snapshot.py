@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import hmac
 import json
 import re
 import secrets
-import time
+from time import monotonic
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import LargeBinary, Text, case, cast, func, select, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine, MappingResult
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.sql import ColumnElement
 
@@ -63,7 +64,7 @@ def snapshot_failure_diagnostics(error: Exception) -> dict[str, Any]:
     """Emit code-owned field paths and classifications without record inputs."""
     result: dict[str, Any] = {"error_type": type(error).__name__}
     if isinstance(error, DBAPIError) and getattr(error.orig, "sqlstate", None) == "57014":
-        result["reason"] = "snapshot_statement_time_limit"
+        result["reason"] = "snapshot_statement_canceled"
     if isinstance(error, SnapshotUnavailable):
         result["reason"] = str(error)
         for key in ("rows_exported", "source_row_bytes", "scrubbed_bytes"):
@@ -237,6 +238,25 @@ class _Scrubber:
         return value
 
 
+def _statement_timeout_ms(remaining: int) -> int:
+    return min(remaining, 15000) // 1000 * 1000 or remaining
+
+
+@contextmanager
+def _snapshot_cursor(
+    connection: Connection,
+    statement: Any,
+    refuse: Callable[[str], SnapshotUnavailable],
+) -> Iterator[MappingResult]:
+    try:
+        with connection.execute(statement.execution_options(yield_per=1)) as result:
+            yield result.mappings()
+    except DBAPIError as error:
+        if getattr(error.orig, "sqlstate", None) == "57014":
+            raise refuse("snapshot_statement_canceled") from error
+        raise
+
+
 def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
     scrubber = _Scrubber()
     tables: dict[str, list[dict[str, Any]]] = {}
@@ -244,7 +264,7 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
     scrubbed_bytes = 0
     source_row_bytes = 0
     family = ""
-    deadline = time.monotonic() + 20
+    deadline = monotonic() + 20
 
     def refuse(reason: str) -> SnapshotUnavailable:
         return SnapshotUnavailable(
@@ -261,7 +281,12 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
         if engine.dialect.name == "postgresql":
             connection = connection.execution_options(isolation_level="REPEATABLE READ")
             connection.execute(text("SET TRANSACTION READ ONLY"))
-            connection.execute(text("SET LOCAL statement_timeout = '15000ms'"))
+            remaining = int((deadline - monotonic()) * 1000)
+            if remaining <= 0:
+                raise refuse("snapshot_time_limit")
+            connection.execute(
+                text(f"SET LOCAL statement_timeout = '{_statement_timeout_ms(remaining)}ms'")
+            )
         revision = str(
             connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         )
@@ -270,11 +295,11 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
             family = table.name
             schema = model_type.model_json_schema()
             rows: list[dict[str, Any]] = []
-            remaining = int((deadline - time.monotonic()) * 1000)
+            remaining = int((deadline - monotonic()) * 1000)
             if remaining <= 0:
                 raise refuse("snapshot_time_limit")
             if engine.dialect.name == "postgresql":
-                statement_timeout = min(remaining, 15000) // 1000 * 1000 or remaining
+                statement_timeout = _statement_timeout_ms(remaining)
                 connection.execute(text(f"SET LOCAL statement_timeout = '{statement_timeout}ms'"))
             # Bound one raw row before the driver decodes its JSON. Cumulative
             # raw history is not the response size: free text shrinks on scrubbing.
@@ -316,7 +341,6 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
                             sized.c.snapshot_source_row_bytes <= SNAPSHOT_MAX_BYTES,
                             sized.c[column.name],
                         ),
-                        else_=None,
                     ).label(column.name)
                     for column in table.c
                 ),
@@ -324,12 +348,12 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
             )
             # A server cursor fetches one bounded row at a time instead of
             # buffering every raw revision. Closing it also covers refusal paths.
-            with connection.execute(bounded.execution_options(yield_per=1)) as result:
-                for raw in result.mappings():
+            with _snapshot_cursor(connection, bounded, refuse) as result:
+                for raw in result:
                     source_row_bytes = raw["snapshot_source_row_bytes"]
                     if row_count >= SNAPSHOT_MAX_ROWS:
                         raise refuse("snapshot_row_limit")
-                    if time.monotonic() > deadline:
+                    if monotonic() > deadline:
                         raise refuse("snapshot_time_limit")
                     if source_row_bytes > SNAPSHOT_MAX_BYTES:
                         raise refuse("snapshot_source_row_byte_limit")
@@ -353,7 +377,7 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
                             LaunchplaneAuthzPolicy.model_validate(payload["policy"])
                         )
                     elif model_type is MergeTrainPolicyRecord:
-                        original = model_type.model_validate(raw["payload"])
+                        original = MergeTrainPolicyRecord.model_validate(raw["payload"])
                         policy_type = type(original.policy)
                         payload["policy_sha256"] = policy_type.model_validate(
                             payload["policy"], context={"historical_policy_record": True}
@@ -379,17 +403,17 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
                     scrubbed_bytes += row_size
                     if scrubbed_bytes > SNAPSHOT_MAX_BYTES:
                         raise refuse("snapshot_byte_limit")
-                    if time.monotonic() > deadline:
+                    if monotonic() > deadline:
                         raise refuse("snapshot_time_limit")
                     row_count += 1
                     rows.append(row)
                     # FETCH is a new statement on the server cursor. Clip its
                     # timeout to the budget left after processing this row.
-                    remaining = int((deadline - time.monotonic()) * 1000)
+                    remaining = int((deadline - monotonic()) * 1000)
                     if remaining <= 0:
                         raise refuse("snapshot_time_limit")
                     if engine.dialect.name == "postgresql":
-                        next_timeout = min(remaining, 15000) // 1000 * 1000 or remaining
+                        next_timeout = _statement_timeout_ms(remaining)
                         if next_timeout < statement_timeout:
                             connection.execute(
                                 text(f"SET LOCAL statement_timeout = '{next_timeout}ms'")
@@ -411,6 +435,6 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
     family = ""
     if len(snapshot.model_dump_json().encode()) > SNAPSHOT_MAX_BYTES:
         raise refuse("snapshot_byte_limit")
-    if time.monotonic() > deadline:
+    if monotonic() > deadline:
         raise refuse("snapshot_time_limit")
     return snapshot

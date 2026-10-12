@@ -290,12 +290,11 @@ class StoredRecordSnapshotTests(unittest.TestCase):
     def test_failure_diagnostics_exclude_validation_inputs(self) -> None:
         from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
 
-        try:
+        with self.assertRaises(ValidationError) as raised:
             LaunchplaneAuthzPolicyRecord.model_validate(
                 {"unexpected-private-key": "plaintext-sentinel"}
             )
-        except ValidationError as error:
-            diagnostics = json.dumps(snapshot_failure_diagnostics(error))
+        diagnostics = json.dumps(snapshot_failure_diagnostics(raised.exception))
         self.assertNotIn("plaintext-sentinel", diagnostics)
         self.assertNotIn("unexpected-private-key", diagnostics)
 
@@ -303,7 +302,7 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
 
         with patch(
-            "control_plane.stored_record_snapshot.time.monotonic",
+            "control_plane.stored_record_snapshot.monotonic",
             side_effect=chain([0], repeat(1_000_000)),
         ):
             with self.assertRaises(ValueError) as raised:
@@ -314,23 +313,37 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         self.assertNotIn("plaintext-sentinel", json.dumps(diagnostics))
 
     def test_database_statement_timeout_reports_reason_without_sql_or_inputs(self) -> None:
+        from psycopg.errors import QueryCanceled
         from sqlalchemy.exc import OperationalError
         from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
-
-        class QueryCanceled(Exception):
-            sqlstate = "57014"
 
         error = OperationalError(
             "private-sql", {"private-key": "plaintext-sentinel"}, QueryCanceled("private-value")
         )
         diagnostics = snapshot_failure_diagnostics(error)
-        self.assertEqual(diagnostics["reason"], "snapshot_statement_time_limit")
+        self.assertEqual(diagnostics["reason"], "snapshot_statement_canceled")
         self.assertNotIn("private", json.dumps(diagnostics))
         self.assertNotIn("plaintext-sentinel", json.dumps(diagnostics))
 
+    def test_subsecond_statement_budget_is_preserved_and_never_disabled(self) -> None:
+        from control_plane.stored_record_snapshot import _statement_timeout_ms
+
+        for remaining in (1, 20, 999):
+            with self.subTest(remaining=remaining):
+                self.assertEqual(_statement_timeout_ms(remaining), remaining)
+        for remaining in (1000, 1999, 20_000):
+            with self.subTest(remaining=remaining):
+                self.assertGreater(_statement_timeout_ms(remaining), 0)
+                self.assertLessEqual(_statement_timeout_ms(remaining), remaining)
+
     def test_train_run_history_samples_latest_without_deleting_source_records(self) -> None:
-        earlier = _merge_train_run_record(recorded_at="2026-05-09T02:05:00Z")
-        later = _merge_train_run_record(recorded_at="2026-05-10T02:05:00Z")
+        earlier = _merge_train_run_record()
+        later = _merge_train_run_record(
+            recorded_at=(
+                datetime.fromisoformat(earlier.recorded_at.replace("Z", "+00:00"))
+                + timedelta(days=1)
+            ).isoformat()
+        )
         later = later.model_copy(update={"run_id": "later"})
         self.store.write_merge_train_run_record(earlier)
         self.store.write_merge_train_run_record(later)
