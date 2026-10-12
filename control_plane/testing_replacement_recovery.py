@@ -8,6 +8,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Protocol, cast
+from time import monotonic
 
 from pydantic import BaseModel
 
@@ -235,6 +236,8 @@ _TERMINAL_PROVIDER_STATUSES = frozenset({"done", "error"})
 def inspect_testing_replacement(
     operation: OdooStableTargetReplacementOperationRecord,
     root: Path,
+    *,
+    deadline_at: float | None = None,
 ) -> dict[str, str] | None:
     journal = operation.recovery_journal
     if journal is None or journal.attempt != operation.attempt:
@@ -246,19 +249,23 @@ def inspect_testing_replacement(
         [host.rstrip("/")]
     ):
         return None
+
     # Provider identity and the full returned histories must be readable. An empty
     # target history is valid only when there has been no deploy trigger.
-    target = api.fetch_dokploy_target_payload(
-        host=host, token=token, target_type="compose", target_id=journal.target_id
-    )
-    if str(target.get("composeId") or "") != journal.target_id:
+    def read(path: str, query: dict[str, str | int]) -> api.JsonValue:
+        timeout: float = 60
+        if deadline_at is not None:
+            timeout = min(5, deadline_at - monotonic())
+            if timeout <= 0:
+                raise TimeoutError("Testing recovery inspection deadline expired.")
+        return api.dokploy_request(
+            host=host, token=token, path=path, query=query, timeout_seconds=timeout
+        )
+
+    target = read("/api/compose.one", {"composeId": journal.target_id})
+    if not isinstance(target, dict) or target.get("composeId") != journal.target_id:
         return None
-    raw_history = api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/deployment.allByType",
-        query={"id": journal.target_id, "type": "compose"},
-    )
+    raw_history = read("/api/deployment.allByType", {"id": journal.target_id, "type": "compose"})
     if not isinstance(raw_history, list) or any(not isinstance(item, dict) for item in raw_history):
         return None
     history = cast(list[api.JsonObject], raw_history)
@@ -278,24 +285,14 @@ def inspect_testing_replacement(
                 return None
             if not effect.schedule_id:
                 return None
-            schedule = api.dokploy_request(
-                host=host,
-                token=token,
-                path="/api/schedule.one",
-                query={"scheduleId": effect.schedule_id},
-            )
+            schedule = read("/api/schedule.one", {"scheduleId": effect.schedule_id})
             if (
                 not isinstance(schedule, dict)
                 or api.schedule_key(schedule) != effect.schedule_id
                 or schedule.get("enabled") is not False
             ):
                 return None
-            raw = api.dokploy_request(
-                host=host,
-                token=token,
-                path="/api/deployment.allByType",
-                query={"id": effect.schedule_id, "type": "schedule"},
-            )
+            raw = read("/api/deployment.allByType", {"id": effect.schedule_id, "type": "schedule"})
             if not isinstance(raw, list) or any(
                 not isinstance(item, dict)
                 or api.deployment_status(item) not in _TERMINAL_PROVIDER_STATUSES
@@ -338,17 +335,20 @@ def testing_replacement_recovery_read(
         "provider_inspected": False,
         "safe_to_release": False,
     }
-    if not service_testing_operation(operation) or operation.status != "reconciliation_required":
+    if not service_testing_operation(operation):
         return view
 
     def refuse(reason: str) -> dict[str, object]:
         view["reason"] = reason
         return view
 
+    if operation.status != "reconciliation_required":
+        return refuse("recovery_operation_not_held")
+
     try:
         with store.testing_replacement_execution_lock(operation.operation_id) as check_lock:
             if check_lock is None:
-                return refuse("recovery_execution_owner_present")
+                return refuse("recovery_execution_exclusion_unavailable")
             current = store.read_odoo_stable_target_replacement_operation_record(
                 operation.operation_id
             )
@@ -383,21 +383,33 @@ def testing_replacement_recovery_read(
                 return refuse("recovery_effect_unsupported")
             if _now() < current.updated_at:
                 return refuse("recovery_inspection_before_fence")
-            view["provider_inspected"] = True
-            inspection = inspect_testing_replacement(current, root)
+            inspection = inspect_testing_replacement(current, root, deadline_at=monotonic() + 15)
             if inspection is None:
                 return refuse("recovery_provider_evidence_incomplete")
+            view["provider_inspected"] = True
             check_lock()
             if (
                 store.read_odoo_stable_target_replacement_operation_record(operation.operation_id)
                 != current
                 or current_binding_fingerprint(store, current) != journal.target_fingerprint
             ):
+                view.update(
+                    journal="unknown",
+                    attempt_matches=None,
+                    binding_matches=None,
+                    effects_acknowledged=None,
+                )
                 return refuse("recovery_operation_or_binding_changed")
-            view.update(status="eligible", reason="", provider_effects="quiescent_safe_to_retry")
+            view.update(status="eligible", reason="", provider_effects="quiescent_observed")
             # Eligibility is a read-time observation, never a cancellation attestation.
             return view
-    except Exception:
+    except Exception as error:
+        view.update(attempt_matches=None, binding_matches=None, effects_acknowledged=None)
+        logging.getLogger(__name__).info(
+            "Testing recovery read unavailable for %s (%s)",
+            operation.operation_id,
+            type(error).__name__,
+        )
         return refuse("recovery_evidence_unavailable")
 
 

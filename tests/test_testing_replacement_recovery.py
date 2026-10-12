@@ -63,6 +63,64 @@ class _FilesystemServiceStore(FilesystemRecordStore):
 
 
 class TestingReplacementRecoveryTests(unittest.TestCase):
+    def test_inspection_deadline_refuses_before_another_provider_read(self) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            with guard_testing_replacement(
+                store, operation, "worker", lambda _: None
+            ) as checkpoint:
+                checkpoint("preparing")
+                fenced = self.fence(store)
+            with (
+                patch("control_plane.testing_replacement_recovery.monotonic", return_value=101),
+                patch(
+                    "control_plane.testing_replacement_recovery.source.read_dokploy_config",
+                    return_value=("https://provider.test", "fixture-token"),
+                ),
+                patch.object(api, "dokploy_request") as provider_read,
+                self.assertRaises(TimeoutError),
+            ):
+                inspect_testing_replacement(fenced, root, deadline_at=100)
+            provider_read.assert_not_called()
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+                fenced,
+            )
+
+    def test_classification_invalidates_agreement_after_inspection_race(self) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            with guard_testing_replacement(
+                store, operation, "worker", lambda _: None
+            ) as checkpoint:
+                checkpoint("preparing")
+                fenced = self.fence(store)
+
+            def inspect(*args: object, **kwargs: object) -> dict[str, str]:
+                getattr(store, "write_dokploy_target_id_record")(
+                    DokployTargetIdRecord(
+                        context="cm",
+                        instance="testing",
+                        target_id="changed",
+                        updated_at=stamp(),
+                    )
+                )
+                return {"state": "quiescent_safe_to_retry"}
+
+            with patch(
+                "control_plane.testing_replacement_recovery.inspect_testing_replacement",
+                side_effect=inspect,
+            ):
+                view = testing_replacement_recovery_read(store, fenced, root)
+            self.assertEqual(view["reason"], "recovery_operation_or_binding_changed")
+            self.assertIsNone(view["binding_matches"])
+            self.assertEqual(view["provider_effects"], "unknown")
+            self.assertFalse(view["safe_to_release"])
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+                fenced,
+            )
+
     def test_classification_reports_persisted_absence_without_provider_read_or_retirement(
         self,
     ) -> None:
@@ -92,13 +150,13 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 checkpoint("preparing")
                 fenced = self.fence(store)
                 view = testing_replacement_recovery_read(store, fenced, root)
-                self.assertEqual(view["reason"], "recovery_execution_owner_present")
+                self.assertEqual(view["reason"], "recovery_execution_exclusion_unavailable")
             with self.provider():
                 view = testing_replacement_recovery_read(store, fenced, root)
             self.assertEqual(view["status"], "eligible")
             self.assertTrue(view["attempt_matches"])
             self.assertTrue(view["binding_matches"])
-            self.assertEqual(view["provider_effects"], "quiescent_safe_to_retry")
+            self.assertEqual(view["provider_effects"], "quiescent_observed")
             self.assertFalse(view["safe_to_release"])
             self.assertEqual(
                 store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),

@@ -62,9 +62,11 @@ from control_plane.service_auth import (
     LocalOperatorIdentity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.testing_replacement_recovery import TestingReplacementRecoveryRead
 from control_plane.testing_replacement_recovery import (
     TestingRecoveryStore,
     testing_replacement_recovery_read,
+    service_testing_operation,
 )
 
 _LAUNCHPLANE_DRIVER_READ_PRODUCT = "launchplane"
@@ -102,7 +104,7 @@ class OdooStableTargetReplacementOperationStatusResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     trace_id: str
-    recovery: dict[str, object] | None = None
+    recovery: TestingReplacementRecoveryRead | None = None
     operation: dict[str, object]
     result: dict[str, object] | None = None
 
@@ -555,7 +557,9 @@ def register_operation_status_read_routes(
                     operation_id=operation.operation_id.strip()
                 ),
             )
-            if operation.status == "reconciliation_required" and operation.instance == "testing":
+            if operation.status == "reconciliation_required" and service_testing_operation(
+                operation
+            ):
                 # The maintained bounded helper already retains this public
                 # description even when it omits new structured response fields.
                 status_view["error_description"] = (
@@ -566,14 +570,14 @@ def register_operation_status_read_routes(
                 )
             return OdooStableTargetReplacementOperationStatusResponse(
                 trace_id=trace_id,
-                recovery=recovery,
+                recovery=TestingReplacementRecoveryRead.model_validate(recovery),
                 operation=status_view,
                 result=operation_result_read_view(operation.result),
             )
         result = operation.result.model_dump(mode="json") if operation.result else None
         return OdooStableTargetReplacementOperationStatusResponse(
             trace_id=trace_id,
-            recovery=recovery,
+            recovery=TestingReplacementRecoveryRead.model_validate(recovery),
             operation=odoo_stable_target_replacement_operation_status_payload(operation),
             result=result,
         )

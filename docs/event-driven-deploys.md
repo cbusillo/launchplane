@@ -595,6 +595,11 @@ held testing operations its fixed `error_description` also carries the recovery
 reason, journal state and effect classification so the maintained bounded
 operation-read helper preserves the diagnosis while omitting the structured
 extension. Recovery still gathers and checks its own fresh proof before action.
+The classification has a closed typed response schema. Live inspection on a
+status read is bounded to a 15-second budget, with at most five seconds per
+provider call; timeout and lock contention report refusal. Contention does not
+assert that the competing lock belongs to a surviving worker. A read-time
+quiescent observation remains evidence, not release permission.
 
 Only a proved-quiescent attempt is cancelled with the existing timestamped
 `safe_to_release=true` attestation. The observed references are persisted beside
