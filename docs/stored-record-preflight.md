@@ -68,8 +68,10 @@ rehearsal's containers, anonymous volumes and network. The workflow also runs
 always-cleanup using the exact current job's resource label, covering forced
 termination without sweeping other jobs' resources. Qualification uses its own
 temporary registry config and removes it; persistent runner credentials stay
-untouched. Qualification and the mandatory gate use the same job-token login
-and fresh Docker context; the existing image-build login is unchanged. Verify
+untouched. Authentication writes Docker's supported `auths` format into a new
+private file instead of invoking login, which could select a persistent
+credential helper. Qualification and the mandatory gate use the same temporary job-token
+authentication file and fresh Docker context; the existing image-build login is unchanged. Verify
 that this context reaches the actual deployment runner's intended Docker daemon.
 A passing rehearsal on a different daemon cannot qualify that runner. The job
 summary retains the safe result, never the snapshot.
