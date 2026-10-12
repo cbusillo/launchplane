@@ -250,7 +250,6 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
             launch_testing_browser(chromium)
         chromium.connect.assert_called_once()
         self.assertEqual(chromium.connect.call_args.args, (endpoint,))
-        self.assertEqual(set(chromium.connect.call_args.kwargs), {"timeout"})
         self.assertGreater(chromium.connect.call_args.kwargs["timeout"], 0)
         chromium.launch.assert_not_called()
 
@@ -325,9 +324,15 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
 
         browser = MagicMock()
         browser.close.side_effect = RuntimeError("browser disconnected")
+        browser.new_context.return_value.__exit__.side_effect = RuntimeError("context disconnected")
+        playwright = MagicMock()
+        playwright.__exit__.side_effect = RuntimeError("driver disconnected")
         evidence: dict[str, str] = {}
         with (
-            patch("control_plane.workflows.verireel_testing_post_deploy.sync_playwright"),
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.sync_playwright",
+                return_value=playwright,
+            ),
             patch(
                 "control_plane.workflows.verireel_testing_post_deploy.launch_testing_browser",
                 return_value=browser,

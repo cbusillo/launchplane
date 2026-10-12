@@ -26,6 +26,7 @@ cancel() {
 }
 cleanup() {
     local result="$?"
+    local cleanup_failed=0
     trap - EXIT
     trap '' INT TERM
     if [[ -f "$fixture_dir/probe.cid" ]]; then
@@ -33,8 +34,10 @@ cleanup() {
         probe="$(cat "$fixture_dir/probe.cid")"
         if docker container inspect "$probe" >/dev/null 2>&1; then
             if ! docker rm --force "$probe"; then
-                printf 'Browser probe cleanup failed; retained %s.\n' "$fixture_dir" >&2
-                exit 1
+                if docker container inspect "$probe" >/dev/null 2>&1; then
+                    printf 'Browser probe cleanup failed; retained %s.\n' "$fixture_dir" >&2
+                    cleanup_failed=1
+                fi
             fi
         fi
     fi
@@ -43,6 +46,9 @@ cleanup() {
             printf 'Browser fixture cleanup failed; retained %s.\n' "$fixture_dir" >&2
             exit 1
         fi
+    fi
+    if [[ "$cleanup_failed" == 1 ]]; then
+        exit 1
     fi
     rm -rf "$fixture_dir"
     exit "$result"

@@ -285,125 +285,131 @@ def verify_verireel_testing_product(
     evidence["fixture_email"] = email
     public_label = f"Launchplane testing {stamp}"
     destination = f"https://example.com/watch/{stamp}"
-    effect_unknown = False
+    effect_unknown: ProviderMutationUnknownError | None = None
     # A disposable application fixture only; no operator credential is created.
-    with sync_playwright() as playwright:
-        browser = launch_testing_browser(playwright.chromium)
-        try:
-            with browser.new_context() as browser_context:
-                page = browser_context.new_page()
-                page.set_default_timeout(30_000)
-                try:
-                    assert_verireel_testing_identity(base_url, context)
-                    _goto(page, base_url, "/sign-up")
-                    page.wait_for_load_state("networkidle")
-                    page.get_by_label("Creator name").fill("Launchplane testing")
-                    page.get_by_label("Email").fill(email)
-                    page.get_by_placeholder("Create a strong password").fill(
-                        "Quartz!Canopy$" + "-".join(str(randbelow(10)) for _ in range(18))
-                    )
-                    checkpoint_testing_effect(guard, "post_deploy_fixture_signup")
-                    page.get_by_role(
-                        "button", name=re.compile("create account and choose a plan", re.I)
-                    ).click()
-                    page.wait_for_url(f"{base_url}/billing", wait_until="domcontentloaded")
-                    assert_verireel_testing_identity(base_url, context)
-                    # Exercise creator denial before turning this fixture into an admin.
-                    for path in ("/site-config", "/site-config/billing"):
-                        _goto(page, base_url, path)
-                        if urlparse(page.url).path in {path, "/sign-in", "/sign-up"}:
-                            raise TestingProductCheckFailed(
-                                "Creator admin denial did not preserve its session."
-                            )
-                        expect(page.get_by_text(email, exact=False).first).to_be_visible(
-                            timeout=30_000
-                        )
-                    _maintenance(
-                        root,
-                        context,
-                        guard,
-                        action="grant-sponsored",
-                        intent="stable-testing-remote-e2e-grant-sponsored",
-                        email=email,
-                    )
-                    _goto(page, base_url, "/dashboard")
-                    page.get_by_label("Video label").fill(f"Launchplane creator {stamp}")
-                    page.get_by_label("Public verification label").fill(public_label)
-                    page.get_by_label("Destination URL").fill(destination)
-                    checkpoint_testing_effect(guard, "post_deploy_fixture_qr")
-                    page.get_by_role(
-                        "button", name=re.compile("create verification qr", re.I)
-                    ).click()
-                    link = page.locator("a[href*='/v/']").last
-                    expect(link).to_be_visible(timeout=30_000)
-                    href = link.get_attribute("href") or ""
-                    # Only this fixture's QR can qualify; never inspect another user's record.
-                    path = verification_path(base_url, href)
-                    with browser.new_context() as public_context:
-                        public_page = public_context.new_page()
-                        public_page.set_default_timeout(30_000)
-                        _goto(public_page, base_url, path)
-                        expect(public_page.get_by_text(public_label, exact=False)).to_be_visible(
-                            timeout=30_000
-                        )
-                        expect(
-                            public_page.get_by_role("link", name=destination, exact=True)
-                        ).to_be_visible(timeout=30_000)
-                    assert_verireel_testing_identity(base_url, context)
-                    evidence["creator_verification_status"] = "pass"
-                    _maintenance(
-                        root,
-                        context,
-                        guard,
-                        action="promote-owner",
-                        intent="owner-route-promote-owner",
-                        email=email,
-                    )
-                    for path in ("/site-config", "/site-config/billing"):
-                        _goto(page, base_url, path)
-                        if urlparse(page.url).path != path:
-                            raise TestingProductCheckFailed(
-                                "Admin could not reach the protected route."
-                            )
-                        heading = (
-                            "controls and defaults"
-                            if path == "/site-config"
-                            else "billing diagnostics"
-                        )
-                        expect(
-                            page.get_by_role(
-                                "heading", name=re.compile(rf"(Admin|Owner) {heading}", re.I)
-                            )
-                        ).to_be_visible(timeout=30_000)
-                        assert_verireel_testing_identity(base_url, context)
-                    evidence["admin_verification_status"] = "pass"
-                except ProviderMutationUnknownError:
-                    effect_unknown = True
-                    raise
-                finally:
-                    # The existing cleanup intent also removes sponsored creator fixtures.
-                    evidence["cleanup_status"] = "fail"
-                    if not effect_unknown:
-                        try:
-                            _maintenance(
-                                root,
-                                context,
-                                guard,
-                                action="delete-user",
-                                intent="owner-route-delete-user",
-                                email=email,
-                            )
-                        except ProviderMutationUnknownError:
-                            effect_unknown = True
-                            raise
-                        evidence["cleanup_status"] = "pass"
-        finally:
+    try:
+        with sync_playwright() as playwright:
+            browser = launch_testing_browser(playwright.chromium)
             try:
-                browser.close()
-            except Exception:
-                if not effect_unknown:
-                    raise
-                _LOGGER.warning("Browser cleanup failed after an unknown testing effect.")
+                with browser.new_context() as browser_context:
+                    page = browser_context.new_page()
+                    page.set_default_timeout(30_000)
+                    try:
+                        assert_verireel_testing_identity(base_url, context)
+                        _goto(page, base_url, "/sign-up")
+                        page.wait_for_load_state("networkidle")
+                        page.get_by_label("Creator name").fill("Launchplane testing")
+                        page.get_by_label("Email").fill(email)
+                        page.get_by_placeholder("Create a strong password").fill(
+                            "Quartz!Canopy$" + "-".join(str(randbelow(10)) for _ in range(18))
+                        )
+                        checkpoint_testing_effect(guard, "post_deploy_fixture_signup")
+                        page.get_by_role(
+                            "button", name=re.compile("create account and choose a plan", re.I)
+                        ).click()
+                        page.wait_for_url(f"{base_url}/billing", wait_until="domcontentloaded")
+                        assert_verireel_testing_identity(base_url, context)
+                        # Exercise creator denial before turning this fixture into an admin.
+                        for path in ("/site-config", "/site-config/billing"):
+                            _goto(page, base_url, path)
+                            if urlparse(page.url).path in {path, "/sign-in", "/sign-up"}:
+                                raise TestingProductCheckFailed(
+                                    "Creator admin denial did not preserve its session."
+                                )
+                            expect(page.get_by_text(email, exact=False).first).to_be_visible(
+                                timeout=30_000
+                            )
+                        _maintenance(
+                            root,
+                            context,
+                            guard,
+                            action="grant-sponsored",
+                            intent="stable-testing-remote-e2e-grant-sponsored",
+                            email=email,
+                        )
+                        _goto(page, base_url, "/dashboard")
+                        page.get_by_label("Video label").fill(f"Launchplane creator {stamp}")
+                        page.get_by_label("Public verification label").fill(public_label)
+                        page.get_by_label("Destination URL").fill(destination)
+                        checkpoint_testing_effect(guard, "post_deploy_fixture_qr")
+                        page.get_by_role(
+                            "button", name=re.compile("create verification qr", re.I)
+                        ).click()
+                        link = page.locator("a[href*='/v/']").last
+                        expect(link).to_be_visible(timeout=30_000)
+                        href = link.get_attribute("href") or ""
+                        # Only this fixture's QR can qualify; never inspect another user's record.
+                        path = verification_path(base_url, href)
+                        with browser.new_context() as public_context:
+                            public_page = public_context.new_page()
+                            public_page.set_default_timeout(30_000)
+                            _goto(public_page, base_url, path)
+                            expect(
+                                public_page.get_by_text(public_label, exact=False)
+                            ).to_be_visible(timeout=30_000)
+                            expect(
+                                public_page.get_by_role("link", name=destination, exact=True)
+                            ).to_be_visible(timeout=30_000)
+                        assert_verireel_testing_identity(base_url, context)
+                        evidence["creator_verification_status"] = "pass"
+                        _maintenance(
+                            root,
+                            context,
+                            guard,
+                            action="promote-owner",
+                            intent="owner-route-promote-owner",
+                            email=email,
+                        )
+                        for path in ("/site-config", "/site-config/billing"):
+                            _goto(page, base_url, path)
+                            if urlparse(page.url).path != path:
+                                raise TestingProductCheckFailed(
+                                    "Admin could not reach the protected route."
+                                )
+                            heading = (
+                                "controls and defaults"
+                                if path == "/site-config"
+                                else "billing diagnostics"
+                            )
+                            expect(
+                                page.get_by_role(
+                                    "heading", name=re.compile(rf"(Admin|Owner) {heading}", re.I)
+                                )
+                            ).to_be_visible(timeout=30_000)
+                            assert_verireel_testing_identity(base_url, context)
+                        evidence["admin_verification_status"] = "pass"
+                    except ProviderMutationUnknownError as error:
+                        effect_unknown = error
+                        raise
+                    finally:
+                        # The existing cleanup intent also removes sponsored creator fixtures.
+                        evidence["cleanup_status"] = "fail"
+                        if not effect_unknown:
+                            try:
+                                _maintenance(
+                                    root,
+                                    context,
+                                    guard,
+                                    action="delete-user",
+                                    intent="owner-route-delete-user",
+                                    email=email,
+                                )
+                            except ProviderMutationUnknownError as error:
+                                effect_unknown = error
+                                raise
+                            evidence["cleanup_status"] = "pass"
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    if not effect_unknown:
+                        raise
+                    _LOGGER.warning("Browser cleanup failed after an unknown testing effect.")
+
+    except Exception:
+        if effect_unknown is not None:
+            raise effect_unknown
+        raise
 
 
 def execute_verireel_testing_post_deploy(
