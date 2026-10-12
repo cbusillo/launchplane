@@ -34,13 +34,13 @@ test("effective failing checks supply diagnostics without inventing a proxy or a
     assert.ok(sidebarStatus(lane, "Production").description.includes(sidebarLayerLabel(layer)));
   }
   check.failure_code = "http_error";
-  assert.doesNotMatch(sidebarStatus(lane, "Production").description, /proxy|app/i);
+  assert.doesNotMatch(sidebarStatus(lane, "Production").description, /\b(proxy|app)\b/i);
   check.failure_code = "dns_failure";
   check.probe_effective = false;
   assert.ok(!sidebarStatus(lane, "Production").description.includes(sidebarLayerLabel("dns")));
 });
 
- test("an expiring certificate cannot append a failure layer to a healthy lane", () => {
+test("an expiring certificate is not named as a failure layer", () => {
   const lane = structuredClone(productsForFixture("products")[0].environments[0]);
   lane.trust_state = "recorded";
   lane.provenance.freshness_status = "verified";
@@ -60,5 +60,9 @@ test("effective failing checks supply diagnostics without inventing a proxy or a
   lane.health_monitoring.checks[0].provenance.stale_after = lane.provenance.stale_after;
   lane.topology.observed.tls_domains = [{ status: "expiring", trust_state: "verified", provenance: lane.provenance }];
   assert.equal(environmentOperationalTone(lane), "verified");
+  assert.ok(!sidebarStatus(lane, "Production").description.includes(sidebarLayerLabel("tls")));
+  Object.assign(lane.health_monitoring.checks[0], { status: "fail", failure_code: "dns_failure" });
+  assert.equal(environmentOperationalTone(lane), "danger");
+  assert.ok(sidebarStatus(lane, "Production").description.includes(sidebarLayerLabel("dns")));
   assert.ok(!sidebarStatus(lane, "Production").description.includes(sidebarLayerLabel("tls")));
 });

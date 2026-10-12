@@ -35,10 +35,9 @@ export function sidebarStatus(environment: ProductEnvironmentSummary | null, lab
       layers.add(sidebarLayerLabel("runtime_identity"));
     }
     if (environment.topology.observed.tls_domains.some(domain =>
-      ["expired", "hostname_mismatch", "untrusted", "self_signed", "unreachable", "expiring"].includes(domain.status))) {
+      ["expired", "hostname_mismatch", "untrusted", "self_signed", "unreachable"].includes(domain.status))) {
       layers.add(sidebarLayerLabel("tls"));
     }
   }
-  if (tone === "verified") layers.clear();
   return { tone, description: `${label}: ${state}${layers.size ? `; ${[...layers].join(", ")}` : ""}` };
 }

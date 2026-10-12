@@ -100,7 +100,11 @@ for (const state of cases) {
         return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
       }).reduce((total, value, index) => total + value * [0.2126, 0.7152, 0.0722][index], 0);
       const fg = luminance(rgb(getComputedStyle(element).color));
-      const bg = luminance(rgb(getComputedStyle(element.closest(".control-rail")!).backgroundColor));
+      let background = element.parentElement!;
+      while (getComputedStyle(background).backgroundColor === "rgba(0, 0, 0, 0)") {
+        background = background.parentElement!;
+      }
+      const bg = luminance(rgb(getComputedStyle(background).backgroundColor));
       return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
     });
     expect(contrast).toBeGreaterThanOrEqual(3);
