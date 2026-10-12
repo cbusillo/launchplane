@@ -1,0 +1,48 @@
+name: Merge Train Stall Alert
+
+"on":
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Repository whose train needs attention
+        required: true
+      issue_number:
+        description: Durable Supervisor issue in that repository
+        required: true
+      state:
+        description: Current issue state
+        type: choice
+        options: [open, closed]
+        required: true
+      notification_key:
+        description: Value-free monitor transition identity
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: merge-train-stall-alert-${{ inputs.notification_key }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Send existing Launchplane Discord alert
+        env:
+          DISCORD_LAUNCHPLANE_WEBHOOK: ${{ secrets.DISCORD_LAUNCHPLANE_WEBHOOK }}
+          STALL_REPOSITORY: ${{ inputs.repository }}
+          STALL_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          STALL_STATE: ${{ inputs.state }}
+          STALL_NOTIFICATION_KEY: ${{ inputs.notification_key }}
+        run: uv run python scripts/notify-merge-train-stall.py

@@ -14,6 +14,8 @@ from typing import Any, Literal, TypeVar, cast
 
 from pydantic import BaseModel
 
+from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
+
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
 from control_plane.contracts.administrator_enrollment import (
@@ -2221,6 +2223,21 @@ class FilesystemRecordStore:
     ) -> Path:
         return self._write_model(
             "launchplane_merge_train_batch_candidates", record.record_id, record
+        )
+
+    @contextmanager
+    def merge_train_stall_lock(self, *, repository: str) -> Iterator[None]:
+        with self._exclusive_record_lock("merge_train_stall_monitor", repository):
+            yield
+
+    def read_merge_train_stall_record(self, repository: str) -> MergeTrainStallRecord:
+        return self._read_model(
+            MergeTrainStallRecord, "launchplane_merge_train_stalls", repository.replace("/", ":")
+        )
+
+    def write_merge_train_stall_record(self, record: MergeTrainStallRecord) -> Path:
+        return self._write_model(
+            "launchplane_merge_train_stalls", record.normalized_repository.replace("/", ":"), record
         )
 
     def write_merge_train_controller_state_record(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
+
 from pathlib import Path
 
 from uuid import uuid4
@@ -4911,6 +4913,12 @@ class LaunchplaneMergeTrainBatchCandidateRow(Base):
     base_branch: Mapped[str] = mapped_column(String, nullable=False)
     batch_id: Mapped[str] = mapped_column(String, nullable=False)
     candidate_status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneMergeTrainStallRow(Base):
+    __tablename__ = "launchplane_merge_train_stalls"
+    repository: Mapped[str] = mapped_column(String, primary_key=True)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -19125,6 +19133,38 @@ class PostgresRecordStore(HumanSessionStore):
                 base_branch=record.candidate.base_branch,
                 batch_id=record.candidate.batch_id,
                 candidate_status=record.candidate.status,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    @contextmanager
+    def merge_train_stall_lock(self, *, repository: str) -> Iterator[None]:
+        if self.database_dialect_name == "sqlite":
+            database = self._engine.url.database
+            if not database or database == ":memory:":
+                raise ValueError("Stall monitoring requires persistent storage.")
+            path = Path(database).resolve()
+            with FilesystemRecordStore(path.parent).merge_train_stall_lock(
+                repository=f"{path}:{repository}"
+            ):
+                yield
+            return
+        with self._session_factory() as session, session.begin():
+            session.execute(text("SET LOCAL lock_timeout = '5s'"))
+            self._lock_landing_authority(session, f"merge-train-stall:{repository}")
+            yield
+
+    def read_merge_train_stall_record(self, repository: str) -> MergeTrainStallRecord:
+        return self._read_model(
+            model_type=MergeTrainStallRecord,
+            orm_model=LaunchplaneMergeTrainStallRow,
+            filters=(LaunchplaneMergeTrainStallRow.repository == repository.lower(),),
+        )
+
+    def write_merge_train_stall_record(self, record: MergeTrainStallRecord) -> None:
+        self._write_row(
+            LaunchplaneMergeTrainStallRow(
+                repository=record.normalized_repository,
                 payload=self._payload_dict(record),
             )
         )

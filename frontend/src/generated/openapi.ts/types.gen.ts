@@ -1421,6 +1421,7 @@ export type MergeTrainControllerStatusReadModel = {
     reconciliation_diagnostics: Array<MergeTrainReconciliationDiagnostic>;
     repository: string;
     schema_version: number;
+    stall?: MergeTrainStallRecord | null;
 };
 
 export type MergeTrainControllerStatusResponse = {
@@ -1583,6 +1584,33 @@ export type MergeTrainServiceAuthz = {
     action: string;
     context: string;
     product: string;
+};
+
+export type MergeTrainStallObservation = {
+    progress_key: string;
+    progress_since: string;
+    queue_suspended: boolean;
+    ready_since: {
+        [key: string]: string;
+    };
+    reasons: Array<string>;
+    suspected_signals: Array<string>;
+};
+
+export type MergeTrainStallRecord = {
+    delivery_error: string;
+    issue_body_sha256: string;
+    issue_number: number | null;
+    issue_state: 'open' | 'closed';
+    notification_key: string;
+    notified_key: string;
+    observations: {
+        [key: string]: MergeTrainStallObservation;
+    };
+    observed_at: string;
+    published_issue_number: number | null;
+    published_reason_sha256: string;
+    repository: string;
 };
 
 export type MergeTrainStructuralCandidateResult = {
