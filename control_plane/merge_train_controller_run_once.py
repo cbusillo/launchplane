@@ -4006,7 +4006,10 @@ def _advance_from_live_snapshot(
     )
     snapshot = _without_held_out_pull_requests(snapshot=snapshot, held_out=held_out)
     dry_run_result = build_merge_train_dry_run_result(
-        policy=policy, snapshot=snapshot, batch_landing=lease.record.ordinary_job_binding is None
+        policy=policy,
+        snapshot=snapshot,
+        batch_landing=lease.record.ordinary_job_binding is None,
+        new_candidate=True,
     )
     selected_pr = dry_run_result.selected_pr
     if selected_pr is not None:
@@ -4171,6 +4174,7 @@ def _advance_from_live_snapshot(
             mutate=request.mutate,
             enabled=lease.record.ordinary_job_binding is None,
             lease=lease,
+            new_candidate=True,
         )
         dry_run_result = probe.dry_run_result
         selected_pr = dry_run_result.selected_pr
@@ -5684,6 +5688,7 @@ def _probe_queue_entry_conflicts(
     mutate: bool,
     enabled: bool,
     lease: MergeTrainControllerLeaseContext,
+    new_candidate: bool = False,
 ) -> _ConflictProbeOutcome:
     """Hold out queued pull requests that conflict with the ones ahead of them.
 
@@ -5744,7 +5749,7 @@ def _probe_queue_entry_conflicts(
     return _ConflictProbeOutcome(
         snapshot=snapshot,
         dry_run_result=build_merge_train_dry_run_result(
-            policy=policy, snapshot=snapshot, batch_landing=enabled
+            policy=policy, snapshot=snapshot, batch_landing=enabled, new_candidate=new_candidate
         ),
         held_out=held_out,
         report=report,
