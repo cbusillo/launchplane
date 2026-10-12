@@ -29,7 +29,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+from control_plane.workflows.generic_web_application_snapshot import ApplicationLifecycleSnapshot
 from control_plane.workflows.generic_web_application_lifecycle import (
     GenericWebApplicationLifecycle,
     dokploy_application_lifecycle,
@@ -472,7 +472,7 @@ class DokployGenericWebDeployProvider:
         self,
         *,
         control_plane_root: Path,
-        extensions: GenericWebLaneExtensions,
+        snapshot: ApplicationLifecycleSnapshot,
         target_type: str,
         target_id: str,
         checkpoint: Callable[[str], None],
@@ -480,7 +480,7 @@ class DokployGenericWebDeployProvider:
     ) -> GenericWebApplicationLifecycle:
         return dokploy_application_lifecycle(
             control_plane_root=control_plane_root,
-            extensions=extensions,
+            snapshot=snapshot,
             target_type=target_type,
             target_id=target_id,
             checkpoint=checkpoint,

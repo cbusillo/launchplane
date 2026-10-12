@@ -309,6 +309,13 @@ class ProductPreviewProfile(BaseModel):
     context: str = ""
     slug_template: str = "pr-{number}"
     app_name_prefix: str = ""
+    app_name_suffix: str = Field(
+        default="",
+        max_length=40,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+        pattern=r"^(-[a-z0-9-]+)?$",
+    )
     template_instance: str = "testing"
     required_template_env_keys: tuple[str, ...] = ()
     copied_env_keys: tuple[str, ...] = ()
@@ -658,6 +665,8 @@ class LaunchplaneProductProfileRecord(BaseModel):
             raise ValueError("product profile default_branch cannot contain whitespace")
         if not self.driver_id.strip():
             raise ValueError("product profile requires driver_id")
+        if self.preview.transport_extension and self.driver_id != "generic-web":
+            raise ValueError("declared preview transport requires the generic-web driver")
         self.health_path = self.health_path.strip()
         if self.health_path and not self.health_path.startswith("/"):
             raise ValueError("product profile health_path must start with /")

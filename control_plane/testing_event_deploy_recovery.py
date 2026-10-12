@@ -22,6 +22,9 @@ from control_plane.workflows.generic_web_deploy_provider import (
     TestingEventDeployRecoveryRefused,
     decode_generic_web_provider_reconciliation_target,
 )
+from control_plane.workflows.generic_web_application_snapshot import (
+    has_recorded_application_lifecycle,
+)
 from control_plane.workflows.odoo_generic_web_post_deploy import (
     generic_web_post_deploy_executor_for_driver_id,
 )
@@ -87,6 +90,12 @@ def retire_unavailable_testing_event_deploy(
             "testing",
         ):
             return decline("recovery_lane_changed")
+        if has_recorded_application_lifecycle(
+            store,
+            context=context,
+            instance="testing",
+        ):
+            return decline("recovery_application_lifecycle_required")
         lookup = store.lookup_existing_mutation_reservation(
             route_path=reservation.route_path,
             idempotency_key=reservation.idempotency_key,

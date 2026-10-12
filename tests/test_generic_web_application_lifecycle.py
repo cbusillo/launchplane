@@ -16,6 +16,10 @@ from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
 )
+from control_plane.workflows.generic_web_application_snapshot import (
+    ApplicationLifecycleSnapshot,
+    recorded_application_lifecycle,
+)
 from control_plane.workflows.generic_web_application_lifecycle import (
     DokployApplicationLifecycle,
     schedule_payload,
@@ -135,6 +139,147 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             )
         return result, store
 
+    def _api_context(self) -> None:
+        self.enterContext(
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://provider.example", "test-token"),
+            )
+        )
+        self.enterContext(
+            patch.object(api, "read_dokploy_application_schedule", side_effect=self._read)
+        )
+        self.enterContext(
+            patch.object(api, "upsert_dokploy_application_schedule", side_effect=self._upsert)
+        )
+        self.enterContext(patch.object(api, "run_dokploy_schedule", side_effect=self._run))
+        self.enterContext(
+            patch.object(
+                api,
+                "delete_dokploy_application_schedule",
+                side_effect=lambda **kwargs: self.schedules.pop(
+                    str(cast(api.JsonObject, kwargs["schedule_payload"])["name"]), None
+                ),
+            )
+        )
+
+    def test_interrupted_image_deploy_retains_original_schedule_before_retry(self) -> None:
+        self._api_context()
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        store = _GenericWebDeployStore(profile)
+        provider = _LifecycleDeployProvider(target_id="app-123")
+
+        def interrupt(**kwargs: object) -> None:
+            del kwargs
+            raise SystemExit("worker interrupted")
+
+        with patch.object(provider, "execute_artifact_deploy", side_effect=interrupt):
+            with self.assertRaises(SystemExit):
+                execute_generic_web_deploy(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=_request(),
+                    deploy_provider=provider,
+                    deployment_record_id="interrupted",
+                )
+        receipt = recorded_application_lifecycle(store.read_deployment_record("interrupted"))
+        assert receipt is not None
+        self.assertEqual(receipt.originals["billing-recovery"], self.original)
+        self.assertFalse(self.schedules["billing-recovery"]["enabled"])
+        self.failure_command = self.extensions.maintenance[0].command
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=_request(),
+            deploy_provider=provider,
+            deployment_record_id="interrupted",
+        )
+        self.assertEqual(result.post_deploy_status, "fail")
+        retried = recorded_application_lifecycle(store.read_deployment_record("interrupted"))
+        assert retried is not None
+        self.assertEqual(retried.originals, receipt.originals)
+        self.assertFalse(self.schedules["billing-recovery"]["enabled"])
+
+    def test_refusal_before_image_mutation_restores_original_enabled_schedule(self) -> None:
+        self._api_context()
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        provider = _LifecycleDeployProvider(target_id="app-123")
+        with patch.object(
+            provider,
+            "execute_artifact_deploy",
+            side_effect=click.ClickException("image preflight refused"),
+        ):
+            result = execute_generic_web_deploy(
+                control_plane_root=Path("."),
+                record_store=_GenericWebDeployStore(profile),
+                request=_request(),
+                deploy_provider=provider,
+            )
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(self.schedules["billing-recovery"], self.original)
+        self.assertEqual(self.commands, [])
+
+    def test_profile_edit_cannot_make_existing_attempt_image_only(self) -> None:
+        _result, store = self._deploy()
+        lane = store.profile.lanes[0].model_copy(
+            update={"generic_web_extensions": GenericWebLaneExtensions()}
+        )
+        profile = store.profile.model_copy(update={"lanes": (lane,)})
+        provider = _LifecycleDeployProvider(target_id="app-123")
+        adapter = GenericWebDeployProviderMutationAdapter(
+            control_plane_root=Path("."),
+            record_store=store,
+            deploy_request=GenericWebDeployEnvelope(product=profile.product, deploy=_request()),
+            profile=profile,
+            lane=lane,
+            trace_id="testing-recovery",
+            deploy_provider=provider,
+        )
+        with patch.object(adapter, "_runtime_close_out_evidence") as close_out:
+            self.assertIsNone(
+                adapter.inspect_runtime_close_out(
+                    resolved_deploy_target=provider.resolve_deploy_target(
+                        control_plane_root=Path("."),
+                        request_artifact_id=_request().artifact_id,
+                        request_source_git_ref=_request().source_git_ref,
+                        request_timeout_seconds=None,
+                        request_no_cache=False,
+                        record_store=store,
+                        profile=profile,
+                        lane=lane,
+                        normalized_artifact_id=store.deployments[0].artifact_identity.artifact_id
+                        if store.deployments[0].artifact_identity
+                        else "",
+                        fallback_target_name="application",
+                    )
+                )
+            )
+        close_out.assert_not_called()
+
+    def test_removed_declaration_removes_only_previously_managed_schedule(self) -> None:
+        result, store = self._deploy()
+        self.assertEqual(result.post_deploy_status, "pass")
+        self._api_context()
+        unrelated = {**self.original, "name": "unrelated"}
+        self.schedules["unrelated"] = unrelated
+        lane = store.profile.lanes[0].model_copy(
+            update={"generic_web_extensions": GenericWebLaneExtensions()}
+        )
+        store.profile = store.profile.model_copy(update={"lanes": (lane,)})
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=_request(),
+            deploy_provider=_LifecycleDeployProvider(target_id="app-123"),
+        )
+        self.assertEqual(result.post_deploy_status, "pass")
+        self.assertNotIn("billing-recovery", self.schedules)
+        self.assertEqual(self.schedules["unrelated"], unrelated)
+
     def test_declared_lifecycle_runs_on_shared_driver_in_order(self) -> None:
         result, store = self._deploy()
         self.assertEqual(result.post_deploy_status, "pass")
@@ -147,32 +292,30 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         )
         self.assertTrue(self.schedules["billing-recovery"]["enabled"])
         self.assertEqual(store.inventories[0].post_deploy_update.status, "pass")
-        self.assertEqual(
-            store.deployments[0].post_deploy_update.evidence[
-                f"maintenance:{self.extensions.maintenance[0].name}"
-            ],
-            "pass",
-        )
+        receipt = recorded_application_lifecycle(store.deployments[0])
+        self.assertIsNotNone(receipt)
+        assert receipt is not None
+        self.assertEqual(receipt.state, "qualified")
 
     def test_migration_failure_cannot_run_billing_or_qualify_lane(self) -> None:
         result, store = self._deploy(failure_command=self.extensions.maintenance[0].command)
         self.assertEqual(result.deploy_status, "pass")
         self.assertEqual(result.post_deploy_status, "fail")
         self.assertEqual(self.commands, [self.extensions.maintenance[0].command])
-        self.assertEqual(self.schedules["billing-recovery"], self.original)
+        self.assertFalse(self.schedules["billing-recovery"]["enabled"])
         self.assertEqual(store.inventories[0].post_deploy_update.status, "fail")
 
-    def test_canary_failure_restores_previous_exact_schedule(self) -> None:
+    def test_canary_failure_keeps_schedule_paused(self) -> None:
         result, _store = self._deploy(failure_command=self.extensions.schedules[0].command)
         self.assertEqual(result.post_deploy_status, "fail")
-        self.assertEqual(self.schedules["billing-recovery"], self.original)
+        self.assertFalse(self.schedules["billing-recovery"]["enabled"])
         self.assertNotIn("application_schedule_activate", self.phases)
 
     def test_product_verification_failure_keeps_new_schedule_unactivated(self) -> None:
         result, _store = self._deploy(verification_fails=True)
         self.assertEqual(result.post_deploy_status, "fail")
         self.assertEqual(self.commands, [self.extensions.maintenance[0].command])
-        self.assertEqual(self.schedules["billing-recovery"], self.original)
+        self.assertFalse(self.schedules["billing-recovery"]["enabled"])
 
     def test_lost_effect_fence_does_not_attempt_restoration(self) -> None:
         def lost_fence(_phase: str) -> None:
@@ -182,10 +325,19 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             "https://provider.example",
             "test-token",
             "app-123",
-            self.extensions,
+            ApplicationLifecycleSnapshot(
+                product="example",
+                context="testing",
+                instance="testing",
+                provider_id="dokploy",
+                target_id="app-123",
+                artifact_id="artifact",
+                source_git_ref="source",
+                extensions=self.extensions,
+                originals={"billing-recovery": self.original},
+            ),
             lost_fence,
             lambda: None,
-            originals={"billing-recovery": self.original},
         )
         with patch.object(api, "upsert_dokploy_application_schedule") as upsert:
             with self.assertRaisesRegex(RuntimeError, "lost lease"):

@@ -3403,6 +3403,7 @@ export type ProductOwnerSecretInput = {
 
 export type ProductPreviewProfile = {
     app_name_prefix: string;
+    app_name_suffix?: string;
     context: string;
     copied_env_keys: Array<string>;
     data_transport_mode: 'none' | 'clone' | 'bootstrap' | 'migrate_seed' | 'driver';

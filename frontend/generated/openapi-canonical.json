@@ -32707,6 +32707,14 @@
             "title": "App Name Prefix",
             "type": "string"
           },
+          "app_name_suffix": {
+            "default": "",
+            "maxLength": 40,
+            "pattern": "^(-[a-z0-9-]+)?$",
+            "title": "App Name Suffix",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "context": {
             "default": "",
             "title": "Context",

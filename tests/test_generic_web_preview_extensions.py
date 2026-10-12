@@ -50,6 +50,7 @@ def _driver_profile(
             context="verireel-testing",
             slug_template="pr-{number}",
             app_name_prefix="ver-preview",
+            app_name_suffix="-app" if declared_transport else "",
             template_instance="testing",
             data_transport_mode="driver",
             transport_extension="verireel-postgres" if declared_transport else "",

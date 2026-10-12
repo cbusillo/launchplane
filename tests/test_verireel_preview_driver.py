@@ -633,6 +633,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 "preview": profile.preview.model_copy(
                     update={
                         "app_name_prefix": "sample-preview",
+                        "app_name_suffix": "-app",
                         "transport_database_prefix": "sample_data_",
                     }
                 ),

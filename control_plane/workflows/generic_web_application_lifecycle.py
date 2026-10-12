@@ -9,11 +9,11 @@ import click
 
 from control_plane.contracts.generic_web_extensions import (
     GenericWebApplicationSchedule,
-    GenericWebLaneExtensions,
     GenericWebMaintenanceCommand,
 )
 from control_plane.dokploy import api, source
 from control_plane.dokploy.post_deploy import DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION
+from control_plane.workflows.generic_web_application_snapshot import ApplicationLifecycleSnapshot
 
 
 def schedule_payload(
@@ -24,11 +24,9 @@ def schedule_payload(
 ) -> api.JsonObject:
     return {
         "name": definition.name,
-        "cronExpression": (
-            definition.cron_expression
-            if isinstance(definition, GenericWebApplicationSchedule)
-            else DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION
-        ),
+        "cronExpression": definition.cron_expression
+        if isinstance(definition, GenericWebApplicationSchedule)
+        else DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
         "scheduleType": "application",
         "shellType": "sh",
         "command": definition.command,
@@ -39,13 +37,15 @@ def schedule_payload(
 
 
 class GenericWebApplicationLifecycle(Protocol):
+    snapshot: ApplicationLifecycleSnapshot
+    effect_attempted: bool
+
+    def capture(self) -> None: ...
     def prepare(self) -> None: ...
-
     def maintain(self) -> dict[str, str]: ...
-
     def complete(self) -> dict[str, str]: ...
-
     def restore(self) -> None: ...
+    def hold(self) -> None: ...
 
 
 @runtime_checkable
@@ -54,7 +54,7 @@ class GenericWebApplicationLifecycleProvider(Protocol):
         self,
         *,
         control_plane_root: Path,
-        extensions: GenericWebLaneExtensions,
+        snapshot: ApplicationLifecycleSnapshot,
         target_type: str,
         target_id: str,
         checkpoint: Callable[[str], None],
@@ -67,97 +67,116 @@ class DokployApplicationLifecycle:
     host: str
     token: str = field(repr=False)
     application_id: str
-    extensions: GenericWebLaneExtensions
+    snapshot: ApplicationLifecycleSnapshot
     checkpoint: Callable[[str], None]
     effect_started: Callable[[], None]
-    originals: dict[str, api.JsonObject | None] = field(default_factory=dict)
+    effect_attempted: bool = False
+    observed: dict[str, api.JsonObject | None] = field(default_factory=dict)
 
     def _mutate(self, phase: str) -> None:
         self.checkpoint(phase)
         self.effect_started()
+        self.effect_attempted = True
 
-    def prepare(self) -> None:
-        for definition in self.extensions.schedules:
-            observed = api.read_dokploy_application_schedule(
+    def _read(self, name: str) -> api.JsonObject | None:
+        observed = api.read_dokploy_application_schedule(
+            host=self.host,
+            token=self.token,
+            application_id=self.application_id,
+            schedule_name=name,
+        )
+        if observed is None:
+            return None
+        if observed.get("applicationId") != self.application_id or not isinstance(
+            observed.get("enabled"), bool
+        ):
+            raise click.ClickException("Application schedule has no exact target/state readback.")
+        return {key: observed.get(key) for key in api._DOKPLOY_APPLICATION_SCHEDULE_READBACK_FIELDS}
+
+    def _upsert(self, payload: api.JsonObject, phase: str) -> api.JsonObject:
+        self._mutate(phase)
+        return api.upsert_dokploy_application_schedule(
+            host=self.host,
+            token=self.token,
+            application_id=self.application_id,
+            schedule_payload=payload,
+        )
+
+    def _delete(self, name: str) -> None:
+        observed = self._read(name)
+        if observed is not None:
+            self._mutate("application_schedule_remove")
+            api.delete_dokploy_application_schedule(
                 host=self.host,
                 token=self.token,
                 application_id=self.application_id,
-                schedule_name=definition.name,
+                schedule_payload=observed,
             )
-            if observed is None:
-                self.originals[definition.name] = None
-                continue
-            if observed.get("applicationId") != self.application_id or not isinstance(
-                observed.get("enabled"), bool
-            ):
-                raise click.ClickException(
-                    "Application schedule has no exact target/state readback."
-                )
-            payload = {
-                key: observed.get(key) for key in api._DOKPLOY_APPLICATION_SCHEDULE_READBACK_FIELDS
-            }
-            self.originals[definition.name] = payload
-            if observed["enabled"]:
-                self._mutate("application_schedule_quiesce")
-                api.upsert_dokploy_application_schedule(
-                    host=self.host,
-                    token=self.token,
-                    application_id=self.application_id,
-                    schedule_payload={**payload, "enabled": False},
+
+    def capture(self) -> None:
+        # Capture every baseline before the first provider mutation. The caller
+        # durably writes this artifact-bound receipt before prepare().
+        for name in self.snapshot.managed_names:
+            observed = self._read(name)
+            self.observed[name] = observed
+            if self.snapshot.mode == "deploy" and name not in self.snapshot.originals:
+                self.snapshot.originals[name] = observed
+        if self.snapshot.restore_declared:
+            for definition in self.snapshot.extensions.schedules:
+                self.snapshot.originals[definition.name] = schedule_payload(
+                    definition,
+                    self.application_id,
+                    enabled=definition.enabled,
                 )
 
+    def prepare(self) -> None:
+        for payload in self.observed.values():
+            if payload is not None and payload["enabled"]:
+                self._upsert({**payload, "enabled": False}, "application_schedule_quiesce")
+
     def maintain(self) -> dict[str, str]:
+        if self.snapshot.mode == "rollback":
+            return {}
         evidence: dict[str, str] = {}
-        for definition in self.extensions.maintenance:
+        for definition in self.snapshot.extensions.maintenance:
             self._run_command(definition)
             evidence[f"maintenance:{definition.name}"] = "pass"
         return evidence
 
     def complete(self) -> dict[str, str]:
+        if self.snapshot.mode == "rollback":
+            self._restore(canary=True)
+            return {"application_rollback": "qualified"}
         evidence: dict[str, str] = {}
-        for definition in self.extensions.schedules:
-            self._mutate("application_schedule_prepare")
+        declared = {item.name for item in self.snapshot.extensions.schedules}
+        for name in self.snapshot.managed_names:
+            if name not in declared:
+                self._delete(name)
+        for definition in self.snapshot.extensions.schedules:
             disabled = schedule_payload(definition, self.application_id, enabled=False)
-            schedule = api.upsert_dokploy_application_schedule(
-                host=self.host,
-                token=self.token,
-                application_id=self.application_id,
-                schedule_payload=disabled,
-            )
+            schedule = self._upsert(disabled, "application_schedule_prepare")
             if definition.enabled:
-                self._mutate("application_schedule_canary")
-                api.run_dokploy_schedule(
-                    host=self.host,
-                    token=self.token,
-                    schedule_id=api.schedule_key(schedule),
-                    timeout_seconds=definition.timeout_seconds,
-                )
-                self._mutate("application_schedule_activate")
-                api.upsert_dokploy_application_schedule(
-                    host=self.host,
-                    token=self.token,
-                    application_id=self.application_id,
-                    schedule_payload={**disabled, "enabled": True},
-                )
+                self._run_schedule(schedule, definition.timeout_seconds)
+                self._upsert({**disabled, "enabled": True}, "application_schedule_activate")
             evidence[f"schedule:{definition.name}"] = "pass"
         return evidence
 
-    def _run_command(self, definition: GenericWebMaintenanceCommand) -> None:
-        self._mutate("application_maintenance_prepare")
-        payload = schedule_payload(definition, self.application_id, enabled=False)
-        observed = api.read_dokploy_application_schedule(
+    def _run_schedule(self, schedule: api.JsonObject, timeout_seconds: int) -> None:
+        self._mutate("application_schedule_canary")
+        api.run_dokploy_schedule(
             host=self.host,
             token=self.token,
-            application_id=self.application_id,
-            schedule_name=definition.name,
+            schedule_id=api.schedule_key(schedule),
+            timeout_seconds=timeout_seconds,
         )
+
+    def _run_command(self, definition: GenericWebMaintenanceCommand) -> None:
+        observed = self._read(definition.name)
         if observed is not None and observed.get("enabled") is not False:
             raise click.ClickException("Application maintenance cannot replace an active schedule.")
-        schedule = api.upsert_dokploy_application_schedule(
-            host=self.host,
-            token=self.token,
-            application_id=self.application_id,
-            schedule_payload=payload,
+        schedule = self._upsert(
+            schedule_payload(definition, self.application_id, enabled=False),
+            "application_maintenance_prepare",
         )
         self._mutate("application_maintenance_execute")
         api.run_dokploy_schedule(
@@ -168,56 +187,44 @@ class DokployApplicationLifecycle:
         )
 
     def restore(self) -> None:
-        errors: list[str] = []
-        for definition in self.extensions.schedules:
-            if definition.name not in self.originals:
+        self._restore(canary=False)
+
+    def _restore(self, *, canary: bool) -> None:
+        for name, original in self.snapshot.originals.items():
+            if original is None:
+                self._delete(name)
                 continue
-            self._mutate("application_schedule_restore")
-            try:
-                original = self.originals[definition.name]
-                if original is not None:
-                    api.upsert_dokploy_application_schedule(
-                        host=self.host,
-                        token=self.token,
-                        application_id=self.application_id,
-                        schedule_payload=original,
-                    )
-                else:
-                    observed = api.read_dokploy_application_schedule(
-                        host=self.host,
-                        token=self.token,
-                        application_id=self.application_id,
-                        schedule_name=definition.name,
-                    )
-                    if observed is not None:
-                        api.delete_dokploy_application_schedule(
-                            host=self.host,
-                            token=self.token,
-                            application_id=self.application_id,
-                            schedule_payload={
-                                key: observed.get(key)
-                                for key in api._DOKPLOY_APPLICATION_SCHEDULE_READBACK_FIELDS
-                            },
-                        )
-            except click.ClickException as error:
-                errors.append(str(error))
-        if errors:
-            raise click.ClickException(
-                "Application schedule restoration failed: " + "; ".join(errors)
+            payload = original
+            schedule = self._upsert(
+                {**payload, "enabled": False} if canary else payload, "application_schedule_restore"
             )
+            if canary and payload["enabled"]:
+                definition = next(
+                    (item for item in self.snapshot.extensions.schedules if item.name == name), None
+                )
+                self._run_schedule(schedule, definition.timeout_seconds if definition else 300)
+                self._upsert(payload, "application_schedule_activate")
+
+    def hold(self) -> None:
+        # A new image or an inherited interrupted attempt is not qualified.
+        # Never re-enable its old cron jobs until a proved rollback canary.
+        for name in self.snapshot.managed_names:
+            observed = self._read(name)
+            if observed is not None and observed["enabled"]:
+                self._upsert({**observed, "enabled": False}, "application_schedule_hold")
 
 
 def application_lifecycle_for_lane(
     *,
     control_plane_root: Path,
-    extensions: GenericWebLaneExtensions,
+    snapshot: ApplicationLifecycleSnapshot | None,
     provider: object,
     target_type: str,
     target_id: str,
     checkpoint: Callable[[str], None],
     effect_started: Callable[[], None],
 ) -> GenericWebApplicationLifecycle | None:
-    if not extensions.configured:
+    if snapshot is None:
         return None
     if not isinstance(provider, GenericWebApplicationLifecycleProvider):
         raise click.ClickException(
@@ -225,7 +232,7 @@ def application_lifecycle_for_lane(
         )
     return provider.application_lifecycle(
         control_plane_root=control_plane_root,
-        extensions=extensions,
+        snapshot=snapshot,
         target_type=target_type,
         target_id=target_id,
         checkpoint=checkpoint,
@@ -236,7 +243,7 @@ def application_lifecycle_for_lane(
 def dokploy_application_lifecycle(
     *,
     control_plane_root: Path,
-    extensions: GenericWebLaneExtensions,
+    snapshot: ApplicationLifecycleSnapshot,
     target_type: str,
     target_id: str,
     checkpoint: Callable[[str], None],
@@ -245,6 +252,4 @@ def dokploy_application_lifecycle(
     if target_type != "application" or not target_id:
         raise click.ClickException("Declared application lifecycle requires a Dokploy application.")
     host, token = source.read_dokploy_config(control_plane_root=control_plane_root)
-    return DokployApplicationLifecycle(
-        host, token, target_id, extensions, checkpoint, effect_started
-    )
+    return DokployApplicationLifecycle(host, token, target_id, snapshot, checkpoint, effect_started)

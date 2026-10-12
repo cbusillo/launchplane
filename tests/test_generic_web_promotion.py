@@ -38,6 +38,7 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployResult,
 )
 from control_plane.workflows.generic_web_deploy_provider import (
+    DokployGenericWebDeployProvider,
     GenericWebProviderDeploymentObservation,
     GenericWebResolvedDeployTarget,
 )
@@ -1192,6 +1193,96 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
                 deployment_record_id=deployment_record_id,
                 provider_effect_checkpoint=provider_effect_checkpoint,
             )
+
+    def test_failed_maintenance_rolls_back_without_running_new_commands_on_old_image(self) -> None:
+        from control_plane.contracts.generic_web_extensions import (
+            GenericWebLaneExtensions,
+            GenericWebMaintenanceCommand,
+            GenericWebApplicationSchedule,
+        )
+        from control_plane.dokploy import api
+        from control_plane.workflows.generic_web_application_lifecycle import schedule_payload
+        from control_plane.workflows.generic_web_application_snapshot import (
+            recorded_application_lifecycle,
+        )
+
+        class LifecycleProvider(_ProductionProvider, DokployGenericWebDeployProvider):
+            def healthcheck(self, **kwargs: object) -> HealthcheckPass:
+                # Even a healthy new image must not hide failed maintenance.
+                assert self.running is not None
+                return HealthcheckPass(
+                    payload={"runtime_identity": self.running.model_dump(mode="json")}
+                )
+
+        store = _store_with_production()
+        extensions = GenericWebLaneExtensions(
+            maintenance=(GenericWebMaintenanceCommand(name="migrate", command="./new-migration"),),
+            schedules=(
+                GenericWebApplicationSchedule(
+                    name="billing", command="./new-billing", cron_expression="*/15 * * * *"
+                ),
+            ),
+        )
+        store.profile = store.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"generic_web_extensions": extensions})
+                    if lane.instance == "prod"
+                    else lane
+                    for lane in store.profile.lanes
+                )
+            }
+        )
+        provider = LifecycleProvider()
+        original = schedule_payload(
+            GenericWebApplicationSchedule(
+                name="billing", command="./old-billing", cron_expression="*/20 * * * *"
+            ),
+            "app-123",
+            enabled=True,
+        )
+        schedules: dict[str, api.JsonObject] = {"billing": original}
+        executed: list[tuple[str, str]] = []
+
+        def upsert(**kwargs: object) -> api.JsonObject:
+            payload = cast(api.JsonObject, kwargs["schedule_payload"])
+            schedules[str(payload["name"])] = dict(payload)
+            return {**payload, "scheduleId": payload["name"]}
+
+        def run(**kwargs: object) -> None:
+            payload = schedules[str(kwargs["schedule_id"])]
+            self.assertFalse(schedules["billing"]["enabled"])
+            assert provider.running is not None
+            command = str(payload["command"])
+            executed.append((command, provider.running.artifact_id))
+            if command == "./new-migration":
+                raise click.ClickException("migration failed")
+
+        with (
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://provider.example", "test-token"),
+            ),
+            patch.object(
+                api,
+                "read_dokploy_application_schedule",
+                side_effect=lambda **kwargs: schedules.get(str(kwargs["schedule_name"])),
+            ),
+            patch.object(api, "upsert_dokploy_application_schedule", side_effect=upsert),
+            patch.object(api, "run_dokploy_schedule", side_effect=run),
+        ):
+            result = self._promote(store, provider)
+        self.assertEqual(result.promotion_status, "fail")
+        self.assertEqual(result.rollback_status, "pass")
+        self.assertEqual(provider.deployed_artifacts[-1], _PREVIOUS_ARTIFACT)
+        self.assertEqual([command for command, _ in executed], ["./new-migration", "./old-billing"])
+        self.assertEqual(executed[-1][1], _PREVIOUS_ARTIFACT)
+        self.assertEqual(schedules["billing"], original)
+        rollback_receipt = recorded_application_lifecycle(
+            store.read_deployment_record("deployment-promotion-syo-prod-rollback")
+        )
+        assert rollback_receipt is not None
+        self.assertEqual(rollback_receipt.state, "qualified")
 
     def test_failed_health_check_returns_production_to_the_previous_deployment(self) -> None:
         store = _store_with_production()

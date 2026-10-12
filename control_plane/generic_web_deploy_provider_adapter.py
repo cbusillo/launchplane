@@ -7,6 +7,11 @@ from typing import Protocol, cast
 import click
 from sqlalchemy.exc import SQLAlchemyError
 
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.workflows.generic_web_application_snapshot import (
+    has_recorded_application_lifecycle,
+    recorded_application_lifecycle,
+)
 from control_plane.contracts.generic_web_deploy_recovery import (
     GenericWebDeployProviderEvidenceClassification,
     GenericWebDeployProviderReadErrorClass,
@@ -66,7 +71,7 @@ def _string_field(payload: dict[str, object], key: str) -> str:
 
 
 class _DeploymentRecordReader(Protocol):
-    def read_deployment_record(self, record_id: str) -> object: ...
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +313,17 @@ class GenericWebDeployProviderMutationAdapter:
             or generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None
         )
         deployment_record_id = self._deployment_record_id(provider_operation_key)
+        existing = None
+        if callable(getattr(self._record_store, "read_deployment_record", None)):
+            try:
+                existing = cast(_DeploymentRecordReader, self._record_store).read_deployment_record(
+                    deployment_record_id
+                )
+            except FileNotFoundError:
+                pass
+        receipt = recorded_application_lifecycle(existing) if existing else None
+        if receipt is not None:
+            post_deploy_unobserved = receipt.state != "qualified"
         if provider_effect_phase.startswith(("post_deploy_", "application_")):
             read_deployment_record_value = getattr(
                 self._record_store, "read_deployment_record", None
@@ -325,7 +341,7 @@ class GenericWebDeployProviderMutationAdapter:
                     observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
                     provider_evidence=evidence.provider_evidence,
                 )
-            post_deploy_unobserved = False
+            post_deploy_unobserved = receipt is not None and receipt.state != "qualified"
         return _GenericWebDeployProviderInspection(
             observation=observation,
             resolved_deploy_target=resolved_target,
@@ -379,8 +395,16 @@ class GenericWebDeployProviderMutationAdapter:
         returns ``None`` so the caller keeps holding the reservation.
         """
 
-        if self._lane.generic_web_extensions.configured or (
-            generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None
+        if (
+            has_recorded_application_lifecycle(
+                self._record_store,
+                context=self._lane.context,
+                instance=self._lane.instance,
+                artifact_id=resolved_deploy_target.ship_request.artifact_id,
+                source_git_ref=resolved_deploy_target.ship_request.source_git_ref,
+            )
+            or self._lane.generic_web_extensions.configured
+            or (generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None)
         ):
             return None
         return self._runtime_close_out_evidence(resolved_deploy_target)

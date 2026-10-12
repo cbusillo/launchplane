@@ -403,3 +403,22 @@ reports only the product smoke result to
 `/v1/drivers/verireel/preview-verification`. Event-driven previews replace that:
 Launchplane's own health check of the expected build marks the preview ready
 (#2740).
+
+Lifecycle declarations are qualified with the deployed artifact, not merely the
+provider's image status. Before pausing recurring jobs, the shared deploy writes
+a target- and artifact-bound receipt containing their original definitions.
+An interrupted attempt resumes from that receipt under the same provider
+operation. A failed migration or canary keeps recurring jobs disabled on the
+unqualified image; promotion fails and restores the previous artifact. Rollback
+skips the new artifact's maintenance commands and canaries the recorded previous
+schedules before enabling them. Removing a declaration also removes its
+previously managed schedule after qualification, while unrelated jobs are left
+alone. Editing a profile cannot remove the qualification required by an existing
+deployment receipt.
+
+For declared preview transport, `preview.app_name_suffix` is part of the resource
+name used by creation, inventory and destruction. Existing VeriReel applications
+use `-app`; record that suffix explicitly when switching its profile. The named
+`verireel-postgres` transport retains VeriReel's Prisma, seed and environment
+interfaces while its template lane, product identity and resource prefixes come
+from the profile. It does not imply compatibility with other applications.

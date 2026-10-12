@@ -226,8 +226,10 @@ def _preview_app_name(preview_slug: str, prefix: str = PREVIEW_APP_PREFIX) -> st
     return f"{prefix}-{preview_slug}"
 
 
-def _preview_application_name(preview_slug: str, prefix: str = PREVIEW_APP_PREFIX) -> str:
-    return f"{_preview_app_name(preview_slug, prefix)}-app"
+def _preview_application_name(
+    preview_slug: str, prefix: str = PREVIEW_APP_PREFIX, suffix: str = "-app"
+) -> str:
+    return f"{_preview_app_name(preview_slug, prefix)}{suffix}"
 
 
 def _preview_slug_from_application_name(application_name: str) -> str:
@@ -1169,7 +1171,11 @@ def execute_verireel_preview_refresh(
         if profile is not None
         else PREVIEW_DATABASE_PREFIX
     )
-    application_name = _preview_application_name(request.preview_slug, app_prefix)
+    application_name = _preview_application_name(
+        request.preview_slug,
+        app_prefix,
+        profile.preview.app_name_suffix if profile is not None else "-app",
+    )
     app_name = _preview_app_name(request.preview_slug, app_prefix)
     preview_host = _preview_url_host(preview_url)
     preview_domain = _preview_domain_from_url(preview_url)
@@ -1466,7 +1472,11 @@ def execute_verireel_preview_destroy(
         if profile is not None
         else PREVIEW_DATABASE_PREFIX
     )
-    application_name = _preview_application_name(request.preview_slug, app_prefix)
+    application_name = _preview_application_name(
+        request.preview_slug,
+        app_prefix,
+        profile.preview.app_name_suffix if profile is not None else "-app",
+    )
     try:
         application = _find_application_by_name(
             host=host, token=token, application_name=application_name

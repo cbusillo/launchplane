@@ -558,13 +558,17 @@ class GenericWebPreviewTests(unittest.TestCase):
                 )
 
     def test_execute_generic_web_preview_inventory_filters_by_app_prefix(self) -> None:
-        store = _GenericWebPreviewStore(_profile())
+        profile = _profile()
+        profile = profile.model_copy(
+            update={"preview": profile.preview.model_copy(update={"app_name_suffix": "-app"})}
+        )
+        store = _GenericWebPreviewStore(profile)
         raw_projects = [
             {
                 "environments": [
                     {
                         "applications": [
-                            {"applicationId": "app-1", "name": "syo-preview-preview-42-site"},
+                            {"applicationId": "app-1", "name": "syo-preview-preview-42-site-app"},
                             {"applicationId": "app-2", "name": "other-preview-pr-1"},
                         ]
                     }
