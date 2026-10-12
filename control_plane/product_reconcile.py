@@ -727,6 +727,7 @@ def _deploy_generic_web_testing(
             trace_id=trace_id,
             deploy_provider=provider,
             retain_event_request=True,
+            post_deploy_authority_digest=authority,
         )
         execution_lock = (
             record_store.testing_replacement_execution_lock(

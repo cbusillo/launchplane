@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from click import ClickException
 
@@ -14,6 +14,11 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.http_app import idempotency_request_fingerprint
+from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
+from control_plane.generic_web_deploy_provider_adapter import (
+    GenericWebDeployProviderMutationAdapter,
+)
+from control_plane.provider_operations import ProviderOperationLease
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
@@ -372,6 +377,67 @@ class _LegacyRecoveryObservationProvider(_RecoveryObservationProvider):
         if isinstance(correlation, BaseException):
             raise correlation
         return correlation
+
+
+class GenericWebQualificationRecoveryKeyTests(unittest.TestCase):
+    def test_recovered_reservation_preserves_original_key_and_execution_authority(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _product_profile_payload("verireel")
+        )
+        request_payload = _generic_web_recovery_original_deploy()
+        request_payload["product"] = profile.product
+        cast(dict[str, object], request_payload["deploy"])["product"] = profile.product
+        cast(dict[str, object], request_payload["deploy"])["artifact_id"] = (
+            f"{profile.image.repository}@sha256:abc123"
+        )
+        request = GenericWebDeployEnvelope.model_validate(request_payload)
+        target = _generic_web_recovery_target(context=profile.lanes[0].context)
+        for reserved_digest in ("", "reserved-authority"):
+            with self.subTest(reserved_digest=reserved_digest):
+                provider = Mock()
+                provider.observe_artifact_deploy.return_value = (
+                    GenericWebProviderDeploymentObservation(outcome="absent")
+                )
+                adapter = GenericWebDeployProviderMutationAdapter(
+                    control_plane_root=Path("."),
+                    record_store=Mock(),
+                    deploy_request=request,
+                    profile=profile,
+                    lane=profile.lanes[0],
+                    trace_id="trace-recovery-key",
+                    deploy_provider=provider,
+                )
+                original_key = build_generic_web_provider_reconciliation_key(
+                    target,
+                    product=profile.product,
+                    qualification_authority_digest=reserved_digest,
+                )
+                with (
+                    patch(
+                        "control_plane.generic_web_deploy_provider_adapter."
+                        "generic_web_post_deploy_authority_digest",
+                        return_value="current-authority",
+                    ),
+                    patch(
+                        "control_plane.generic_web_deploy_provider_adapter."
+                        "execute_generic_web_deploy_result",
+                        return_value=({}, {}),
+                    ) as execute,
+                ):
+                    evidence = adapter.inspect_evidence(
+                        provider_operation_key="operation-recovery-key",
+                        provider_effect_phase="target_update",
+                        reconciliation_key=original_key,
+                    )
+                    self.assertTrue(evidence.identity_matches)
+                    self.assertEqual(adapter.reconciliation_key(), original_key)
+                    adapter.apply(
+                        "operation-recovery-key", cast(ProviderOperationLease, cast(object, Mock()))
+                    )
+                    self.assertEqual(
+                        execute.call_args.kwargs["post_deploy_authority_digest"],
+                        reserved_digest or "current-authority",
+                    )
 
 
 class GenericWebDeployRecoveryHttpTests(unittest.TestCase):

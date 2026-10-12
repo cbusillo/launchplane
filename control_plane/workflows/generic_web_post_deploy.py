@@ -2,6 +2,31 @@
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.workflows.generic_web_deploy import GenericWebPostDeployExecutor
+from control_plane.contracts.product_profile_record import ProductLaneProfile
+from typing import cast
+
+
+def generic_web_post_deploy_authority_digest(
+    store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+) -> str:
+    """Read expected testing authority before target preparation and provider effects."""
+    from control_plane.workflows.verireel_testing_post_deploy import (
+        execute_verireel_testing_post_deploy,
+    )
+
+    if (
+        generic_web_post_deploy_executor_for_profile(profile, instance=lane.instance)
+        is not execute_verireel_testing_post_deploy
+    ):
+        return ""
+    from control_plane.product_reconcile import (
+        ProductReconcileStore,
+        _generic_web_testing_authority,
+    )
+
+    return _generic_web_testing_authority(
+        record_store=cast(ProductReconcileStore, store), lane=lane
+    )
 
 
 def declares_verireel_testing_extension(
