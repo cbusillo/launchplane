@@ -903,6 +903,11 @@ def _generic_web_testing_authority(
                 "target": target_authority,
                 "provider_target": provider_authority,
                 "target_id": target_id_authority,
+                **(
+                    {"application_lifecycle": lane.generic_web_extensions.model_dump(mode="json")}
+                    if lane.generic_web_extensions.configured
+                    else {}
+                ),
                 "settings": sorted(settings, key=lambda record: json.dumps(record, sort_keys=True)),
                 "secrets": {
                     key: {

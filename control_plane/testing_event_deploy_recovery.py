@@ -71,6 +71,12 @@ def retire_unavailable_testing_event_deploy(
         or reservation.provider_target_key != current_target_key
         or reservation.provider_effect_phase not in {"", "target_update", "deploy_trigger"}
         or generic_web_post_deploy_executor_for_driver_id(profile.driver_id) is not None
+        or any(
+            lane.context == context
+            and lane.instance == "testing"
+            and lane.generic_web_extensions.configured
+            for lane in profile.lanes
+        )
     ):
         return decline("recovery_scope_or_effect_unsupported")
     try:

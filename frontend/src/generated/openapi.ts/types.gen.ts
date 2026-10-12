@@ -661,6 +661,25 @@ export type ExistingDeliveryKey = {
     secret_id: string;
 };
 
+export type GenericWebApplicationSchedule = {
+    command: string;
+    cron_expression: string;
+    enabled: boolean;
+    name: string;
+    timeout_seconds: number;
+};
+
+export type GenericWebLaneExtensions = {
+    maintenance: Array<GenericWebMaintenanceCommand>;
+    schedules: Array<GenericWebApplicationSchedule>;
+};
+
+export type GenericWebMaintenanceCommand = {
+    command: string;
+    name: string;
+    timeout_seconds: number;
+};
+
 export type GenericWebProdPromotionRecords = {
     backup_record_id: string;
     backup_status: string;
@@ -3154,6 +3173,7 @@ export type ProductLaneHealthMonitoringPolicy = {
 export type ProductLaneProfile = {
     base_url: string;
     context: string;
+    generic_web_extensions?: GenericWebLaneExtensions;
     health_monitoring: ProductLaneHealthMonitoringPolicy;
     health_url: string;
     instance: string;
@@ -3400,6 +3420,8 @@ export type ProductPreviewProfile = {
     seed_command: string;
     slug_template: string;
     template_instance: string;
+    transport_database_prefix?: string;
+    transport_extension?: '' | 'verireel-postgres';
 };
 
 export type ProductPreviewReference = {

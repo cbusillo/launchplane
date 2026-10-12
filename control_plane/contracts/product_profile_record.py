@@ -1,9 +1,11 @@
 from collections.abc import Iterable
 import hashlib
 import json
+import re
 from typing import Literal
 
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
+from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -269,6 +271,11 @@ class ProductLaneProfile(BaseModel):
     instance: str
     context: str
     base_url: str = ""
+    generic_web_extensions: GenericWebLaneExtensions = Field(
+        default_factory=GenericWebLaneExtensions,
+        exclude_if=lambda value: not value.configured,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     odoo_cutover: OdooCutoverLane | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -312,6 +319,17 @@ class ProductPreviewProfile(BaseModel):
     domain_certificate_type: Literal["none", "letsencrypt"] = "none"
     required_provider_fields: tuple[str, ...] = ()
     data_transport_mode: Literal["none", "clone", "bootstrap", "migrate_seed", "driver"] = "none"
+    transport_extension: Literal["", "verireel-postgres"] = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    transport_database_prefix: str = Field(
+        default="",
+        max_length=40,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     migration_command: str = ""
     seed_command: str = ""
 
@@ -369,6 +387,17 @@ class ProductPreviewProfile(BaseModel):
             raise ValueError(
                 "product preview profile migration_command/seed_command require a data transport mode"
             )
+        if self.transport_extension and self.data_transport_mode != "driver":
+            raise ValueError("preview transport extension requires driver data transport")
+        if self.transport_extension and (
+            not self.app_name_prefix.strip()
+            or not re.fullmatch(r"[a-z][a-z0-9_]*", self.transport_database_prefix)
+        ):
+            raise ValueError(
+                "declared PostgreSQL transport requires application and safe database prefixes"
+            )
+        if self.transport_database_prefix and not self.transport_extension:
+            raise ValueError("preview transport database prefix requires a transport extension")
         return self
 
 

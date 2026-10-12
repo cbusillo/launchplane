@@ -27,7 +27,9 @@ from control_plane.workflows.generic_web_preview import (
 )
 
 
-def _driver_profile(*, driver_id: str = "verireel") -> LaunchplaneProductProfileRecord:
+def _driver_profile(
+    *, driver_id: str = "verireel", declared_transport: bool = False
+) -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
         product="verireel",
         display_name="VeriReel",
@@ -50,6 +52,8 @@ def _driver_profile(*, driver_id: str = "verireel") -> LaunchplaneProductProfile
             app_name_prefix="ver-preview",
             template_instance="testing",
             data_transport_mode="driver",
+            transport_extension="verireel-postgres" if declared_transport else "",
+            transport_database_prefix="verireel_preview_" if declared_transport else "",
         ),
         updated_at="2026-07-12T03:00:00Z",
         source="test",
@@ -102,7 +106,7 @@ class GenericWebPreviewExtensionTests(unittest.TestCase):
                 product="verireel",
                 refresh=request,
             ),
-            profile=_driver_profile(),
+            profile=_driver_profile(driver_id="generic-web", declared_transport=True),
         )
 
         self.assertEqual(records["preview_id"], "preview-verireel-testing-verireel-pr-42")
@@ -158,7 +162,7 @@ class GenericWebPreviewExtensionTests(unittest.TestCase):
                 product="verireel",
                 destroy=request,
             ),
-            profile=_driver_profile(),
+            profile=_driver_profile(driver_id="generic-web", declared_transport=True),
         )
 
         self.assertEqual(records["transition"], "destroyed")

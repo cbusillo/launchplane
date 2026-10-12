@@ -29,6 +29,11 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+from control_plane.workflows.generic_web_application_lifecycle import (
+    GenericWebApplicationLifecycle,
+    dokploy_application_lifecycle,
+)
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
@@ -462,6 +467,25 @@ class TestingEventDeployRecoveryRefused(ValueError):
 class DokployGenericWebDeployProvider:
     provider_id = "dokploy"
     delegated_executor = "control-plane.dokploy"
+
+    def application_lifecycle(
+        self,
+        *,
+        control_plane_root: Path,
+        extensions: GenericWebLaneExtensions,
+        target_type: str,
+        target_id: str,
+        checkpoint: Callable[[str], None],
+        effect_started: Callable[[], None],
+    ) -> GenericWebApplicationLifecycle:
+        return dokploy_application_lifecycle(
+            control_plane_root=control_plane_root,
+            extensions=extensions,
+            target_type=target_type,
+            target_id=target_id,
+            checkpoint=checkpoint,
+            effect_started=effect_started,
+        )
 
     def _read_provider_config(self, *, control_plane_root: Path) -> tuple[str, str]:
         if self.provider_id != "dokploy":

@@ -88,6 +88,38 @@ the underlying image deploy as `pass` and the post-deploy evidence as `fail`.
 Launchplane wires this extension for Odoo profiles when they execute generic-web
 deploy or rollback apply, so Odoo can reuse common provider deployment while its
 post-deploy maintenance remains explicit driver behavior.
+
+Generic-web lanes can declare application maintenance commands and recurring
+schedules in `generic_web_extensions`; their typed contract is
+[`GenericWebLaneExtensions`](../control_plane/contracts/generic_web_extensions.py).
+These are product profile records, not Launchplane build inputs or checked-in
+product catalogs. The deploy provider must implement the application lifecycle
+protocol; the current implementation supports Dokploy applications and refuses
+other targets before any mutation. Generic deploy, promotion and rollback share
+this path. Empty declarations retain existing profile serialization and behavior.
+
+The lifecycle pauses existing declared schedules before deploying, runs the
+declared maintenance before product post-deploy verification, then runs each
+enabled schedule once as a canary before enabling its recurring invocation.
+Disabled schedules remain disabled. Provider readback must match the exact
+application and schedule. Failure restores the original schedule payload under
+the same effect fence and records failed post-deploy evidence. A lost fence
+cannot perform restoration, and runtime-image evidence alone cannot close out
+an operation whose application lifecycle remains unobserved. Managed cron
+expressions use the grammar in [`control_plane/cron.py`](../control_plane/cron.py).
+Testing retry authority includes the declaration, so repaired commands do not
+replay a previous failed attempt. Command text names an executable in the
+product artifact; runtime settings and managed bindings supply its secrets.
+
+Preview profiles using driver data transport can explicitly select the
+`verireel-postgres` transport extension through `transport_extension` while their
+driver is `generic-web`, declaring its isolated database namespace through
+`transport_database_prefix`. The template lane, application prefix, database
+namespace and runtime product identity come from the profile. This uses the existing isolated PostgreSQL preparation
+and cleanup rather than the plain preview path. Existing VeriReel profiles retain
+their current dispatch until their supported testing transition is qualified.
+This source capability does not change a live profile or production artifact.
+
 Do not move a product apply route onto generic deploy until its remaining
 release, backup, promotion, migration, and post-deploy invariants are either
 represented in generic contracts or still explicitly wrapped by the product

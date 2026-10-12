@@ -52,6 +52,10 @@ from control_plane.workflows.generic_web_deploy_provider import (
     generic_web_provider_deployment_succeeded,
 )
 from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.workflows.generic_web_application_lifecycle import (
+    GenericWebApplicationLifecycle,
+    application_lifecycle_for_lane,
+)
 from control_plane.workflows.ship import (
     build_deployment_record,
     generate_deployment_record_id,
@@ -544,6 +548,7 @@ def execute_generic_web_deploy(
     post_deploy_update = PostDeployUpdateEvidence()
     key_readback: IntegrationKeyReadbackEvidence | None = None
     verified_build_evidence: dict[str, str] = {}
+    application_lifecycle: GenericWebApplicationLifecycle | None = None
 
     def mark_provider_effect_started() -> None:
         nonlocal provider_effect_attempted
@@ -579,6 +584,17 @@ def execute_generic_web_deploy(
                 or desired_build
             )
         verified_build_evidence = lane_build_proof(desired_build)
+        application_lifecycle = application_lifecycle_for_lane(
+            control_plane_root=control_plane_root,
+            extensions=resolved_lane.generic_web_extensions,
+            provider=resolved_deploy_provider,
+            target_type=resolved_target.target_type,
+            target_id=resolved_target.target_id,
+            checkpoint=provider_effect_checkpoint or (lambda _phase: None),
+            effect_started=mark_provider_effect_started,
+        )
+        if application_lifecycle is not None:
+            application_lifecycle.prepare()
         untitled_deployment_observation = resolved_deploy_provider.execute_artifact_deploy(
             control_plane_root=control_plane_root,
             resolved_deploy_target=prepared_deploy_target,
@@ -621,8 +637,16 @@ def execute_generic_web_deploy(
             context_name=resolved_lane.context,
             instance_name=resolved_lane.instance,
         )
+        if application_lifecycle is not None:
+            maintenance_evidence = application_lifecycle.maintain()
+            post_deploy_update = PostDeployUpdateEvidence(
+                attempted=True,
+                status="pass",
+                detail="Declared application maintenance completed.",
+                evidence=maintenance_evidence,
+            )
         if post_deploy_executor is not None:
-            post_deploy_update = _run_post_deploy_extension(
+            extension_update = _run_post_deploy_extension(
                 control_plane_root=control_plane_root,
                 record_store=record_store,
                 context=_build_post_deploy_context(
@@ -642,11 +666,33 @@ def execute_generic_web_deploy(
                     ),
                 ),
             )
+            post_deploy_update = extension_update.model_copy(
+                update={"evidence": {**post_deploy_update.evidence, **extension_update.evidence}}
+            )
             if post_deploy_update.status == "fail":
                 raise click.ClickException(
                     post_deploy_update.detail or "Generic web post-deploy extension failed."
                 )
+        if application_lifecycle is not None:
+            extension_evidence = application_lifecycle.complete()
+            post_deploy_update = PostDeployUpdateEvidence(
+                attempted=True,
+                status="pass",
+                detail="Declared application maintenance and schedules completed.",
+                evidence={**post_deploy_update.evidence, **extension_evidence},
+            )
     except click.ClickException as exc:
+        if application_lifecycle is not None:
+            try:
+                application_lifecycle.restore()
+            except click.ClickException as restore_error:
+                exc = click.ClickException(f"{exc}\n{restore_error}")
+            post_deploy_update = PostDeployUpdateEvidence(
+                attempted=True,
+                status="fail",
+                detail=str(exc),
+                evidence=post_deploy_update.evidence,
+            )
         finished_at = utc_now_timestamp()
         deployment_status: Literal["pass", "fail"] = "pass" if deploy_completed else "fail"
         recorded_deployment_id = (

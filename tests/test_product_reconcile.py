@@ -1395,6 +1395,28 @@ def _generic_web_profile() -> LaunchplaneProductProfileRecord:
 
 
 class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
+    def test_declared_maintenance_changes_testing_retry_authority(self) -> None:
+        from control_plane.contracts.generic_web_extensions import (
+            GenericWebLaneExtensions,
+            GenericWebMaintenanceCommand,
+        )
+        from control_plane.product_reconcile import _generic_web_testing_authority
+
+        lane = self.store.read_product_profile_record("site").lanes[0]
+        before = _generic_web_testing_authority(record_store=self.store, lane=lane)
+        changed = lane.model_copy(
+            update={
+                "generic_web_extensions": GenericWebLaneExtensions(
+                    maintenance=(GenericWebMaintenanceCommand(name="migrate", command="./migrate"),)
+                )
+            }
+        )
+        after = _generic_web_testing_authority(record_store=self.store, lane=changed)
+        self.assertNotEqual(before, after)
+        self.assertEqual(
+            after, _generic_web_testing_authority(record_store=self.store, lane=changed)
+        )
+
     def setUp(self) -> None:
         super().setUp()
         encryption_key = patch.dict(

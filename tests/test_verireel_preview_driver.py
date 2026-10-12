@@ -623,6 +623,21 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
     def test_preview_refresh_generates_its_own_secrets_and_copies_none_from_testing(
         self,
     ) -> None:
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        profile = _driver_profile(driver_id="generic-web", declared_transport=True)
+        profile = profile.model_copy(
+            update={
+                "product": "sample-product",
+                "lanes": (profile.lanes[0].model_copy(update={"context": "sample-template"}),),
+                "preview": profile.preview.model_copy(
+                    update={
+                        "app_name_prefix": "sample-preview",
+                        "transport_database_prefix": "sample_data_",
+                    }
+                ),
+            }
+        )
         captured_env: dict[str, str] = {}
         template_master_key = base64.b64encode(b"template-master-key").decode("ascii")
 
@@ -654,7 +669,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                         ),
                     },
                 ),
-            ),
+            ) as template_lookup,
             patch(
                 "control_plane.workflows.verireel_preview_driver._find_application_by_name",
                 return_value=None,
@@ -691,6 +706,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             result = execute_verireel_preview_refresh(
                 control_plane_root=Path(temporary_directory_name),
                 request=_refresh_request(),
+                profile=profile,
             )
 
         self.assertEqual(result.refresh_status, "pass")
@@ -706,7 +722,19 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             template_master_key,
         )
         self.assertEqual(len(base64.b64decode(captured_env["VERIREEL_SECRETS_MASTER_KEY"])), 32)
-        self.assertIn("/verireel_preview_pr_71?", captured_env["DATABASE_URL"])
+        self.assertIn(
+            f"/{profile.preview.transport_database_prefix}pr_71?", captured_env["DATABASE_URL"]
+        )
+        self.assertEqual(result.application_name, f"{profile.preview.app_name_prefix}-pr-71-app")
+        self.assertEqual(
+            template_lookup.call_args.kwargs["template_context"], profile.lanes[0].context
+        )
+        self.assertEqual(
+            template_lookup.call_args.kwargs["template_instance"], profile.lanes[0].instance
+        )
+        self.assertIsNotNone(result.runtime_identity)
+        assert result.runtime_identity is not None
+        self.assertEqual(result.runtime_identity.product, profile.product)
         self.assertNotIn("POSTGRES_PASSWORD", captured_env)
         self.assertNotIn("template-postgres-password", "\n".join(captured_env.values()))
         self.assertEqual(captured_env["NEXT_PUBLIC_SUPPORT_EMAIL"], "support@example.com")

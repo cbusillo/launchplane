@@ -301,12 +301,14 @@ class GenericWebDeployProviderMutationAdapter:
                 provider_evidence="provider_read_failed",
                 provider_read_error_class="target_resolution_failed",
             )
-        post_deploy_unobserved = (
-            generic_web_provider_deployment_succeeded(observation.deployment_status)
-            and generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None
+        post_deploy_unobserved = generic_web_provider_deployment_succeeded(
+            observation.deployment_status
+        ) and (
+            self._lane.generic_web_extensions.configured
+            or generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None
         )
         deployment_record_id = self._deployment_record_id(provider_operation_key)
-        if provider_effect_phase.startswith("post_deploy_"):
+        if provider_effect_phase.startswith(("post_deploy_", "application_")):
             read_deployment_record_value = getattr(
                 self._record_store, "read_deployment_record", None
             )
@@ -377,7 +379,9 @@ class GenericWebDeployProviderMutationAdapter:
         returns ``None`` so the caller keeps holding the reservation.
         """
 
-        if generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None:
+        if self._lane.generic_web_extensions.configured or (
+            generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None
+        ):
             return None
         return self._runtime_close_out_evidence(resolved_deploy_target)
 

@@ -21,6 +21,7 @@ from control_plane.contracts.runtime_identity import (
     health_payload_runtime_identity_status,
     runtime_identity_env,
 )
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
@@ -65,9 +66,10 @@ def _build_preview_runtime_identity(
     preview_id: str = "",
     preview_generation_id: str = "",
     deployed_at: str = "",
+    product: str = "verireel",
 ) -> RuntimeIdentity:
     return RuntimeIdentity(
-        product="verireel",
+        product=product,
         context=request.context,
         instance=request.preview_slug,
         environment_kind="preview",
@@ -220,12 +222,12 @@ class _DatabaseParts(BaseModel):
     password: str
 
 
-def _preview_app_name(preview_slug: str) -> str:
-    return f"{PREVIEW_APP_PREFIX}-{preview_slug}"
+def _preview_app_name(preview_slug: str, prefix: str = PREVIEW_APP_PREFIX) -> str:
+    return f"{prefix}-{preview_slug}"
 
 
-def _preview_application_name(preview_slug: str) -> str:
-    return f"{_preview_app_name(preview_slug)}-app"
+def _preview_application_name(preview_slug: str, prefix: str = PREVIEW_APP_PREFIX) -> str:
+    return f"{_preview_app_name(preview_slug, prefix)}-app"
 
 
 def _preview_slug_from_application_name(application_name: str) -> str:
@@ -236,9 +238,11 @@ def _preview_slug_from_application_name(application_name: str) -> str:
     return application_name[len(prefix) : -len(suffix)]
 
 
-def _preview_database_identifiers(preview_slug: str) -> tuple[str, str]:
+def _preview_database_identifiers(
+    preview_slug: str, prefix: str = PREVIEW_DATABASE_PREFIX
+) -> tuple[str, str]:
     normalized_slug = preview_slug.strip().lower().replace("-", "_")
-    identifier = f"{PREVIEW_DATABASE_PREFIX}{normalized_slug}"[:63]
+    identifier = f"{prefix}{normalized_slug}"[:63]
     return identifier, identifier
 
 
@@ -414,7 +418,12 @@ def _resolve_preview_secret(
 
 
 def _template_application_payload(
-    *, control_plane_root: Path, host: str, token: str
+    *,
+    control_plane_root: Path,
+    host: str,
+    token: str,
+    template_context: str = "verireel",
+    template_instance: str = "testing",
 ) -> tuple[dokploy_source.DokployTargetDefinition, JsonObject]:
     try:
         source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
@@ -426,12 +435,12 @@ def _template_application_payload(
         raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
     target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
-        context_name="verireel",
-        instance_name="testing",
+        context_name=template_context,
+        instance_name=template_instance,
     )
     if target_definition is None:
         raise VeriReelPreviewRefreshConfigError(
-            "No Dokploy target definition found for verireel/testing."
+            f"No Dokploy target definition found for {template_context}/{template_instance}."
         )
     if target_definition.target_type != "application":
         raise VeriReelPreviewRefreshConfigError(
@@ -453,6 +462,29 @@ def _template_application_payload(
             raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
         raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
     return target_definition, payload
+
+
+def _declared_template_options(
+    profile: LaunchplaneProductProfileRecord | None,
+) -> dict[str, str]:
+    if profile is None:
+        return {}
+    if (
+        profile.driver_id != "generic-web"
+        or profile.preview.transport_extension != "verireel-postgres"
+        or not profile.preview.transport_database_prefix
+        or not profile.preview.app_name_prefix
+    ):
+        raise VeriReelPreviewRefreshConfigError(
+            "Declared preview transport configuration is incomplete."
+        )
+    template = next(
+        (lane for lane in profile.lanes if lane.instance == profile.preview.template_instance),
+        None,
+    )
+    if template is None:
+        raise VeriReelPreviewRefreshConfigError("Declared preview transport has no template lane.")
+    return {"template_context": template.context, "template_instance": template.instance}
 
 
 def _is_source_of_truth_backend_failure(error: click.ClickException) -> bool:
@@ -1096,15 +1128,18 @@ def execute_verireel_preview_refresh(
     request: VeriReelPreviewRefreshRequest,
     preview_id: str = "",
     preview_generation_id: str = "",
+    profile: LaunchplaneProductProfileRecord | None = None,
 ) -> VeriReelPreviewRefreshResult:
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     except click.ClickException as exc:
         raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
+    template_options = _declared_template_options(profile)
     template_target, template_application = _template_application_payload(
         control_plane_root=control_plane_root,
         host=host,
         token=token,
+        **template_options,
     )
     template_env_map = dokploy_api.parse_dokploy_env_text(
         str(template_application.get("env") or "")
@@ -1128,8 +1163,14 @@ def execute_verireel_preview_refresh(
 
     started_at = utc_now_timestamp()
     preview_url = _resolve_preview_url(control_plane_root=control_plane_root, request=request)
-    application_name = _preview_application_name(request.preview_slug)
-    app_name = _preview_app_name(request.preview_slug)
+    app_prefix = profile.preview.app_name_prefix if profile is not None else PREVIEW_APP_PREFIX
+    database_prefix = (
+        profile.preview.transport_database_prefix
+        if profile is not None
+        else PREVIEW_DATABASE_PREFIX
+    )
+    application_name = _preview_application_name(request.preview_slug, app_prefix)
+    app_name = _preview_app_name(request.preview_slug, app_prefix)
     preview_host = _preview_url_host(preview_url)
     preview_domain = _preview_domain_from_url(preview_url)
     try:
@@ -1153,7 +1194,7 @@ def execute_verireel_preview_refresh(
     existing_env_map = dokploy_api.parse_dokploy_env_text(
         str((existing_snapshot or {}).get("env") or "")
     )
-    database_name, role_name = _preview_database_identifiers(request.preview_slug)
+    database_name, role_name = _preview_database_identifiers(request.preview_slug, database_prefix)
     database_parts = existing_database or _DatabaseParts(
         host=template_database.host,
         port=template_database.port,
@@ -1189,6 +1230,7 @@ def execute_verireel_preview_refresh(
             request=request,
             preview_id=preview_id,
             preview_generation_id=preview_generation_id,
+            product=profile.product if profile is not None else "verireel",
         )
         env_text = dokploy_api.render_dokploy_env_text_with_overrides(
             str(template_application.get("env") or ""),
@@ -1398,12 +1440,14 @@ def execute_verireel_preview_destroy(
     *,
     control_plane_root: Path,
     request: VeriReelPreviewDestroyRequest,
+    profile: LaunchplaneProductProfileRecord | None = None,
 ) -> VeriReelPreviewDestroyResult:
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     template_target, template_application = _template_application_payload(
         control_plane_root=control_plane_root,
         host=host,
         token=token,
+        **_declared_template_options(profile),
     )
     template_env_map = dokploy_api.parse_dokploy_env_text(
         str(template_application.get("env") or "")
@@ -1416,7 +1460,13 @@ def execute_verireel_preview_destroy(
     preview_url = _resolve_preview_url_for_destroy(
         control_plane_root=control_plane_root, request=request
     )
-    application_name = _preview_application_name(request.preview_slug)
+    app_prefix = profile.preview.app_name_prefix if profile is not None else PREVIEW_APP_PREFIX
+    database_prefix = (
+        profile.preview.transport_database_prefix
+        if profile is not None
+        else PREVIEW_DATABASE_PREFIX
+    )
+    application_name = _preview_application_name(request.preview_slug, app_prefix)
     try:
         application = _find_application_by_name(
             host=host, token=token, application_name=application_name
@@ -1432,7 +1482,7 @@ def execute_verireel_preview_destroy(
             error_message=str(exc),
         )
     application_id = str((application or {}).get("applicationId") or "").strip()
-    database_name, role_name = _preview_database_identifiers(request.preview_slug)
+    database_name, role_name = _preview_database_identifiers(request.preview_slug, database_prefix)
     existing_database = None
     if application_id:
         application_payload = _fetch_application(
