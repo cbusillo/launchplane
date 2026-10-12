@@ -616,7 +616,10 @@ class GenericWebDeployProviderMutationAdapter:
                 # The runner releases only when no earlier effect checkpoint
                 # exists; after an effect it preserves the reconciliation fence.
                 raise ProviderMutationRejectedError(error) from error
-            lease.checkpoint_effect(phase)
+            if phase == "provider_dispatch_prepared":
+                lease.assert_current()
+            else:
+                lease.checkpoint_effect(phase)
 
         proved_pre_image_retry = self._proved_pre_image_operation == provider_operation_key
         self._proved_pre_image_operation = ""
@@ -647,18 +650,23 @@ class GenericWebDeployProviderMutationAdapter:
                 raise ProviderMutationRejectedError(error) from error
             raise ProviderMutationUnknownError(str(error)) from error
         provider_effect_attempted = result.pop("provider_effect_attempted", False) is True
-        if _string_field(result, "deploy_status") == "fail" and provider_effect_attempted:
+        provider_failure_proved = result.pop("provider_failure_proved", False) is True
+        if (
+            _string_field(result, "deploy_status") == "fail"
+            and provider_effect_attempted
+            and not provider_failure_proved
+        ):
             raise ProviderMutationUnknownError(
                 _string_field(result, "error_message")
                 or "Generic web provider outcome requires reconciliation."
             )
         return ProviderMutationOutcome(
-            response_status_code=202,
+            response_status_code=502 if provider_failure_proved else 202,
             response_payload=provider_operation_response_payload(
                 trace_id=self._trace_id,
                 records=records,
                 result=result,
             ),
-            durable=should_store_generic_web_deploy_idempotency(result),
+            durable=provider_failure_proved or should_store_generic_web_deploy_idempotency(result),
             provider_effect_performed=provider_effect_attempted,
         )

@@ -8187,6 +8187,56 @@ class PostgresRecordStore(HumanSessionStore):
             retry_missing_collision=True,
         )
 
+    def _observe_mutation_during_drain(
+        self,
+        session: Any,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> MutationReservationResult | None:
+        from control_plane.service_deploy_drain import ServiceDeployDraining, admit_reservation
+
+        try:
+            admit_reservation(self, session, scope)
+        except ServiceDeployDraining:
+            # Keep replay, expiry reconciliation and provider observation usable
+            # under the fence. None of these paths admits a fresh effect owner.
+            row = session.scalar(
+                self._idempotency_statement(
+                    scope=scope,
+                    route_path=route_path,
+                    idempotency_key=idempotency_key,
+                    for_update=True,
+                )
+            )
+            if row is None:
+                raise
+            record = self._read_payload(
+                model_type=LaunchplaneIdempotencyRecord, payload=row.payload
+            )
+            if record.request_fingerprint != request_fingerprint:
+                return MutationReservationResult(status="conflict", record=record)
+            if record.state == "completed":
+                return MutationReservationResult(status="replayed", record=record)
+            if record.state == "reconcile_required":
+                return MutationReservationResult(status="reconcile_required", record=record)
+            now = self._database_mutation_timestamp(session)
+            if parse_launchplane_mutation_timestamp(
+                record.lease_expires_at, field_name="lease_expires_at"
+            ) > parse_launchplane_mutation_timestamp(now, field_name="observed_at"):
+                return MutationReservationResult(status="in_progress", record=record)
+            if not record.reconciliation_key:
+                raise
+            record = self._updated_idempotency_record(
+                record, state="reconcile_required", updated_at=now
+            )
+            self._sync_idempotency_row(row, record)
+            session.commit()
+            return MutationReservationResult(status="reconcile_required", record=record)
+        return None
+
     def _reserve_mutation(
         self,
         *,
@@ -8214,17 +8264,15 @@ class PostgresRecordStore(HumanSessionStore):
         try:
             with self._session_factory() as session:
                 self._begin_serialized_write(session)
-                if normalized_scope == "client-release":
-                    from control_plane.service_deploy_drain import (
-                        ServiceDeployDraining,
-                        admission_allowed,
-                        lock,
-                    )
-
-                    if not self.database_url.startswith("sqlite"):
-                        lock(self, session)
-                    if not admission_allowed(session, self._database_mutation_timestamp(session)):
-                        raise ServiceDeployDraining("Launchplane is draining release effects.")
+                observed = self._observe_mutation_during_drain(
+                    session,
+                    scope=normalized_scope,
+                    route_path=normalized_route_path,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint=normalized_request_fingerprint,
+                )
+                if observed is not None:
+                    return observed
                 observed_at = self._database_mutation_timestamp(session)
                 reservation = build_launchplane_mutation_reservation(
                     scope=scope,
@@ -8248,17 +8296,15 @@ class PostgresRecordStore(HumanSessionStore):
 
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            if normalized_scope == "client-release":
-                from control_plane.service_deploy_drain import (
-                    ServiceDeployDraining,
-                    admission_allowed,
-                    lock,
-                )
-
-                if not self.database_url.startswith("sqlite"):
-                    lock(self, session)
-                if not admission_allowed(session, self._database_mutation_timestamp(session)):
-                    raise ServiceDeployDraining("Launchplane is draining release effects.")
+            observed = self._observe_mutation_during_drain(
+                session,
+                scope=normalized_scope,
+                route_path=normalized_route_path,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint=normalized_request_fingerprint,
+            )
+            if observed is not None:
+                return observed
             row = session.scalar(
                 self._idempotency_statement(
                     scope=normalized_scope,
@@ -9004,6 +9050,9 @@ class PostgresRecordStore(HumanSessionStore):
         try:
             with self._session_factory() as session:
                 self._begin_serialized_write(session)
+                from control_plane.service_deploy_drain import admit_reservation
+
+                admit_reservation(self, session, scope)
                 row = session.scalar(
                     self._idempotency_statement(
                         scope=reservation.scope,
@@ -9147,6 +9196,9 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("Reconciled mutation retry requires a lease owner.")
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            from control_plane.service_deploy_drain import admit_reservation
+
+            admit_reservation(self, session, reservation.scope)
             row = session.scalar(
                 self._idempotency_statement(
                     scope=reservation.scope,

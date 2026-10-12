@@ -53,6 +53,7 @@ class GenericWebResolvedDeployTarget(BaseModel):
     resolved_target: ResolvedTargetEvidence
     deployed_target: DeployedTargetReference | None = None
     deploy_timeout_seconds: int = Field(ge=1)
+    provider_dispatch_evidence: dict[str, object] = Field(default_factory=dict)
 
 
 class GenericWebProviderReconciliationTarget(BaseModel):
@@ -235,6 +236,32 @@ class GenericWebProviderDeploymentObservation(BaseModel):
                 + "."
             )
         return self
+
+
+class GenericWebProviderDeploymentFailed(click.ClickException):
+    """A correlated terminal provider failure, with complete deployment references."""
+
+    def __init__(self, observation: GenericWebProviderDeploymentObservation) -> None:
+        if observation.outcome != "present" or observation.deployment_status not in {
+            "failed",
+            "error",
+            "canceled",
+            "cancelled",
+            "killed",
+            "unhealthy",
+            "timeout",
+        }:
+            raise ValueError("A provider failure requires determinate terminal failure evidence.")
+        started = parse_launchplane_mutation_timestamp(
+            observation.started_at, field_name="started_at"
+        )
+        finished = parse_launchplane_mutation_timestamp(
+            observation.finished_at, field_name="finished_at"
+        )
+        if finished < started:
+            raise ValueError("Provider failure timestamps are out of order.")
+        self.observation = observation
+        super().__init__(observation.error_message or "Generic web provider deployment failed.")
 
 
 class GenericWebLegacyDeploymentCorrelationEvidence(BaseModel):
@@ -611,23 +638,43 @@ class DokployGenericWebDeployProvider:
         effect_started: Callable[[], None],
     ) -> GenericWebProviderDeploymentObservation | None:
         host, token = self._read_provider_config(control_plane_root=control_plane_root)
-        # Dokploy compose deployments have not carried the title Launchplane
-        # sends (cbusillo/launchplane#2531), so compose deploys also accept the
-        # sole new deployment and leave proof of its effect to runtime evidence.
-        untitled_deployment = execute_dokploy_artifact_deploy(
-            host=host,
-            token=token,
-            ship_request=resolved_deploy_target.ship_request,
-            resolved_target=resolved_deploy_target.resolved_target,
-            deploy_timeout_seconds=resolved_deploy_target.deploy_timeout_seconds,
-            runtime_identity=runtime_identity,
-            deployment_title=deployment_title,
-            before_provider_mutation=before_provider_mutation,
-            effect_started=effect_started,
-            accept_sole_new_deployment=(
-                resolved_deploy_target.resolved_target.target_type == "compose"
-            ),
-        )
+
+        def retain_dispatch(known_ids: frozenset[str]) -> None:
+            resolved_deploy_target.provider_dispatch_evidence = {
+                "deployment_title": deployment_title,
+                "target_id": resolved_deploy_target.resolved_target.target_id,
+                "known_deployment_ids": sorted(known_ids),
+            }
+            before_provider_mutation("provider_dispatch_prepared")
+
+        try:
+            untitled_deployment = execute_dokploy_artifact_deploy(
+                host=host,
+                token=token,
+                ship_request=resolved_deploy_target.ship_request,
+                resolved_target=resolved_deploy_target.resolved_target,
+                deploy_timeout_seconds=resolved_deploy_target.deploy_timeout_seconds,
+                runtime_identity=runtime_identity,
+                deployment_title=deployment_title,
+                before_provider_mutation=before_provider_mutation,
+                effect_started=effect_started,
+                dispatch_evidence_checkpoint=retain_dispatch,
+                accept_sole_new_deployment=(
+                    resolved_deploy_target.resolved_target.target_type == "compose"
+                ),
+            )
+        except dokploy_api.DokployDeploymentFailed as error:
+            if error.deployment is None:
+                raise
+            try:
+                observation = _terminal_deployment_observation(error.deployment)
+            except ValueError:
+                raise error from None
+            try:
+                failure = GenericWebProviderDeploymentFailed(observation)
+            except ValueError:
+                raise error from None
+            raise failure from error
         if untitled_deployment is None:
             return None
         try:

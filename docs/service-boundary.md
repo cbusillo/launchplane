@@ -592,16 +592,7 @@ records `already_absent` without claiming a GitHub mutation.
   - `POST /v1/drivers/odoo/prod-promotion-run` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-promotion` (native FastAPI retained admin route)
   - `POST /v1/drivers/odoo/prod-rollback` (native FastAPI)
-  - `POST /v1/drivers/verireel/testing-deploy` (native FastAPI)
-  - `POST /v1/drivers/verireel/testing-verification` (native FastAPI)
-  - `POST /v1/drivers/verireel/stable-environment` (native FastAPI)
   - `POST /v1/drivers/verireel/app-maintenance` (native FastAPI)
-  - `POST /v1/drivers/verireel/prod-deploy` (native FastAPI)
-  - `POST /v1/drivers/verireel/prod-promotion` (native FastAPI)
-  - `POST /v1/drivers/verireel/prod-rollback` (native FastAPI)
-  - `POST /v1/drivers/verireel/preview-refresh` (native FastAPI)
-  - `POST /v1/drivers/verireel/preview-inventory` (native FastAPI)
-  - `POST /v1/drivers/verireel/preview-destroy` (native FastAPI)
 
 ## Service Route Checklist
 
@@ -1627,79 +1618,10 @@ rule
   - allowed actions
 ```
 
-The product-repository examples below show the current code's rule shape only;
-product-repository workflow grants are retired (see `DIRECTION.md`).
-
-Example policy intent:
-
-```text
-repository: example-org/verireel
-workflow_ref: example-org/verireel/.github/workflows/preview-control-plane.yml@*
-event_name: pull_request
-allowed product: verireel
-allowed contexts: verireel-testing
-allowed actions:
-  - verireel_preview_refresh.execute
-  - preview_generation.write
-```
-
-Another example:
-
-```text
-repository: example-org/verireel
-workflow_ref: example-org/verireel/.github/workflows/preview-cleanup.yml@*
-event_name: pull_request
-allowed product: verireel
-allowed contexts: verireel-testing
-allowed actions:
-  - preview_lifecycle.plan
-  - preview_lifecycle.cleanup
-  - verireel_preview_destroy.execute
-  - preview_destroyed.write
-```
-
-Launchplane preview lifecycle sweep example:
-
-```text
-repository: example-org/launchplane
-workflow_ref: example-org/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main
-event_name: schedule or workflow_dispatch
-allowed products: all preview-enabled products
-allowed contexts: each preview-enabled product preview context
-allowed actions:
-  - preview_lifecycle.plan
-  - preview_lifecycle.cleanup
-```
-
-Stable-lane examples:
-
-```text
-repository: example-org/verireel
-workflow_ref: example-org/verireel/.github/workflows/publish-image.yml@refs/heads/main
-event_name: push or workflow_dispatch
-allowed product: verireel
-allowed contexts: verireel
-allowed actions:
-  - verireel_testing_deploy.execute
-  - verireel_stable_environment.read
-  - deployment.write
-```
-
-```text
-repository: example-org/verireel
-workflow_ref: example-org/verireel/.github/workflows/promote-image.yml@refs/heads/main
-event_name: workflow_dispatch
-allowed product: verireel
-allowed contexts: verireel
-allowed actions:
-  - verireel_stable_environment.read
-  - backup_gate.write
-  - verireel_prod_deploy.execute
-  - verireel_prod_promotion.execute
-  - verireel_prod_rollback.execute
-  - deployment.write
-  - promotion.write
-```
+Product repositories build their own artifacts and do not call Launchplane;
+see [event-driven deploys](event-driven-deploys.md). Retired VeriReel workflow
+grant examples and native release routes are removed. Shared driver contracts
+and declared extensions are documented in [driver development](driver-development.md).
 
 Odoo stable-lane example:
 
@@ -3270,12 +3192,12 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/generic-web/prod-promotion` (native FastAPI)
 - `POST /v1/drivers/generic-web/prod-rollback-plan` (native FastAPI)
 - `POST /v1/drivers/generic-web/prod-rollback` (native FastAPI)
-- `POST /v1/drivers/verireel/...` (native FastAPI)
+- `POST /v1/drivers/verireel/app-maintenance` (declared testing/preview extension repair)
 
 Driver route metadata remains descriptor-backed for UI/action discovery.
-VeriReel testing verification, stable environment, runtime verification,
-preview inventory, and preview verification are native FastAPI routes; their
-descriptors remain discoverable.
+VeriReel uses generic-web release and preview routes; its genuine application
+behavior is selected through the profile declarations. The old native release
+descriptor and endpoints are removed; historical evidence reads remain.
 
 `Odoo Driver Route Smoke` is the Launchplane-owned route exposure gate for Odoo
 preview and artifact-publish handoff routes. It first sends unauthenticated
@@ -3529,19 +3451,9 @@ Product preview TLS apply is the first DB-only route migrated to this boundary;
 remaining route migrations must preserve the same fail-closed semantics rather
 than relying on process-local locks.
 
-Current VeriReel key shapes:
-
-- preview generation: `preview-generation:<product>:<context>:<anchor_repo>:<pr_number>:<sha>`
-- preview destroy: `preview-destroyed:<product>:<context>:<anchor_repo>:<pr_number>:<destroy_reason>`
-- VeriReel preview refresh driver:
-  `verireel-preview-refresh:<product>:<context>:<anchor_repo>:<pr_number>:<sha>`
-- VeriReel preview destroy driver:
-  `verireel-preview-destroy:<product>:<context>:<anchor_repo>:<pr_number>:<destroy_reason>`
-
-For VeriReel, `destroy_reason` should stay stable per destroy lane so idempotent
-retries do not collide. The regular cleanup workflow uses
-`external_preview_cleanup_completed`; the janitor backstop uses
-`external_preview_janitor_cleanup_completed`.
+Stored preview-generation and destruction keys remain historical evidence. Current
+shared-driver mutation and replay contracts are described in
+[driver development](driver-development.md) and [event-driven deploys](event-driven-deploys.md).
 
 - testing deployment evidence: `testing-deployment:<product>:<context>:<instance>:<record_id>`
 - prod deployment evidence: `prod-deployment:<product>:<context>:<instance>:<record_id>`
@@ -3845,58 +3757,7 @@ from the base branch through `pull_request_target`, so the deploy-maintained
 grant set includes both `pull_request` and `pull_request_target` feedback
 writers for the same workflow file.
 
-- VeriReel testing deploy driver:
-  `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
-- VeriReel testing verification driver:
-  `verireel-testing-verification:<product>:<context>:<instance>:<deployment_record_id>`
-- VeriReel prod deploy driver:
-  `verireel-prod-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
-- VeriReel prod backup gate driver:
-  `verireel-prod-backup-gate:<product>:<context>:<instance>:<backup_record_id>`
-- VeriReel prod promotion driver:
-  `verireel-prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<artifact_id>:<source_git_ref>:<backup_record_id>:<promotion_record_id>:<expected_build_revision>:<expected_build_tag>`
-
-The VeriReel prod-promotion request may include the primitive testing-lane
-source health status. Launchplane normalizes that status and writes it into the
-driver-owned promotion record; product workflows should not post a second
-rendered promotion evidence payload for fields the driver can derive.
-
-VeriReel deploy and prod-promotion responses expose provider-neutral target
-metadata with `target_category`, `provider_id`, and `provider_target_type`.
-The legacy response-only `target_type` alias is retired; Dokploy execution
-configuration still uses provider-specific target type fields internally where
-application-vs-compose behavior is required.
-
-Recommended first success shape:
-
-```json
-{
-  "status": "accepted",
-  "trace_id": "launchplane_req_01jabc...",
-  "records": {
-    "preview_id": "preview-verireel-pr-123",
-    "generation_id": "preview-verireel-pr-123-generation-0003"
-  }
-}
-```
-
-Recommended first error shape:
-
-```json
-{
-  "status": "rejected",
-  "trace_id": "launchplane_req_01jabc...",
-  "error": {
-    "code": "authorization_denied",
-    "message": "Workflow cannot write preview evidence for verireel-testing."
-  }
-}
-```
-
 ## First Stable Payloads
-
-Launchplane should keep the typed evidence payloads already proven in the current
-CLI adapters and expose them over HTTP.
 
 ### Preview generation evidence
 
