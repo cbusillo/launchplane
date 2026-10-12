@@ -2038,3 +2038,12 @@ h3 {
     transition-duration: 0.01ms !important;
   }
 }
+
+.monitoring-control { min-width: 0; }
+.monitoring-checkbox { display: flex; align-items: center; gap: .6rem; margin: .9rem 0; }
+.monitoring-checkbox input { flex: 0 0 auto; }
+.monitoring-endpoint, .monitoring-review dd { overflow-wrap: anywhere; }
+.monitoring-review { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+.monitoring-review dl { display: grid; gap: .7rem; }
+.monitoring-review dt { color: var(--muted); }
+.monitoring-review dd { margin: .2rem 0 0; }

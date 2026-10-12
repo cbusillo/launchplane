@@ -31433,6 +31433,257 @@
         "title": "ProductHealthMonitoringCheckSummary",
         "type": "object"
       },
+      "ProductHealthMonitoringPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "check_name": {
+            "title": "Check Name",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "current_check_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "public_http",
+                  "private_http",
+                  "provider"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Check Kind"
+          },
+          "current_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Enabled"
+          },
+          "current_monitoring_intent": {
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Current Monitoring Intent",
+            "type": "string"
+          },
+          "current_private_endpoint_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Private Endpoint Key"
+          },
+          "current_require_runtime_identity": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Require Runtime Identity"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "create",
+              "update",
+              "unchanged"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "plan_sha256": {
+            "title": "Plan Sha256",
+            "type": "string"
+          },
+          "private_endpoint_key": {
+            "default": "",
+            "title": "Private Endpoint Key",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "profile_sha256_before": {
+            "title": "Profile Sha256 Before",
+            "type": "string"
+          },
+          "profile_updated_at_after": {
+            "default": "",
+            "title": "Profile Updated At After",
+            "type": "string"
+          },
+          "profile_updated_at_before": {
+            "title": "Profile Updated At Before",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "requested_check_kind": {
+            "enum": [
+              "public_http",
+              "private_http"
+            ],
+            "title": "Requested Check Kind",
+            "type": "string"
+          },
+          "requested_enabled": {
+            "title": "Requested Enabled",
+            "type": "boolean"
+          },
+          "requested_monitoring_intent": {
+            "enum": [
+              "public",
+              "private",
+              "prelaunch"
+            ],
+            "title": "Requested Monitoring Intent",
+            "type": "string"
+          },
+          "requested_require_runtime_identity": {
+            "title": "Requested Require Runtime Identity",
+            "type": "boolean"
+          },
+          "resolved_url": {
+            "title": "Resolved Url",
+            "type": "string"
+          },
+          "source_label": {
+            "const": "service:product-health-monitoring",
+            "default": "service:product-health-monitoring",
+            "title": "Source Label",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "product",
+          "context",
+          "instance",
+          "check_name",
+          "requested_check_kind",
+          "current_monitoring_intent",
+          "requested_monitoring_intent",
+          "operation",
+          "requested_enabled",
+          "requested_require_runtime_identity",
+          "resolved_url",
+          "changed",
+          "reason",
+          "profile_updated_at_before",
+          "profile_sha256_before",
+          "plan_sha256"
+        ],
+        "title": "ProductHealthMonitoringPlan",
+        "type": "object"
+      },
+      "ProductHealthMonitoringResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "original_trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Trace Id"
+          },
+          "records": {
+            "additionalProperties": true,
+            "title": "Records",
+            "type": "object"
+          },
+          "replayed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replayed"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductHealthMonitoringPlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "records"
+        ],
+        "title": "ProductHealthMonitoringResponse",
+        "type": "object"
+      },
       "ProductHealthMonitoringSummary": {
         "additionalProperties": false,
         "properties": {
@@ -83315,6 +83566,16 @@
               "title": "Authorization",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -83417,7 +83678,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                  "$ref": "#/components/schemas/ProductHealthMonitoringResponse"
                 }
               }
             },
@@ -95048,6 +95309,7 @@
     "/v1/privileged-operations/ordinary-agent-delivery-activation/plans": "plan_ordinary_agent_delivery_activation",
     "/v1/privileged-operations/plans/{operation_id}/approve": "approve_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
+    "/v1/product-profiles/health-monitoring/apply": "apply_product_health_monitoring",
     "/v1/product-profiles/{product}/image-repository": "apply_product_image_repository",
     "/v1/product-profiles/{product}/owner": "apply_product_owner",
     "/v1/product-profiles/{product}/production-use": "apply_product_production_use",

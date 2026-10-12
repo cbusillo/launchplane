@@ -5,6 +5,8 @@ import type {
   ProductListPayload,
 } from "./types";
 import type {
+  ApplyProductHealthMonitoringData,
+  ApplyProductHealthMonitoringResponse,
   ApplyProductEnvironmentConfigData,
   ApplyProductWebsiteCleanupData,
   ApplyProductWebsiteCleanupResponse,
@@ -604,6 +606,16 @@ export function applyProductEnvironmentConfig(
     options.signal,
     generatedIdempotencyKey(request.headers),
     options.onDispatch,
+  );
+}
+
+export function applyProductHealthMonitoring(
+  payload: ApplyProductHealthMonitoringData["body"],
+  options: BrowserOperationOptions,
+): Promise<ApplyProductHealthMonitoringResponse> {
+  return requestJson<ApplyProductHealthMonitoringResponse>(
+    BROWSER_WRITE_ROUTES.productHealthMonitoringApply,
+    "POST", payload, options.signal, options.idempotencyKey, options.onDispatch,
   );
 }
 
