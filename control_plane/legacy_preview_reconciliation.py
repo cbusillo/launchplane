@@ -408,7 +408,8 @@ def plan_legacy_preview(
         if observation["provider_absence_verified"]
         else "blocked_provider_present",
         "apply_eligible": observation["provider_absence_verified"]
-        and bound.preview.state != "destroyed",
+        and bound.preview.state != "destroyed"
+        and bound.profile.is_active,
         "authority_digest": bound.digest,
         **observation,
     }

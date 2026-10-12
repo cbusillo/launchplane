@@ -791,10 +791,6 @@ class ProductRetirementTests(unittest.TestCase):
             store.close()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ProductRetirementObservationCompatibilityTests(unittest.TestCase):
     def test_pre_upgrade_plan_with_domains_keeps_its_provider_identity(self) -> None:
         # Captured from 13b55ec7 with synthetic provider input; this is immutable
@@ -839,3 +835,7 @@ class ProductRetirementObservationCompatibilityTests(unittest.TestCase):
             }
         )
         self.assertFalse(_observation_allows_reconciliation(planned=legacy, current=changed))
+
+
+if __name__ == "__main__":
+    unittest.main()

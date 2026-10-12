@@ -107,6 +107,10 @@ def register_legacy_preview_reconciliation_route(
                 product_mutation=reconciliation.mode == "apply",
             ):
                 if reconciliation.mode == "apply":
+                    if not store.read_product_profile_record(profile.product).is_active:
+                        raise ValueError(
+                            "Product retirement owns preview reconciliation; resume it."
+                        )
                     saved = store.read_idempotency_record(
                         scope=idempotency_scope(identity),
                         route_path=LEGACY_PREVIEW_RECONCILIATION_ROUTE,

@@ -297,6 +297,21 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.store.read_product_profile_record(self.profile.product).lifecycle_state, "retiring"
         )
+        from control_plane.http_routes.evidence import _write_active_product_preview_evidence
+        import click
+
+        with patch(
+            "control_plane.http_routes.evidence.apply_launchplane_destroy_preview"
+        ) as writer:
+            for product in (self.profile.product, "another-product"):
+                with self.assertRaises(click.ClickException):
+                    _write_active_product_preview_evidence(
+                        record_store=self.store,
+                        product=product,
+                        context=self.profile.preview.context,
+                        write=writer,
+                    )
+            writer.assert_not_called()
         retry = await request(
             self.app,
             "POST",
@@ -307,7 +322,7 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retry.status_code, 202, retry.text)
         self.assertEqual(self.deleted, ["preview-6", "testing-app"])
 
-    async def test_changed_preview_and_renamed_or_shared_provider_refuse_deletion(self) -> None:
+    async def test_changed_preview_refuses_deletion(self) -> None:
         await self.plan()
         preview = self.store.read_preview_record("legacy-6")
         self.store.write_preview_record(
@@ -322,6 +337,18 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(self.deleted, [])
+
+    async def test_review_shows_observed_names_and_distinguishes_absence_proof(self) -> None:
+        self.apps["preview-6"]["name"] = "renamed-preview"
+        self.apps["testing-app"]["name"] = "renamed-testing"
+        planned = await self.plan()
+        result = planned["result"]
+        self.assertIn("renamed-testing", result["testing_plan"]["application_name"])
+        present = next(p for p in result["preview_plan"] if p["preview_id"] == "legacy-6")
+        absent = next(p for p in result["preview_plan"] if p["preview_id"] == "legacy-1")
+        self.assertIn("renamed-preview", present["application_name"])
+        self.assertIn(self.apps["preview-6"]["appName"], present["application_name"])
+        self.assertNotEqual(present["ownership"], absent["ownership"])
 
     async def test_instance_grant_does_not_expand_to_product_preview_retirement(self) -> None:
         from tests.test_http_app_product_retirement import ProductRetirementHttpTests
@@ -542,6 +569,29 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_dokploy_target_id_records(), ())
         self.assertEqual(self.store.list_dokploy_target_records(), ())
 
+    async def test_refresh_accepts_cosmetic_profile_change(self) -> None:
+        from control_plane.workflows.generic_web_preview import (
+            execute_generic_web_preview_refresh,
+            GenericWebPreviewRefreshRequest,
+        )
+
+        current = self.profile.model_copy(update={"display_name": "New display name"})
+        self.store.write_product_profile_record(current)
+        with patch(
+            "control_plane.workflows.generic_web_preview._execute_generic_web_preview_refresh_unserialized"
+        ) as provider:
+            execute_generic_web_preview_refresh(
+                control_plane_root=self.root,
+                record_store=self.store,
+                request=GenericWebPreviewRefreshRequest(
+                    product=self.profile.product,
+                    preview_slug="pr-6",
+                    image_reference=self.profile.image.repository + ":fixture",
+                ),
+                profile=self.profile,
+            )
+            self.assertEqual(provider.call_args.kwargs["profile"], current)
+
     async def test_standalone_destroy_with_stale_profile_refuses_retiring_product(self) -> None:
         from control_plane.workflows.generic_web_preview import (
             execute_generic_web_preview_destroy,
@@ -625,6 +675,7 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         import click
 
         entered = Event()
+        finished = Event()
 
         def queued_deploy() -> None:
             entered.set()
@@ -640,19 +691,25 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     profile=self.profile,
                 )
+            finished.set()
 
-        with serialize_generic_web_product_operation(
-            record_store=self.store, product=self.profile.product, exclusive=True
-        ):
-            task = asyncio.create_task(asyncio.to_thread(queued_deploy))
-            await asyncio.to_thread(entered.wait, 5)
-            self.store.write_product_profile_record(
-                self.profile.model_copy(
-                    update={
-                        "lifecycle_state": "retiring",
-                        "preview": self.profile.preview.model_copy(update={"enabled": False}),
-                    }
+        with patch(
+            "control_plane.workflows.generic_web_deploy._execute_generic_web_deploy_unserialized"
+        ) as provider:
+            with serialize_generic_web_product_operation(
+                record_store=self.store, product=self.profile.product, exclusive=True
+            ):
+                task = asyncio.create_task(asyncio.to_thread(queued_deploy))
+                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                self.assertFalse(await asyncio.to_thread(finished.wait, 0.1))
+                self.store.write_product_profile_record(
+                    self.profile.model_copy(
+                        update={
+                            "lifecycle_state": "retiring",
+                            "preview": self.profile.preview.model_copy(update={"enabled": False}),
+                        }
+                    )
                 )
-            )
-        await asyncio.wait_for(task, 5)
+            await asyncio.wait_for(task, 5)
+            provider.assert_not_called()
         self.assertEqual(self.deleted, [])

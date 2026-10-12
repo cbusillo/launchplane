@@ -164,7 +164,12 @@ def plan_product_previews(
             ProductRetirementPreviewPlan(
                 preview=bound.preview,
                 slug=bound.slug,
-                application_name=bound.application_name,
+                application_name=provider.application_name if provider else bound.application_name,
+                ownership_proof="provider_absent"
+                if provider is None
+                else "recorded_target"
+                if provider.target_id in bound.preview_target_ids
+                else "product_source",
                 authority_sha256=canonical_sha256(authority),
                 provider_observation=provider,
                 target_authority=tuple(targets),

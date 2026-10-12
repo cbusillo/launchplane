@@ -26,6 +26,7 @@ from control_plane.contracts.product_retirement import (
     canonical_sha256,
     provider_identifier_sha256,
     product_retirement_secret_authority,
+    preview_inclusive_retirement_confirmation,
 )
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
@@ -408,6 +409,8 @@ def build_provider_observation(
         application_name_sha256=canonical_sha256(
             {"name": core_payload["name"], "app_name": core_payload["app_name"]}
         ),
+        application_name=core_payload["name"],
+        application_app_name=core_payload["app_name"],
         project_reference_sha256=canonical_sha256(
             {
                 "project_id": core_payload["project_id"],
@@ -522,7 +525,7 @@ def build_product_retirement_plan_record(
         authority_snapshot=snapshot,
         preview_plans=preview_plans,
         profile_record=bound.profile if request.include_previews else None,
-        application_name=bound.dokploy_target.target_name,
+        application_name=observation.application_name or bound.dokploy_target.target_name,
     )
 
 
@@ -1442,6 +1445,17 @@ def build_started_product_retirement_record(
     )
 
 
+def _review_application_name(
+    observation: ProductRetirementProviderObservation | None, expected: str
+) -> str:
+    if observation is None:
+        return expected
+    name = observation.application_name or expected
+    return (
+        f"{name} ({observation.application_app_name})" if observation.application_app_name else name
+    )
+
+
 def redacted_product_retirement_response(record: ProductRetirementRecord) -> dict[str, object]:
     evidence = record.mutation_evidence
     return {
@@ -1463,25 +1477,36 @@ def redacted_product_retirement_response(record: ProductRetirementRecord) -> dic
             "planned_preview_ids": list(record.authority_snapshot.preview_record_refs),
             **(
                 {
-                    "confirmation": f"retire product {record.product} including its previews"
+                    "confirmation": preview_inclusive_retirement_confirmation(record.product)
                     if record.profile_record
                     else "",
                     "preview_plan": [
                         {
                             "preview_id": p.preview.preview_id,
-                            "application_name": p.application_name,
+                            "application_name": _review_application_name(
+                                p.provider_observation, p.application_name
+                            ),
                             "provider_state": "present" if p.provider_observation else "absent",
                             "target_sha256": p.provider_observation.target_id_sha256
                             if p.provider_observation
                             else "",
                             "routes": list(p.routes),
                             "affected_records": list(p.affected_record_refs),
-                            "ownership": f"Exclusive context {p.preview.context}; repository {p.preview.anchor_repo}; PR {p.preview.anchor_pr_number}. Exact preview identity and product source or historical target match verified.",
+                            "ownership": f"Exclusive context {p.preview.context}; repository {p.preview.anchor_repo}; PR {p.preview.anchor_pr_number}. "
+                            + (
+                                "Exact preview identity with recorded target proof verified."
+                                if p.provider_observation and p.ownership_proof == "recorded_target"
+                                else "Exact preview identity with product source proof verified."
+                                if p.provider_observation
+                                else "Complete provider inventory proves absence; preview history retained."
+                            ),
                         }
                         for p in record.preview_plans
                     ],
                     "testing_plan": {
-                        "application_name": record.application_name,
+                        "application_name": _review_application_name(
+                            record.provider_observation, record.application_name
+                        ),
                         "target_sha256": record.provider_observation.target_id_sha256,
                         "routes": sorted(
                             set(record.provider_observation.domain_hosts)
@@ -1599,6 +1624,10 @@ def _same_planned_observation(
             if planned.source_fingerprint_sha256
             else "",
             "domain_hosts": current.domain_hosts if planned.domain_hosts else (),
+            "application_name": current.application_name if planned.application_name else "",
+            "application_app_name": current.application_app_name
+            if planned.application_app_name
+            else "",
         }
     )
     return planned.model_copy(update={"observed_at": current.observed_at}) == normalized

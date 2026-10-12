@@ -24,6 +24,10 @@ ProductRetirementOutcome = Literal[
 MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH = 1000
 
 
+def preview_inclusive_retirement_confirmation(product: str) -> str:
+    return f"retire product {product} including its previews"
+
+
 def product_retirement_secret_authority(record: SecretRecord) -> dict[str, object]:
     return record.model_dump(mode="json", exclude={"status", "updated_at", "updated_by"})
 
@@ -98,7 +102,7 @@ class ProductRetirementRequest(BaseModel):
     @property
     def expected_confirmation(self) -> str:
         if self.include_previews:
-            return f"retire product {self.product} including its previews"
+            return preview_inclusive_retirement_confirmation(self.product)
         if self.no_target:
             return f"retire product {self.product} instance {self.instance} with no target"
         return (
@@ -161,6 +165,8 @@ class ProductRetirementProviderObservation(BaseModel):
     application_fingerprint_sha256: str = ""
     source_fingerprint_sha256: str = ""
     application_name_sha256: str = ""
+    application_name: str = ""
+    application_app_name: str = ""
     project_reference_sha256: str = ""
     domain_ids: tuple[str, ...] = ()
     domain_id_sha256: tuple[str, ...] = ()
@@ -221,6 +227,16 @@ class ProductRetirementProviderObservation(BaseModel):
             raise ValueError("Present provider observations require complete fingerprints.")
         if self.state == "absent" and self.retirable:
             raise ValueError("Absent provider observations cannot be marked retirable.")
+        if (self.application_name or self.application_app_name) and canonical_sha256(
+            {"name": self.application_name, "app_name": self.application_app_name}
+        ) != self.application_name_sha256:
+            raise ValueError("Provider review names do not match their bound identity.")
+        if (
+            self.domain_hosts
+            and tuple(canonical_sha256(host) for host in self.domain_hosts)
+            != self.domain_host_sha256
+        ):
+            raise ValueError("Provider review routes do not match their bound identity.")
         return self
 
 
@@ -230,6 +246,7 @@ class ProductRetirementPreviewPlan(BaseModel):
     preview: PreviewRecord
     slug: str
     application_name: str
+    ownership_proof: Literal["", "recorded_target", "product_source", "provider_absent"] = ""
     authority_sha256: str
     provider_observation: ProductRetirementProviderObservation | None = None
     target_authority: tuple[dict[str, object], ...] = ()

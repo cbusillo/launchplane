@@ -1408,7 +1408,10 @@ def execute_generic_web_preview_refresh(
         current = resolve_generic_web_preview_profile(
             record_store=record_store, product=resolved.product
         )
-        if not current.is_active or current != resolved:
+        cosmetic = {"display_name", "updated_at", "source"}
+        if not current.is_active or current.model_dump(exclude=cosmetic) != resolved.model_dump(
+            exclude=cosmetic
+        ):
             raise click.ClickException("Product preview authority changed before refresh.")
         return _execute_generic_web_preview_refresh_unserialized(
             control_plane_root=control_plane_root,
