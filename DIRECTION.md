@@ -11,8 +11,7 @@ Launchplane is the small control layer that lets agents build, preview,
 deploy, promote, back up, restore, and merge every product, and record a
 Client's accept-or-reject decision. A live site is the production lane of a
 product recorded as live. A product is recorded as live when its Client uses
-production for real business; a missing or wrong record does not override
-the overall direction's stop on Client business systems.
+production for real business.
 
 Judge every change by one question: can a product be maintained without
 anyone touching Launchplane? Work that adds upkeep to Launchplane itself needs
