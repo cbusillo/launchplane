@@ -375,39 +375,137 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(denied.status_code, 403, denied.text)
 
-    async def test_role_policy_diagnostics_evaluate_inherited_effects_without_policy_writes(
-        self,
-    ) -> None:
+    async def test_role_policy_diagnostics_match_runtime_product_resolution(self) -> None:
+        from control_plane.contracts.authz_access_read import EffectiveAccessEvaluateRequest
+
         policy = reader_policy()
-        probe = {
-            "principal": {
-                "principal_type": "local_operator",
-                "subject": "record-reader",
-                "token_label": "record-reader-label",
-            },
-            "action": "product_config.plan",
-            "product": "sample",
-            "context": "sample",
-            "target_scope": "context",
+        profiles = tuple(
+            LaunchplaneProductProfileRecord.model_validate(product_profile_payload(name))
+            for name in ("sample", "foreign-site")
+        )
+        principal = {
+            "principal_type": "local_operator",
+            "subject": "record-reader",
+            "token_label": "record-reader-label",
         }
+        own, foreign = profiles
+        lane = own.lanes[0]
+        probes = [
+            {
+                "principal": principal,
+                "action": "product_config.plan",
+                "product": own.product,
+                "context": lane.context,
+                "target_scope": "context",
+            },
+            {
+                "principal": principal,
+                "action": "inventory.read",
+                "product": "launchplane",
+                "context": lane.context,
+                "target_scope": "instance",
+                "instance": lane.instance,
+            },
+            {
+                "principal": principal,
+                "action": "product_config.plan",
+                "product": own.product,
+                "context": foreign.lanes[0].context,
+                "target_scope": "context",
+            },
+            {
+                "principal": principal,
+                "action": "product_profile.read",
+                "product": "launchplane",
+                "context": "launchplane",
+                "target_scope": "context",
+            },
+        ]
+        candidate = policy.model_copy(
+            update={
+                "local_operators": tuple(
+                    rule.model_copy(update={"products": (*rule.products, foreign.product)})
+                    for rule in policy.local_operators
+                )
+            }
+        )
         with _database_app(policy) as (store, record, app):
+            for profile in profiles:
+                store.write_product_profile_record(profile)
             headers = {"Authorization": "Bearer reader-token"}
             async with lifespan_client(app) as client:
-                effective = await client.post(
-                    "/v1/authz-diagnostics/effective-access/evaluate", headers=headers, json=probe
-                )
-                self.assertEqual(effective.status_code, 200, effective.text)
-                self.assertEqual(effective.json()["evaluation"]["decision"], "allowed")
+                expected = ("allowed", "allowed", "denied", "denied")
+                for probe, decision in zip(probes, expected, strict=True):
+                    effective = await client.post(
+                        "/v1/authz-diagnostics/effective-access/evaluate",
+                        headers=headers,
+                        json=probe,
+                    )
+                    self.assertEqual(effective.status_code, 200, effective.text)
+                    self.assertEqual(effective.json()["evaluation"]["decision"], decision)
+                    typed_probe = EffectiveAccessEvaluateRequest.model_validate(probe)
+                    actual = app.state.authz_policy_runtime.evaluate(
+                        identity=LocalOperatorIdentity("record-reader", "record-reader-label"),
+                        action=typed_probe.action,
+                        product=typed_probe.product,
+                        context=typed_probe.context,
+                        target=AuthorizationTarget(
+                            scope="instance", instances=(typed_probe.instance,)
+                        )
+                        if "instance" in probe
+                        else AuthorizationTarget(scope="context"),
+                        record_context=False,
+                    )
+                    self.assertEqual(effective.json()["evaluation"]["decision"], actual.decision)
                 preview = await client.post(
                     "/v1/authz-diagnostics/candidate-policy/preview",
                     headers=headers,
-                    json={"candidate_policy": policy.model_dump(mode="json"), "probes": [probe]},
+                    json={"candidate_policy": candidate.model_dump(mode="json"), "probes": probes},
                 )
                 self.assertEqual(preview.status_code, 200, preview.text)
-                result = preview.json()["probes"][0]
-                self.assertEqual(result["active_evaluation"]["decision"], "allowed")
-                self.assertEqual(result["candidate_evaluation"]["decision"], "allowed")
+                for result, decision in zip(preview.json()["probes"], expected, strict=True):
+                    self.assertEqual(result["active_evaluation"]["decision"], decision)
+                aggregate = preview.json()["probes"][-1]
+                self.assertEqual(aggregate["candidate_evaluation"]["decision"], "allowed")
+                self.assertEqual(aggregate["delta"], "granted")
             self.assertEqual(tuple(store.list_authz_policy_records()), (record,))
+
+    async def test_role_intent_does_not_read_foreign_destination_secret_metadata(self) -> None:
+        profiles = tuple(
+            LaunchplaneProductProfileRecord.model_validate(product_profile_payload(name))
+            for name in ("sample", "foreign-site")
+        )
+        own, foreign = profiles
+        with _database_app(reader_policy()) as (store, _, app):
+            for profile in profiles:
+                store.write_product_profile_record(profile)
+            with patch(
+                "control_plane.http_app.latest_active_runtime_key_safety_policy",
+                side_effect=AssertionError("Foreign destination must not be inspected"),
+            ) as inspect:
+                async with lifespan_client(app) as client:
+                    response = await client.post(
+                        "/v1/agent/write-intents/evaluate",
+                        headers={"Authorization": "Bearer reader-token"},
+                        json={
+                            "intent": "product_config_apply",
+                            "product": own.product,
+                            "context": own.lanes[0].context,
+                            "source_url": "https://github.com/example/sample/issues/1",
+                            "reason": "Inspect intent",
+                            "secret_bindings": ["API_TOKEN"],
+                            "destination": {
+                                "context": foreign.lanes[0].context,
+                                "instance": foreign.lanes[0].instance,
+                            },
+                        },
+                    )
+                    self.assertEqual(response.status_code, 202, response.text)
+                    result = response.json()["result"]["intent"]
+                    self.assertEqual(result["status"], "denied")
+                    self.assertFalse(result["safe_to_execute"])
+                    self.assertFalse(result["secret_evidence"]["findings"])
+                inspect.assert_not_called()
 
     async def test_denied_intent_cannot_introduce_an_aggregate_product_scope(self) -> None:
         with _database_app(reader_policy()) as (store, _, app):

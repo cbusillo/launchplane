@@ -38,6 +38,7 @@ from control_plane.storage.postgres import (
     LaunchplaneMergeTrainPolicyRow,
     LaunchplaneMergeTrainRunRow,
     LaunchplaneProductProfileRow,
+    PostgresRecordStore,
 )
 
 # This is a record-format allowlist, never a list of runtime identities. Secret,
@@ -291,7 +292,7 @@ def export_stored_record_snapshot(
                 if authorize_records is not None:
                     if model_type is LaunchplaneProductProfileRecord:
                         profiles.append(
-                            LaunchplaneProductProfileRecord.model_validate(raw["payload"])
+                            PostgresRecordStore._read_product_profile_payload(raw["payload"])
                         )
                     elif model_type is EnvironmentInventory:
                         inventory.append(EnvironmentInventory.model_validate(raw["payload"]))

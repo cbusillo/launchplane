@@ -4030,36 +4030,77 @@ class LaunchplaneAuthzPolicyRuntime:
         target: AuthorizationTarget | None = None,
         inherit_agent_read_role: bool = True,
     ) -> bool:
-        if self.policy.allows(
+        return (
+            self.evaluate(
+                identity=identity,
+                action=action,
+                product=product,
+                context=context,
+                target=target,
+                inherit_agent_read_role=inherit_agent_read_role,
+            ).decision
+            == "allowed"
+        )
+
+    def evaluate(
+        self,
+        *,
+        identity: LaunchplaneIdentity,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None = None,
+        inherit_agent_read_role: bool = True,
+        record_context: bool = True,
+    ) -> AuthzEvaluation:
+        def evaluate_policy(
+            *, inherited: bool = False, owned_product: str = product
+        ) -> AuthzEvaluation:
+            return self.policy.evaluate(
+                identity=identity,
+                action=action,
+                product=owned_product,
+                context=context,
+                target=target,
+                inherit_agent_read_role=inherited,
+                record_context=record_context,
+            )
+
+        explicit = self.policy.evaluate(
             identity=identity,
             action=action,
             product=product,
             context=context,
             target=target,
             inherit_agent_read_role=False,
-        ):
-            return True
+            record_context=False,
+        )
+        if explicit.decision == "allowed":
+            return evaluate_policy()
         if (
             not inherit_agent_read_role
             or not agent_read_role_covers(action)
             or not isinstance(identity, LocalOperatorIdentity | TerminalAgentIdentity)
         ):
-            return False
+            return evaluate_policy()
         returned_product = product
         if context and context != _LAUNCHPLANE_SERVICE_CONTEXT:
             if self._context_product_resolver is None:
-                return False
+                return evaluate_policy()
             try:
                 owner = self._context_product_resolver(context)
             except (TypeError, ValueError, RuntimeError, SQLAlchemyError):
-                return False
+                return evaluate_policy()
             if not owner or (product != _LAUNCHPLANE_SERVICE_CONTEXT and product != owner):
-                return False
+                return evaluate_policy()
             returned_product = owner
         if not self.policy.agent_read_role_allows(
-            identity=identity, product=returned_product, context=context, target=target
+            identity=identity,
+            product=returned_product,
+            context=context,
+            target=target,
         ):
-            return False
+            return evaluate_policy()
         if (
             returned_product == _LAUNCHPLANE_SERVICE_CONTEXT
             and context in ("", _LAUNCHPLANE_SERVICE_CONTEXT)
@@ -4068,15 +4109,8 @@ class LaunchplaneAuthzPolicyRuntime:
             if self._aggregate_product_authorizer is None or not self._aggregate_product_authorizer(
                 identity
             ):
-                return False
-        return self.policy.allows(
-            identity=identity,
-            action=action,
-            product=returned_product,
-            context=context,
-            target=target,
-            inherit_agent_read_role=True,
-        )
+                return evaluate_policy()
+        return evaluate_policy(inherited=True, owned_product=returned_product)
 
     def policy_record(self, *, updated_at: str) -> LaunchplaneAuthzPolicyRecord:
         record_id = self._record_id or f"runtime-authz-policy-{self._policy_sha256[:12]}"
@@ -4456,13 +4490,26 @@ def create_launchplane_fastapi_app(
             raise RuntimeError("Launchplane record store is not initialized.")
         return shared_record_store
 
-    def all_recorded_products_readable(identity: LaunchplaneIdentity) -> bool:
+    def all_recorded_products_readable(
+        identity: LaunchplaneIdentity,
+        *,
+        scoped_policy: LaunchplaneAuthzPolicy | None = None,
+        scope_store: object | None = None,
+    ) -> bool:
         try:
-            reader = getattr(get_record_store(), "list_recorded_product_scopes", None)
+            reader = getattr(
+                scope_store if scope_store is not None else get_record_store(),
+                "list_recorded_product_scopes",
+                None,
+            )
             if not callable(reader):
                 return False
             return all(
-                resolved_authz_policy_runtime.policy.agent_read_role_allows(
+                (
+                    scoped_policy
+                    if scoped_policy is not None
+                    else resolved_authz_policy_runtime.policy
+                ).agent_read_role_allows(
                     identity=identity,
                     product=product,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
@@ -4476,6 +4523,36 @@ def create_launchplane_fastapi_app(
         lambda context: _lane_setup_context_owner(record_store=get_record_store(), context=context),
         all_recorded_products_readable,
     )
+
+    def evaluate_scoped_policy(
+        *,
+        policy: LaunchplaneAuthzPolicy,
+        identity: LaunchplaneIdentity,
+        action: str,
+        product: str,
+        context: str,
+        target: AuthorizationTarget,
+        record_store: object,
+    ) -> AuthzEvaluation:
+        runtime = LaunchplaneAuthzPolicyRuntime(policy)
+        runtime.configure_context_product_resolver(
+            lambda selected_context: _lane_setup_context_owner(
+                record_store=record_store, context=selected_context
+            ),
+            lambda selected_identity: all_recorded_products_readable(
+                selected_identity,
+                scoped_policy=policy,
+                scope_store=record_store,
+            ),
+        )
+        return runtime.evaluate(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+            target=target,
+            record_context=False,
+        )
 
     def github_id_owns_active_product(github_id: int) -> bool:
         if github_id <= 0:
@@ -11732,6 +11809,26 @@ def create_launchplane_fastapi_app(
                 context=intent_request.context,
             )
         )
+        destination_readable = (
+            not intent_request.secret_bindings or intent_request.destination is None
+        )
+        if intent_request.secret_bindings and intent_request.destination is not None:
+            destination_readable = resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="secret.list",
+                product=intent_request.product,
+                context=intent_request.destination.context,
+                target=AuthorizationTarget(
+                    scope="instance", instances=(intent_request.destination.instance,)
+                ),
+            ) or resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action=agent_write_intent_secret_action(intent_request),
+                product=intent_request.product,
+                context=intent_request.destination.context,
+                inherit_agent_read_role=False,
+            )
+            planning_authorized = planning_authorized and destination_readable
         authorized = authorized or planning_authorized
         if intent_request.secret_bindings:
             secret_authz_action = agent_write_intent_secret_action(intent_request)
@@ -11754,9 +11851,14 @@ def create_launchplane_fastapi_app(
             policy_source=resolved_authz_policy_runtime.source,
             policy_sha256=resolved_authz_policy_runtime.policy_sha256,
         )
-        secret_evidence = agent_write_intent_secret_evidence(
-            record_store=record_store,
-            request=intent_request,
+        secret_evidence = (
+            agent_write_intent_secret_evidence(record_store=record_store, request=intent_request)
+            if destination_readable
+            else secret_evidence_for_agent_write_intent(
+                request=intent_request,
+                evaluation=None,
+                unavailable=True,
+            )
         )
         evaluation = evaluate_agent_write_intent(
             request=intent_request,
@@ -19604,7 +19706,7 @@ def create_launchplane_fastapi_app(
             | LocalAdminIdentity
             | TerminalAgentIdentity,
         )
-        preflight = resolved_authz_policy_runtime.policy.evaluate(
+        preflight = resolved_authz_policy_runtime.evaluate(
             identity=identity,
             action=AUTHZ_REPOSITORY_SCOPE_READ_ACTION,
             product="launchplane",
@@ -19711,7 +19813,7 @@ def create_launchplane_fastapi_app(
     ) -> AuthzPolicyCandidatePreviewResponse:
         trace_id = next_trace_id()
         preflight_authorized = (
-            resolved_authz_policy_runtime.policy.evaluate(
+            resolved_authz_policy_runtime.evaluate(
                 identity=identity,
                 action=AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
                 product="launchplane",
@@ -19762,6 +19864,19 @@ def create_launchplane_fastapi_app(
                 caller_identity=identity,
                 request=preview_request,
                 trace_id=trace_id,
+                probe_evaluator=lambda policy, probe: evaluate_scoped_policy(
+                    policy=policy,
+                    identity=probe.identity(),
+                    action=probe.action,
+                    product=probe.product,
+                    context=probe.context,
+                    target=(
+                        AuthorizationTarget(scope="instance", instances=(probe.instance,))
+                        if probe.target_scope == "instance"
+                        else AuthorizationTarget(scope="context")
+                    ),
+                    record_store=record_store,
+                ),
             )
         except (
             control_plane_authz_grant_service.AuthzPolicyRequestError,
@@ -19822,14 +19937,14 @@ def create_launchplane_fastapi_app(
             if evaluation_request.target_scope == "instance"
             else AuthorizationTarget(scope="context")
         )
-        evaluation = active_record.policy.evaluate(
+        evaluation = evaluate_scoped_policy(
+            policy=active_record.policy,
             identity=evaluation_request.identity(),
             action=evaluation_request.action,
             product=evaluation_request.product,
             context=evaluation_request.context,
             target=target,
-            record_context=False,
-            inherit_agent_read_role=True,
+            record_store=record_store,
         )
         return EffectiveAccessEvaluateResponse(
             trace_id=trace_id,
