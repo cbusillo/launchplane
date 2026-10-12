@@ -30,8 +30,8 @@ access to an invalid policy or silently starting with bootstrap authority.
 - People sign in with GitHub and hold the `admin` or `read_only` role. Clients
   hold the narrow `owner` role for their own site's decisions.
 - The [admin](#the-admin) may do anything.
-- Machine identities (workflows, agents, tokens, workers) hold only their
-  enumerated grants.
+- Machine identities hold DB policy grants. Token-bound agents can hold the
+  product-scoped standing read-and-plan permission described below.
 - Granting access is a stop boundary: an agent asks the Director before creating
   credentials, granting access, or changing who can merge (see
   [DIRECTION.md](../DIRECTION.md#stop-boundaries)). Do not create, edit,
@@ -79,6 +79,72 @@ repository-record evidence for the redacted repository-scope read model;
 retired records contribute no active inventory membership. When authorization
 rules are the only remaining active source, the read model reports stale
 authorization membership rather than complete coverage.
+
+## Standing Agent Read And Plan Permission
+
+`agent.read` is a DB rule action, not an identity shortcut or an installed
+default. A schema-2 or schema-3 `local_operator` or `terminal_agent` rule names exact
+subjects, token labels and products; wildcard agent or product selectors are
+rejected. Context and instance selectors retain their existing matching rules.
+Product-level reads use the `launchplane` metadata context, so the context
+rule must include it alongside the selected product lane contexts (or use the
+existing all-context selector). Use separate context and instance rules when
+both scopes are needed. A new
+product is included through an explicitly reviewed policy change.
+
+[`action_effects.py`](../control_plane/action_effects.py) owns source declarations
+of `read`, `plan` and `write`. Only declared reads and qualified plans inherit
+`agent.read`, within the matching rule's product, context and instance scope.
+Unknown actions fail closed. Raw policy matching defaults to explicit actions;
+role inheritance passes through the service runtime, which resolves returned
+product ownership. Existing enumerated permissions remain authoritative; a
+`launchplane_service.read` grant also reads Delivery metadata but does not
+inherit authority for other read actions. Policy refresh and
+revocation apply to the role on every request, as to other DB grants.
+
+Pure dry runs and inert evidence can use this role. Queuing execution, taking
+leases, creating operative plans (including stored product-retirement lifecycle
+plans), revealing credentials and copying secret values retain separate write or
+explicit source permissions. Service-side authenticated provider reads do not
+return the credential used to perform them. Existing terminal
+credential transport restrictions remain; the `local_operator` transport covers
+the Director's full planning surface. A Client's own agent can use the same
+product-scoped model later; no Client-agent access is installed by source code.
+
+Product reads authorize the returned product. Profile and product overview lists filter role access
+per returned product; contextual secret and runtime-setting collections omit
+global or other-product records unless their scopes are also granted; saved Client reviews resolve the repository's product.
+Dokploy dry runs use the recorded product owning the context, and ingress plans validate the
+product lane's domains and remove provider configuration fields that can contain
+credentials. Service metadata and global policy history require their own
+Launchplane product scope. That scope never stands for another product.
+Declarations distinguish service-owned metadata from aggregates containing
+product records; aggregate reads require each recorded product scope, including
+historical product projections without a current profile. Caller-supplied intent
+evaluations, including denied requests, do not establish product scopes. Snapshot authorization
+checks the actual exported profiles and inventory inside the same read-only
+transaction. The Delivery selector GET uses ordinary DB read
+authorization; its configuration and credential retirement keep their admin gates.
+
+Non-agent policy-diagnostic identity gates remain; the exact agent read role
+adds the supported agent path. Repository-scope lookups require both the Launchplane metadata scope and
+coverage of recorded products; they include Root-owned repository inventory,
+classification, work-request and policy membership metadata. Global effective-access,
+candidate-policy diagnostics and policy-retirement evidence require the recorded
+product scopes they inspect. Service-only metadata at the root context requires
+the Launchplane product scope; supplying another product cannot borrow it.
+Denial explanations additionally require the recorded denial's product and context.
+Workflow retirement probes also require the products in matching policy rules,
+including products not yet recorded; unbounded selectors require explicit authority.
+Snapshot inventory for Launchplane itself uses its own scope; ambiguous
+product context ownership fails closed.
+
+Source delivery installs no grant. After the deployed source is qualified,
+prepare one managed-policy proposal bound to the current exact agent and explicit
+product set. Chris reviews and approves its exact diff in the signed-in Access
+policy UI; agents never apply it. Preserve existing enumerated rules for rollback,
+and remove the new role through the same reviewed path before reverting to an
+older service image that cannot validate its scoped marker.
 
 ## Current Transitional Model
 
