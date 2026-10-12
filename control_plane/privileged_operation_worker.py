@@ -1356,6 +1356,7 @@ def _failure_code(error: Exception) -> str:
     if isinstance(error, ManagedMergeTrainPolicyImportPreEffectDeniedError):
         return MANAGED_MERGE_TRAIN_POLICY_IMPORT_PRE_EFFECT_DENIED
     known_codes = {
+        "privileged_operation_retired",
         "approval_provenance_missing",
         "approval_managed_rule_drift",
         "approval_policy_admin_drift",
@@ -1556,13 +1557,13 @@ def execute_approved_privileged_operations_once(
             approval = claimed.approval
             if approval is None:
                 raise ValueError("approval_provenance_missing")
+            registration = read_privileged_operation_descriptor(claimed.descriptor_id)
+            if registration.planner is None:
+                raise ValueError("privileged_operation_retired")
             authorization = _authorize_approved_operation(
                 record=claimed,
                 record_store=record_store,
             )
-            registration = read_privileged_operation_descriptor(claimed.descriptor_id)
-            if registration.planner is None:
-                raise ValueError("privileged_operation_retired")
             fresh_evidence = registration.planner(record_store, claimed.request)
             if (
                 fresh_evidence.plan_digest != approval.plan_digest

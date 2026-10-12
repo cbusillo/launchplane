@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 import inspect
 from typing import Any, cast
 
@@ -61,15 +61,6 @@ from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.schema_invariants import RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS
 
 
-_ACTIVATION_DURATION_OPTIONS = (
-    (60 * 60, "1 hour"),
-    (24 * 60 * 60, "1 day"),
-    (7 * 24 * 60 * 60, "7 days"),
-    (30 * 24 * 60 * 60, "30 days"),
-)
-_MAX_ACTIVATION_DURATION = timedelta(days=30)
-
-
 class OrdinaryAgentDeliveryActivationPlanningError(ValueError):
     """Raised when referenced server-owned setup data does not resolve exactly."""
 
@@ -84,12 +75,6 @@ def _same_activation_scope_identity(
         and left.managed_set_id == right.managed_set_id
         and left.managed_rule_id == right.managed_rule_id
     )
-
-
-def _activation_option_timestamp(value: str) -> str:
-    parsed = datetime.fromisoformat(value).astimezone(timezone.utc)
-    fraction = f".{parsed.microsecond:06d}" if parsed.microsecond else ""
-    return f"{parsed.strftime('%b %d, %Y at %H:%M:%S')}{fraction} UTC"
 
 
 @dataclass(frozen=True, slots=True)
@@ -729,43 +714,6 @@ def _scope_predecessor(
             "Activation setup requires the exact latest predecessor reference."
         )
     return expected
-
-
-def _available_scope_predecessor(
-    record_store: object,
-    *,
-    scope: OrdinaryAgentDeliveryActivationScope,
-    observed_at: datetime,
-) -> OrdinaryAgentDeliveryActivationReference | None:
-    matching = tuple(
-        record
-        for record in _activation_records(record_store)
-        if _same_activation_scope_identity(record.scope, scope)
-    )
-    if not matching:
-        return None
-    newest_time = max(datetime.fromisoformat(record.installed_at) for record in matching)
-    newest = tuple(
-        record for record in matching if datetime.fromisoformat(record.installed_at) == newest_time
-    )
-    if len(newest) != 1:
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation history does not have one newest intent."
-        )
-    record = newest[0]
-    if (
-        not record.revoked_at
-        and not record.superseded_by_activation_id
-        and observed_at < datetime.fromisoformat(record.activation_expires_at)
-    ):
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation scope already has an unexpired guarded intent."
-        )
-    return OrdinaryAgentDeliveryActivationReference(
-        activation_id=record.activation_id,
-        revision=record.revision,
-        activation_sha256=record.activation_sha256,
-    )
 
 
 def _read_activation(

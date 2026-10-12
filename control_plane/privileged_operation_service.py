@@ -991,8 +991,8 @@ def _build_privileged_operation_semantic_review(
                 digests=_semantic_review_digests(record, extra_digests),
             ),
             activity=_semantic_review_activity(record.operation_id, events),
-            can_approve=record.status == "planned" and not activation_blocker_codes,
-            can_revoke=record.status == "approved" and lifecycle.expiry_state == "active",
+            can_approve=False,
+            can_revoke=False,
         )
     raise PrivilegedOperationSemanticReviewError(
         "Privileged-operation semantic review descriptor is unsupported."

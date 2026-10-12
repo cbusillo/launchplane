@@ -29,10 +29,6 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_pre_state_digest,
     terminal_agent_principal_sha256,
 )
-from control_plane.contracts.merge_train_policy import (
-    MergeTrainPolicyRecord,
-)
-from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationRevokeRequest,
     OrdinaryAgentDeliveryActivationSetupRequest,
@@ -56,9 +52,6 @@ from control_plane.durable_operation_authorization import (
     require_single_managed_rule_identity,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
-from control_plane.ordinary_agent_delivery_authorization_inputs import (
-    _read_current_inventory,
-)
 from control_plane.privileged_operation_registry import (
     PrivilegedOperationPlannerError,
     PrivilegedOperationPlanningStoreError,
@@ -207,24 +200,6 @@ class AuthorizationCandidatePrepareResponse(BaseModel):
         exclude_if=lambda value: value is None,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
-
-
-class OrdinaryAgentMergeTrainTargetInventoryInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    repository_id: str
-    repository: str
-    inventory_record_id: str
-    inventory_digest: str
-
-
-class OrdinaryAgentMergeTrainTargetPolicyInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    record_id: str
-    updated_at: str
-    policy_sha256: str
-    configured_policy_keys: tuple[str, ...]
 
 
 class PrivilegedPolicyOperationAgentProposalEnvelope(BaseModel):
@@ -1400,27 +1375,6 @@ def register_privileged_operation_routes(
             state="planned",
             operation_id=result.record.operation_id,
         )
-
-    def read_current_merge_train_policy(*, record_store: object) -> MergeTrainPolicyRecord:
-        list_records = getattr(record_store, "list_merge_train_policy_records", None)
-        if not callable(list_records):
-            raise PrivilegedOperationPlanningStoreError(
-                "Merge-train target preparation requires merge-train policy storage."
-            )
-        active_records = tuple(list_records(status="active", limit=2))
-        if len(active_records) != 1:
-            raise PrivilegedOperationPlannerError(
-                "Merge-train target preparation requires exactly one active policy record."
-            )
-        return MergeTrainPolicyRecord.model_validate(active_records[0])
-
-    def current_tracked_inventory(*, record_store: object) -> tuple[RepositoryInventoryRecord, ...]:
-        inventory_state, tracked_records, _diagnostics = _read_current_inventory(record_store)
-        if inventory_state != "complete":
-            raise PrivilegedOperationPlanningStoreError(
-                "Merge-train target preparation requires complete unambiguous repository inventory."
-            )
-        return tracked_records
 
     app.add_api_route(
         AUTHORIZATION_CANDIDATE_PREPARE_ROUTE,

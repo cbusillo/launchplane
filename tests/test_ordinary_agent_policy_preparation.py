@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import unittest
 
+from control_plane.http_routes.privileged_operations import (
+    PrivilegedOperationPlanEnvelope,
+    PrivilegedPolicyOperationAgentProposalEnvelope,
+)
+
 from control_plane.authz_candidate_preparation import (
     compile_ordinary_agent_delivery_policy_candidate,
     ordinary_agent_delivery_policy_managed_set_id,
@@ -11,6 +16,7 @@ from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule, Ordi
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.privileged_operation import (
+    ManagedAuthzPolicySetProposalInput,
     ManagedOrdinaryAgentPolicyPreparationContext,
     OrdinaryAgentDeliveryPolicyIntent,
 )
@@ -230,6 +236,40 @@ class OrdinaryAgentPolicyPreparationTests(unittest.TestCase):
 
         self.assertEqual(state, "already_satisfied")
         self.assertIsNone(proposal)
+
+    def test_generic_envelopes_reject_preparation_context(self) -> None:
+        intent = _intent()
+        context = ManagedOrdinaryAgentPolicyPreparationContext(
+            intent=intent,
+            managed_set_id=ordinary_agent_delivery_policy_managed_set_id(intent.principal_id),
+            managed_rule_id="delivery",
+            expected_policy_record_id="policy",
+            expected_policy_revision=1,
+            expected_policy_sha256="a" * 64,
+            expected_inventory_record_id="inventory",
+            expected_inventory_revision=1,
+            expected_inventory_sha256="b" * 64,
+            expected_merge_policy_record_id="merge",
+            expected_merge_policy_sha256="c" * 64,
+        )
+        proposal = ManagedAuthzPolicySetProposalInput(
+            managed_set_id=context.managed_set_id,
+            desired_policy=LaunchplaneAuthzPolicy(schema_version=3),
+            reason="test",
+            ordinary_agent_preparation_context=context,
+        )
+        with self.assertRaises(ValueError):
+            PrivilegedOperationPlanEnvelope(
+                descriptor_id="managed-authz-policy-set",
+                source_event_id="context-check",
+                request=proposal,
+            )
+        with self.assertRaises(ValueError):
+            PrivilegedPolicyOperationAgentProposalEnvelope(
+                descriptor_id="managed-authz-policy-set",
+                source_event_id="context-check",
+                request=proposal,
+            )
 
 
 if __name__ == "__main__":
