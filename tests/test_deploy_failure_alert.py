@@ -89,10 +89,10 @@ class DeployFailureAlertTests(unittest.TestCase):
             self.assertEqual(evidence["failed_health_result"]["http_status"], "503")
             self.assertNotIn("secret-detail", json.dumps(payload))
             self.assertIn("https://forge.example/example/service/actions/runs/1234", values)
-            self.assertIn(
-                "https://forge.example/example/service/actions/workflows/deploy-launchplane.yml",
-                values,
-            )
+            recovery_link = next(value for value in values if "/actions/workflows/" in value)
+            workflow_name = recovery_link.rsplit("/", 1)[1]
+            self.assertTrue((Path(".github/workflows") / workflow_name).is_file())
+            self.assertTrue(recovery_link.startswith("https://forge.example/example/service/"))
             self.assertNotIn(sender_url, json.dumps(payload))
             self.assertEqual(payload["allowed_mentions"]["parse"], [])
 

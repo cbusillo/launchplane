@@ -2008,9 +2008,12 @@ product/runtime truth from checked-in catalogs.
 deploy workflow. Use a Launchplane `GET /v1/health` endpoint reachable from that
 runner rather than an internal-only provider hostname.
 
-After the self-deploy request leaves its legitimate release drain, forward
-replacement verification shares a two-minute deadline across image, marker and
-health checks. A continuously unavailable API during the request also has that
+After the self-deploy request leaves its legitimate release drain, the workflow
+allows the existing provider/worker stop budget while the old API still serves.
+The first API outage starts a two-minute observation window. When the forward
+deployment marker appears, image and health checks share its remaining deadline;
+if no outage was observed, that marker starts the window. This also handles a
+same-image redeploy. A continuously unavailable API during the request has that
 shorter limit, while successful draining responses reset it and preserve the
 full release-drain budget. In-flight requests are bounded; this is health-based
 failure detection, not evidence of container restarts or a startup cause.

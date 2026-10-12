@@ -419,7 +419,7 @@ jobs:
       - name: Read previous Launchplane runtime
         id: previous_runtime
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -762,7 +762,7 @@ jobs:
       - name: Request Launchplane self deploy
         id: self_deploy_request
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -785,7 +785,7 @@ jobs:
           timeout-ms: "10000"
           oidc-timeout-ms: "10000"
           retry-attempts: "1"
-          ingress-retry-delay-ms: "0"
+          ingress-retry-delay-ms: "1000"
           response-output-file: ${{ runner.temp }}/launchplane-self-deploy-response.json
           log-response-body: "false"
 
@@ -825,12 +825,16 @@ jobs:
         env:
           WAIT_DEADLINE_EPOCH: ${{ steps.deploy_wait_timeout.outputs.deadline_epoch }}
           SELF_DEPLOY_RESPONSE_FILE: ${{ runner.temp }}/launchplane-self-deploy-response.json
-          REPLACEMENT_TIMEOUT_SECONDS: ${{ steps.deploy_wait_timeout.outputs.replacement_timeout_seconds }}
+          DRAINED_WAIT_TIMEOUT_SECONDS: ${{ steps.deploy_wait_timeout.outputs.drained_timeout_seconds }}
         run: |
           set -euo pipefail
-          wait_seconds="${REPLACEMENT_TIMEOUT_SECONDS:?}"
-          test "$wait_seconds" -gt 0
-          deadline_epoch=$(($(date +%s) + wait_seconds))
+          deadline_epoch="${WAIT_DEADLINE_EPOCH:?}"
+          if [ -n "${SELF_DEPLOY_RESPONSE_FILE:-}" ] \
+            && jq -e '.result.release_drain_complete == true' "$SELF_DEPLOY_RESPONSE_FILE" >/dev/null; then
+            wait_seconds="${DRAINED_WAIT_TIMEOUT_SECONDS:?}"
+            test "$wait_seconds" -gt 0
+            deadline_epoch=$(($(date +%s) + wait_seconds))
+          fi
           echo "deadline_epoch=$deadline_epoch" >>"$GITHUB_OUTPUT"
           remaining_timeout_ms=$(( (deadline_epoch - $(date +%s)) * 1000 ))
           if [ "$remaining_timeout_ms" -lt 1 ]; then
@@ -838,9 +842,9 @@ jobs:
           fi
           echo "timeout_ms=$remaining_timeout_ms" >>"$GITHUB_OUTPUT"
 
-      - name: Wait for deployed Launchplane runtime image
-        id: deployed_runtime_image
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+      - name: Wait for replacement Launchplane runtime marker
+        id: replacement_runtime
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -850,9 +854,9 @@ jobs:
           timeout-ms: "10000"
           oidc-timeout-ms: "10000"
           retry-attempts: "1"
-          ingress-retry-delay-ms: "0"
-          poll-until-path: runtime.docker_image_reference
-          poll-until-value: ${{ steps.image.outputs.image_reference }}
+          ingress-retry-delay-ms: "1000"
+          poll-until-path: runtime.deployment_marker
+          poll-until-value: ${{ steps.prep.outputs.forward_deployment_marker }}
           poll-retry-on-request-error: "true"
           poll-retry-on-unexpected-status: "true"
           poll-interval-ms: "5000"
@@ -865,7 +869,7 @@ jobs:
         id: deploy_marker_wait
         shell: bash
         env:
-          WAIT_DEADLINE_EPOCH: ${{ steps.deploy_runtime_wait.outputs.deadline_epoch }}
+          WAIT_DEADLINE_EPOCH: ${{ steps.replacement_runtime.outputs.observation-deadline-epoch }}
         run: |
           set -euo pipefail
           remaining_timeout_ms=$(( (${WAIT_DEADLINE_EPOCH:?} - $(date +%s)) * 1000 ))
@@ -874,8 +878,9 @@ jobs:
           fi
           echo "timeout_ms=$remaining_timeout_ms" >>"$GITHUB_OUTPUT"
 
-      - name: Wait for deployed Launchplane runtime marker
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+      - name: Wait for deployed Launchplane runtime image
+        id: deployed_image
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -885,9 +890,9 @@ jobs:
           timeout-ms: "10000"
           oidc-timeout-ms: "10000"
           retry-attempts: "1"
-          ingress-retry-delay-ms: "0"
-          poll-until-path: runtime.deployment_marker
-          poll-until-value: ${{ steps.prep.outputs.forward_deployment_marker }}
+          ingress-retry-delay-ms: "1000"
+          poll-until-path: runtime.docker_image_reference
+          poll-until-value: ${{ steps.image.outputs.image_reference }}
           poll-retry-on-request-error: "true"
           poll-retry-on-unexpected-status: "true"
           poll-interval-ms: "5000"
@@ -900,7 +905,7 @@ jobs:
         id: deployed_health
         shell: bash
         env:
-          WAIT_DEADLINE_EPOCH: ${{ steps.deploy_runtime_wait.outputs.deadline_epoch }}
+          WAIT_DEADLINE_EPOCH: ${{ steps.replacement_runtime.outputs.observation-deadline-epoch }}
         run: |
           set -euo pipefail
 
@@ -957,7 +962,8 @@ jobs:
           exit 1
 
       - name: Verify deployed Launchplane runtime image after health
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+        id: final_image
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -967,7 +973,7 @@ jobs:
           timeout-ms: "10000"
           oidc-timeout-ms: "10000"
           retry-attempts: "1"
-          ingress-retry-delay-ms: "0"
+          ingress-retry-delay-ms: "1000"
           poll-until-path: runtime.docker_image_reference
           poll-until-value: ${{ steps.image.outputs.image_reference }}
           poll-interval-ms: "1000"
@@ -976,8 +982,22 @@ jobs:
           response-output-file: ${{ runner.temp }}/launchplane-deployed-runtime-final.json
           log-response-body: "false"
 
+      - name: Resolve final runtime marker remaining wait
+        id: final_marker_wait
+        shell: bash
+        env:
+          WAIT_DEADLINE_EPOCH: ${{ steps.replacement_runtime.outputs.observation-deadline-epoch }}
+        run: |
+          set -euo pipefail
+          remaining_timeout_ms=$(( (${WAIT_DEADLINE_EPOCH:?} - $(date +%s)) * 1000 ))
+          if [ "$remaining_timeout_ms" -lt 1 ]; then
+            remaining_timeout_ms=1
+          fi
+          echo "timeout_ms=$remaining_timeout_ms" >>"$GITHUB_OUTPUT"
+
       - name: Verify deployed Launchplane runtime marker after health
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+        id: final_marker
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -987,11 +1007,11 @@ jobs:
           timeout-ms: "10000"
           oidc-timeout-ms: "10000"
           retry-attempts: "1"
-          ingress-retry-delay-ms: "0"
+          ingress-retry-delay-ms: "1000"
           poll-until-path: runtime.deployment_marker
           poll-until-value: ${{ steps.prep.outputs.forward_deployment_marker }}
           poll-interval-ms: "1000"
-          poll-timeout-ms: ${{ steps.deployed_health.outputs.remaining_timeout_ms }}
+          poll-timeout-ms: ${{ steps.final_marker_wait.outputs.timeout_ms }}
           poll-unavailable-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.replacement_timeout_ms }}
           response-output-file: ${{ runner.temp }}/launchplane-deployed-marker-final.json
           log-response-body: "false"
@@ -1003,7 +1023,7 @@ jobs:
           DISCORD_LAUNCHPLANE_WEBHOOK: ${{ secrets.DISCORD_LAUNCHPLANE_WEBHOOK }}
           DEPLOYED_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
           SELF_DEPLOY_RESPONSE_FILE: ${{ runner.temp }}/launchplane-self-deploy-response.json
-          FAILING_RUNTIME_STATUS: ${{ steps.deployed_runtime_image.outputs.status-code || steps.self_deploy_request.outputs.status-code }}
+          FAILING_RUNTIME_STATUS: ${{ steps.final_marker.outcome == 'failure' && steps.final_marker.outputs.status-code || steps.final_image.outcome == 'failure' && steps.final_image.outputs.status-code || steps.deployed_image.outcome == 'failure' && steps.deployed_image.outputs.status-code || steps.replacement_runtime.outcome == 'failure' && steps.replacement_runtime.outputs.status-code || steps.self_deploy_request.outcome == 'failure' && steps.self_deploy_request.outputs.status-code || 'unavailable' }}
           FAILING_HEALTH_RESULT_FILE: ${{ runner.temp }}/launchplane-deployed-health-result.json
         run: uv run python scripts/deploy/notify-deploy-failure.py
 
@@ -1156,7 +1176,7 @@ jobs:
           && steps.rollback_request.outputs.previous_image_reference != ''
         id: rollback_request_action
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1248,7 +1268,7 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
         id: rollback_marker
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1287,7 +1307,7 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
         id: rollback_runtime
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1439,7 +1459,7 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
           && steps.rollback_runtime.outcome == 'success'
           && steps.rollback_health.outcome == 'success'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1463,7 +1483,7 @@ jobs:
           && steps.rollback_marker.outcome == 'success'
           && steps.rollback_runtime.outcome == 'success'
           && steps.rollback_health.outcome == 'success'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1488,7 +1508,7 @@ jobs:
 
       - name: Ensure runtime key-safety policy
         if: steps.runtime_key_safety.outputs.has_runtime_key_safety_policy == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1502,7 +1522,7 @@ jobs:
         if: always() && steps.service.outputs.service_url != ''
         id: deployed_runtime
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}

@@ -262,7 +262,7 @@ jobs:
 
       - name: Request policy import dry-run
         id: dry_run
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ steps.service.outputs.audience }}
@@ -308,7 +308,7 @@ jobs:
 
       - name: Apply policy import
         if: env.APPLY_POLICY == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ steps.service.outputs.audience }}

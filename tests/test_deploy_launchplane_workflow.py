@@ -92,6 +92,7 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
 
     def test_later_waits_consume_remaining_deadline_without_resetting_budget(self) -> None:
         for step in (
+            "Resolve deploy_runtime_wait remaining wait",
             "Resolve deploy_marker_wait remaining wait",
             "Resolve rollback_runtime_wait remaining wait",
         ):
@@ -135,7 +136,7 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                     "${{ steps.deploy_wait_timeout.outputs.deadline_epoch }}": str(
                         int(time.time()) - 10
                     ),
-                    "${{ steps.deploy_wait_timeout.outputs.replacement_timeout_seconds }}": "17",
+                    "${{ steps.deploy_wait_timeout.outputs.drained_timeout_seconds }}": "17",
                 },
             )
             self.assertEqual(result.returncode, 0, result.stderr)
