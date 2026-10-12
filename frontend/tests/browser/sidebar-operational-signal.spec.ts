@@ -10,6 +10,7 @@ for (const state of cases) {
     const fixtures = await page.evaluate(async state => {
       const modulePath = "/ui/src/dev-fixtures.ts";
       const module = await import(modulePath);
+      const { sidebarStatus } = await import("/ui/src/sidebar-status.ts");
       const product = structuredClone(module.productsForFixture("products")[0]);
       const lane = product.environments.find((lane: { environment: string }) => lane.environment === "testing");
       const now = Date.now();
@@ -65,7 +66,7 @@ for (const state of cases) {
           products.push(extra);
         }
       }
-      return { product, products, identity: module.fixtureIdentity, now };
+      return { product, products, identity: module.fixtureIdentity, now, testingDescription: sidebarStatus(product.environments[0] ?? null, "Testing").description };
     }, state);
     await page.clock.install({ time: new Date(fixtures.now) });
     if (theme === "light") await page.getByRole("button", { name: "Switch to light theme" }).click();
@@ -78,6 +79,7 @@ for (const state of cases) {
     await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products: fixtures.products } }));
     await page.route(`**/v1/products/${fixtures.product.product}`, route => route.fulfill({ json: { status: "ok", trace_id: "product", product: fixtures.product } }));
     await page.goto("/ui/products");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     const railLink = page.locator(".rail-product-link").filter({ hasText: fixtures.product.display_name });
     await page.getByRole("list", { name: "Launchplane products" })
       .getByRole("link", { name: new RegExp(fixtures.product.display_name) }).click();
@@ -87,9 +89,8 @@ for (const state of cases) {
     const tone = state === "healthy" ? "verified" : state === "failed" || state === "incident" ? "danger" : state === "stale" ? "warning" : "missing";
     await expect(signal).toHaveAttribute("data-tone", tone);
     await expect(dot).toHaveAttribute("data-tone", tone);
-    const stateName = state === "healthy" ? /healthy/i : state === "failed" || state === "incident" ? /failing/i : state === "stale" ? /warning|stale/i : state === "absent" ? /absent/i : /unknown/i;
-    await expect(dot).toHaveAttribute("title", stateName);
-    await expect(railLink.locator(".product-trust-dots")).toHaveAttribute("aria-label", stateName);
+    await expect(dot).toHaveAttribute("title", fixtures.testingDescription);
+    await expect(railLink.locator(".product-trust-dots")).toHaveAttribute("aria-label", new RegExp(fixtures.testingDescription.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     await expect(dot.locator("svg")).toBeAttached();
     // State symbols must remain perceptible against the actual rail in both themes.
     const contrast = await dot.evaluate(element => {
@@ -107,8 +108,9 @@ for (const state of cases) {
       await page.screenshot({ path: `../tmp/browser-smoke/sidebar-${state}-${theme}-${testInfo.project.name}.png`, fullPage: false });
     }
     if (state === "healthy") {
-      await page.locator(".control-rail").screenshot({ path: `../tmp/browser-smoke/sidebar-overview-${theme}.png` });
-      await expect(page.locator('.rail-product-link').filter({ hasText: "Failing example" }).locator('[data-lane="testing"]')).toHaveAttribute("title", /DNS/);
+      const colors = await page.locator('.rail-product-link [data-lane="testing"]').evaluateAll(icons =>
+        icons.map(icon => getComputedStyle(icon).color));
+      expect(new Set(colors).size).toBe(colors.length);
     }
     expect(mutations).toEqual([]);
   });

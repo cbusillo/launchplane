@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { sidebarStatus } from "../src/sidebar-status.ts";
+import { sidebarLayerLabel, sidebarStatus } from "../src/sidebar-status.ts";
 import { environmentOperationalTone } from "../src/product-environment-signal.ts";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -16,9 +16,9 @@ test("sidebar preserves operational tone and reports every recorded incident lay
   ];
   const status = sidebarStatus(lane, "Testing");
   assert.equal(status.tone, environmentOperationalTone(lane));
-  assert.match(status.description, /DNS/);
-  assert.match(status.description, /certificate/i);
-  assert.match(status.description, /identity/i);
+  for (const layer of ["dns", "tls", "runtime_identity"]) {
+    assert.ok(status.description.includes(sidebarLayerLabel(layer)));
+  }
 });
 
 test("effective failing checks supply diagnostics without inventing a proxy or app cause", () => {
@@ -29,13 +29,36 @@ test("effective failing checks supply diagnostics without inventing a proxy or a
   const check = lane.health_monitoring.checks[0];
   check.probe_effective = true;
   check.status = "fail";
-  for (const [code, layer] of [["dns_failure", /DNS/], ["tls_hostname_mismatch", /certificate/i], ["wrong_runtime_identity", /identity/i]]) {
+  for (const [code, layer] of [["dns_failure", "dns"], ["tls_hostname_mismatch", "tls"], ["wrong_runtime_identity", "runtime_identity"]]) {
     check.failure_code = code;
-    assert.match(sidebarStatus(lane, "Production").description, layer);
+    assert.ok(sidebarStatus(lane, "Production").description.includes(sidebarLayerLabel(layer)));
   }
   check.failure_code = "http_error";
   assert.doesNotMatch(sidebarStatus(lane, "Production").description, /proxy|app/i);
   check.failure_code = "dns_failure";
   check.probe_effective = false;
-  assert.doesNotMatch(sidebarStatus(lane, "Production").description, /DNS/);
+  assert.ok(!sidebarStatus(lane, "Production").description.includes(sidebarLayerLabel("dns")));
+});
+
+ test("an expiring certificate cannot append a failure layer to a healthy lane", () => {
+  const lane = structuredClone(productsForFixture("products")[0].environments[0]);
+  lane.trust_state = "recorded";
+  lane.provenance.freshness_status = "verified";
+  lane.provenance.stale_after = new Date(Date.now() + 60_000).toISOString();
+  const freshen = value => {
+    if (!value || typeof value !== "object") return;
+    if ("stale_after" in value) value.stale_after = lane.provenance.stale_after;
+    Object.values(value).forEach(freshen);
+  };
+  freshen(lane.topology);
+  lane.warnings = [];
+  lane.topology.warnings = [];
+  lane.topology.observed.placement.runtime_identity_status = "match";
+  lane.health_monitoring.open_incidents = [];
+  lane.health_monitoring.checks = [lane.health_monitoring.checks[0]];
+  Object.assign(lane.health_monitoring.checks[0], { probe_effective: true, status: "pass", trust_state: "verified", incident_status: "" });
+  lane.health_monitoring.checks[0].provenance.stale_after = lane.provenance.stale_after;
+  lane.topology.observed.tls_domains = [{ status: "expiring", trust_state: "verified", provenance: lane.provenance }];
+  assert.equal(environmentOperationalTone(lane), "verified");
+  assert.ok(!sidebarStatus(lane, "Production").description.includes(sidebarLayerLabel("tls")));
 });

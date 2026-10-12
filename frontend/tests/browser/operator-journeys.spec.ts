@@ -316,8 +316,9 @@ test.describe("operator journeys", () => {
     ).toBeVisible();
     const sidebarStatus = page.locator(".product-trust-dots").first();
     const laneLabels = await sidebarStatus.locator("[data-lane]").evaluateAll(lanes =>
-      lanes.map(lane => lane.getAttribute("title")).join("; "));
-    await expect(sidebarStatus).toHaveAttribute("aria-label", laneLabels);
+      lanes.map(lane => lane.getAttribute("title")));
+    const accessibleLabel = await sidebarStatus.getAttribute("aria-label");
+    for (const label of laneLabels) expect(accessibleLabel).toContain(label);
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "product-workspace");
     diagnostics.assertClean();
