@@ -580,21 +580,22 @@ async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options)
     }
     options.onPollResponse?.(responseBody, String(response.status));
     const observationDeadlineEpoch = unavailableTimeoutMs ? Math.floor(
-      (unavailableSince === null ? Date.now() + unavailableTimeoutMs : currentDeadline()) / 1000,
+      (unavailableSince === null ? Math.min(deadline, Date.now() + unavailableTimeoutMs) : currentDeadline()) / 1000,
     ) : undefined;
+    const outageDeadlineEpoch = unavailableSince === null ? undefined : observationDeadlineEpoch;
     if (response.ok) unavailableSince = null;
     else onUnavailable();
     const retryUnavailable = responseIsIngress && unavailableTimeoutMs
       && options.pollRetryOnRequestError;
     if (!response.ok && !retryUnavailable
       && (!options.pollUntilPath || !options.pollRetryOnUnexpectedStatus)) {
-      return { response, responseBody, responseText, observationDeadlineEpoch };
+      return { response, responseBody, responseText, observationDeadlineEpoch, outageDeadlineEpoch };
     }
     lastPollValue = String(readJsonPath(responseBody, pollPath) ?? "").trim();
     if (!response.ok && (options.pollUntilPath || retryUnavailable)) {
       lastPollValue = `HTTP ${response.status}`;
     } else if (!shouldPollResponse(responseBody, options)) {
-      return { response, responseBody, responseText, observationDeadlineEpoch };
+      return { response, responseBody, responseText, observationDeadlineEpoch, outageDeadlineEpoch };
     }
     assertCanContinuePolling({
       deadline: currentDeadline(),
@@ -733,7 +734,7 @@ async function main() {
 
   const payload = payloadConfig.payload;
 
-  const { response, responseBody, responseText, observationDeadlineEpoch } = await requestLaunchplaneUntilComplete(
+  const { response, responseBody, responseText, observationDeadlineEpoch, outageDeadlineEpoch } = await requestLaunchplaneUntilComplete(
     requestUrl,
     () => requestInit(payload, idempotencyKey),
     {
@@ -748,6 +749,9 @@ async function main() {
   setOutput("launchplane-url", requestUrl);
   if (observationDeadlineEpoch !== undefined) {
     setOutput("observation-deadline-epoch", observationDeadlineEpoch);
+  }
+  if (outageDeadlineEpoch !== undefined) {
+    setOutput("outage-deadline-epoch", outageDeadlineEpoch);
   }
   setOutput("route-path", routePath);
   setOutput("audience", audience);
