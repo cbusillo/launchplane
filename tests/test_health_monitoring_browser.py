@@ -12,16 +12,48 @@ from tests.http_app_test_support import (
     _github_oauth_config,
     _RejectingVerifier,
     _MissingProductReadStore,
+    _post_product_health_monitoring,
+    _product_health_monitoring_policy,
 )
 from tests.test_http_app_product import (
+    _product_health_monitoring_identity,
     _product_health_monitoring_payload,
     _product_health_monitoring_profile,
 )
 from tests.support.http import request
+from tests.support.auth import _StubVerifier
 from tests.support.stores import _sqlite_database_url
 
 
 class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
+    async def test_workflow_plan_apply_and_replay_keep_browser_evidence_out_of_result(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=_sqlite_database_url(Path(directory) / "db"))
+            store.ensure_schema()
+            store.write_product_profile_record(_product_health_monitoring_profile())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_product_health_monitoring_identity()),
+                authz_policy=_product_health_monitoring_policy(),
+                record_store_factory=lambda: store,
+            )
+            payload = _product_health_monitoring_payload()
+            plan = await _post_product_health_monitoring(app, payload)
+            self.assertEqual(plan.status_code, 202)
+            self.assertNotIn("current_private_endpoint_key", plan.json()["result"])
+            applied = {
+                **payload,
+                "mode": "apply",
+                "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
+            }
+            for _ in range(2):
+                response = await _post_product_health_monitoring(
+                    app, applied, idempotency_key="compatible-workflow"
+                )
+                self.assertEqual(response.status_code, 202)
+                self.assertNotIn("current_private_endpoint_key", response.json()["result"])
+            self.assertTrue(response.json()["replayed"])
+            store.close()
+
     async def test_terminal_agent_cannot_use_monitoring_even_with_broad_policy(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -105,6 +137,10 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
                 headers=_browser_mutation_headers(manager, session),
             )
             self.assertEqual(plan.status_code, 202)
+            self.assertEqual(
+                plan.json()["result"]["current_private_endpoint_key"],
+                original.lanes[0].health_monitoring.checks[0].private_endpoint_key,
+            )
             self.assertEqual(store.read_product_profile_record(original.product), original)
             apply_payload = {
                 **payload,

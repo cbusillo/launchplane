@@ -26929,9 +26929,15 @@
             "type": "string"
           },
           "current_private_endpoint_key": {
-            "default": "",
-            "title": "Current Private Endpoint Key",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Private Endpoint Key"
           },
           "current_require_runtime_identity": {
             "anyOf": [

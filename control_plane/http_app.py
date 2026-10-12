@@ -13001,6 +13001,10 @@ def create_launchplane_fastapi_app(
                 code="invalid_product_profile",
                 message="Updated product profile failed validation.",
             ) from error
+        # Existing terminal/workflow consumers reject unknown result fields.
+        # The extra endpoint comparison belongs to the signed-in editor only.
+        if not isinstance(identity, GitHubHumanIdentity):
+            plan = plan.model_copy(update={"current_private_endpoint_key": None})
         if (
             health_monitoring_request.mode == "apply"
             and health_monitoring_request.reviewed_plan_sha256 != plan.plan_sha256
@@ -13048,7 +13052,7 @@ def create_launchplane_fastapi_app(
                     "instance": health_monitoring_request.instance,
                     "health_check": result_plan.check_name,
                 },
-                result=result_plan.model_dump(mode="json"),
+                result=result_plan.model_dump(mode="json", exclude_none=True),
             )
             mutation = DbOnlyMutationRequest(
                 scope=idempotency_scope(identity),
@@ -13133,7 +13137,7 @@ def create_launchplane_fastapi_app(
                 "instance": health_monitoring_request.instance,
                 "health_check": plan.check_name,
             },
-            result=plan.model_dump(mode="json"),
+            result=plan.model_dump(mode="json", exclude_none=True),
         )
 
     async def apply_product_owner(

@@ -2066,6 +2066,8 @@ editor for existing public/private HTTP checks. The route accepts the existing
 CSRF-checked browser session dependency; every request still checks the policy's
 exact product/context/instance plan or apply authority. Bearer/OIDC authority is
 unchanged. The editor loads the stored profile, shows the preserved endpoint and
+current private endpoint key comparison (browser-session responses only, to
+preserve existing strict terminal/workflow decoders), and the
 before/after flags, invalidates review on edits, and requires confirmation before
 apply. An uncertain request retains its original payload and idempotency key
 across reloads; retry replays that request rather than planning another change.

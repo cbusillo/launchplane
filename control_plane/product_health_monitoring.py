@@ -109,7 +109,7 @@ class ProductHealthMonitoringPlan(BaseModel):
     requested_enabled: bool
     current_require_runtime_identity: bool | None = None
     requested_require_runtime_identity: bool
-    current_private_endpoint_key: str = ""
+    current_private_endpoint_key: str | None = None
     private_endpoint_key: str = ""
     resolved_url: str
     changed: bool
