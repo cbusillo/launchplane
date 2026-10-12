@@ -11,7 +11,6 @@ from control_plane.contracts.durable_operation_authorization import (
 )
 from control_plane.contracts.verireel_prod_backup_gate import (
     VeriReelProdBackupGateRequest,
-    VeriReelProdBackupGateWorkerResult,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -32,9 +31,6 @@ from tests.support.durable_operations import (
 
 
 class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
-    def _sqlite_database_url(self, root: Path) -> str:
-        return f"sqlite+pysqlite:///{root / 'launchplane.sqlite3'}"
-
     def _record_store(self, root: Path) -> FilesystemRecordStore:
         return FilesystemRecordStore(root / "state")
 
@@ -129,20 +125,12 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             store = self._record_store(root)
             operation = self._operation_record()
             store.write_verireel_prod_backup_gate_operation_record(operation)
-            with patch(
-                "control_plane.workflows.production_backup_gate_operation_worker.execute_shared_production_backup"
-            ) as capture:
-                result = run_production_backup_gate_operation_worker_once(
-                    record_store=store,
-                    control_plane_root_path=root,
-                    lease_owner="history-worker",
-                )
-                second = run_production_backup_gate_operation_worker_once(
-                    record_store=store,
-                    control_plane_root_path=root,
-                    lease_owner="history-worker",
-                )
-            capture.assert_not_called()
+            result = run_production_backup_gate_operation_worker_once(
+                record_store=store, control_plane_root_path=root, lease_owner="history-worker"
+            )
+            second = run_production_backup_gate_operation_worker_once(
+                record_store=store, control_plane_root_path=root, lease_owner="history-worker"
+            )
             self.assertTrue(result.terminal_write_committed)
             self.assertEqual(second.status, "idle")
             persisted = store.read_verireel_prod_backup_gate_operation_record(
@@ -241,15 +229,9 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             record_store = self._record_store(root)
             record_store.write_verireel_prod_backup_gate_operation_record(self._operation_record())
             revoked_policy = durable_operation_policy_record(revision=43)
-
-            with (
-                patch(
-                    "control_plane.workflows.production_backup_gate_operation_worker.read_active_authz_policy_record",
-                    side_effect=(self.authorization_policy_record, revoked_policy),
-                ),
-                patch(
-                    "control_plane.workflows.production_backup_gate_operation_worker.execute_shared_production_backup"
-                ) as delegated_worker,
+            with patch(
+                "control_plane.workflows.production_backup_gate_operation_worker.read_active_authz_policy_record",
+                side_effect=(self.authorization_policy_record, revoked_policy),
             ):
                 result = run_production_backup_gate_operation_worker_once(
                     record_store=record_store,
@@ -258,14 +240,12 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                     lease_seconds=300,
                     heartbeat_seconds=60,
                 )
-
             operation = record_store.read_verireel_prod_backup_gate_operation_record(
                 "verireel-operation-1"
             )
             self.assertEqual(result.status, "worked")
             self.assertEqual(operation.status, "fail")
             self.assertEqual(operation.error_code, "operation_authorization_revoked")
-            delegated_worker.assert_not_called()
 
     def test_verireel_operation_worker_fails_closed_for_legacy_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -274,28 +254,19 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             record_store.write_verireel_prod_backup_gate_operation_record(
                 self._operation_record(include_authorization=False)
             )
-
-            with patch(
-                "control_plane.workflows.production_backup_gate_operation_worker.execute_shared_production_backup"
-            ) as delegated_worker:
-                result = run_production_backup_gate_operation_worker_once(
-                    record_store=record_store,
-                    control_plane_root_path=root,
-                    lease_owner="worker-a",
-                    lease_seconds=300,
-                    heartbeat_seconds=60,
-                )
-
+            result = run_production_backup_gate_operation_worker_once(
+                record_store=record_store,
+                control_plane_root_path=root,
+                lease_owner="worker-a",
+                lease_seconds=300,
+                heartbeat_seconds=60,
+            )
             operation = record_store.read_verireel_prod_backup_gate_operation_record(
                 "verireel-operation-1"
             )
             self.assertEqual(result.status, "worked")
             self.assertEqual(operation.status, "fail")
-            self.assertEqual(
-                operation.error_code,
-                "operation_authorization_provenance_missing",
-            )
-            delegated_worker.assert_not_called()
+            self.assertEqual(operation.error_code, "operation_authorization_provenance_missing")
 
     def test_verireel_operation_worker_recovers_created_and_fails_backup_gate_phase(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -418,28 +389,14 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                     }
                 )
             )
-
-            with patch(
-                "control_plane.workflows.production_backup_gate_operation_worker.execute_shared_production_backup",
-                return_value=VeriReelProdBackupGateWorkerResult(
-                    status="pass",
-                    snapshot_name="ver-predeploy-20260425-001500",
-                    started_at="2026-04-25T00:15:00Z",
-                    finished_at="2026-04-25T00:16:00Z",
-                    detail="Backup completed.",
-                    evidence={"snapshot_name": "ver-predeploy-20260425-001500"},
-                ),
-            ) as delegated_worker:
-                second_result = run_production_backup_gate_operation_worker_once(
-                    record_store=record_store,
-                    control_plane_root_path=root,
-                    lease_owner="worker-b",
-                    lease_seconds=300,
-                    heartbeat_seconds=60,
-                )
-
+            second_result = run_production_backup_gate_operation_worker_once(
+                record_store=record_store,
+                control_plane_root_path=root,
+                lease_owner="worker-b",
+                lease_seconds=300,
+                heartbeat_seconds=60,
+            )
             self.assertEqual(second_result.status, "idle")
-            delegated_worker.assert_not_called()
             with self.assertRaises(FileNotFoundError):
                 record_store.read_backup_gate_record(
                     "backup-gate-verireel-prod-run-12345-attempt-1"

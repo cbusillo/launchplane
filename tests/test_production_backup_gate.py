@@ -343,6 +343,59 @@ class ProductionBackupGateTests(unittest.TestCase):
         self.assertEqual(provider.call_args.kwargs["ssh_private_key"], "worker-private")
         self.assertEqual(provider.call_args.kwargs["ssh_known_hosts"], "worker-hosts")
 
+    def test_shared_capture_cannot_publish_after_losing_its_lease(self) -> None:
+        operation = enqueue_production_backup_gate(
+            record_store=self.store,
+            request=self.binding.request,
+            authorization=self.authorization,
+            operation_key="caller|lost-lease",
+        )
+
+        def capture_then_lose_lease(
+            *args: object, **kwargs: object
+        ) -> ProductionBackupGateWorkerResult:
+            current = self.store.read_verireel_prod_backup_gate_operation_record(
+                operation.operation_id
+            )
+            self.store.write_verireel_prod_backup_gate_operation_record(
+                current.model_copy(update={"lease_owner": "replacement-worker"})
+            )
+            return ProductionBackupGateWorkerResult(
+                status="pass",
+                started_at=current.started_at,
+                finished_at=current.updated_at,
+                evidence={"capture_status": "verified"},
+            )
+
+        with (
+            patch(
+                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                return_value={
+                    "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "fixture-key",
+                    "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "fixture-hosts",
+                },
+            ),
+            patch(
+                "control_plane.workflows.production_backup_gate.execute_production_backup_provider",
+                side_effect=capture_then_lose_lease,
+            ) as capture,
+        ):
+            result = run_production_backup_gate_operation_worker_once(
+                record_store=self.store,
+                control_plane_root_path=self.root,
+                lease_owner="original-worker",
+            )
+        capture.assert_called_once()
+        self.assertFalse(result.terminal_write_committed)
+        persisted = self.store.read_verireel_prod_backup_gate_operation_record(
+            operation.operation_id
+        )
+        self.assertEqual(persisted.status, "running")
+        self.assertEqual(persisted.lease_owner, "replacement-worker")
+        self.assertIsNone(persisted.result)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_backup_gate_record(operation.backup_record_id)
+
     def test_retired_binding_blocks_worker_before_provider(self) -> None:
         operation = enqueue_production_backup_gate(
             record_store=self.store,

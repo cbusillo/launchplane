@@ -993,6 +993,11 @@ payload-json-files: |-
 Each `payload-json-files` line is `json.path=file-path`; the action parses the
 file as JSON and writes that value into the request before sending it.
 
+The transitional request action still supports polling asynchronous results.
+Use its [declared polling inputs](../.github/actions/launchplane-request/action.yml)
+for the input descriptions and defaults; select the supported operation from
+[the service boundary](service-boundary.md).
+
 ## New Repo Checklist
 
 When creating a new website repo for Launchplane:
