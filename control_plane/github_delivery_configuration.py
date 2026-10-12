@@ -6,7 +6,12 @@ import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy.exc import IntegrityError
 
+from control_plane.delivery_apply_receipt import (
+    delivery_request_fingerprint,
+    read_delivery_apply_receipt,
+)
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.launchplane_github_delivery import (
@@ -161,38 +166,55 @@ def apply_delivery_github_configuration(
     idempotency_key: str,
 ) -> dict[str, object]:
     scope = f"github-delivery-configuration:{actor}"
-    fingerprint = hashlib.sha256(
-        json.dumps(request.model_dump(mode="json"), sort_keys=True).encode()
-    ).hexdigest()
+    fingerprint = delivery_request_fingerprint(request)
     if request.mode == "apply":
         if not idempotency_key.strip():
             raise ValueError("Delivery App apply requires Idempotency-Key.")
-        previous = store.read_idempotency_record(
+        previous = read_delivery_apply_receipt(
+            store=store,
+            request=request,
+            actor=actor,
             scope=scope,
             route_path=GITHUB_DELIVERY_CONFIGURATION_ROUTE,
             idempotency_key=idempotency_key,
         )
         if previous is not None:
-            if previous.state != "completed" or previous.request_fingerprint != fingerprint:
-                raise ValueError("Delivery App configuration idempotency conflict.")
             return dict(previous.response_payload)
-    summary, bundle = plan_delivery_github_configuration(store=store, request=request, actor=actor)
-    summary["trace_id"] = trace_id
-    if request.mode == "dry-run":
+    try:
+        summary, bundle = plan_delivery_github_configuration(
+            store=store, request=request, actor=actor
+        )
+        summary["trace_id"] = trace_id
+        if request.mode == "dry-run":
+            return summary
+        if request.expected_plan_digest != summary["plan_digest"]:
+            raise ValueError("Delivery App configuration changed since the reviewed dry-run.")
+        now = datetime.now(UTC).isoformat()
+        receipt = LaunchplaneIdempotencyRecord(
+            record_id=f"idempotency-{trace_id}",
+            scope=scope,
+            route_path=GITHUB_DELIVERY_CONFIGURATION_ROUTE,
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+            response_status_code=200,
+            response_trace_id=trace_id,
+            recorded_at=now,
+            response_payload=summary,
+        )
+        store.write_product_authority_bundle(
+            bundle.model_copy(update={"idempotency_record": receipt})
+        )
         return summary
-    if request.expected_plan_digest != summary["plan_digest"]:
-        raise ValueError("Delivery App configuration changed since the reviewed dry-run.")
-    now = datetime.now(UTC).isoformat()
-    receipt = LaunchplaneIdempotencyRecord(
-        record_id=f"idempotency-{trace_id}",
-        scope=scope,
-        route_path=GITHUB_DELIVERY_CONFIGURATION_ROUTE,
-        idempotency_key=idempotency_key,
-        request_fingerprint=fingerprint,
-        response_status_code=200,
-        response_trace_id=trace_id,
-        recorded_at=now,
-        response_payload=summary,
-    )
-    store.write_product_authority_bundle(bundle.model_copy(update={"idempotency_record": receipt}))
-    return summary
+    except (ValueError, FileNotFoundError, IntegrityError):
+        if request.mode == "apply":
+            previous = read_delivery_apply_receipt(
+                store=store,
+                request=request,
+                actor=actor,
+                scope=scope,
+                route_path=GITHUB_DELIVERY_CONFIGURATION_ROUTE,
+                idempotency_key=idempotency_key,
+            )
+            if previous is not None:
+                return dict(previous.response_payload)
+        raise

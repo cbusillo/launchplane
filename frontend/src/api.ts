@@ -1130,3 +1130,9 @@ export function retireServiceGitHubTokens(
   };
   return requestGeneratedPost(request, options.signal, options.onDispatch);
 }
+
+export function checkServiceDeliveryApplyReceipt(
+  originalRequest: import("./generated/openapi.ts").ServiceDeliveryApplyReceiptRequest["original_request"], idempotencyKey: string, signal: AbortSignal,
+): Promise<import("./generated/openapi.ts").ServiceDeliveryApplyReceiptResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.serviceDeliveryReceiptRead, "POST", { original_request: originalRequest, idempotency_key: idempotencyKey }, signal);
+}
