@@ -71,9 +71,9 @@ export function AppShell({
   signingOut: boolean;
   theme: Theme;
 }) {
-  const [now, setNow] = useState(performance.now());
+  const [now, setNow] = useState(() => ({ wallTime: Date.now(), monotonicTime: performance.now() }));
   useEffect(() => {
-    const update = () => setNow(performance.now());
+    const update = () => setNow({ wallTime: Date.now(), monotonicTime: performance.now() });
     update();
     const timer = inventoryReceivedAt === null ? undefined : window.setTimeout(update,
       Math.max(1, inventoryReceivedAt.monotonicTime + 2 * READ_REFRESH_INTERVAL_MS - performance.now()));
@@ -86,7 +86,8 @@ export function AppShell({
     };
   }, [inventoryReceivedAt]);
   const inventoryStale = productsResource.status === "error" || inventoryReceivedAt === null ||
-    now >= inventoryReceivedAt.monotonicTime + 2 * READ_REFRESH_INTERVAL_MS;
+    now.monotonicTime - inventoryReceivedAt.monotonicTime >= 2 * READ_REFRESH_INTERVAL_MS ||
+    now.wallTime - inventoryReceivedAt.wallTime >= 2 * READ_REFRESH_INTERVAL_MS;
   const staleDescription = inventoryStale ? `Stale data${inventoryReceivedAt === null ? "" :
     `; data from ${new Date(inventoryReceivedAt.wallTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}` : "";
   const products = (productsResource.data ?? []).map(product => expireProductEvidence(product));

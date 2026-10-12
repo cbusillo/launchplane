@@ -12,7 +12,7 @@ for (const theme of ["dark", "light"] as const) {
       const freshen = (value: unknown) => {
         if (!value || typeof value !== "object") return;
         const record = value as Record<string, unknown>;
-        if ("stale_after" in record) record.stale_after = new Date(now + 3600_000).toISOString();
+        if ("stale_after" in record) record.stale_after = new Date(now + 4 * 3600_000).toISOString();
         Object.values(record).forEach(freshen);
       };
       freshen(products);
@@ -101,6 +101,17 @@ for (const theme of ["dark", "light"] as const) {
     const activityReads = reads;
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS + 10);
     await expect.poll(() => reads).toBe(activityReads + 1);
+    release = undefined;
+    mode = "delay";
+    // Simulate sleep on browsers whose monotonic clock pauses: focus must
+    // immediately expire old inventory and request current observations.
+    await page.clock.setSystemTime(new Date(fixtures.now + 3600_000));
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect.poll(() => Boolean(release)).toBe(true);
+    await expect(testing).toHaveAttribute("data-tone", "stale");
+    mode = "fresh";
+    release!();
+    await expect(testing).toHaveAttribute("data-tone", "verified");
     expect(mutations).toEqual([]);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   });

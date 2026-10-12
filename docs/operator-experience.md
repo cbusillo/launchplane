@@ -813,7 +813,8 @@ or reviewed request. Return to the product to check the retained original again.
 ## Sidebar lane status
 
 The product sidebar shows Testing then Production with compact, saturated state icons:
-check for healthy, triangle for warning, x for an alert or failure, question
+check for healthy, triangle for warning, clock for stale data or evidence,
+x for an alert or failure, question
 mark for unverified evidence, and minus for absent or unsupported lanes. Hover
 labels and the accessible status name identify the lane, state and known
 diagnostic layers. An alert can include an open warning-severity incident;
@@ -831,3 +832,5 @@ the real lane icons immediately, including failures and warnings. Expired
 health or observed topology evidence uses a clock instead of an amber triangle;
 freshly returned failures and open incidents retain their alert. Stored route
 authority expiry remains a separate diagnostic, as described above.
+Cache age uses both elapsed and forward wall-clock time, so setting the clock
+backward cannot prolong freshness and waking a sleeping browser catches up.
