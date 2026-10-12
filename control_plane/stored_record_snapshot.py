@@ -109,16 +109,19 @@ class _Scrubber:
         return hmac.new(self._salt, value.encode(), hashlib.sha256).hexdigest()
 
     def number(self, value: str) -> int:
-        if value not in self._numbers:
+        # History may contain large decimal audit strings. Retain fixed-size
+        # salted keys, not the source text, across streamed rows.
+        digest = self._digest(value)
+        if digest not in self._numbers:
             # Indexed PR numbers use PostgreSQL Integer. Keep numeric identities
             # consistent across strings/payloads/projections and avoid collisions.
             maximum = (1 << 31) - 1
-            candidate = int(self._digest(value)[:12], 16) % maximum + 1
+            candidate = int(digest[:12], 16) % maximum + 1
             while candidate in self._used_numbers or str(candidate) == value:
                 candidate = candidate % maximum + 1
-            self._numbers[value] = candidate
+            self._numbers[digest] = candidate
             self._used_numbers.add(candidate)
-        return self._numbers[value]
+        return self._numbers[digest]
 
     def string(self, value: str, name: str, *, protocol: bool = False) -> str:
         if not value or value == "*":
@@ -130,7 +133,6 @@ class _Scrubber:
             and re.fullmatch(r"[a-z_][a-z_.-]*", value)
         ):
             return value
-        digest = self._digest(value)
         if protocol and (name.endswith("_at") or name in {"started_at", "finished_at"}):
             try:
                 datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -139,6 +141,7 @@ class _Scrubber:
                 pass
         if value.isdecimal():
             return str(self.number(value))
+        digest = self._digest(value)
         if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
             return digest[: len(value)]
         if name == "slug_template":

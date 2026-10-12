@@ -336,6 +336,29 @@ class StoredRecordSnapshotTests(unittest.TestCase):
                 self.assertGreater(_statement_timeout_ms(remaining), 0)
                 self.assertLessEqual(_statement_timeout_ms(remaining), remaining)
 
+    def test_numeric_identity_cache_does_not_retain_large_source_strings(self) -> None:
+        import gc
+        import tracemalloc
+        from control_plane.stored_record_snapshot import _Scrubber
+
+        gc.collect()
+        already_tracing = tracemalloc.is_tracing()
+        if not already_tracing:
+            tracemalloc.start()
+        try:
+            baseline = tracemalloc.get_traced_memory()[0]
+            scrubber = _Scrubber()
+            source_value_size = 64 * 1024
+            for index in range(64):
+                value = str(index) + "0" * source_value_size
+                self.assertEqual(scrubber.number(value), scrubber.number(value))
+            del value
+            retained = tracemalloc.get_traced_memory()[0] - baseline
+            self.assertLess(retained, source_value_size * 4)
+        finally:
+            if not already_tracing:
+                tracemalloc.stop()
+
     def test_train_run_history_samples_latest_without_deleting_source_records(self) -> None:
         earlier = _merge_train_run_record()
         later = _merge_train_run_record(
