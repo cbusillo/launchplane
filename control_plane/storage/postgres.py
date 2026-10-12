@@ -8797,6 +8797,7 @@ class PostgresRecordStore(HumanSessionStore):
         response_trace_id: str,
         response_payload: dict[str, Any],
         expected_promotion_evidence: tuple[BaseModel, ...] = (),
+        expected_binding_evidence: tuple[BaseModel, ...] = (),
         promotion_recovery_inventory: EnvironmentInventory | None = None,
         promotion_recovery_record: PromotionRecord | None = None,
         promotion_recovery_deployments: tuple[DeploymentRecord, ...] = (),
@@ -8833,7 +8834,7 @@ class PostgresRecordStore(HumanSessionStore):
                     record=current_record,
                 )
             expired_promotion = (
-                bool(expected_promotion_evidence)
+                bool(expected_promotion_evidence or expected_binding_evidence)
                 and current_record.state == "running"
                 and parse_launchplane_mutation_timestamp(
                     current_record.lease_expires_at, field_name="lease_expires_at"
@@ -8855,7 +8856,7 @@ class PostgresRecordStore(HumanSessionStore):
             # Recovery adopts only the reviewed records. Lock and compare them in
             # the same transaction that completes the exact reservation; an expired
             # running promotion need not first change state in a separate write.
-            for evidence in expected_promotion_evidence:
+            for evidence in (*expected_promotion_evidence, *expected_binding_evidence):
                 statement: Any
                 if isinstance(evidence, LaunchplaneProductProfileRecord):
                     statement = select(LaunchplaneProductProfileRow).where(
@@ -8869,6 +8870,16 @@ class PostgresRecordStore(HumanSessionStore):
                     statement = select(LaunchplaneProviderTargetRow).where(
                         LaunchplaneProviderTargetRow.context == evidence.context,
                         LaunchplaneProviderTargetRow.instance == evidence.instance,
+                    )
+                elif isinstance(evidence, DokployTargetRecord):
+                    statement = select(LaunchplaneDokployTargetRow).where(
+                        LaunchplaneDokployTargetRow.context == evidence.context,
+                        LaunchplaneDokployTargetRow.instance == evidence.instance,
+                    )
+                elif isinstance(evidence, DokployTargetIdRecord):
+                    statement = select(LaunchplaneDokployTargetIdRow).where(
+                        LaunchplaneDokployTargetIdRow.context == evidence.context,
+                        LaunchplaneDokployTargetIdRow.instance == evidence.instance,
                     )
                 elif isinstance(evidence, PromotionRecord):
                     statement = select(LaunchplanePromotionRow).where(
