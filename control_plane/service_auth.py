@@ -12,6 +12,7 @@ from typing import Annotated, Any, Literal, Protocol, TypeAlias, cast
 from weakref import WeakKeyDictionary
 
 import jwt
+from control_plane.action_effects import AGENT_READ_ROLE_ACTION, agent_read_role_covers
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -715,11 +716,18 @@ class TerminalAgentPolicyRule(TokenBoundAuthzPolicyRule):
         context: str,
         target: AuthorizationTarget | None = None,
         schema_version: AuthzPolicySchemaVersion = 1,
+        inherit_agent_read_role: bool = False,
     ) -> bool:
         return self.allows_token_bound_identity(
             subject=identity.subject,
             token_label=identity.token_label,
-            action=action,
+            action=(
+                AGENT_READ_ROLE_ACTION
+                if inherit_agent_read_role
+                and AGENT_READ_ROLE_ACTION in self.actions
+                and agent_read_role_covers(action)
+                else action
+            ),
             product=product,
             context=context,
             target=target,
@@ -739,11 +747,18 @@ class LocalOperatorPolicyRule(PatternTokenBoundAuthzPolicyRule):
         context: str,
         target: AuthorizationTarget | None = None,
         schema_version: AuthzPolicySchemaVersion = 1,
+        inherit_agent_read_role: bool = False,
     ) -> bool:
         return self.allows_token_bound_identity(
             subject=identity.subject,
             token_label=identity.token_label,
-            action=action,
+            action=(
+                AGENT_READ_ROLE_ACTION
+                if inherit_agent_read_role
+                and AGENT_READ_ROLE_ACTION in self.actions
+                and agent_read_role_covers(action)
+                else action
+            ),
             product=product,
             context=context,
             target=target,
@@ -832,9 +847,11 @@ def action_safety(action: str) -> AgentConsumerActionSafety:
         return "destructive"
     if "prod" in action_parts or "promotion" in action_parts:
         return "prod"
-    if normalized_action in {"authz_diagnostic.evaluate", "work_graph.rank"} or (
-        normalized_action.endswith(".read")
-    ):
+    if normalized_action in {
+        "agent_write_intent.plan",
+        "authz_diagnostic.evaluate",
+        "work_graph.rank",
+    } or (normalized_action.endswith(".read")):
         return "read"
     if (
         normalized_action.endswith(".write")
@@ -1007,6 +1024,23 @@ class LaunchplaneAuthzPolicy(BaseModel):
             self.local_admins,
         ):
             for rule in rules:
+                if AGENT_READ_ROLE_ACTION in rule.actions:
+                    if not isinstance(rule, LocalOperatorPolicyRule | TerminalAgentPolicyRule):
+                        raise ValueError("The read role requires a token-bound agent rule.")
+                    selectors = (*rule.subjects, *rule.token_labels, *rule.products)
+                    if (
+                        self.schema_version == 1
+                        or not rule.subjects
+                        or not rule.token_labels
+                        or not rule.products
+                        or any(
+                            not item.strip() or any(char in item for char in "*?[")
+                            for item in selectors
+                        )
+                    ):
+                        raise ValueError(
+                            "The read role requires exact agent and product selectors in schema 2 or 3."
+                        )
                 if rule.managed_set_id is not None and rule.managed_rule_id is not None:
                     managed_identity = (rule.managed_set_id, rule.managed_rule_id)
                     if managed_identity in managed_identities:
@@ -1080,6 +1114,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
         context: str,
         target: AuthorizationTarget | None = None,
         record_context: bool = True,
+        inherit_agent_read_role: bool = False,
     ) -> AuthzEvaluation:
         resolved_target = target or AuthorizationTarget(scope="context")
         if self.schema_version == 1 and action in exact_instance_workflow_authz_actions():
@@ -1144,6 +1179,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
                     context=context,
                     target=resolved_target,
                     schema_version=self.schema_version,
+                    inherit_agent_read_role=inherit_agent_read_role,
                 )
                 for rule in self.terminal_agents
             )
@@ -1167,6 +1203,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
                     context=context,
                     target=resolved_target,
                     schema_version=self.schema_version,
+                    inherit_agent_read_role=inherit_agent_read_role,
                 )
                 for rule in self.local_operators
             )
@@ -1224,6 +1261,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
         product: str,
         context: str,
         target: AuthorizationTarget | None = None,
+        inherit_agent_read_role: bool = False,
     ) -> bool:
         return (
             self.evaluate(
@@ -1232,8 +1270,54 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 product=product,
                 context=context,
                 target=target,
+                inherit_agent_read_role=inherit_agent_read_role,
             ).decision
             == "allowed"
+        )
+
+    def agent_read_role_allows(
+        self,
+        *,
+        identity: LaunchplaneIdentity,
+        product: str,
+        context: str,
+        target: AuthorizationTarget | None = None,
+    ) -> bool:
+        if isinstance(identity, LocalOperatorIdentity):
+            matches = any(
+                AGENT_READ_ROLE_ACTION in rule.actions
+                and rule.allows(
+                    identity=identity,
+                    action=AGENT_READ_ROLE_ACTION,
+                    product=product,
+                    context=context,
+                    target=target,
+                    schema_version=self.schema_version,
+                )
+                for rule in self.local_operators
+            )
+        elif isinstance(identity, TerminalAgentIdentity):
+            matches = any(
+                AGENT_READ_ROLE_ACTION in rule.actions
+                and rule.allows(
+                    identity=identity,
+                    action=AGENT_READ_ROLE_ACTION,
+                    product=product,
+                    context=context,
+                    target=target,
+                    schema_version=self.schema_version,
+                )
+                for rule in self.terminal_agents
+            )
+        else:
+            return False
+        return matches and self.allows(
+            identity=identity,
+            action=AGENT_READ_ROLE_ACTION,
+            product=product,
+            context=context,
+            target=target,
+            inherit_agent_read_role=False,
         )
 
     def allows_product_instance_preflight(
@@ -1266,6 +1350,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
             product=product,
             context="",
             target=AuthorizationTarget(scope="instance", instances=(instance,)),
+            inherit_agent_read_role=False,
         )
 
     def names_administrator(self, identity: GitHubHumanIdentity) -> bool:

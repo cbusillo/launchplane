@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
+
 from pathlib import Path
 
 from uuid import uuid4
@@ -50,6 +52,7 @@ from sqlalchemy import (
     or_,
     text,
     select,
+    union_all,
 )
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
@@ -138,6 +141,7 @@ from control_plane.contracts.provider_delivery_readiness import (
 )
 
 if TYPE_CHECKING:
+    from control_plane.stored_record_snapshot import SnapshotAuthorization
     from control_plane.legacy_preview_reconciliation import LegacyPreviewReconciliationRequest
     from control_plane.product_retirement import BoundProductRetirement
     from control_plane.contracts.merge_train_historical_completion import (
@@ -4775,6 +4779,8 @@ class LaunchplaneAgentWriteIntentRow(Base):
             "status",
             desc("recorded_at"),
         ),
+        # Evaluations retain denied caller inputs; they do not establish products.
+        {"info": {"product_scope_authority": False}},
     )
 
     record_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -4908,6 +4914,12 @@ class LaunchplaneMergeTrainBatchCandidateRow(Base):
     base_branch: Mapped[str] = mapped_column(String, nullable=False)
     batch_id: Mapped[str] = mapped_column(String, nullable=False)
     candidate_status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneMergeTrainStallRow(Base):
+    __tablename__ = "launchplane_merge_train_stalls"
+    repository: Mapped[str] = mapped_column(String, primary_key=True)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -5846,10 +5858,29 @@ class PostgresRecordStore(HumanSessionStore):
             return
         Base.metadata.create_all(self._engine)
 
-    def export_stored_record_snapshot(self) -> StoredRecordSnapshot:
+    def list_recorded_product_scopes(self) -> tuple[str, ...]:
+        """Product projections include historical records without an active profile."""
+        product_columns = tuple(
+            table.c.product
+            for table in Base.metadata.tables.values()
+            if "product" in table.c and table.info.get("product_scope_authority", True)
+        )
+        scopes = union_all(
+            *(select(column.label("product")).distinct() for column in product_columns)
+        ).subquery()
+        with self._engine.connect() as connection:
+            return tuple(
+                connection.execute(
+                    select(scopes.c.product).distinct().where(scopes.c.product != "")
+                ).scalars()
+            )
+
+    def export_stored_record_snapshot(
+        self, *, authorize_records: SnapshotAuthorization | None = None
+    ) -> StoredRecordSnapshot:
         from control_plane.stored_record_snapshot import export_stored_record_snapshot
 
-        return export_stored_record_snapshot(self._engine)
+        return export_stored_record_snapshot(self._engine, authorize_records=authorize_records)
 
     def verify_schema(self) -> None:
         backend_name = self._engine.url.get_backend_name()
@@ -19104,6 +19135,38 @@ class PostgresRecordStore(HumanSessionStore):
                 base_branch=record.candidate.base_branch,
                 batch_id=record.candidate.batch_id,
                 candidate_status=record.candidate.status,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    @contextmanager
+    def merge_train_stall_lock(self, *, repository: str) -> Iterator[None]:
+        if self.database_dialect_name == "sqlite":
+            database = self._engine.url.database
+            if not database or database == ":memory:":
+                raise ValueError("Stall monitoring requires persistent storage.")
+            path = Path(database).resolve()
+            with FilesystemRecordStore(path.parent).merge_train_stall_lock(
+                repository=f"{path}:{repository}"
+            ):
+                yield
+            return
+        with self._session_factory() as session, session.begin():
+            session.execute(text("SET LOCAL lock_timeout = '5s'"))
+            self._lock_landing_authority(session, f"merge-train-stall:{repository}")
+            yield
+
+    def read_merge_train_stall_record(self, repository: str) -> MergeTrainStallRecord:
+        return self._read_model(
+            model_type=MergeTrainStallRecord,
+            orm_model=LaunchplaneMergeTrainStallRow,
+            filters=(LaunchplaneMergeTrainStallRow.repository == repository.lower(),),
+        )
+
+    def write_merge_train_stall_record(self, record: MergeTrainStallRecord) -> None:
+        self._write_row(
+            LaunchplaneMergeTrainStallRow(
+                repository=record.normalized_repository,
                 payload=self._payload_dict(record),
             )
         )
@@ -38755,6 +38818,122 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             limit=limit,
         )
+
+    def compare_and_rebind_worker_credentials(
+        self,
+        *,
+        expected_profile: LaunchplaneProductProfileRecord,
+        context: str,
+        instance: str,
+        expected_records: tuple[SecretRecord, ...],
+        expected_bindings: tuple[SecretBinding, ...],
+        replacements: tuple[SecretBinding, ...],
+        mutation: DbOnlyMutationRequest,
+        reason: str,
+    ) -> tuple[str, LaunchplaneIdempotencyRecord]:
+        """Rename worker bindings and receipt atomically; never touch encrypted versions."""
+        from control_plane.secrets import LAUNCHPLANE_WORKER_SECRET_INTEGRATION
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            status, reservation_row, reservation = self._reserve_db_only_mutation_in_session(
+                session=session,
+                mutation=mutation,
+            )
+            if status != "acquired":
+                return status, reservation
+            assert reservation_row is not None
+            self._lock_product_authority_bundle_write(session)
+            profile_row = session.scalar(
+                select(LaunchplaneProductProfileRow)
+                .where(
+                    LaunchplaneProductProfileRow.product == expected_profile.product,
+                )
+                .with_for_update()
+            )
+            records = tuple(
+                SecretRecord.model_validate(row.payload)
+                for row in session.scalars(
+                    select(LaunchplaneSecretRow)
+                    .where(
+                        LaunchplaneSecretRow.integration == LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+                        LaunchplaneSecretRow.context == context,
+                        LaunchplaneSecretRow.instance == instance,
+                        LaunchplaneSecretRow.scope == "context_instance",
+                    )
+                    .with_for_update()
+                ).all()
+            )
+            bindings = tuple(
+                SecretBinding.model_validate(row.payload)
+                for row in session.scalars(
+                    select(LaunchplaneSecretBindingRow)
+                    .where(
+                        LaunchplaneSecretBindingRow.integration
+                        == LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+                        LaunchplaneSecretBindingRow.context == context,
+                        LaunchplaneSecretBindingRow.instance == instance,
+                    )
+                    .with_for_update()
+                ).all()
+            )
+            if (
+                profile_row is None
+                or self._read_product_profile_payload(profile_row.payload) != expected_profile
+                or sorted(records, key=lambda r: r.secret_id)
+                != sorted(expected_records, key=lambda r: r.secret_id)
+                or sorted(bindings, key=lambda b: b.binding_id)
+                != sorted(expected_bindings, key=lambda b: b.binding_id)
+            ):
+                raise SecretCopySourceConflictError(
+                    "Worker credential metadata changed before commit."
+                )
+            require_bundle_context_owner(
+                ProductAuthorityBundle(required_context_owner=(expected_profile.product, context)),
+                (
+                    self._read_product_profile_payload(row.payload)
+                    for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                ),
+            )
+            originals = {binding.binding_id: binding for binding in bindings}
+            for binding in replacements:
+                before = originals[binding.binding_id]
+                if (
+                    before.model_copy(
+                        update={
+                            "binding_key": binding.binding_key,
+                            "updated_at": binding.updated_at,
+                        }
+                    )
+                    != binding
+                ):
+                    raise ValueError("Worker rebinding must preserve the credential and scope.")
+                session.merge(self._secret_binding_row(binding))
+                event = SecretAuditEvent(
+                    event_id=f"{binding.binding_id}-rebound-{uuid4().hex}",
+                    secret_id=binding.secret_id,
+                    event_type="relabelled",
+                    recorded_at=_utc_now_timestamp(),
+                    actor=mutation.scope,
+                    detail=reason,
+                    metadata={
+                        "from_key": before.binding_key,
+                        "binding_key": binding.binding_key,
+                        "source": "backup-worker-rebinding",
+                    },
+                )
+                session.merge(self._secret_audit_event_row(event))
+                self._after_product_authority_bundle_step("rebind_worker_credential")
+            completion = complete_launchplane_mutation_reservation(
+                reservation,
+                response_status_code=mutation.response_status_code,
+                response_trace_id=mutation.response_trace_id,
+                completed_at=self._database_mutation_timestamp(session),
+                response_payload=mutation.response_payload,
+            )
+            self._sync_idempotency_row(reservation_row, completion)
+            session.commit()
+            return "written", completion
 
     def write_secret_version(self, version: SecretVersion) -> None:
         self._write_row(self._secret_version_row(version))

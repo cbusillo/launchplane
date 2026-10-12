@@ -91,6 +91,58 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         LaunchplaneProductProfileRecord.model_validate(profile)
         self.assertEqual(before, self.store.list_authz_policy_records()[0].model_dump_json())
 
+    def test_aggregate_product_scopes_include_history_without_current_profiles(self) -> None:
+        from sqlalchemy import insert
+        from control_plane.storage.postgres import LaunchplaneOwnerAcceptanceSubjectSequenceRow
+
+        with self.store._engine.begin() as connection:
+            connection.execute(
+                insert(LaunchplaneOwnerAcceptanceSubjectSequenceRow).values(
+                    repository_id="historical-repository",
+                    pr_number=1,
+                    product="historical-product",
+                    system="runtime",
+                    owner_action="review",
+                    environment="testing",
+                    last_sequence=1,
+                )
+            )
+        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload())
+        self.store.write_product_profile_record(profile)
+        self.assertTrue(
+            {profile.product, "historical-product"}.issubset(
+                self.store.list_recorded_product_scopes()
+            )
+        )
+
+    def test_role_export_authorizes_legacy_profiles_using_the_store_reader(self) -> None:
+        from control_plane.contracts.product_health_monitoring_migration import (
+            downgrade_product_profile_health_monitoring_payload,
+        )
+        from control_plane.storage.postgres import LaunchplaneProductProfileRow
+
+        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload())
+        self.store.write_product_profile_record(profile)
+        legacy = downgrade_product_profile_health_monitoring_payload(
+            profile.model_dump(mode="json")
+        )
+        with self.store._engine.begin() as connection:
+            connection.execute(update(LaunchplaneProductProfileRow).values(payload=legacy))
+        expected = self.store.read_product_profile_record(profile.product)
+        observed: list[LaunchplaneProductProfileRecord] = []
+
+        def authorize(
+            profiles: tuple[LaunchplaneProductProfileRecord, ...], inventory: tuple[object, ...]
+        ) -> bool:
+            observed.extend(profiles)
+            return profiles == (expected,)
+
+        snapshot = self.store.export_stored_record_snapshot(authorize_records=authorize)
+        self.assertEqual(observed, [expected])
+        self.assertEqual(self.store.read_product_profile_record(profile.product), expected)
+        raw = snapshot.tables[LaunchplaneProductProfileRow.__tablename__][0]["payload"]
+        self.assertIn("public_ingress_monitoring", raw["lanes"][0])
+
     def test_raw_omitted_instances_survive_export_and_new_validation_fails_rehearsal(self) -> None:
         with self.store._engine.begin() as connection:
             payload = self.store.list_authz_policy_records()[0].model_dump(mode="json")

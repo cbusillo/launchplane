@@ -1803,8 +1803,9 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202)
         intent = response.json()["result"]["intent"]
         self.assertEqual(intent["status"], "denied")
-        self.assertEqual(intent["reason_code"], "authorization_denied")
-        self.assertEqual(intent["secret_evidence"]["status"], "pass")
+        self.assertFalse(intent["safe_to_execute"])
+        self.assertEqual(intent["secret_evidence"]["status"], "unavailable")
+        self.assertFalse(intent["secret_evidence"]["findings"])
 
     async def test_evaluate_denies_disallowed_secret_destination(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -3022,6 +3023,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_product_config_local_operator_stays_on_its_products_own_lane(self) -> None:
         context_scoped = _meta_product_config_payload(reason="Context-scoped secret.")
         _product_config_secrets(context_scoped)[0]["scope"] = "context"
+        context_scoped["mode"] = "apply"
         for payload, owner in (
             (context_scoped, "sellyouroutboard"),
             (_meta_product_config_payload(reason="Context of another product."), "other-site"),
@@ -3044,7 +3046,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
                 app = create_launchplane_fastapi_app(
                     verifier=_RejectingVerifier(),
                     authz_policy=_local_operator_policy(
-                        actions=("product_config.plan",),
+                        actions=("product_config.plan", "product_config.apply"),
                         products=("sellyouroutboard",),
                         contexts=("sellyouroutboard",),
                         subject="configured-local-owner",

@@ -272,6 +272,15 @@ export type AuthzManagedRuleChange = {
     previous_rule_sha256: string;
 };
 
+export type BackupCredentialBindingRequest = {
+    bindings: {
+        [key: string]: string;
+    };
+    mode?: 'dry-run' | 'apply';
+    reason: string;
+    reviewed_plan_sha256?: string;
+};
+
 export type BackupGateEvidence = {
     evidence: {
         [key: string]: string;
@@ -1339,6 +1348,34 @@ export type MergeTrainAdmissionDecision = {
     status: 'admitted' | 'deferred';
 };
 
+export type MergeTrainControllerLastResult = {
+    action: string;
+    base_branch: string;
+    base_checks_status: 'not_observed' | 'unknown' | 'pending' | 'pass' | 'fail';
+    base_sha: string;
+    batch_body_retry_of: string;
+    candidate_batch_id: string;
+    candidate_checks_status: 'not_observed' | 'unknown' | 'pending' | 'pass' | 'fail';
+    candidate_sha: string;
+    check_retry_of: string;
+    infrastructure_retry_of: string;
+    next_actor: 'controller' | 'provider' | 'repository_agent';
+    next_observation: string;
+    observed_at: string;
+    observed_candidate_sha: string;
+    pass_started_at: string;
+    policy_key: string;
+    policy_sha256: string;
+    reason_code: string;
+    reconciliation_required: boolean;
+    record_id: string;
+    recovery_kind: string;
+    repository: string;
+    semantic_progress_at: string;
+    source_failed_record_id: string;
+    trace_id: string;
+};
+
 export type MergeTrainControllerLeaseDiagnostics = {
     active_action: string;
     active_phase: string;
@@ -1388,6 +1425,7 @@ export type MergeTrainControllerStateRecord = {
     last_phase: string;
     last_pull_request_number: number | null;
     last_record_id: string;
+    last_result: MergeTrainControllerLastResult | null;
     last_transition_at: string;
     lease_acquired_at: string;
     lease_expires_at: string;
@@ -1399,6 +1437,7 @@ export type MergeTrainControllerStateRecord = {
     reconciliation_status: 'clean' | 'adopted' | 'required';
     repository: string;
     schema_version: number;
+    semantic_progress_key: string;
     status: 'idle' | 'running' | 'reconcile_required';
     step_payload: {
         [key: string]: unknown;
@@ -1415,6 +1454,8 @@ export type MergeTrainControllerStatusReadModel = {
     current_policy_key: string;
     current_policy_sha256: string;
     generated_at: string;
+    last_controller_result: MergeTrainControllerLastResult | null;
+    last_controller_result_policy_status: 'current' | 'stale' | 'unchecked';
     latest_dry_run: MergeTrainLatestDryRunSummary | null;
     latest_run: MergeTrainRunRecord | null;
     latest_run_age_seconds: number | null;
@@ -1422,6 +1463,7 @@ export type MergeTrainControllerStatusReadModel = {
     reconciliation_diagnostics: Array<MergeTrainReconciliationDiagnostic>;
     repository: string;
     schema_version: number;
+    stall?: MergeTrainStallRecord | null;
 };
 
 export type MergeTrainControllerStatusResponse = {
@@ -1584,6 +1626,33 @@ export type MergeTrainServiceAuthz = {
     action: string;
     context: string;
     product: string;
+};
+
+export type MergeTrainStallObservation = {
+    progress_key: string;
+    progress_since: string;
+    queue_suspended: boolean;
+    ready_since: {
+        [key: string]: string;
+    };
+    reasons: Array<string>;
+    suspected_signals: Array<string>;
+};
+
+export type MergeTrainStallRecord = {
+    delivery_error: string;
+    issue_body_sha256: string;
+    issue_number: number | null;
+    issue_state: 'open' | 'closed';
+    notification_key: string;
+    notified_key: string;
+    observations: {
+        [key: string]: MergeTrainStallObservation;
+    };
+    observed_at: string;
+    published_issue_number: number | null;
+    published_reason_sha256: string;
+    repository: string;
 };
 
 export type MergeTrainStructuralCandidateResult = {
@@ -5544,6 +5613,35 @@ export type ReadProductionBackupAuthorityResponses = {
 
 export type ReadProductionBackupAuthorityResponse = ReadProductionBackupAuthorityResponses[keyof ReadProductionBackupAuthorityResponses];
 
+export type QualifyProductionBackupPreflightData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query: {
+        product: string;
+        context: string;
+        instance: string;
+        promotion_action: string;
+    };
+    url: '/v1/production-backup-authority/preflight';
+};
+
+export type QualifyProductionBackupPreflightErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type QualifyProductionBackupPreflightError = QualifyProductionBackupPreflightErrors[keyof QualifyProductionBackupPreflightErrors];
+
+export type QualifyProductionBackupPreflightResponses = {
+    200: AcceptedEvidenceResponse;
+};
+
+export type QualifyProductionBackupPreflightResponse = QualifyProductionBackupPreflightResponses[keyof QualifyProductionBackupPreflightResponses];
+
 export type ReadProductionBackupGateOperationData = {
     body?: never;
     headers?: {
@@ -5731,6 +5829,32 @@ export type ListProductEnvironmentsResponses = {
 };
 
 export type ListProductEnvironmentsResponse = ListProductEnvironmentsResponses[keyof ListProductEnvironmentsResponses];
+
+export type ReadBackupWorkerBindingsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/environments/prod/backup-worker-bindings';
+};
+
+export type ReadBackupWorkerBindingsErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadBackupWorkerBindingsError = ReadBackupWorkerBindingsErrors[keyof ReadBackupWorkerBindingsErrors];
+
+export type ReadBackupWorkerBindingsResponses = {
+    200: AcceptedEvidenceResponse;
+};
+
+export type ReadBackupWorkerBindingsResponse = ReadBackupWorkerBindingsResponses[keyof ReadBackupWorkerBindingsResponses];
 
 export type ReadProductEnvironmentData = {
     body?: never;
@@ -6803,6 +6927,33 @@ export type EnqueueProductionBackupGateResponses = {
 };
 
 export type EnqueueProductionBackupGateResponse = EnqueueProductionBackupGateResponses[keyof EnqueueProductionBackupGateResponses];
+
+export type RebindBackupWorkerCredentialsData = {
+    body: BackupCredentialBindingRequest;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/products/{product}/environments/prod/backup-worker-bindings/apply';
+};
+
+export type RebindBackupWorkerCredentialsErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type RebindBackupWorkerCredentialsError = RebindBackupWorkerCredentialsErrors[keyof RebindBackupWorkerCredentialsErrors];
+
+export type RebindBackupWorkerCredentialsResponses = {
+    202: AcceptedEvidenceResponse;
+};
+
+export type RebindBackupWorkerCredentialsResponse = RebindBackupWorkerCredentialsResponses[keyof RebindBackupWorkerCredentialsResponses];
 
 export type ApplyProductEnvironmentConfigData = {
     body: {

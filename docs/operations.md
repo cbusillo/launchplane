@@ -65,6 +65,28 @@ record IDs. Conflicting or unavailable root evidence also preserves
 reconciliation. Diagnose through controller/status and resume through the
 controller's normal run-once route; do not edit database records or merge by hand.
 
+A current-policy stack with no `stack_child_disposition_label` returns
+`landing_stack_disposition_not_configured` before landing, or
+`completed_landing_stack_disposition_not_configured` during unfinished child
+disposition. Fenced dry runs report the same prerequisite instead of a generic
+resume. The result identifies the landing/collapse records and the managed
+`privileged-policy-propose` recovery action. Prepare an exact target-policy
+replacement, obtain the Director's approval in the service, verify installation,
+then retry the normal controller. No label is inferred or installed automatically.
+Completed child dispositions need no label and do not repeat their effects.
+
+Installing a replacement changes the policy digest. An unlanded collapsed plan
+can retire only after the ordinary exact no-effect proof and admission-outcome
+reconciliation; its original collapse history remains intact. This releases the
+obsolete landing plan, not the carried root's policy/review requirements. The
+next pass may report `merge_train_stack_collapse_policy_changed` or original-review
+recovery: follow the supported branch recovery in
+[Original review recovery](merge-train-policy.md#original-review-recovery), or
+replan legitimate newer root work under the installed policy. Independent queue
+work can proceed. Do not change a record's digest or clear an unknown effect to
+make the old candidate eligible. A completed root instead uses the verified
+historical recovery above and is never merged again.
+
 Use the controller phase when diagnosing a failed landing. An active
 `admit_pull_request` phase means the failure occurred while reconciling or
 evaluating Launchplane admission, before a GitHub merge request. An active

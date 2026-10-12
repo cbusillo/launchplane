@@ -79,6 +79,7 @@ def execute_production_backup_provider(
     ssh_known_hosts: str,
     checkpoint: Callable[[str], None] | None = None,
     record_progress: Callable[[dict[str, str]], None] | None = None,
+    preflight_only: bool = False,
 ) -> ProductionBackupGateWorkerResult:
     """Capture both policy operations through one exact forced-command boundary."""
     started_at = utc_now_timestamp()
@@ -191,6 +192,16 @@ def execute_production_backup_provider(
             ]
             if len(storage_rows) != 1 or storage_rows[0][1:3] != ["pbs", "active"]:
                 raise ProductionBackupProviderError("backup_storage_not_active_pbs")
+
+            if preflight_only:
+                evidence["boundary_status"] = "match_capture_only"
+                evidence["storage_status"] = "active_pbs"
+                return ProductionBackupGateWorkerResult(
+                    status="pass",
+                    started_at=started_at,
+                    finished_at=utc_now_timestamp(),
+                    evidence=evidence,
+                )
 
             stage = "snapshot"
             evidence["requested_snapshot_name"] = snapshot

@@ -1488,10 +1488,11 @@ Controller actions have these retry/stop semantics:
   to the failed record, preserving its SHA and failure history.
   `check_retry_evidence` durably records the observed SHA, controller-pass timestamp,
   passing status and closed batch PR. The response exposes the same observation.
-  The same ordered
-  heads/base may use this rebuild only once, across restarts and replay of the
-  original failed record. A spent budget reports `candidate_check_retry_used`
-  without blaming a member. Pending, missing or unreadable check evidence does
+  Each failed record may produce one check-recovery replacement, across restarts
+  and replay. A later replacement that separately fails and passes its own rerun
+  can recover too. Its ref includes the failed record identity so generations
+  cannot reuse a prior retry ref. Replaying an already recovered failure reports
+  `candidate_check_retry_used` without blaming a member. Pending, missing or unreadable check evidence does
   not authorize this retry. Dry runs report the plan without consuming a budget
   or changing a ref, record, PR or label. A replacement that fails real checks
   still goes through blocker isolation. The batch-body and infrastructure
@@ -1641,6 +1642,26 @@ poll/backoff rules; a newer idle Level 1 run also supersedes older controller
 records before current-policy filtering produces the action hint.
 If an imported dry-run record has an unparseable timestamp, its age is null;
 the stored history and existing scheduling decision remain visible.
+
+`last_controller_result` projects one bounded pass result from the controller
+state payload, including the exact recovery guard reason, failed-source record,
+observed candidate/base check evidence, retry lineage, pass/trace binding,
+reconciliation requirement and next actor/observation. Lease release and restart
+preserve it. `not_observed` means that pass did not read those checks; `unknown`
+means an attempted observation could not establish their status. The observed
+candidate SHA is separate from a newly planned replacement's SHA.
+`last_controller_result_policy_status` qualifies its policy binding; even
+current-policy evidence is the last pass, not current readiness or landing
+authority. Old records without a saved result return null rather than a
+reconstructed explanation. Dry runs return their observation without replacing
+the persisted mutating pass. Worker summaries project this same result and its
+action/reason, independent of their execution status `ran`.
+
+The semantic progress time tracks distinct candidate, landing or collapse
+evidence. Repeating the same evidence, selecting phases, heartbeating and renewing
+or releasing a lease do not move it; initial candidate evidence uses its own
+stored update time. This is diagnostic metadata, not another monitor or recovery
+budget. The existing stall monitor keeps its own observation contract.
 
 The response also includes the
 controller lease holder, active action and phase, lease and heartbeat age, reconciliation
@@ -1929,3 +1950,5 @@ version landed through its own review. A hold in that case describes the
 unqualified saved version, rather than claiming that the PR is still open.
 Active landing diagnostics name its old policy record; selection diagnostics
 retain the complete separate obsolete-policy inventory.
+
+See [stall monitoring](merge-train-events.md#stall-monitoring) for the separate Supervisor and Discord attention record.

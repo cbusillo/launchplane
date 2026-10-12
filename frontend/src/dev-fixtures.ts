@@ -1791,6 +1791,8 @@ export function mergeTrainStatusForFixture(
         last_pull_request_number: 418,
         last_record_id: "fixture-candidate-record",
         last_transition_at: OBSERVED_AT,
+        last_result: null,
+        semantic_progress_key: "",
         lease_acquired_at: "2026-07-14T14:30:40Z",
         lease_expires_at: "2026-07-14T14:37:00Z",
         lease_owner: reconciliationRequired ? "" : "controller-fixture",
@@ -1808,6 +1810,8 @@ export function mergeTrainStatusForFixture(
       },
       current_policy_key: `${repository}:${baseBranch}`,
       current_policy_sha256: "fixture-policy-sha256",
+      last_controller_result: null,
+      last_controller_result_policy_status: "unchecked",
       generated_at: OBSERVED_AT,
       latest_dry_run: {
         eligible_count: 1,

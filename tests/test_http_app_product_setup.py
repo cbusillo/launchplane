@@ -240,14 +240,28 @@ class SignedInProductSetupTests(unittest.IsolatedAsyncioTestCase):
                     {"Authorization": "Bearer read-token"},
                 ):
                     denied = await request(app, "POST", route, payload=payload, headers=headers)
-                    self.assertEqual(denied.status_code, 403, denied.json())
                     if (
                         route.endswith("expected-config/apply")
                         and headers.get("Authorization") == "Bearer local-operator-token"
                     ):
+                        self.assertEqual(denied.status_code, 202, denied.json())
+                        self.assertEqual(denied.json()["result"]["mode"], "dry-run")
                         self.assertEqual(
-                            denied.json()["error"]["code"], "live_product_requires_operator"
+                            store.read_product_profile_record(original.product), stored
                         )
+                        denied_apply = await request(
+                            app,
+                            "POST",
+                            route,
+                            payload={**payload, "mode": "apply"},
+                            headers={**headers, "Idempotency-Key": "live-operator-apply"},
+                        )
+                        self.assertEqual(denied_apply.status_code, 403, denied_apply.json())
+                        self.assertEqual(
+                            denied_apply.json()["error"]["code"], "live_product_requires_operator"
+                        )
+                    else:
+                        self.assertEqual(denied.status_code, 403, denied.json())
                 read_only_session = manager.issue(
                     replace(_github_human_identity(role="read_only"), github_id=124)
                 )

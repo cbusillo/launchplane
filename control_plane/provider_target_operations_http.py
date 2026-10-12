@@ -5,7 +5,9 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.http_routes.support import AuthorizationAllows
 from control_plane.service_auth import (
+    AuthorizationTarget,
     LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
     LocalAdminIdentity,
@@ -77,15 +79,29 @@ def provider_target_operation_authorized(
     authz_policy: LaunchplaneAuthzPolicy,
     identity: LaunchplaneIdentity,
     request: ProviderTargetOperationEnvelope,
+    authorization_allows: AuthorizationAllows | None = None,
 ) -> bool:
     action = (
         "provider_target.backfill" if request.mode == "backfill-apply" else "provider_target.audit"
     )
-    return authz_policy.allows(
+    if authz_policy.allows(
         identity=identity,
         action=action,
         product=request.product,
         context=LAUNCHPLANE_SERVICE_CONTEXT,
+        inherit_agent_read_role=False,
+    ):
+        return True
+    return (
+        request.mode != "backfill-apply"
+        and authorization_allows is not None
+        and authorization_allows(
+            identity=identity,
+            action=action,
+            product=request.product,
+            context=request.context,
+            target=AuthorizationTarget(scope="instance", instances=(request.instance,)),
+        )
     )
 
 

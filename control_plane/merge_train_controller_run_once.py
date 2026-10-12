@@ -1,6 +1,7 @@
+import hashlib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import logging
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -102,6 +103,8 @@ from control_plane.merge_train_original_review import (
     original_review_recovery_records,
     original_review_recovery_details,
 )
+from control_plane.merge_train_diagnostics import controller_last_result
+from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecordStore,
     stack_collapse_expected_root_head_sha,
@@ -222,6 +225,52 @@ class MergeTrainControllerLeaseContext:
     record: MergeTrainControllerStateRecord
     record_store: MergeTrainControllerStateRecordStore | None = None
     lease_seconds: int = DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS
+    observations: dict[str, str] = field(default_factory=dict)
+
+    def observe(self, **evidence: str) -> None:
+        self.observations.update(evidence)
+
+    def observe_failed_candidate(self, record: MergeTrainBatchCandidateRecord) -> None:
+        candidate = record.candidate
+        self.observations.update(
+            source_failed_record_id=record.record_id,
+            candidate_batch_id=candidate.batch_id,
+            candidate_sha=candidate.candidate_sha,
+            base_sha=candidate.base_sha,
+            check_retry_of=candidate.check_retry_of,
+            infrastructure_retry_of=candidate.infrastructure_retry_of,
+            batch_body_retry_of=candidate.batch_body_retry_of,
+        )
+
+    def record_result(
+        self,
+        result: dict[str, object],
+        *,
+        pass_started_at: str,
+        trace_id: str,
+        reconciliation_required: bool,
+        policy_key: str = "",
+        policy_sha256: str = "",
+    ) -> None:
+        diagnosis, progress_key = controller_last_result(
+            result=result,
+            state=self.record,
+            observations=self.observations,
+            pass_started_at=pass_started_at,
+            observed_at=utc_now_timestamp(),
+            trace_id=trace_id,
+            policy_key=policy_key or self.record.policy_key,
+            policy_sha256=policy_sha256 or self.record.policy_sha256,
+            reconciliation_required=reconciliation_required,
+            persisted=self.record_store is not None,
+        )
+        if self.record_store is not None:
+            # The existing fenced release persists this with the lease outcome.
+            # Diagnostic metadata adds no renewal or independent write.
+            self.record = self.record.model_copy(
+                update={"last_result": diagnosis, "semantic_progress_key": progress_key}
+            )
+        result["last_controller_result"] = diagnosis.model_dump(mode="json")
 
     @property
     def owner(self) -> str:
@@ -331,6 +380,15 @@ def merge_train_controller_mutation_fence(
         raise
     except Exception as error:
         try:
+            lease.record_result(
+                {
+                    "controller_action": lease.record.active_action,
+                    "reason_code": _controller_exception_reconciliation_detail(error).split(";")[0],
+                },
+                pass_started_at=controller_state.updated_at,
+                trace_id=trace_id,
+                reconciliation_required=True,
+            )
             lease.release(
                 reconciliation_status="required",
                 reconciliation_detail=_controller_exception_reconciliation_detail(error),
@@ -609,10 +667,29 @@ def _execute_merge_train_controller_with_client(
                     lease=lease,
                     release_hold_reader=release_hold_reader,
                 )
+        lease.record_result(
+            result,
+            pass_started_at=recorded_at,
+            trace_id=trace_id,
+            reconciliation_required=_controller_result_requires_reconciliation(result),
+            policy_key=repository_policy.policy_key,
+            policy_sha256=policy_sha256,
+        )
     except MergeTrainControllerLeaseLostError:
         raise
     except Exception as error:
         try:
+            lease.record_result(
+                {
+                    "controller_action": lease.record.active_action,
+                    "reason_code": _controller_exception_reconciliation_detail(error).split(";")[0],
+                },
+                pass_started_at=recorded_at,
+                trace_id=trace_id,
+                reconciliation_required=True,
+                policy_key=repository_policy.policy_key,
+                policy_sha256=policy_sha256,
+            )
             lease.release(
                 reconciliation_status="required",
                 reconciliation_detail=_controller_exception_reconciliation_detail(error),
@@ -640,6 +717,19 @@ def _execute_merge_train_controller_with_client(
         except Exception as error:
             if request.mutate:
                 try:
+                    lease.record_result(
+                        {
+                            **result,
+                            "reason_code": _controller_exception_reconciliation_detail(error).split(
+                                ";"
+                            )[0],
+                        },
+                        pass_started_at=recorded_at,
+                        trace_id=trace_id,
+                        reconciliation_required=True,
+                        policy_key=repository_policy.policy_key,
+                        policy_sha256=policy_sha256,
+                    )
                     lease.release(
                         reconciliation_status="required",
                         reconciliation_detail=_controller_exception_reconciliation_detail(error),
@@ -691,6 +781,55 @@ def _resume_merge_train_controller_state(
             and lease.record.active_phase
         ):
             return None
+        if not repository_policy.stack_child_disposition_label:
+            landing_record_id = lease.record.step_payload.get("landing_plan_record_id")
+            landing = _merge_train_landing_record_by_id(
+                record_store=landing_store,
+                repository=request.repository,
+                base_branch=request.base_branch,
+                record_id=(
+                    landing_record_id
+                    if isinstance(landing_record_id, str) and landing_record_id
+                    else lease.record.active_record_id
+                ),
+            ) or latest_merge_train_batch_landing_plan_record(
+                record_store=landing_store,
+                repository=request.repository,
+                base_branch=request.base_branch,
+            )
+            if landing is not None and landing.landing_plan.policy_sha256 == policy_sha256:
+                completed = latest_completed_merge_train_batch_landing_plan_record(
+                    record_store=landing_store,
+                    repository=request.repository,
+                    base_branch=request.base_branch,
+                    batch_id=landing.landing_plan.batch_id,
+                    candidate_sha=landing.landing_plan.candidate_sha,
+                    policy_sha256=policy_sha256,
+                )
+                landing = completed or landing
+                if completed is not None:
+                    collapses = stack_collapse_records_for_completed_landing(
+                        record_store=stack_collapse_store,
+                        github_client=github_client,
+                        repository=request.repository,
+                        base_branch=request.base_branch,
+                        landing_plan=landing.landing_plan,
+                        policy_sha256=policy_sha256,
+                    )
+                else:
+                    collapse = latest_merge_train_stack_collapse_plan_record_for_landing(
+                        record_store=stack_collapse_store,
+                        repository=request.repository,
+                        base_branch=request.base_branch,
+                        landing_plan=landing.landing_plan,
+                        policy_sha256=policy_sha256,
+                    )
+                    collapses = (collapse,) if collapse is not None else ()
+                unfinished = tuple(r for r in collapses if r.plan.status != "ready_for_train")
+                if unfinished:
+                    return _stack_disposition_configuration_block(
+                        landing_record=landing, collapse_records=unfinished
+                    )
         return {
             "repository": request.repository,
             "base_branch": request.base_branch,
@@ -1123,7 +1262,6 @@ def _advance_active_landing_record(
                     github_client=github_client,
                     candidate_store=candidate_store,
                     landing_store=landing_store,
-                    stack_collapse_store=stack_collapse_store,
                     admission_store=admission_store,
                     admission_evaluator=admission_evaluator,
                     landing_record=active_landing_record,
@@ -1161,7 +1299,6 @@ def _advance_active_landing_record(
             github_client=github_client,
             candidate_store=candidate_store,
             landing_store=landing_store,
-            stack_collapse_store=stack_collapse_store,
             admission_store=admission_store,
             admission_evaluator=admission_evaluator,
             landing_record=active_landing_record,
@@ -1192,8 +1329,8 @@ def _advance_active_landing_record(
         except ValueError as error:
             raise MergeTrainControllerRequestError(str(error)) from error
         if not repository_policy.stack_child_disposition_label:
-            raise ValueError(
-                "merge train stack child disposition requires stack_child_disposition_label policy"
+            return _stack_disposition_configuration_block(
+                landing_record=active_landing_record, collapse_records=(collapse_record,)
             )
     candidate_record = _candidate_record_for_landing_plan(
         record_store=candidate_store,
@@ -1384,7 +1521,6 @@ def _advance_active_landing_record(
                 github_client=github_client,
                 candidate_store=candidate_store,
                 landing_store=landing_store,
-                stack_collapse_store=stack_collapse_store,
                 admission_store=admission_store,
                 admission_evaluator=admission_evaluator,
                 landing_record=blocked_landing_record,
@@ -1572,7 +1708,6 @@ def _retire_changed_policy_landing(
     github_client: GitHubMergeTrainClient,
     candidate_store: MergeTrainBatchCandidateRecordStore,
     landing_store: MergeTrainBatchLandingPlanRecordStore,
-    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
     admission_store: MergeAdmissionRecordStore,
     admission_evaluator: MergeAdmissionEvaluator,
     landing_record: MergeTrainBatchLandingPlanRecord,
@@ -1580,20 +1715,9 @@ def _retire_changed_policy_landing(
     retirement_source: str = "policy-changed-landing",
 ) -> dict[str, object]:
     plan = landing_record.landing_plan
-    if (
-        latest_merge_train_stack_collapse_plan_record_for_landing(
-            record_store=stack_collapse_store,
-            repository=request.repository,
-            base_branch=request.base_branch,
-            landing_plan=plan,
-            policy_sha256=plan.policy_sha256,
-        )
-        is not None
-        and retirement_source != "original-review-recovery"
-    ):
-        raise MergeTrainControllerRequestError(
-            "Policy-change recovery of a collapsed stack requires explicit reconciliation."
-        )
+    # Retirement changes no carried branch history. The same exact no-effect
+    # proof below applies to collapsed roots; their obsolete collapse history
+    # remains subject to normal current-policy/original-review recovery.
     candidate_record = _candidate_record_for_landing_plan(
         record_store=candidate_store, landing_plan_record=landing_record
     )
@@ -1817,6 +1941,42 @@ def _finish_retired_policy_landing(
     }
 
 
+def _stack_disposition_configuration_block(
+    *,
+    landing_record: MergeTrainBatchLandingPlanRecord,
+    collapse_records: tuple[MergeTrainStackCollapsePlanRecord, ...],
+) -> dict[str, object]:
+    plan = landing_record.landing_plan
+    reason = (
+        "completed_landing_stack_disposition_not_configured"
+        if _landing_cleanup_allowed(landing_record)
+        else "landing_stack_disposition_not_configured"
+    )
+    return {
+        "repository": plan.repository,
+        "base_branch": plan.base_branch,
+        "mode": "blocked",
+        "controller_action": "block",
+        "reason_code": reason,
+        "controller_reconciliation_status": "required",
+        "reconciliation_detail": reason,
+        "merge_train_batch_landing_plan_record_id": landing_record.record_id,
+        "blocking_reason": {
+            "code": reason,
+            "message": (
+                "Current policy has no stack child disposition label. "
+                "Submit a managed merge-train policy proposal for this target, obtain "
+                "Director approval, then retry the normal controller under the installed policy."
+            ),
+        },
+        "details": {
+            "policy_key": plan.policy_key,
+            "recovery_action": "privileged-policy-propose",
+            "stack_collapse_plan_record_ids": [record.record_id for record in collapse_records],
+        },
+    }
+
+
 def _finish_landed_merge_train_batch(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -1870,9 +2030,10 @@ def _finish_landed_merge_train_batch(
         raise MergeTrainControllerRequestError(
             "ordinary merge train landing does not support stack collapse"
         )
-    if collapse_records and not repository_policy.stack_child_disposition_label:
-        raise MergeTrainControllerRequestError(
-            "merge train stack child disposition requires stack_child_disposition_label policy"
+    unfinished = tuple(r for r in collapse_records if r.plan.status != "ready_for_train")
+    if unfinished and not repository_policy.stack_child_disposition_label:
+        return _stack_disposition_configuration_block(
+            landing_record=landed_record, collapse_records=unfinished
         )
     lease.checkpoint(
         active_action="land_batch",
@@ -2029,9 +2190,8 @@ def _reconcile_completed_landing_after_policy_change(
         record for record in collapse_records if record.plan.status != "ready_for_train"
     )
     if unfinished and not repository_policy.stack_child_disposition_label:
-        return blocked(
-            "completed_landing_stack_disposition_not_configured",
-            "Current policy has no stack child disposition label.",
+        return _stack_disposition_configuration_block(
+            landing_record=landed_record, collapse_records=unfinished
         )
     # Historical plans are evidence of an already-landed effect, never authority
     # for another collapse or merge. Verify every child before any provider write.
@@ -2533,7 +2693,13 @@ def _advance_active_candidate_record(
         )
     except ValueError as error:
         raise MergeTrainControllerRequestError(str(error)) from error
+    lease.observe(
+        candidate_batch_id=active_candidate_record.candidate.batch_id,
+        candidate_sha=active_candidate_record.candidate.candidate_sha,
+        base_sha=active_candidate_record.candidate.base_sha,
+    )
     if active_candidate_record.candidate.status == "failed":
+        lease.observe_failed_candidate(active_candidate_record)
         if request.mutate:
             _close_service_batch_pull_request(
                 github_client=github_client,
@@ -2721,6 +2887,11 @@ def _advance_active_candidate_record(
                 lease.checkpoint(active_phase="ensure_batch_pull_request")
                 github_client.ensure_batch_pull_request(candidate=active_candidate_record.candidate)
                 lease.checkpoint(active_phase="observe_required_checks")
+            if request.mutate:
+                lease.observe(
+                    candidate_checks_status="unknown",
+                    candidate_sha=active_candidate_record.candidate.candidate_sha,
+                )
             candidate = (
                 github_client.observe_batch_candidate_checks(
                     candidate=active_candidate_record.candidate
@@ -2728,6 +2899,8 @@ def _advance_active_candidate_record(
                 if request.mutate
                 else active_candidate_record.candidate
             )
+            if request.mutate:
+                lease.observe(candidate_checks_status=candidate.required_checks_status)
         except MergeTrainGitHubStaleHeadError as error:
             controller_action = "candidate_failed"
             candidate_build_error = error
@@ -3088,9 +3261,14 @@ def _advance_passed_candidate_record(
     )
     batch_pull_request_number = None
     if passed_candidate_record.candidate.head_check_reuse is not None:
+        lease.observe(
+            candidate_checks_status="unknown",
+            candidate_sha=passed_candidate_record.candidate.candidate_sha,
+        )
         refreshed = github_client.observe_batch_candidate_checks(
             candidate=passed_candidate_record.candidate
         )
+        lease.observe(candidate_checks_status=refreshed.required_checks_status)
         refreshed_record = build_merge_train_batch_candidate_record(
             candidate=refreshed,
             source=f"service:controller:head-check-revalidation:{trace_id}",
@@ -4320,6 +4498,7 @@ def try_reflow_failed_merge_train_candidate(
             base_branch=base_branch,
         )
     except Exception:
+        lease.observe(reason_code="recovery_queue_read_unavailable")
         return None
     snapshot = _without_obsolete_stack_collapse_pull_requests(
         snapshot=snapshot,
@@ -4355,6 +4534,7 @@ def try_reflow_failed_merge_train_candidate(
             "base_branch": base_branch,
             "mode": "dry-run",
             "controller_action": "wait_for_checks",
+            "reason_code": "original_head_checks_pending",
             "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
             "dry_run_result": dry_run_result.model_dump(mode="json"),
         }
@@ -4701,7 +4881,9 @@ def _resume_known_failed_batch(
             )
         if unfinished_retry and retry.candidate_sha:
             try:
+                lease.observe(candidate_checks_status="unknown", candidate_sha=retry.candidate_sha)
                 observed = github_client.observe_batch_candidate_checks(candidate=retry)
+                lease.observe(candidate_checks_status=observed.required_checks_status)
                 closed = bound_closed_batch_pull_request(client=github_client, candidate=retry)
             except (MergeTrainGitHubError, MergeAdmissionDeniedError):
                 return _stop_failed_batch_after_conflict_probe(
@@ -4948,16 +5130,23 @@ def _retry_closed_candidate_after_passing_checks(
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
     failed = active_candidate_record.candidate
+    lease.observe_failed_candidate(active_candidate_record)
     if failed.required_checks_status != "fail":
+        lease.observe(reason_code="candidate_not_failed_checks")
         return None
     try:
+        lease.observe(candidate_checks_status="unknown")
         observed = github_client.observe_batch_candidate_checks(candidate=failed)
+        lease.observe(candidate_checks_status=observed.required_checks_status)
         if observed.required_checks_status != "pass":
+            lease.observe(reason_code="candidate_checks_not_recovered")
             return None
         closed = bound_closed_batch_pull_request(client=github_client, candidate=failed)
     except (MergeTrainGitHubError, MergeAdmissionDeniedError):
+        lease.observe(reason_code="candidate_retry_evidence_unavailable")
         return None
     if closed is None:
+        lease.observe(reason_code="candidate_closed_batch_evidence_unavailable")
         return None
     details: dict[str, object] = {
         "observed_candidate_sha": failed.candidate_sha,
@@ -4965,11 +5154,11 @@ def _retry_closed_candidate_after_passing_checks(
         "required_checks_status": observed.required_checks_status,
         "closed_batch_pull_request_number": closed["number"],
     }
-    retry_used = failed.check_retry_of or any(
-        record.candidate.check_retry_of
-        and _merge_train_candidate_matches_dry_run_queue(
-            candidate=record.candidate, dry_run_result=dry_run_result, base_sha=snapshot.base_sha
-        )
+    # One replacement per failed record, not per unchanged queue. A replacement
+    # may itself fail transiently and later pass its exact-head rerun. Earlier
+    # recovery on the same base must not leave that new failure stuck forever.
+    retry_used = any(
+        record.candidate.check_retry_of == active_candidate_record.record_id
         for record in _candidate_history_on_base(
             candidate_store=candidate_store,
             repository=repository,
@@ -5071,6 +5260,7 @@ def _recover_failed_merge_train_candidate(
     blocked. ``None`` keeps the failure stopped.
     """
     failed = active_candidate_record.candidate
+    lease.observe_failed_candidate(active_candidate_record)
     if (
         active_candidate_record.ordinary_job_binding is not None
         or failed.required_checks_status != "fail"
@@ -5080,9 +5270,11 @@ def _recover_failed_merge_train_candidate(
     try:
         failures = github_client.read_candidate_check_failures(candidate=failed)
     except MergeTrainGitHubError:
+        lease.observe(reason_code="candidate_failure_read_unavailable")
         return None
     if not failures.conclusive:
         # A re-run in progress or a failure no longer visible blames nobody yet.
+        lease.observe(reason_code="candidate_failure_evidence_unavailable")
         return None
     details: dict[str, object] = {
         "failed_checks": [
@@ -5132,6 +5324,7 @@ def _recover_failed_merge_train_candidate(
         )
     except MergeTrainGitHubError:
         base_check_status = "unknown"
+    lease.observe(base_checks_status=base_check_status)
     if base_check_status != "pass":
         # Failure on an unverified base cannot identify a queued change as its cause.
         base_detail = (
@@ -5313,7 +5506,12 @@ def _plan_failed_candidate_replacement(
         # A separate ref keeps the retry from rediscovering the failed run and batch PR.
         check_retry = reason_code == "candidate_checks_recovered"
         suffix, retry_field = retry_kind
-        batch_id = candidate.batch_id + "-" + suffix
+        retry_identity = (
+            "-" + hashlib.sha256(active_candidate_record.record_id.encode()).hexdigest()[:12]
+            if check_retry
+            else ""
+        )
+        batch_id = candidate.batch_id + retry_identity + "-" + suffix
         candidate = MergeTrainBatchCandidate.model_validate(
             {
                 **candidate.model_dump(),
@@ -5458,6 +5656,7 @@ def _reobserve_failed_merge_train_candidate(
     multi-entry merge batch stays failed until its queue changes.
     """
     candidate = active_candidate_record.candidate
+    lease.observe_failed_candidate(active_candidate_record)
     if candidate.required_checks_status != "fail":
         return None
     if (
@@ -5467,9 +5666,12 @@ def _reobserve_failed_merge_train_candidate(
     ):
         return None
     try:
+        lease.observe(candidate_checks_status="unknown")
         observed_candidate = github_client.observe_batch_candidate_checks(candidate=candidate)
     except MergeTrainGitHubError:
+        lease.observe(reason_code="candidate_check_read_unavailable")
         return None
+    lease.observe(candidate_checks_status=observed_candidate.required_checks_status)
     if observed_candidate.required_checks_status == "fail":
         return None
     observed_candidate = observed_candidate.model_copy(update={"held_out": held_out})

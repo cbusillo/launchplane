@@ -3777,6 +3777,59 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_expired_event_hold_blocks_only_while_its_execution_owner_is_present(self) -> None:
+        from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
+        from control_plane.product_reconcile import reconcile_reservation_scope
+        from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+        from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+        from tests.test_client_release_redeploy import _prepare
+
+        with _head_postgres_database() as url:
+            store = PostgresRecordStore(database_url=url)
+            old_worker = PostgresRecordStore(database_url=url)
+            try:
+                reservation = store.reserve_mutation(
+                    scope=reconcile_reservation_scope("isolated-product"),
+                    route_path=GENERIC_WEB_DEPLOY_ROUTE,
+                    idempotency_key="original-event",
+                    request_fingerprint="original",
+                    lease_owner="old-worker",
+                    reconciliation_key="original-request",
+                    provider_target_key="isolated-target",
+                ).record
+                assert reservation is not None
+                held = store.mark_mutation_reconcile_required(
+                    reservation=reservation, reconciliation_key=reservation.reconciliation_key
+                ).record
+                assert held is not None
+                expired = parse_launchplane_mutation_timestamp(
+                    held.lease_expires_at, field_name="lease_expires_at"
+                ) + timedelta(seconds=1)
+                with patch.object(
+                    store, "_database_mutation_timestamp", return_value=expired.isoformat()
+                ):
+                    with old_worker.testing_replacement_execution_lock(
+                        testing_event_execution_lock_name(held.provider_target_key)
+                    ) as check:
+                        assert check is not None
+                        _, blockers, dispatch = _prepare(store)
+                        self.assertEqual(blockers, (held.record_id,))
+                        self.assertFalse(dispatch)
+                    _, blockers, dispatch = _prepare(store)
+                    self.assertFalse(blockers)
+                    self.assertTrue(dispatch)
+                self.assertEqual(
+                    store.read_idempotency_record(
+                        scope=held.scope,
+                        route_path=held.route_path,
+                        idempotency_key=held.idempotency_key,
+                    ),
+                    held,
+                )
+            finally:
+                old_worker.close()
+                store.close()
+
     def test_self_deploy_repair_cannot_overtake_an_active_provider_dispatch(self) -> None:
         from control_plane.service_deploy_drain import ServiceDeployDispatchBusy, dispatch_lock
 

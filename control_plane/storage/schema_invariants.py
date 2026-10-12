@@ -5,14 +5,26 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+from pathlib import Path
 from typing import Any, Protocol
+
+from alembic.script import ScriptDirectory
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
-EXPECTED_ALEMBIC_HEAD_REVISION = "ab3145d1c001"
+
+
+def _migration_head() -> str:
+    head = ScriptDirectory(str(Path(__file__).parent / "migrations")).get_current_head()
+    if head is None:
+        raise ValueError("Launchplane migration graph has no head.")
+    return head
+
+
+EXPECTED_ALEMBIC_HEAD_REVISION = _migration_head()
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (EXPECTED_ALEMBIC_HEAD_REVISION,)
 ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE = "launchplane_ordinary_agent_delivery_activations"
 ORDINARY_AGENT_DELIVERY_ACTIVATION_EVENT_TABLE = (

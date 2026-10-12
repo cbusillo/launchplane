@@ -3538,6 +3538,44 @@
         "title": "AuthzWorkflowEvidenceCandidate",
         "type": "object"
       },
+      "BackupCredentialBindingRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "bindings": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Bindings",
+            "type": "object"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bindings",
+          "reason"
+        ],
+        "title": "BackupCredentialBindingRequest",
+        "type": "object"
+      },
       "BackupGateEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -17259,6 +17297,181 @@
         "title": "MergeTrainAdmissionResponse",
         "type": "object"
       },
+      "MergeTrainControllerLastResult": {
+        "additionalProperties": false,
+        "description": "One pass's bounded evidence. It is never admission or landing authority.",
+        "properties": {
+          "action": {
+            "maxLength": 128,
+            "title": "Action",
+            "type": "string"
+          },
+          "base_branch": {
+            "maxLength": 256,
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "base_checks_status": {
+            "default": "not_observed",
+            "enum": [
+              "not_observed",
+              "unknown",
+              "pending",
+              "pass",
+              "fail"
+            ],
+            "title": "Base Checks Status",
+            "type": "string"
+          },
+          "base_sha": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "batch_body_retry_of": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Batch Body Retry Of",
+            "type": "string"
+          },
+          "candidate_batch_id": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Candidate Batch Id",
+            "type": "string"
+          },
+          "candidate_checks_status": {
+            "default": "not_observed",
+            "enum": [
+              "not_observed",
+              "unknown",
+              "pending",
+              "pass",
+              "fail"
+            ],
+            "title": "Candidate Checks Status",
+            "type": "string"
+          },
+          "candidate_sha": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Candidate Sha",
+            "type": "string"
+          },
+          "check_retry_of": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Check Retry Of",
+            "type": "string"
+          },
+          "infrastructure_retry_of": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Infrastructure Retry Of",
+            "type": "string"
+          },
+          "next_actor": {
+            "default": "controller",
+            "enum": [
+              "controller",
+              "provider",
+              "repository_agent"
+            ],
+            "title": "Next Actor",
+            "type": "string"
+          },
+          "next_observation": {
+            "maxLength": 256,
+            "title": "Next Observation",
+            "type": "string"
+          },
+          "observed_at": {
+            "maxLength": 64,
+            "title": "Observed At",
+            "type": "string"
+          },
+          "observed_candidate_sha": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Observed Candidate Sha",
+            "type": "string"
+          },
+          "pass_started_at": {
+            "maxLength": 64,
+            "title": "Pass Started At",
+            "type": "string"
+          },
+          "policy_key": {
+            "maxLength": 256,
+            "title": "Policy Key",
+            "type": "string"
+          },
+          "policy_sha256": {
+            "maxLength": 256,
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "reason_code": {
+            "maxLength": 128,
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "reconciliation_required": {
+            "default": false,
+            "title": "Reconciliation Required",
+            "type": "boolean"
+          },
+          "record_id": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Record Id",
+            "type": "string"
+          },
+          "recovery_kind": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Recovery Kind",
+            "type": "string"
+          },
+          "repository": {
+            "maxLength": 256,
+            "title": "Repository",
+            "type": "string"
+          },
+          "semantic_progress_at": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Semantic Progress At",
+            "type": "string"
+          },
+          "source_failed_record_id": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Source Failed Record Id",
+            "type": "string"
+          },
+          "trace_id": {
+            "maxLength": 256,
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "base_branch",
+          "policy_key",
+          "policy_sha256",
+          "pass_started_at",
+          "observed_at",
+          "trace_id",
+          "action",
+          "reason_code",
+          "next_observation"
+        ],
+        "title": "MergeTrainControllerLastResult",
+        "type": "object"
+      },
       "MergeTrainControllerLeaseDiagnostics": {
         "additionalProperties": false,
         "properties": {
@@ -17530,6 +17743,16 @@
             "title": "Last Record Id",
             "type": "string"
           },
+          "last_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeTrainControllerLastResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "last_transition_at": {
             "default": "",
             "title": "Last Transition At",
@@ -17592,6 +17815,11 @@
             "minimum": 1.0,
             "title": "Schema Version",
             "type": "integer"
+          },
+          "semantic_progress_key": {
+            "default": "",
+            "title": "Semantic Progress Key",
+            "type": "string"
           },
           "status": {
             "default": "idle",
@@ -17675,6 +17903,27 @@
             "title": "Generated At",
             "type": "string"
           },
+          "last_controller_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeTrainControllerLastResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Last observed pass, not current readiness or landing authority."
+          },
+          "last_controller_result_policy_status": {
+            "default": "unchecked",
+            "enum": [
+              "current",
+              "stale",
+              "unchecked"
+            ],
+            "title": "Last Controller Result Policy Status",
+            "type": "string"
+          },
           "latest_dry_run": {
             "anyOf": [
               {
@@ -17739,6 +17988,17 @@
             "default": 1,
             "title": "Schema Version",
             "type": "integer"
+          },
+          "stall": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeTrainStallRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -19144,6 +19404,133 @@
           }
         },
         "title": "MergeTrainServiceAuthz",
+        "type": "object"
+      },
+      "MergeTrainStallObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "progress_key": {
+            "default": "",
+            "title": "Progress Key",
+            "type": "string"
+          },
+          "progress_since": {
+            "default": "",
+            "title": "Progress Since",
+            "type": "string"
+          },
+          "queue_suspended": {
+            "default": false,
+            "title": "Queue Suspended",
+            "type": "boolean"
+          },
+          "ready_since": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Ready Since",
+            "type": "object"
+          },
+          "reasons": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "suspected_signals": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Suspected Signals",
+            "type": "array"
+          }
+        },
+        "title": "MergeTrainStallObservation",
+        "type": "object"
+      },
+      "MergeTrainStallRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery_error": {
+            "default": "",
+            "title": "Delivery Error",
+            "type": "string"
+          },
+          "issue_body_sha256": {
+            "default": "",
+            "title": "Issue Body Sha256",
+            "type": "string"
+          },
+          "issue_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issue Number"
+          },
+          "issue_state": {
+            "default": "closed",
+            "enum": [
+              "open",
+              "closed"
+            ],
+            "title": "Issue State",
+            "type": "string"
+          },
+          "notification_key": {
+            "default": "",
+            "title": "Notification Key",
+            "type": "string"
+          },
+          "notified_key": {
+            "default": "",
+            "title": "Notified Key",
+            "type": "string"
+          },
+          "observations": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MergeTrainStallObservation"
+            },
+            "title": "Observations",
+            "type": "object"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "published_issue_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published Issue Number"
+          },
+          "published_reason_sha256": {
+            "default": "",
+            "title": "Published Reason Sha256",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "observed_at"
+        ],
+        "title": "MergeTrainStallRecord",
         "type": "object"
       },
       "MergeTrainStructuralCandidateResult": {
@@ -81023,6 +81410,106 @@
         "summary": "Refuse new legacy runtime backup migrations; use typed authority apply"
       }
     },
+    "/v1/production-backup-authority/preflight": {
+      "get": {
+        "operationId": "qualify_production_backup_preflight",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "promotion_action",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Promotion Action",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Preflight"
+      }
+    },
     "/v1/production-backup-gates": {
       "post": {
         "operationId": "enqueue_production_backup_gate",
@@ -82131,6 +82618,166 @@
           }
         },
         "summary": "List product environments"
+      }
+    },
+    "/v1/products/{product}/environments/prod/backup-worker-bindings": {
+      "get": {
+        "operationId": "read_backup_worker_bindings",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Bindings"
+      }
+    },
+    "/v1/products/{product}/environments/prod/backup-worker-bindings/apply": {
+      "post": {
+        "operationId": "rebind_backup_worker_credentials",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCredentialBindingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Rebind"
       }
     },
     "/v1/products/{product}/environments/{environment}": {
@@ -90105,12 +90752,14 @@
     "/v1/product-profiles/{product}/reconcile-requests": "read_product_reconcile_requests",
     "/v1/product-review": "read_product_review",
     "/v1/production-backup-authority": "read_production_backup_authority",
+    "/v1/production-backup-authority/preflight": "qualify_production_backup_preflight",
     "/v1/production-backup-gates/operations/{operation_id}": "read_production_backup_gate_operation",
     "/v1/products": "list_products",
     "/v1/products/{product}": "read_product",
     "/v1/products/{product}/activity": "read_product_activity",
     "/v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness": "read_product_operational_readiness",
     "/v1/products/{product}/environments": "list_product_environments",
+    "/v1/products/{product}/environments/prod/backup-worker-bindings": "read_backup_worker_bindings",
     "/v1/products/{product}/environments/{environment}": "read_product_environment",
     "/v1/products/{product}/environments/{environment}/config-status": "read_product_environment_config_status",
     "/v1/products/{product}/environments/{environment}/promotion-status": "read_product_promotion_status",
@@ -90148,6 +90797,7 @@
     "/v1/product-review/feedback/retry": "retry_product_review_feedback",
     "/v1/production-backup-authority/apply": "apply_production_backup_authority",
     "/v1/production-backup-gates": "enqueue_production_backup_gate",
+    "/v1/products/{product}/environments/prod/backup-worker-bindings/apply": "rebind_backup_worker_credentials",
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": "dispatch_product_promotion_workflow",
