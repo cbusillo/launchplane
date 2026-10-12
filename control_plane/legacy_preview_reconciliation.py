@@ -1,6 +1,7 @@
 """Reviewed reconciliation of one legacy preview after complete provider absence proof."""
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -69,7 +70,10 @@ class LegacyPreviewAuthority:
 
 
 def bind_legacy_preview(
-    store: PostgresRecordStore, request: LegacyPreviewReconciliationRequest
+    store: PostgresRecordStore,
+    request: LegacyPreviewReconciliationRequest,
+    *,
+    allow_tracked: bool = False,
 ) -> LegacyPreviewAuthority:
     profile = store.read_product_profile_record(request.product)
     preview = store.read_preview_record(request.preview_id)
@@ -161,8 +165,22 @@ def bind_legacy_preview(
         *targets,
         *target_ids,
     )
-    if any(t.context == preview.context and t.instance == slug for t in scoped_targets):
+    if not allow_tracked and any(
+        t.context == preview.context and t.instance == slug for t in scoped_targets
+    ):
         raise ValueError("Preview has tracked target authority; use tracked teardown first.")
+    if allow_tracked:
+        preview_target_ids.update(
+            t.target_id
+            for t in physical_targets
+            if t.context == preview.context and t.instance == slug
+        )
+        for target_id in preview_target_ids:
+            if any(
+                t.target_id == target_id and (t.context, t.instance) != (preview.context, slug)
+                for t in physical_targets
+            ):
+                raise ValueError("Preview provider target has another owner.")
     lane_scopes = {(lane.context, lane.instance) for lane in profile.lanes}
     sibling_scopes = {
         (
@@ -227,13 +245,17 @@ def bind_legacy_preview(
 
 
 def observe_legacy_preview(
-    *, control_plane_root: Path, bound: LegacyPreviewAuthority
+    *,
+    control_plane_root: Path,
+    bound: LegacyPreviewAuthority,
+    retirement_peers: tuple[LegacyPreviewAuthority, ...] = (),
 ) -> dict[str, object]:
     """Enumerate twice; inspect payloads and domains, including renamed candidates."""
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     applications = dokploy_api.search_dokploy_applications(host=host, token=token)
     seen: dict[str, dict[str, object]] = {}
     present = False
+    candidates: list[str] = []
     domain_host = urlsplit(bound.preview.canonical_url).hostname
     if not domain_host:
         raise ValueError("Preview has no usable domain evidence.")
@@ -241,6 +263,8 @@ def observe_legacy_preview(
         target_id = str(item.get("applicationId") or item.get("id") or "").strip()
         if not target_id:
             raise ValueError("Provider inventory is incomplete.")
+        if target_id in seen:
+            raise ValueError("Provider inventory has duplicate identifiers.")
         app = dokploy_api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="application", target_id=target_id
         )
@@ -258,13 +282,17 @@ def observe_legacy_preview(
         )
         if any(not d for d in domain_names):
             raise ValueError("Provider domain evidence is incomplete.")
-        exact_candidate = (
-            target_id in bound.preview_target_ids
-            or name.lower() == bound.application_name.lower()
-            or app_name.lower() == f"{bound.profile.product}-{bound.slug}".lower()
-            or app_name.lower().startswith(f"{bound.profile.product}-{bound.slug}-".lower())
-            or domain_host.lower() in domain_names
-        )
+        exact_candidate = legacy_preview_candidate(bound, app, tuple(domains))
+        peer_matches = [
+            peer
+            for peer in retirement_peers
+            if peer.preview.preview_id != bound.preview.preview_id
+            and legacy_preview_candidate(peer, app, tuple(domains))
+        ]
+        if exact_candidate and peer_matches:
+            raise ValueError("Preview provider identity is shared.")
+        if len(peer_matches) > 1:
+            raise ValueError("Sibling preview provider identity is ambiguous.")
         repository = bound.profile.repository.lower()
         image_repository = bound.profile.image.repository
         repository_values = [
@@ -292,8 +320,28 @@ def observe_legacy_preview(
             or image.startswith((image_repository + ":", image_repository + "@"))
         )
         if exact_candidate:
+            if (
+                retirement_peers
+                and target_id not in bound.preview_target_ids
+                and not any(
+                    value == repository
+                    or value.endswith("/" + repository)
+                    or value == repository.partition("/")[2]
+                    for value in repository_values
+                )
+                and not (
+                    image == image_repository
+                    or image.startswith((image_repository + ":", image_repository + "@"))
+                )
+            ):
+                raise ValueError("Preview candidate lacks product source ownership proof.")
+            if target_id in bound.known_other_target_ids:
+                raise ValueError("Preview candidate belongs to a stable lane or sibling.")
             present = True
-        elif potential_product and target_id not in bound.known_other_target_ids:
+            candidates.append(target_id)
+        elif (
+            potential_product and target_id not in bound.known_other_target_ids and not peer_matches
+        ):
             raise ValueError("Provider has an unbound or renamed product candidate.")
         seen[target_id] = {
             "id": target_id,
@@ -308,12 +356,34 @@ def observe_legacy_preview(
         str(a.get("applicationId") or a.get("id")) for a in final
     ):
         raise ValueError("Provider inventory changed during inspection.")
-    return {
+    result: dict[str, object] = {
         "provider_state": "present" if present else "absent",
         "provider_absence_verified": not present,
         "inventory_digest": canonical_sha256(seen),
         "provider_writes": False,
     }
+    if retirement_peers:
+        result["candidate_target_ids"] = tuple(sorted(candidates))
+    return result
+
+
+def legacy_preview_candidate(
+    bound: LegacyPreviewAuthority,
+    app: Mapping[str, object],
+    domains: tuple[Mapping[str, object], ...],
+) -> bool:
+    target_id = str(app.get("applicationId") or app.get("id") or "").strip()
+    name = str(app.get("name") or "").strip().lower()
+    app_name = str(app.get("appName") or "").strip().lower()
+    domain = urlsplit(bound.preview.canonical_url).hostname
+    hosts = {str(d.get("host") or d.get("domain") or "").strip().lower() for d in domains}
+    return (
+        target_id in bound.preview_target_ids
+        or name == bound.application_name.lower()
+        or app_name == f"{bound.profile.product}-{bound.slug}".lower()
+        or app_name.startswith(f"{bound.profile.product}-{bound.slug}-".lower())
+        or bool(domain and domain.lower() in hosts)
+    )
 
 
 def plan_legacy_preview(
@@ -338,7 +408,8 @@ def plan_legacy_preview(
         if observation["provider_absence_verified"]
         else "blocked_provider_present",
         "apply_eligible": observation["provider_absence_verified"]
-        and bound.preview.state != "destroyed",
+        and bound.preview.state != "destroyed"
+        and bound.profile.is_active,
         "authority_digest": bound.digest,
         **observation,
     }

@@ -1332,6 +1332,8 @@ class LaunchplaneAuthzPolicy(BaseModel):
 
         Callers must re-check the resolved context before performing a mutation.
         """
+        if isinstance(identity, GitHubHumanIdentity) and self.names_administrator(identity):
+            return True
         policy = self.model_copy(deep=True)
         for collection_name in (
             "github_actions",

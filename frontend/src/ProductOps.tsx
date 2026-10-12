@@ -19,6 +19,7 @@ import { formatTime } from "./format";
 import { ProductGenericWebTransitionPanel } from "./ProductGenericWebTransitionPanel";
 import { ProductDisplayNamePanel } from "./ProductDisplayNamePanel";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
+import { ProductRetirementPanel } from "./ProductRetirementPanel";
 import { ProductWebsiteCleanupPanel } from "./ProductWebsiteCleanupPanel";
 import { ProductSetupPanel } from "./ProductSetupPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
@@ -567,6 +568,7 @@ function ProductWorkspace({
       {admin && !fixtureMode ? <ProductSetupPanel key={`setup:${product.product}`} product={product.product} onApplied={onSaved} /> : null}
 
       <ProductGenericWebTransitionPanel key={`driver:${product.product}`} fixtureMode={fixtureMode} product={product.product} onSaved={onSaved} />
+      <ProductRetirementPanel key={`retire:${product.product}`} fixtureMode={fixtureMode} product={product.product} onSaved={onSaved} />
       <ProductDiagnostics product={product} />
     </article>
   );

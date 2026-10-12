@@ -464,6 +464,7 @@ from control_plane.contracts.production_backup_authority import (
 )
 from control_plane.contracts.product_retirement import (
     ProductRetirementRecord,
+    ProductRetirementPreviewPlan,
     product_retirement_secret_authority,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
@@ -13024,7 +13025,7 @@ class PostgresRecordStore(HumanSessionStore):
 
     @contextmanager
     def serialize_preview_refresh(
-        self, *, preview_id: str, dedicated: bool = False
+        self, *, preview_id: str, dedicated: bool = False, shared: bool = False
     ) -> Iterator[None]:
         normalized_preview_id = preview_id.strip()
         if not normalized_preview_id:
@@ -13037,8 +13038,9 @@ class PostgresRecordStore(HumanSessionStore):
             assert self._preview_lock_engine is not None
             factory = sessionmaker(self._preview_lock_engine, expire_on_commit=False)
         with factory() as session:
+            lock_function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
             session.execute(
-                text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                text(f"select {lock_function}(hashtextextended(:lock_name, 0))"),
                 {"lock_name": f"launchplane-preview-refresh:{normalized_preview_id}"},
             )
             try:
@@ -36251,6 +36253,123 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 return
             session.add(self._idempotency_row(completion))
+            session.commit()
+
+    def _product_retirement_checkpoint_row(
+        self, record: ProductRetirementRecord
+    ) -> LaunchplaneProductRetirementRow:
+        return LaunchplaneProductRetirementRow(
+            record_id=record.record_id,
+            plan_record_id=record.plan_record_id,
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+            actor=record.identity.actor,
+            idempotency_key=record.idempotency_key,
+            mode=record.mode,
+            outcome=record.outcome,
+            recorded_at=record.recorded_at,
+            payload=self._payload_dict(record),
+        )
+
+    def commit_product_retirement_fence(
+        self,
+        *,
+        expected: LaunchplaneProductProfileRecord,
+        replacement: LaunchplaneProductProfileRecord,
+        checkpoint: ProductRetirementRecord,
+    ) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_landing_authority(
+                session, landing_authority.product_profile(expected.product)
+            )
+            row = session.get(LaunchplaneProductProfileRow, expected.product)
+            if row is None or self._read_product_profile_payload(row.payload) != expected:
+                raise ValueError("Product profile changed before retirement fence.")
+            row.updated_at = replacement.updated_at
+            row.payload = self._payload_dict(replacement)
+            session.add(self._product_retirement_checkpoint_row(checkpoint))
+            session.commit()
+
+    def commit_product_retirement_preview(
+        self,
+        *,
+        plan: ProductRetirementPreviewPlan,
+        checkpoint: ProductRetirementRecord,
+        destroyed_at: str,
+    ) -> None:
+        from control_plane.legacy_preview_reconciliation import (
+            LegacyPreviewReconciliationRequest,
+            bind_legacy_preview,
+        )
+        from control_plane.product_retirement_previews import preview_authority
+        from control_plane.contracts.product_retirement import canonical_sha256
+        from control_plane.workflows.launchplane import apply_preview_destroyed_transition
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_preview_authority_write(session, preview=plan.preview)
+            if self._engine.dialect.name == "postgresql":
+                tables = ", ".join(
+                    model.__tablename__
+                    for model in (
+                        LaunchplaneProductProfileRow,
+                        LaunchplaneProviderTargetRow,
+                        LaunchplaneDokployTargetIdRow,
+                        LaunchplaneDokployTargetRow,
+                        LaunchplanePreviewGenerationRow,
+                        LaunchplanePreviewRow,
+                        LaunchplaneProductReconcileRequestRow,
+                        LaunchplaneDeploymentRow,
+                    )
+                )
+                session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
+            bound = bind_legacy_preview(
+                self,
+                LegacyPreviewReconciliationRequest(
+                    product=checkpoint.product,
+                    preview_id=plan.preview.preview_id,
+                    reason=checkpoint.reason,
+                ),
+                allow_tracked=True,
+            )
+            if (
+                not bound.profile.lifecycle_state == "retiring"
+                or canonical_sha256(preview_authority(self, bound)) != plan.authority_sha256
+            ):
+                raise ValueError("Preview authority changed before retirement completion.")
+            models: dict[str, Any] = {
+                "provider_target": (LaunchplaneProviderTargetRow, ProviderTargetRecord),
+                "dokploy_target_id": (LaunchplaneDokployTargetIdRow, DokployTargetIdRecord),
+                "dokploy_target": (LaunchplaneDokployTargetRow, DokployTargetRecord),
+            }
+            for target in plan.target_authority:
+                model, contract = models[str(target["kind"])]
+                row = session.scalar(
+                    select(model).where(
+                        model.context == plan.preview.context, model.instance == plan.slug
+                    )
+                )
+                if row is None or canonical_sha256(
+                    self._read_payload(model_type=contract, payload=row.payload).model_dump(
+                        mode="json"
+                    )
+                ) != canonical_sha256(target["record"]):
+                    raise ValueError("Preview target changed before retirement completion.")
+                session.delete(row)
+            closed = apply_preview_destroyed_transition(
+                preview=bound.preview, destroyed_at=destroyed_at, destroy_reason=checkpoint.reason
+            )
+            preview_row = session.get(LaunchplanePreviewRow, closed.preview_id)
+            if preview_row is None:
+                raise ValueError("Preview disappeared before retirement completion.")
+            preview_row.state = closed.state
+            preview_row.updated_at = closed.updated_at
+            preview_row.payload = self._payload_dict(closed)
+            session.add(self._product_retirement_checkpoint_row(checkpoint))
             session.commit()
 
     def commit_legacy_preview_reconciliation(

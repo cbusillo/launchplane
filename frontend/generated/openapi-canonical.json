@@ -1132,6 +1132,12 @@
           "identity": {
             "$ref": "#/components/schemas/GitHubHumanIdentityResponse"
           },
+          "is_administrator": {
+            "default": false,
+            "title": "Is Administrator",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
+          },
           "status": {
             "const": "ok",
             "default": "ok",
@@ -35101,6 +35107,11 @@
             "default": "",
             "title": "Expected Target Sha256",
             "type": "string"
+          },
+          "include_previews": {
+            "default": false,
+            "title": "Include Previews",
+            "type": "boolean"
           },
           "instance": {
             "title": "Instance",
@@ -80532,6 +80543,16 @@
               "title": "Authorization",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -90771,6 +90792,7 @@
     "/v1/product-profiles/{product}/owner": "apply_product_owner",
     "/v1/product-profiles/{product}/production-use": "apply_product_production_use",
     "/v1/product-profiles/{product}/website-cleanup": "apply_product_website_cleanup",
+    "/v1/product-retirement": "execute_product_retirement",
     "/v1/product-review/decisions": "write_product_review_decision",
     "/v1/product-review/feedback/retry": "retry_product_review_feedback",
     "/v1/production-backup-authority/apply": "apply_production_backup_authority",

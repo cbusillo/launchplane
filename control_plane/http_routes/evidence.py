@@ -1,8 +1,10 @@
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Protocol, cast
 
+import asyncio
 import click
 from fastapi import Depends, Header, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -57,6 +59,39 @@ from control_plane.workflows.evidence_ingestion import (
     apply_promotion_evidence,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
+
+
+def _write_active_product_preview_evidence(
+    *, record_store: object, product: str, context: str, write: Callable[[], dict[str, object]]
+) -> dict[str, object]:
+    list_profiles = getattr(record_store, "list_product_profile_records", None)
+
+    def owners() -> dict[str, object]:
+        return (
+            {
+                p.product: p
+                for p in list_profiles()
+                if product == p.product or context in {p.preview.context, *p.historical_contexts}
+            }
+            if callable(list_profiles)
+            else {}
+        )
+
+    original = owners()
+    with ExitStack() as scopes:
+        for owner in sorted({product, *original}):
+            scopes.enter_context(
+                serialize_generic_web_product_operation(record_store=record_store, product=owner)
+            )
+        current = owners()
+        if current.keys() != original.keys() or any(
+            not getattr(p, "is_active", False) for p in current.values()
+        ):
+            raise click.ClickException(
+                "Product retirement owns preview evidence; resume its original operation."
+            )
+        return write()
 
 
 DEPLOYMENT_EVIDENCE_ROUTE = "/v1/evidence/deployments"
@@ -661,11 +696,19 @@ def register_evidence_write_routes(
         try:
             records = {
                 str(key): str(value)
-                for key, value in apply_launchplane_generation_evidence(
-                    control_plane_root_path=dependencies.control_plane_root,
-                    record_store=evidence_store,
-                    preview_request=preview_generation_request.preview,
-                    generation_request=preview_generation_request.generation,
+                for key, value in (
+                    await asyncio.to_thread(
+                        _write_active_product_preview_evidence,
+                        record_store=evidence_store,
+                        product=preview_generation_request.product,
+                        context=preview_generation_request.preview.context,
+                        write=lambda: apply_launchplane_generation_evidence(
+                            control_plane_root_path=dependencies.control_plane_root,
+                            record_store=evidence_store,
+                            preview_request=preview_generation_request.preview,
+                            generation_request=preview_generation_request.generation,
+                        ),
+                    )
                 ).items()
             }
         except click.ClickException as error:
@@ -759,9 +802,17 @@ def register_evidence_write_routes(
         try:
             records = {
                 str(key): str(value)
-                for key, value in apply_launchplane_destroy_preview(
-                    record_store=evidence_store,
-                    request=preview_destroyed_request.destroy,
+                for key, value in (
+                    await asyncio.to_thread(
+                        _write_active_product_preview_evidence,
+                        record_store=evidence_store,
+                        product=preview_destroyed_request.product,
+                        context=preview_destroyed_request.destroy.context,
+                        write=lambda: apply_launchplane_destroy_preview(
+                            record_store=evidence_store,
+                            request=preview_destroyed_request.destroy,
+                        ),
+                    )
                 ).items()
             }
         except click.ClickException as error:

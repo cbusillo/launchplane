@@ -1,0 +1,25 @@
+{
+  "observed_at": "2026-10-12T16:00:00Z",
+  "provider_id": "dokploy",
+  "target_type": "application",
+  "target_id": "legacy-fixture-target",
+  "target_id_sha256": "43a0c53047f3c7e46cbe382d6fe053bc506925fd227961f6dcbe72994b440828",
+  "state": "present",
+  "application_fingerprint_sha256": "2d158e654112bd75a702ab13f1de1ba1952ccbfb24569c116e12ece0e4c8a161",
+  "application_name_sha256": "fa2815020c46ba9b382870a261ef2f0da1045ca680f462cc7929795d209379c6",
+  "project_reference_sha256": "0085edb748c696cfa5c199bdb884dceab8d7ed958231b77ac32e84f758466533",
+  "domain_ids": [
+    "legacy-domain"
+  ],
+  "domain_id_sha256": [
+    "70c17362d2e5b791816d787fd4473cc5ec9d00e94d67a0f254ec1a37197cc460"
+  ],
+  "domain_host_sha256": [
+    "60bb28c54b2e9c23aeb4e7010b52717a7361eecaf2ffb43db5d2ad13eb794cc1"
+  ],
+  "deployment_status": "done",
+  "retirable": true,
+  "no_target": false,
+  "absence_scope_sha256": "",
+  "inventory_sha256": ""
+}

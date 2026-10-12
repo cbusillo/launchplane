@@ -201,6 +201,23 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(self.store.read_preview_record(self.preview.preview_id), self.preview)
 
+    async def test_retiring_product_preserves_preview_for_original_retirement(self) -> None:
+        plan = await self.plan()
+        self.store.write_product_profile_record(
+            self.profile.model_copy(
+                update={
+                    "lifecycle_state": "retiring",
+                    "preview": self.profile.preview.model_copy(update={"enabled": False}),
+                }
+            )
+        )
+        response = await self.apply(plan)
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.store.read_preview_record(self.preview.preview_id), self.preview)
+        inspected = await self.call("inspect")
+        self.assertEqual(inspected.status_code, 202, inspected.text)
+        self.assertFalse(inspected.json()["result"]["apply_eligible"])
+
     async def test_changed_preview_refuses_reviewed_apply(self) -> None:
         plan = await self.plan()
         changed = self.preview.model_copy(update={"state": "paused"})
