@@ -271,9 +271,8 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
             if remaining <= 0:
                 raise refuse("snapshot_time_limit")
             if engine.dialect.name == "postgresql":
-                connection.execute(
-                    text(f"SET LOCAL statement_timeout = '{min(remaining, 15000)}ms'")
-                )
+                statement_timeout = max(1, min(remaining, 15000) // 1000 * 1000)
+                connection.execute(text(f"SET LOCAL statement_timeout = '{statement_timeout}ms'"))
             # Bound one raw row before the driver decodes its JSON. Cumulative
             # raw history is not the response size: free text shrinks on scrubbing.
             sizes = []
@@ -288,13 +287,7 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
             row_bytes: ColumnElement[Any] = sizes[0]
             for size in sizes[1:]:
                 row_bytes += size
-            statement = select(
-                *(
-                    case((row_bytes <= SNAPSHOT_MAX_BYTES, column), else_=None).label(column.name)
-                    for column in table.c
-                ),
-                row_bytes.label("snapshot_source_row_bytes"),
-            )
+            statement = select(table, row_bytes.label("snapshot_source_row_bytes"))
             if row_type is LaunchplaneMergeTrainRunRow:
                 # Run history grows forever. Rehearse current per-lane state;
                 # never delete or retain production history as a deploy operation.
@@ -310,11 +303,25 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
                 statement = statement.join(ranked, table.c.run_id == ranked.c.run_id).where(
                     ranked.c.snapshot_rank == 1
                 )
+            # OFFSET 0 keeps PostgreSQL from flattening the size calculation into
+            # every CASE expression. Measure JSON text once per row on the server.
+            sized = statement.limit(SNAPSHOT_MAX_ROWS + 1).offset(0).subquery()
+            bounded = select(
+                *(
+                    case(
+                        (
+                            sized.c.snapshot_source_row_bytes <= SNAPSHOT_MAX_BYTES,
+                            sized.c[column.name],
+                        ),
+                        else_=None,
+                    ).label(column.name)
+                    for column in table.c
+                ),
+                sized.c.snapshot_source_row_bytes,
+            )
             # A server cursor fetches one bounded row at a time instead of
             # buffering every raw revision. Closing it also covers refusal paths.
-            with connection.execute(
-                statement.limit(SNAPSHOT_MAX_ROWS + 1).execution_options(yield_per=1)
-            ) as result:
+            with connection.execute(bounded.execution_options(yield_per=1)) as result:
                 for raw in result.mappings():
                     source_row_bytes = raw["snapshot_source_row_bytes"]
                     if row_count >= SNAPSHOT_MAX_ROWS:
@@ -379,9 +386,12 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
                     if remaining <= 0:
                         raise refuse("snapshot_time_limit")
                     if engine.dialect.name == "postgresql":
-                        connection.execute(
-                            text(f"SET LOCAL statement_timeout = '{min(remaining, 15000)}ms'")
-                        )
+                        next_timeout = max(1, min(remaining, 15000) // 1000 * 1000)
+                        if next_timeout < statement_timeout:
+                            connection.execute(
+                                text(f"SET LOCAL statement_timeout = '{next_timeout}ms'")
+                            )
+                            statement_timeout = next_timeout
             tables[table.name] = rows
         snapshot = StoredRecordSnapshot(
             captured_at=datetime.now(timezone.utc).isoformat(),
@@ -393,6 +403,9 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
     ]
     if len(active_policies) != 1:
         raise SnapshotUnavailable("snapshot_requires_one_active_policy")
+    # Envelope overhead and final encoding apply to the whole export, not the
+    # last record family visited. rows_exported always counts all accepted rows.
+    family = ""
     if len(snapshot.model_dump_json().encode()) > SNAPSHOT_MAX_BYTES:
         raise refuse("snapshot_byte_limit")
     if time.monotonic() > deadline:

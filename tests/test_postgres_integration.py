@@ -1375,7 +1375,16 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 )
             # Two individually bounded rows exceed the cumulative source limit;
             # all their historical shape must survive the real PostgreSQL cursor.
-            with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", 25_000):
+            with source._engine.connect() as connection:
+                source_sizes = [
+                    len(json.dumps(dict(row)).encode())
+                    for row in connection.execute(
+                        select(LaunchplaneAuthzPolicyRow.__table__)
+                    ).mappings()
+                ]
+            byte_bound = max(source_sizes) + 1024
+            self.assertGreater(sum(source_sizes), byte_bound)
+            with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", byte_bound):
                 snapshot = source.export_stored_record_snapshot()
             self.assertEqual(len(snapshot.tables[LaunchplaneAuthzPolicyRow.__tablename__]), 2)
             self.assertNotIn("plaintext-sentinel", snapshot.model_dump_json())

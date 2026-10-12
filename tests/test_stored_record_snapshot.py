@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from pydantic import ValidationError
-from sqlalchemy import insert, text, update
+from sqlalchemy import insert, select, text, update
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -188,8 +188,6 @@ class StoredRecordSnapshotTests(unittest.TestCase):
                 self.store.export_stored_record_snapshot()
 
     def test_large_source_history_exports_every_row_within_scrubbed_bound(self) -> None:
-        from control_plane.contracts.stored_record_snapshot import SNAPSHOT_MAX_BYTES
-
         with self.store._engine.begin() as connection:
             payload = self.store.list_authz_policy_records()[0].model_dump(mode="json")
             payload["audit"] = {"private_note": "plaintext-sentinel" * 1000}
@@ -208,13 +206,22 @@ class StoredRecordSnapshotTests(unittest.TestCase):
                     payload=historical,
                 )
             )
+        with self.store._engine.connect() as connection:
+            source_sizes = [
+                len(json.dumps(dict(row)).encode())
+                for row in connection.execute(
+                    select(LaunchplaneAuthzPolicyRow.__table__)
+                ).mappings()
+            ]
+        byte_bound = max(source_sizes) + 1024
+        self.assertGreater(sum(source_sizes), byte_bound)
         # Each row fits, and the scrubbed export fits, but cumulative raw data does not.
-        with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", 25_000):
+        with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", byte_bound):
             snapshot = self.store.export_stored_record_snapshot()
         rows = snapshot.tables[LaunchplaneAuthzPolicyRow.__tablename__]
         self.assertEqual({row["status"] for row in rows}, {"active", "superseded"})
         self.assertEqual(len(rows), 2)
-        self.assertLess(len(snapshot.model_dump_json().encode()), SNAPSHOT_MAX_BYTES)
+        self.assertLess(len(snapshot.model_dump_json().encode()), byte_bound)
         self.assertNotIn("plaintext-sentinel", snapshot.model_dump_json())
 
     def test_oversized_source_row_refuses_with_safe_family_and_budget_diagnostics(self) -> None:
@@ -237,12 +244,20 @@ class StoredRecordSnapshotTests(unittest.TestCase):
             payload = self.store.list_authz_policy_records()[0].model_dump(mode="json")
             payload["audit"] = {"private_numbers": [1] * 500}
             connection.execute(update(LaunchplaneAuthzPolicyRow).values(payload=payload))
-        with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", 4_000):
-            with self.assertRaises(ValueError) as raised:
-                self.store.export_stored_record_snapshot()
+        # Use the same synthetic salt when measuring and exercising the bound;
+        # random numeric pseudonym widths must not change between these exports.
+        with patch(
+            "control_plane.stored_record_snapshot.secrets.token_bytes", return_value=b"test"
+        ):
+            snapshot = self.store.export_stored_record_snapshot()
+            row = snapshot.tables[LaunchplaneAuthzPolicyRow.__tablename__][0]
+            byte_bound = len(json.dumps(row, separators=(",", ":")).encode()) - 1
+            with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", byte_bound):
+                with self.assertRaises(ValueError) as raised:
+                    self.store.export_stored_record_snapshot()
         diagnostics = snapshot_failure_diagnostics(raised.exception)
         self.assertEqual(diagnostics["reason"], "snapshot_byte_limit")
-        self.assertLess(diagnostics["source_row_bytes"], 4_000)
+        self.assertLess(diagnostics["source_row_bytes"], byte_bound)
         self.assertEqual(diagnostics["rows_exported"], 0)
 
     def test_legacy_dictionary_keys_and_policy_key_relationship_survive(self) -> None:
