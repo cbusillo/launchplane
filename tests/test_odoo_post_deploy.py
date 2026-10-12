@@ -76,13 +76,13 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
         )
 
         def checkpoint(phase: str) -> None:
-            if phase == "post_deploy_schedule_trigger":
+            if phase == dokploy_post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER:
                 raise refusal
 
         def runner(**kwargs: object) -> dict[str, str]:
             before_effect = cast(Callable[[str], None], kwargs["before_provider_mutation"])
             before_effect("post_deploy_target_update")
-            before_effect("post_deploy_schedule_trigger")
+            before_effect(dokploy_post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
             self.fail("The refused restore schedule must not start")
 
         with (

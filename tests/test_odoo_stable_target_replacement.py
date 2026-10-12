@@ -26,7 +26,10 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
-from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooOverrideValue,
+    OdooOverrideApplyResult,
+)
 from control_plane.contracts.odoo_instance_override_record import OdooWebsiteBootstrapPayload
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -67,7 +70,10 @@ from control_plane.workflows.odoo_prod_backup_gate import (
     BACKUP_GATE_SOURCE,
     BACKUP_VERIFICATION_SOURCE,
 )
-from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
+from control_plane.workflows.odoo_post_deploy import (
+    OdooPostDeployResult,
+    execute_odoo_post_deploy,
+)
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.product_reconcile import (
     PLAN_BLOCKER_DESCRIPTIONS,
@@ -84,6 +90,8 @@ from control_plane.contracts.odoo_target_replacement_failures import (
 from control_plane.operation_status_read import safe_operation_error_code
 from control_plane.workflows.odoo_stable_target_replacement import (
     DokployRequest,
+    TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
+    TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE,
     OdooTargetReplacementStageError,
     _deploy_step_failure,
     _failure_stage,
@@ -264,6 +272,21 @@ class _Store:
         expected_record: OdooInstanceOverrideRecord | None = None,
     ) -> None:
         self.odoo_instance_override_record = record
+
+    def update_odoo_instance_override_apply_result(
+        self,
+        *,
+        context_name: str,
+        instance_name: str,
+        last_apply: OdooOverrideApplyResult,
+        updated_at: str,
+        source_label: str,
+    ) -> OdooInstanceOverrideRecord:
+        record = self.read_odoo_instance_override_record(
+            context_name=context_name, instance_name=instance_name
+        ).model_copy(update={"last_apply": last_apply, "updated_at": updated_at})
+        self.odoo_instance_override_record = record
+        return record
 
     def write_release_tuple_record(self, record: object) -> None:
         self.release_tuples.append(record)
@@ -3086,6 +3109,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         supply_proof: bool = True,
         mutate_proof: Callable[[_Store], None] | None = None,
         mutate_before_write: Callable[[_Store], None] | None = None,
+        real_post_deploy: bool = False,
+        restore_schedule_upsert: Callable[[], dict[str, str]] | None = None,
+        external_checkpoint: Callable[[str], None] | None = None,
     ) -> tuple[OdooStableTargetReplacementApplyResult, Mock, Mock, _Store]:
         profile = _opw_profile_with_prelaunch_policy(enabled=True)
         if live:
@@ -3155,7 +3181,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             return evidence
 
         def checkpoint(phase: str) -> None:
-            if phase == "target_replacement_raw_source":
+            if external_checkpoint is not None:
+                external_checkpoint(phase)
+            if phase == TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE:
                 if mutate_proof is not None:
                     mutate_proof(store)
                 if mutate_before_write is not None:
@@ -3175,6 +3203,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         def _fetch_target_payload(**_: object) -> JsonValue:
             return {
                 "name": "opw-prod",
+                "appName": "opw-prod-app",
+                "serverId": "fixture-server",
                 "sourceType": "raw",
                 "composePath": "docker-compose.yml",
                 "composeFile": "services: {}",
@@ -3248,8 +3278,30 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
-                side_effect=post_deploy_provider,
+                side_effect=execute_odoo_post_deploy if real_post_deploy else post_deploy_provider,
             ) as post_deploy,
+            patch(
+                "control_plane.workflows.odoo_post_deploy.dokploy_source.read_control_plane_dokploy_source_of_truth",
+                return_value=control_plane_dokploy.DokploySourceOfTruth(
+                    schema_version=1,
+                    targets=(
+                        control_plane_dokploy.DokployTargetDefinition(
+                            context="opw",
+                            instance=test_instance,
+                            target_id="compose-opw",
+                            target_name="opw-prod",
+                        ),
+                    ),
+                ),
+            ),
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
+            patch(
+                "control_plane.dokploy.api.upsert_dokploy_schedule",
+                side_effect=(lambda **_: restore_schedule_upsert())
+                if restore_schedule_upsert
+                else None,
+            ),
+            patch("control_plane.dokploy.api.latest_deployment_for_schedule", return_value=None),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
                 return_value=OdooVerificationResult(
@@ -3279,6 +3331,59 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             )
 
         return result, post_deploy, verify, store
+
+    def test_real_restore_schedule_does_not_trigger_after_authorization_revocation(self) -> None:
+        from control_plane.contracts.durable_operation_authorization import (
+            DurableOperationAuthorization,
+        )
+        from control_plane.durable_operation_authorization import DurableOperationAuthorizationGuard
+        from tests.support.durable_operations import (
+            durable_operation_authorization_payload,
+            durable_operation_policy_record,
+        )
+
+        authorization = durable_operation_authorization_payload(
+            action="odoo_target_replacement_apply.execute",
+            managed_rule_id="opw-prod-replace",
+            product="odoo-tenant-opw",
+            context="opw",
+            instances=("prod",),
+        )
+        policy = durable_operation_policy_record(authorization)
+        guard = DurableOperationAuthorizationGuard(
+            authorization=DurableOperationAuthorization.model_validate(authorization),
+            policy_record_reader=lambda: policy,
+        )
+        phases: list[str] = []
+
+        def checkpoint(phase: str) -> None:
+            phases.append(phase)
+            if phase in {
+                TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
+                TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE,
+            }:
+                guard.recheck_provider_effect(phase)
+            else:
+                guard.checkpoint_provider_effect(phase)
+
+        def revoke() -> dict[str, str]:
+            nonlocal policy
+            policy = durable_operation_policy_record(revision=43)
+            return {"scheduleId": "fixture-restore"}
+
+        with patch("control_plane.dokploy.api.trigger_dokploy_schedule_and_wait") as trigger:
+            with self.assertRaises(DurableOperationAuthorizationDeniedError) as caught:
+                self._apply_upstream_restore(
+                    override_record=None,
+                    post_deploy_results=(),
+                    protected=True,
+                    real_post_deploy=True,
+                    restore_schedule_upsert=revoke,
+                    external_checkpoint=checkpoint,
+                )
+            self.assertEqual(caught.exception.code, "operation_authorization_revoked")
+            self.assertIn(TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE, phases)
+            trigger.assert_not_called()
 
     def test_authoritative_replacement_consumes_exact_backup_and_restore_proof(self) -> None:
         passed = OdooPostDeployResult(
@@ -3345,7 +3450,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     mutate_proof=mutation,
                 )
                 self.assertEqual(result.deploy_status, "fail")
-                self.assertEqual(result.error_code, "deploy_blocked.backup_restore_proof_required")
+                self.assertEqual(
+                    result.error_code, deploy_blocked_code("backup_restore_proof_required")
+                )
                 restore.assert_not_called()
                 verify.assert_not_called()
                 self.assertEqual(store.environment_inventories, [])
@@ -3366,7 +3473,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             mutate_before_write=invalidate,
         )
         self.assertEqual(result.deploy_status, "fail")
-        self.assertEqual(result.error_code, "deploy_blocked.backup_restore_proof_required")
+        self.assertEqual(result.error_code, deploy_blocked_code("backup_restore_proof_required"))
         restore.assert_not_called()
         verify.assert_not_called()
         self.assertEqual(store.environment_inventories, [])
@@ -3436,7 +3543,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 protected=True,
                 mutate_before_restore=mutate,
             )
-        self.assertEqual(caught.exception.code, "deploy_blocked.backup_restore_proof_required")
+        self.assertEqual(
+            caught.exception.code, deploy_blocked_code("backup_restore_proof_required")
+        )
         self.assertEqual(observed[0].deployment_records[-1].deploy.status, "fail")
         self.assertEqual(observed[0].environment_inventories, [])
 

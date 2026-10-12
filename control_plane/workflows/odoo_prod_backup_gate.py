@@ -614,6 +614,7 @@ def execute_odoo_prod_backup_verification(
         expected_paths=expected_paths,
     )
     verification_nonce = python_secrets.token_hex(32)
+    denial_error: DurableOperationAuthorizationDeniedError | None = None
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
         raw_evidence = dokploy_post_deploy.run_compose_odoo_backup_verification(
@@ -647,7 +648,7 @@ def execute_odoo_prod_backup_verification(
         verification_evidence = OdooProdBackupVerificationEvidence.model_validate(raw_evidence)
     except (click.ClickException, OSError, ValidationError) as error:
         if isinstance(error, DurableOperationAuthorizationDeniedError):
-            raise
+            denial_error = error
         verification_evidence = OdooProdBackupVerificationEvidence(
             verification_status="fail",
             failure_code="provider_verification_failed",
@@ -662,6 +663,8 @@ def execute_odoo_prod_backup_verification(
         verification_nonce=verification_nonce,
         created_at=verification_created_at,
     )
+    if denial_error is not None:
+        raise denial_error
     return OdooProdBackupVerificationResult(
         context=request.context,
         instance=request.instance,

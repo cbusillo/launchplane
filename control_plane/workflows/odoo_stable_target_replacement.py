@@ -1911,7 +1911,7 @@ def execute_odoo_stable_target_replacement_apply(
     def restore_effect_checkpoint(phase: str) -> None:
         if provider_effect_checkpoint is not None:
             if (
-                phase == "post_deploy_schedule_trigger"
+                phase == dokploy_post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
                 and plan.data_source_mode == "upstream_restore"
             ):
                 provider_effect_checkpoint(TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE)

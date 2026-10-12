@@ -38,6 +38,8 @@ from control_plane.integration_readback import (
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
 
+ODOO_POST_DEPLOY_SCHEDULE_TRIGGER = "post_deploy_schedule_trigger"
+
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
 DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME = "platform-odoo-bootstrap"
 DOKPLOY_ODOO_BACKUP_GATE_SCHEDULE_NAME = "platform-odoo-backup-gate"
@@ -664,7 +666,7 @@ def run_compose_post_deploy_update(
         schedule_id=schedule_id,
     )
     if before_provider_mutation is not None:
-        before_provider_mutation("post_deploy_schedule_trigger")
+        before_provider_mutation(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
     completed_schedule_deployment_key = api.deployment_key_from_wait_result(
         api.trigger_dokploy_schedule_and_wait(
             host=host,

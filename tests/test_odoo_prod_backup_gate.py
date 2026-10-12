@@ -579,6 +579,40 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
 
         run_verification_mock.assert_not_called()
 
+    def test_verification_denial_records_failure_and_preserves_authorization_reason(self) -> None:
+        from control_plane.durable_operation_authorization import (
+            DurableOperationAuthorizationDeniedError,
+        )
+
+        refusal = DurableOperationAuthorizationDeniedError(
+            code="operation_authorization_revoked", message="fixture denial"
+        )
+        store = self._record_store()
+        store.read_backup_gate_record.return_value = _passing_backup_record()
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_source.read_dokploy_config",
+                return_value=("fixture", "fixture"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_verification",
+                side_effect=refusal,
+            ),
+        ):
+            with self.assertRaises(DurableOperationAuthorizationDeniedError) as caught:
+                execute_odoo_prod_backup_verification(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=OdooProdBackupVerificationRequest(
+                        context="cm", backup_record_id="backup-gate-cm-prod-1"
+                    ),
+                    runtime_values=_runtime_values(),
+                )
+        self.assertIs(caught.exception, refusal)
+        record = store.write_backup_gate_record.call_args.args[0]
+        self.assertEqual(record.status, "fail")
+        self.assertEqual(record.evidence["backup_record_id"], "backup-gate-cm-prod-1")
+
     def test_backup_verification_redacts_provider_failure(self) -> None:
         record_store = self._record_store()
         record_store.read_backup_gate_record.return_value = _passing_backup_record()
