@@ -133,6 +133,8 @@ def retire_unavailable_testing_event_deploy(
         )
         if evidence is None:
             return decline("recovery_provider_unproven")
+        if evidence.get("state") not in {"no_live_effect", "quiescent_safe_to_retry"}:
+            return decline("recovery_provider_classification_unknown")
         check_execution_lock()
         audit: dict[str, object] = {
             "action": "retire_unavailable_testing_event_deploy",

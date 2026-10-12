@@ -250,6 +250,17 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
     def test_post_deploy_effect_remains_held(self) -> None:
         self.assert_held_without_inspection(self.reserve(phase="post_deploy_started"))
 
+    def test_interrupted_records_publication_remains_held(self) -> None:
+        self.assert_held_without_inspection(self.reserve(phase="records_commit"))
+
+    def test_unknown_provider_classification_cannot_retire(self) -> None:
+        record = self.reserve()
+        with patch.object(
+            self.provider, "observe_testing_no_live_effect", return_value={"state": "unknown"}
+        ):
+            self.assertIsNone(self.recover(record))
+        self.assertEqual(self.current(record), record)
+
     def test_queued_trigger_missing_from_history_stays_held_and_reports_why(self) -> None:
         record = self.reserve()
         self.responses["/api/deployment.queueList"] = [
@@ -295,7 +306,7 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
         self.assertIsNone(self.recover(record))
         self.assertEqual(self.current(record), record)
 
-    def test_triggered_attempt_cannot_qualify_with_filtered_container_inventory(self) -> None:
+    def test_trigger_checkpoint_without_correlated_history_stays_held(self) -> None:
         record = self.reserve(phase="deploy_trigger")
         self.assertIsNone(self.recover(record))
         self.assertEqual(self.current(record), record)
@@ -334,6 +345,10 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
         completed = self.current(record)
         self.assertEqual(completed.state, "completed")
         self.assertGreaterEqual(completed.response_status_code or 0, 400)
+        self.assertEqual(
+            completed.response_payload["error"]["code"],
+            "testing_deploy_retired_after_terminal_dispatch",
+        )
         self.assertNotIn("held-deploy", str(audit))
         paths = [call.kwargs["path"] for call in self.read_mock.call_args_list]
         self.assertNotIn("/api/docker.getContainers", paths)
@@ -349,6 +364,10 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
             [deployment, deployment],
             [dict(deployment, status="running")],
             [dict(deployment, finishedAt="")],
+            [dict(deployment, deploymentId="")],
+            [dict(deployment, composeId="another-target")],
+            [dict(deployment, finishedAt=self.now(-180))],
+            [deployment, dict(deployment, title="unrelated")],
             [deployment, {"deploymentId": "other", "status": "running"}],
         ):
             with self.subTest(history=history):

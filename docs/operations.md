@@ -595,6 +595,10 @@ quiescent provider effects safe to retry.
 It excludes other testing reconcilers with the provider-target execution lock,
 requires an expired lease, unchanged product/target bindings and the exact
 service-originated testing reservation, and refuses post-deploy/data-work effects.
+Before publishing deployment or inventory records, the worker rechecks execution
+exclusion and checkpoints its live reservation as `records_commit`. Recovery
+refuses that interrupted-publication phase; a worker whose connection or lease
+was lost cannot publish a stale successful deployment after retirement.
 The Dokploy inspector qualifies a testing compose whose held
 attempt never reached the deploy-trigger checkpoint, with empty deployment
 history, no schedules and no queued or running compose work. It reads the
