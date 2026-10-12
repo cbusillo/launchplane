@@ -493,7 +493,7 @@ reconciliation rules. Production release and backup gates are unchanged. Complet
 are reused after replacement, so polling or a worker restart cannot duplicate
 their effects. The release read explains the pause; the engineering runtime read
 exposes `runtime.release_drain`, its running operation IDs, and up to 100
-operation details with kind, state, product, lease owner and expiry. Total and
+operation details with kind, state, product, `lease_owner` and expiry. Total and
 truncation fields distinguish a complete diagnostic list from a partial one;
 provider coordinates, request bodies and idempotency keys are not exposed.
 

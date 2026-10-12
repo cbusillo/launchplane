@@ -121,6 +121,12 @@ class EventDeployRedeployTests(unittest.TestCase):
         began = parse_launchplane_mutation_timestamp(record.updated_at, field_name="updated_at")
         deadline = began + timedelta(seconds=SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS)
         original_deadline = read_status(self.store)["drain_deadline_at"]
+        restarted = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(restarted.close)
+        _, restarted_blockers, restarted_dispatch = _prepare(restarted)
+        self.assertEqual(restarted_blockers, (reservation.record_id,))
+        self.assertFalse(restarted_dispatch)
+        self.assertEqual(read_status(restarted)["drain_deadline_at"], original_deadline)
         # Repeated successful polls may renew admission, never the total budget.
         for seconds in (
             1,
