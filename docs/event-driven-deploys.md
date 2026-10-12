@@ -586,7 +586,7 @@ The existing target-replacement operation GET also returns a value-free
 `recovery` classification under scoped `operations.read`. It reports persisted
 journal presence or absence, attempt/binding agreement, effect acknowledgement,
 provider inspection and an eligibility/refusal code. It excludes the execution
-owner and rechecks the operation and binding after inspection. Missing journal
+worker and rechecks the operation and binding after inspection. Missing journal
 means unknown historical effects, never an absent provider dispatch. The read
 does not cancel, publish an attestation, queue reconciliation or change incidents;
 `safe_to_release` remains false even when the read observes eligibility. Raw
