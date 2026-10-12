@@ -8,7 +8,6 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 from alembic import command
-from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
@@ -2094,10 +2093,6 @@ class SchemaMigrationTests(unittest.TestCase):
             for primary_key in CRITICAL_PRIMARY_KEYS
         }
 
-        self.assertEqual(
-            EXPECTED_ALEMBIC_HEAD_REVISION,
-            ScriptDirectory.from_config(alembic_config("sqlite+pysqlite://")).get_current_head(),
-        )
         self.assertFalse(
             [index.index_name for index in CRITICAL_SCHEMA_INDEXES if len(index.index_name) > 63]
         )

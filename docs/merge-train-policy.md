@@ -1477,10 +1477,11 @@ Controller actions have these retry/stop semantics:
   to the failed record, preserving its SHA and failure history.
   `check_retry_evidence` durably records the observed SHA, controller-pass timestamp,
   passing status and closed batch PR. The response exposes the same observation.
-  The same ordered
-  heads/base may use this rebuild only once, across restarts and replay of the
-  original failed record. A spent budget reports `candidate_check_retry_used`
-  without blaming a member. Pending, missing or unreadable check evidence does
+  Each failed record may produce one check-recovery replacement, across restarts
+  and replay. A later replacement that separately fails and passes its own rerun
+  can recover too. Its ref includes the failed record identity so generations
+  cannot reuse a prior retry ref. Replaying an already recovered failure reports
+  `candidate_check_retry_used` without blaming a member. Pending, missing or unreadable check evidence does
   not authorize this retry. Dry runs report the plan without consuming a budget
   or changing a ref, record, PR or label. A replacement that fails real checks
   still goes through blocker isolation. The batch-body and infrastructure
@@ -1918,3 +1919,5 @@ version landed through its own review. A hold in that case describes the
 unqualified saved version, rather than claiming that the PR is still open.
 Active landing diagnostics name its old policy record; selection diagnostics
 retain the complete separate obsolete-policy inventory.
+
+See [stall monitoring](merge-train-events.md#stall-monitoring) for the separate Supervisor and Discord attention record.

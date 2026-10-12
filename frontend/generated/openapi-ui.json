@@ -16830,6 +16830,17 @@
             "default": 1,
             "title": "Schema Version",
             "type": "integer"
+          },
+          "stall": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeTrainStallRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -17706,6 +17717,150 @@
           "context",
           "product"
         ]
+      },
+      "MergeTrainStallObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "progress_key": {
+            "default": "",
+            "title": "Progress Key",
+            "type": "string"
+          },
+          "progress_since": {
+            "default": "",
+            "title": "Progress Since",
+            "type": "string"
+          },
+          "queue_suspended": {
+            "default": false,
+            "title": "Queue Suspended",
+            "type": "boolean"
+          },
+          "ready_since": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Ready Since",
+            "type": "object"
+          },
+          "reasons": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "suspected_signals": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Suspected Signals",
+            "type": "array"
+          }
+        },
+        "title": "MergeTrainStallObservation",
+        "type": "object",
+        "required": [
+          "progress_key",
+          "progress_since",
+          "queue_suspended",
+          "ready_since",
+          "reasons",
+          "suspected_signals"
+        ]
+      },
+      "MergeTrainStallRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery_error": {
+            "default": "",
+            "title": "Delivery Error",
+            "type": "string"
+          },
+          "issue_body_sha256": {
+            "default": "",
+            "title": "Issue Body Sha256",
+            "type": "string"
+          },
+          "issue_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issue Number"
+          },
+          "issue_state": {
+            "default": "closed",
+            "enum": [
+              "open",
+              "closed"
+            ],
+            "title": "Issue State",
+            "type": "string"
+          },
+          "notification_key": {
+            "default": "",
+            "title": "Notification Key",
+            "type": "string"
+          },
+          "notified_key": {
+            "default": "",
+            "title": "Notified Key",
+            "type": "string"
+          },
+          "observations": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MergeTrainStallObservation"
+            },
+            "title": "Observations",
+            "type": "object"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "published_issue_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published Issue Number"
+          },
+          "published_reason_sha256": {
+            "default": "",
+            "title": "Published Reason Sha256",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "delivery_error",
+          "issue_body_sha256",
+          "issue_number",
+          "issue_state",
+          "notification_key",
+          "notified_key",
+          "observations",
+          "observed_at",
+          "published_issue_number",
+          "published_reason_sha256",
+          "repository"
+        ],
+        "title": "MergeTrainStallRecord",
+        "type": "object"
       },
       "MergeTrainStructuralCandidateResult": {
         "additionalProperties": false,
