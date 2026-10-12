@@ -19,7 +19,11 @@ from control_plane.product_config import (
     plan_product_config_authority_bundle,
 )
 from control_plane.product_config_http import ProductConfigApplyEnvelope
-from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    LaunchplaneAuthzPolicy,
+    LocalOperatorPolicyRule,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
@@ -91,7 +95,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         }
         self.app = self.make_app()
 
-    def make_app(self, *, source_read: bool = True) -> FastAPI:
+    def make_app(self, *, source_read: bool = True, standing_read: bool = False) -> FastAPI:
         actions: tuple[str, ...] = (
             "product_config.plan",
             "product_config.apply",
@@ -100,9 +104,28 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         )
         if source_read:
             actions += ("secret.read",)
+        policy = _local_operator_policy(actions=actions)
+        if standing_read:
+            policy = LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_operators=(
+                    *policy.local_operators,
+                    *(
+                        LocalOperatorPolicyRule(
+                            subjects=("local-owner-agent",),
+                            token_labels=("local-owner-write",),
+                            products=("example-site",),
+                            contexts=("*",),
+                            actions=("agent.read",),
+                            instances=instances,
+                        )
+                        for instances in ((), ("*",))
+                    ),
+                ),
+            )
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
-            authz_policy=_local_operator_policy(actions=actions),
+            authz_policy=policy,
             record_store_factory=lambda: self.store,
             bearer_identity_config=BearerIdentityConfig(
                 local_operator_token="test-operator-token",
@@ -157,6 +180,25 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(binding.declared_secret_class, "shared_safe")
         assert binding.sharing_reason is not None
         self.assertEqual(binding.sharing_reason.kind, "read_only_source")
+
+    async def test_read_role_cannot_replace_explicit_secret_copy_source_grant(self) -> None:
+        app = self.make_app(source_read=False, standing_read=True)
+        before = self.store.list_secret_bindings(limit=None)
+        with patch.object(
+            secrets, "_decrypt_secret_value", side_effect=AssertionError("No value access")
+        ):
+            metadata = await _asgi_request(
+                app,
+                "GET",
+                "/v1/products/example-site/secret-bindings",
+                headers={"Authorization": "Bearer test-operator-token"},
+            )
+            self.assertEqual(metadata.status_code, 200, metadata.text)
+            self.assertTrue(metadata.json()["bindings"])
+            response = await self.post(app=app)
+            self.assertEqual(response.status_code, 403, response.text)
+            self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(self.store.list_secret_bindings(limit=None), before)
 
     async def test_copy_requires_matching_dry_run_and_source_read(self) -> None:
         response = await self.post({**self.payload, "mode": "apply"}, key="no-review")
@@ -258,9 +300,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                 response = await self.post(payload)
                 self.assertEqual(
                     response.status_code,
-                    403
-                    if change.get("scope") == "context"
-                    else 409
+                    409
                     if change.get("copy_from")
                     == {"context": "example-site", "instance": "prod", "version_id": "old-version"}
                     else 400,
