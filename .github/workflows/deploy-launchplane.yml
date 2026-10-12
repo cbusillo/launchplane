@@ -1776,6 +1776,7 @@ jobs:
       - name: Authenticate the existing image read
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          LAUNCHPLANE_PREFLIGHT_OWNER: github-actions:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.job }}
         run: bash scripts/deploy/authenticate-preflight-registry.sh
       - name: Read scrubbed Launchplane stored records
         uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
