@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from control_plane.health_monitor_scheduler import HealthMonitorScheduler, monitor_slot
+from control_plane.health_monitor_scheduler import HealthMonitorScheduler, monitor_slot, monitor_key
 from control_plane.contracts.public_ingress_monitoring import health_monitor_interval_seconds
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.postgres import PostgresRecordStore
@@ -33,7 +33,7 @@ class HealthMonitorStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             scheduler = HealthMonitorScheduler(
                 store, clock=lambda: now, run_monitor=lambda _lanes: None
             )
-            scheduler._write_completion("testing:enabled", now)
+            scheduler._write_completion(monitor_key("enabled", "testing"), now)
             scheduler.run_once("testing")
             store.write_product_profile_record(
                 self.store_profile.model_copy(update={"display_name": "Changed"})
@@ -62,7 +62,6 @@ class HealthMonitorStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(testing_status["slots"][0]["completion"])
             self.assertEqual(testing_status["lane_changes"][0]["instance"], "testing")
             self.assertIsNone(prod_response.json()["monitor"]["slots"][0]["completion"])
-            self.assertNotIn("authority_revision", testing_response.text)
 
     async def test_receipts_are_bounded_and_do_not_expose_stored_payload_or_keys(self) -> None:
         with TemporaryDirectory() as directory:

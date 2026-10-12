@@ -5948,14 +5948,26 @@ class PostgresRecordStore(HumanSessionStore):
                 isinstance(row, authority_rows)
                 for row in session.new | session.dirty | session.deleted
             ):
-                session.info["health_monitor_changed"] = True
+                transaction = session.get_nested_transaction() or session.get_transaction()
+                if transaction is not None:
+                    session.info.setdefault("health_monitor_changed", set()).add(transaction)
 
         def committed(session: Session) -> None:
-            if session.info.pop("health_monitor_changed", False):
-                wake()
+            transaction = session.get_nested_transaction() or session.get_transaction()
+            changed = session.info.get("health_monitor_changed", set())
+            if transaction in changed:
+                changed.remove(transaction)
+                if transaction is not None and transaction.nested:
+                    changed.add(transaction.parent)
+                else:
+                    wake()
 
         def rolled_back(session: Session) -> None:
-            session.info.pop("health_monitor_changed", None)
+            transaction = session.get_nested_transaction() or session.get_transaction()
+            changed = session.info.get("health_monitor_changed", set())
+            changed.discard(transaction)
+            if transaction is not None and not transaction.nested:
+                changed.clear()
 
         event.listen(self._session_factory, "after_flush", flushed)
         event.listen(self._session_factory, "after_commit", committed)

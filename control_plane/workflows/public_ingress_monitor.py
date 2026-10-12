@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -648,6 +650,7 @@ def run_public_ingress_monitor_once(
     sleep: Callable[[float], None] = time.sleep,
     should_stop: Callable[[], bool] | None = None,
     lane_keys: frozenset[tuple[str, str, str]] | None = None,
+    max_concurrent_probes: int = 1,
 ) -> PublicIngressMonitorResult:
     observed_at = checked_at.strip() or utc_now_timestamp()
     public_get = http_get or fetch_public_ingress_url
@@ -681,7 +684,20 @@ def run_public_ingress_monitor_once(
             tls_get=tls_probe,
         )
 
-    probed = [(target, probe(target)) for target in targets]
+    if max_concurrent_probes < 1:
+        raise ValueError("Monitor probe concurrency must be positive")
+
+    def probe_targets(
+        selected: tuple[PublicIngressMonitorTarget, ...],
+    ) -> list[tuple[PublicIngressMonitorTarget, PublicIngressObservationRecord]]:
+        if max_concurrent_probes == 1 or not selected:
+            return [(target, probe(target)) for target in selected]
+        with ThreadPoolExecutor(
+            max_workers=min(max_concurrent_probes, len(selected)), thread_name_prefix="health-probe"
+        ) as executor:
+            return list(zip(selected, executor.map(probe, selected), strict=True))
+
+    probed = probe_targets(targets)
     unconfirmed = [
         index
         for index, (_target, record) in enumerate(probed)
@@ -691,6 +707,7 @@ def run_public_ingress_monitor_once(
         # One wait per run, however many lanes are mid-deploy.
         if runtime_identity_confirmation_delay_seconds > 0:
             sleep(runtime_identity_confirmation_delay_seconds)
+        retry_targets = []
         for index in unconfirmed:
             target = probed[index][0]
             target = replace(
@@ -701,7 +718,9 @@ def run_public_ingress_monitor_once(
                     instance_name=target.instance,
                 ),
             )
-            probed[index] = (target, probe(target))
+            retry_targets.append(target)
+        for index, retried in zip(unconfirmed, probe_targets(tuple(retry_targets)), strict=True):
+            probed[index] = retried
     for target, record in probed:
         _check_monitor_cancelled(should_stop)
         stored_transition = _store_monitor_observation(

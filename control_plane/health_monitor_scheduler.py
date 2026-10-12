@@ -34,7 +34,8 @@ from control_plane.workflows.public_ingress_monitor import (
 MONITOR_INTERVAL_SECONDS = PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS
 MONITOR_COMPLETION_GRACE_SECONDS = MONITOR_INTERVAL_SECONDS
 MONITOR_POLL_SECONDS = 5
-MONITOR_LEASE_SECONDS = 120
+MONITOR_LEASE_SECONDS = 30
+MONITOR_MAX_CONCURRENT_PROBES = 16
 MONITOR_RECEIPT_FINGERPRINT = "health-monitor-scheduler-v2"
 # New epoch: half-hour receipts and activation cannot prove a one-minute schedule.
 _SCOPE = "launchplane:health-monitor-scheduler:v2"
@@ -193,7 +194,7 @@ class HealthMonitorScheduler:
             store=self.store,
             reservation=claim.record,
             lease_seconds=MONITOR_LEASE_SECONDS,
-            interval_seconds=30,
+            interval_seconds=10,
         )
         heartbeat.start()
         try:
@@ -289,7 +290,13 @@ class HealthMonitorScheduler:
         missed = is_missed()
         if self._last_report.get(instance) == (due_slot, missed):
             return missed
-        lanes = frozenset(self._revisions(instance))
+        lanes = frozenset(
+            (profile.product, lane.context, lane.instance)
+            for profile in self.store.list_product_profile_records()
+            if profile.is_active
+            for lane in profile.lanes
+            if (lane.instance == "testing") == (instance == "testing")
+        )
         if not lanes:
             return False
         with self._lease(monitor_key("watch-active", instance)) as heartbeat:
@@ -317,6 +324,7 @@ class HealthMonitorScheduler:
             should_stop=self._stop.is_set,
             sleep=self._wait,
             lane_keys=lanes,
+            max_concurrent_probes=MONITOR_MAX_CONCURRENT_PROBES,
         )
 
     def _report_cadence(self, missed: bool, observed_at: str, lanes: frozenset[LaneKey]) -> None:

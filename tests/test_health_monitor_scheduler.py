@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Event, Thread
+from threading import Barrier, Event, Thread
 import unittest
 from unittest.mock import Mock, patch
 from pydantic import JsonValue
@@ -12,6 +12,10 @@ from control_plane.health_monitor_scheduler import (
     HealthMonitorScheduler,
     MONITOR_COMPLETION_GRACE_SECONDS,
     MONITOR_INTERVAL_SECONDS,
+    MONITOR_LEASE_SECONDS,
+    MONITOR_RECEIPT_FINGERPRINT,
+    _SCOPE,
+    _ROUTE,
     monitor_lane_key,
     monitor_slot,
 )
@@ -214,6 +218,137 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
                 self.assertTrue(changed.wait(5))
             finally:
                 self.scheduler.stop()
+
+    def test_savepoint_wakes_only_on_outer_commit_and_preserves_outer_changes(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneProductProfileRow
+
+        wake = Mock()
+        unsubscribe = self.store.subscribe_health_monitor_changes(wake)
+        self.addCleanup(unsubscribe)
+        for commit_nested, commit_outer, outer_write in (
+            (True, True, False),
+            (True, False, False),
+            (False, True, False),
+            (False, True, True),
+        ):
+            with self.subTest(
+                commit_nested=commit_nested, commit_outer=commit_outer, outer_write=outer_write
+            ):
+                wake.reset_mock()
+                with self.store._session_factory() as session:
+                    row = session.get(LaunchplaneProductProfileRow, "example-site")
+                    assert row is not None
+                    if outer_write:
+                        row.display_name = "outer write"
+                        session.flush()
+                    nested = session.begin_nested()
+                    row.display_name = "nested write"
+                    session.flush()
+                    if commit_nested:
+                        nested.commit()
+                    else:
+                        nested.rollback()
+                    wake.assert_not_called()
+                    if commit_outer:
+                        session.commit()
+                    else:
+                        session.rollback()
+                self.assertEqual(
+                    wake.call_count, int(commit_outer and (commit_nested or outer_write))
+                )
+
+    def test_watchdog_does_not_depend_on_config_digest_reads(self) -> None:
+        self.now += MONITOR_COMPLETION_GRACE_SECONDS
+        with patch.object(
+            self.store,
+            "health_monitor_authority_revisions",
+            side_effect=ValueError("invalid settings fixture"),
+        ):
+            self.assertTrue(self.scheduler.watch_once())
+            self.alert.assert_called_once()
+            with self.assertRaises(ValueError):
+                self.scheduler.run_once()
+
+    def test_another_replica_recovers_a_dead_workers_expired_lease(self) -> None:
+        with patch.object(
+            self.store,
+            "_database_mutation_timestamp",
+            side_effect=lambda _session: (
+                datetime.fromtimestamp(self.now, timezone.utc).isoformat().replace("+00:00", "Z")
+            ),
+        ):
+            claim = self.store.reserve_mutation(
+                scope=_SCOPE,
+                route_path=_ROUTE,
+                idempotency_key="active",
+                request_fingerprint=MONITOR_RECEIPT_FINGERPRINT,
+                lease_owner="dead-worker-fixture",
+                lease_seconds=MONITOR_LEASE_SECONDS,
+            )
+            self.assertEqual(claim.status, "acquired")
+            peer = self.make_scheduler()
+            self.assertFalse(peer.run_once())
+            self.now += MONITOR_LEASE_SECONDS + 1
+            self.assertTrue(peer.run_once())
+        self.probe.assert_called_once()
+
+    def test_service_probe_path_checks_lanes_in_parallel(self) -> None:
+        first = _profile().model_copy(
+            update={
+                "lanes": (
+                    _profile()
+                    .lanes[0]
+                    .model_copy(
+                        update={"base_url": "", "health_url": "https://first.test/healthz"}
+                    ),
+                )
+            }
+        )
+        second = _profile().model_copy(
+            update={
+                "product": "other-site",
+                "lanes": (
+                    _profile()
+                    .lanes[0]
+                    .model_copy(
+                        update={
+                            "context": "other-site",
+                            "base_url": "",
+                            "health_url": "https://second.test/healthz",
+                        }
+                    ),
+                ),
+            }
+        )
+        self.store.write_product_profile_record(first)
+        self.store.write_product_profile_record(second)
+        overlap = Barrier(2)
+
+        def healthy(url: str, _timeout: int) -> HttpObservation:
+            overlap.wait(5)
+            return HttpObservation(status_code=200, final_url=url, redirect_count=0)
+
+        lanes = frozenset(
+            (profile.product, lane.context, lane.instance)
+            for profile in (first, second)
+            for lane in profile.lanes
+        )
+        with (
+            patch(
+                "control_plane.workflows.public_ingress_monitor.fetch_public_ingress_url",
+                side_effect=healthy,
+            ),
+            patch(
+                "control_plane.health_monitor_scheduler.public_ingress_notification_drivers",
+                return_value=None,
+            ),
+        ):
+            self.scheduler._run_monitor(lanes)
+        for product in (first.product, second.product):
+            self.assertEqual(
+                self.store.list_public_ingress_observation_records(product=product)[0].status,
+                "pass",
+            )
 
     def test_testing_probe_does_not_hold_production_lease(self) -> None:
         profile = _profile()
@@ -497,6 +632,39 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
 
 
 class MonitorCadenceIncidentTests(unittest.TestCase):
+    def test_parallel_probe_batch_has_independent_requests_and_stable_result_order(self) -> None:
+        first = _profile(
+            lane=_profile()
+            .lanes[0]
+            .model_copy(update={"base_url": "", "health_url": "https://first.test/healthz"})
+        )
+        second = _profile(
+            lane=_profile()
+            .lanes[0]
+            .model_copy(
+                update={
+                    "context": "other-site",
+                    "base_url": "",
+                    "health_url": "https://second.test/healthz",
+                }
+            )
+        ).model_copy(update={"product": "other-site"})
+        profiles = (first, second)
+        store = _Store(profiles)
+        overlap = Barrier(2)
+
+        def healthy(url: str, _timeout: int) -> HttpObservation:
+            overlap.wait(5)
+            return HttpObservation(status_code=200, final_url=url, redirect_count=0)
+
+        result = run_public_ingress_monitor_once(
+            record_store=store, http_get=healthy, notify=False, max_concurrent_probes=2
+        )
+        self.assertEqual(result.pass_count, len(profiles))
+        self.assertEqual(
+            [record.product for record in result.records], [first.product, second.product]
+        )
+
     def test_observation_freshness_uses_the_observations_lane_cadence(self) -> None:
         store = _Store((_profile(),))
         run_public_ingress_monitor_once(

@@ -1526,12 +1526,17 @@ rule counts, managed IDs and hashes, compact diffs, and redacted audit evidence;
 they do not echo workflow refs, human logins, Director-agent subjects, or the full
 policy body.
 
+### Lane Health Monitoring
+
 Lane health monitoring is Launchplane-owned synthetic monitoring for
 generic-web stable lanes, including drivers that inherit generic-web behavior.
 The Launchplane service owns the recurring schedule: production lanes run in
 one-minute UTC slots and testing lanes in five-minute slots, independently of
 GitHub cron. Separate workers and renewed leases isolate the two cadences.
-Other declared stable-lane instances use the production cadence.
+Other declared stable-lane instances use the production cadence. Each scheduled
+batch runs at most 16 probes concurrently, retaining existing per-request
+timeouts and reusing the same bound for identity-confirmation retries. Manual
+runs retain sequential probing unless their caller explicitly selects concurrency.
 The service lifespan starts and stops the scheduler; DB-backed completion records
 survive restarts, and a renewed DB lease serializes replicas across slots.
 Shutdown cancels before the next probe or incident update and interrupts the
@@ -1545,7 +1550,13 @@ Persisted authority digests suppress duplicate change runs across replicas and
 restarts; a change during a probe remains due on the next pass. Sensor writes
 and scheduler receipts do not wake another probe. Probes retain their existing
 timeouts and the single runtime-identity confirmation wait, so a slow/failing
-batch can miss its deadline; expired evidence stays stale.
+batch can miss its deadline; expired evidence stays stale. Batch latency and
+polling drift can create stale intervals between completions: expiry is not
+extended to hide those gaps. Qualify actual completion latency and storage growth
+on the deployed service before starting a continuous-green observation clock.
+Probe leases expire after 30 seconds and renew every 10 seconds so a dead worker
+does not retain a production slot for two minutes. The watchdog reads lane
+profiles independently of the broader settings/secret authority digests.
 The service uses the same monitor, recorded lane intent, notification policies,
 and managed secrets as manual runs, with no caller credential or new grant.
 The `Public Ingress Monitor` workflow remains a manual admin rerun and best-effort
