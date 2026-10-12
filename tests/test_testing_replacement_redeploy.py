@@ -44,7 +44,8 @@ class TestingReplacementRedeployTests(unittest.TestCase):
     def test_admitted_replacement_blocks_dispatch_until_terminal_commit(self) -> None:
         claimed = self.claim()
         assert claimed is not None
-        # A missed heartbeat alone cannot prove that the provider effect ended.
+        # A running record still blocks dispatch after a missed heartbeat. Recovery
+        # retains its separate existing reconciliation rules.
         self.store.write_odoo_stable_target_replacement_operation_record(
             claimed.model_copy(update={"lease_expires_at": claimed.started_at})
         )

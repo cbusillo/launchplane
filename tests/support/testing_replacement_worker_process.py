@@ -18,11 +18,15 @@ def main(database_url: str) -> None:
         print("effect admitted", flush=True)
         if sys.stdin.readline().strip() != "finish":
             raise AssertionError("The fixture did not release its admitted effect")
+        (operation,) = store.list_odoo_stable_target_replacement_operation_records(
+            statuses=("running",)
+        )
+        assert operation.request.strategy == "recreate-in-place"
         return OdooStableTargetReplacementApplyResult(
-            product="odoo-tenant-cm",
-            context="cm",
-            instance="testing",
-            strategy="recreate-in-place",
+            product=operation.product,
+            context=operation.context,
+            instance=operation.instance,
+            strategy=operation.request.strategy,
             deployment_record_id="isolated-deployment",
             deploy_status="pass",
             post_deploy_status="pass",
