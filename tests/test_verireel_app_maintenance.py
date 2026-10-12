@@ -85,7 +85,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
         prefix = "control_plane.workflows.verireel_app_maintenance."
         request = VeriReelAppMaintenanceRequest(
             action="delete-user",
-            intent="stable-testing-remote-e2e-delete-user",
+            intent="owner-route-delete-user",
             email="fixture@example.com",
         )
         with (
