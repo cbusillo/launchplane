@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
 
+from control_plane.deploy_failure_alert import FINAL_VERIFICATION_TIMEOUT_SECONDS
 from tests.support.workflows import load_workflow
 
 
@@ -47,6 +48,7 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 "LANG": "C.UTF-8",
                 "GITHUB_OUTPUT": str(directory / "output"),
                 "RUNNER_TEMP": str(directory),
+                "MINIMUM_TIMEOUT_MS": str(FINAL_VERIFICATION_TIMEOUT_SECONDS * 1000),
                 **declared_env,
                 "PREVIOUS_RUNTIME_RESPONSE_FILE": str(runtime),
                 "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
@@ -119,7 +121,12 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                         self.assertLessEqual(actual, remaining * 1000)
                         self.assertGreater(actual, (remaining - 10) * 1000)
                     else:
-                        self.assertEqual(actual, 1)
+                        self.assertEqual(
+                            actual,
+                            FINAL_VERIFICATION_TIMEOUT_SECONDS * 1000
+                            if step == "Resolve final runtime marker remaining wait"
+                            else 1,
+                        )
 
     def test_finished_drain_preserves_worker_stop_budget_then_later_wait_consumes_it(
         self,
@@ -179,12 +186,16 @@ fi
             sleep = directory / "sleep"
             sleep.write_text("#!/usr/bin/env bash\nexit 0\n")
             sleep.chmod(0o700)
+            date = directory / "date"
+            date.write_text("#!/usr/bin/env bash\nprintf '%s' \"$TEST_NOW_EPOCH\"\n")
+            date.chmod(0o700)
             evidence = directory / "launchplane-deployed-health-result.json"
             result = self._run_step(
                 "deploy",
                 "Wait for deployed Launchplane health URLs",
                 {
-                    "WAIT_DEADLINE_EPOCH": str(int(time.time()) + 30),
+                    "WAIT_DEADLINE_EPOCH": "10001",
+                    "TEST_NOW_EPOCH": "10000",
                     "LAUNCHPLANE_DEPLOY_HEALTH_URLS": "https://health.example.invalid",
                     "PATH": str(directory) + os.pathsep + os.environ["PATH"],
                 },
@@ -193,6 +204,12 @@ fi
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(evidence.read_text(), "")
             self.assertTrue((directory / "output").is_file())
+            values = dict(
+                line.split("=", 1) for line in (directory / "output").read_text().splitlines()
+            )
+            self.assertEqual(
+                int(values["remaining_timeout_ms"]), FINAL_VERIFICATION_TIMEOUT_SECONDS * 1000
+            )
 
     def test_timed_out_drain_does_not_request_service_rollback(self) -> None:
         for payload in (

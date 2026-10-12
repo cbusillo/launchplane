@@ -15,6 +15,7 @@ from control_plane.notifications import post_discord_webhook, public_discord_url
 
 
 REPLACEMENT_TIMEOUT_SECONDS = 120
+FINAL_VERIFICATION_TIMEOUT_SECONDS = 15
 
 
 def validate_sender() -> str:

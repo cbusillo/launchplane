@@ -199,7 +199,7 @@ jobs:
 
       - name: Request Launchplane app maintenance
         id: lp
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@c34f63a7293f4a5cbf2ba0bbdb96811ae546e83d # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@b03966548631da91979592966cb562f9127c912c # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}

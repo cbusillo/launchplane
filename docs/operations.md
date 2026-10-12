@@ -2019,11 +2019,17 @@ same-image redeploy. A continuously unavailable API during the request has that
 shorter limit, while successful draining responses reset it and preserve the
 full release-drain budget. In-flight requests are bounded; this is health-based
 failure detection, not evidence of container restarts or a startup cause.
-OIDC failures before sending a request and ingress replies after a known
-pre-effect drain preserve that drain proof and its full wait. An uncertain
-POST still clears earlier proof. The alert and rollback share the same
+OIDC failures before sending a request and non-JSON ingress 404 route misses
+after a known pre-effect drain preserve that drain proof and its full wait.
+Gateway failures may follow a dispatched POST with a lost reply, so they start
+the short window and clear earlier drain proof. A later auth refusal cannot
+downgrade an already dispatched or uncertain attempt. These proof changes apply
+only to the opted-in self-deploy polling path. The alert and rollback share the same
 dispatch-proof decoder, including authentication refusals and a request that
 could not be prepared before any Launchplane attempt.
+When health succeeds at the end of the observation window, each final identity
+check gets a bounded fifteen-second allowance to finish its OIDC and API proof.
+An unhealthy replacement still fails at the two-minute health deadline.
 
 Before replacement, the workflow validates the already-approved existing
 Launchplane Discord sender supplied as `DISCORD_LAUNCHPLANE_WEBHOOK`. An absent
