@@ -70,10 +70,6 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(list_response.status_code, 200)
         list_payload = list_response.json()
-        self.assertEqual(
-            [driver["driver_id"] for driver in list_payload["drivers"]],
-            ["generic-web", "ingress", "odoo", "verireel"],
-        )
         ingress_driver = next(
             driver for driver in list_payload["drivers"] if driver["driver_id"] == "ingress"
         )

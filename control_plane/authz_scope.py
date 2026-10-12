@@ -5,12 +5,14 @@ from functools import lru_cache
 
 # Creates one lane's Dokploy compose target; granted per context and instance.
 DOKPLOY_TARGET_LANE_SETUP_ACTION = "dokploy_target.lane_setup"
+VERIREEL_APP_MAINTENANCE_ACTION = "verireel_app_maintenance.execute"
 
 _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
     {
         "backup_gate.write",
         # Retired capture grants still scope historical-operation cancellation.
         "verireel_prod_backup_gate.execute",
+        VERIREEL_APP_MAINTENANCE_ACTION,
         "deployment.read",
         DOKPLOY_TARGET_LANE_SETUP_ACTION,
         "every_code_feedback_resume.request",

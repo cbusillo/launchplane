@@ -210,9 +210,6 @@ live authority across DB, files, and process env:
 - stable target definitions resolve from DB-backed tracked target records
 - release tuple baseline resolution fails closed unless DB-backed release-tuple
   records exist
-- VeriReel prod rollback dispatch resolves worker/runtime-action config from
-  `verireel/prod` runtime-environment records, then passes those values to the
-  delegated worker process
 - legacy VeriReel backup dispatch and worker commands refuse without reading
   product-prefixed backup environment values or invoking host commands; use
   `/v1/production-backup-gates` with typed authority instead

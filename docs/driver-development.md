@@ -117,16 +117,17 @@ Preview profiles using driver data transport can explicitly select the
 driver is `generic-web`, declaring its isolated database namespace through
 `transport_database_prefix`. The template lane, application prefix, database
 namespace and runtime product identity come from the profile. This uses the existing isolated PostgreSQL preparation
-and cleanup rather than the plain preview path. Existing VeriReel profiles retain
-their current dispatch until their supported testing transition is qualified.
-This source capability does not change a live profile or production artifact.
+and cleanup rather than the plain preview path. The VeriReel testing transition
+has qualified this declared shared path; the parallel deploy, promotion and rollback driver is removed. Historical deployment
+and backup records remain readable. Production still changes only through an
+accepted release.
 
 A generic-web testing lane selects `verification_extension="verireel-testing"`
 in `generic_web_extensions` to reuse VeriReel's migration and creator/admin
 qualification. The preset accepts only a recorded testing lane and exact
 reserved application target; other lanes and an absent executor are refused
-before deployment. Legacy VeriReel profiles retain their existing testing
-selection until the qualified profile transition. The extension runs
+before deployment. The preset is selected only by the declaration; a product
+name or historical driver identifier does not enable testing qualification. The extension runs
 the existing `stable-testing-migration` maintenance intent, then verifies a
 disposable creator's QR/public flow, creator denial of admin pages, and the admin
 pages after the existing smoke-maintenance intent elevates that fixture. Cleanup
@@ -445,12 +446,9 @@ in the driver once Launchplane has the lane profile, target, health path, and
 expected artifact identity. Product repos should not keep their own URL
 derivation or health polling scripts.
 
-Transitional: on the old call-in path, VeriReel preview refresh writes the
-initial preview generation from the provider result, then the product repo
-reports only the product smoke result to
-`/v1/drivers/verireel/preview-verification`. Event-driven previews replace that:
-Launchplane's own health check of the expected build marks the preview ready
-(#2740).
+Event-driven previews record provider results and use Launchplane's health check
+of the expected build to mark the preview ready. See
+[event-driven deploys](event-driven-deploys.md).
 
 Lifecycle declarations are qualified with the deployed artifact, not merely the
 provider's image status. Before pausing recurring jobs, the shared deploy writes
@@ -489,3 +487,18 @@ that a pre-image refusal restored all schedules, recovery may retry the original
 operation. A different attempt or an unqualified/failed-restoration receipt does
 not supply that proof. Testing rollback selects the same declared qualification
 executor as a forward testing deploy.
+
+### VeriReel extension repair and history
+
+VeriReel uses the shared deploy, promotion, rollback and backup paths. Its
+PostgreSQL preview persistence adapter is internal to the declared transport;
+it does not expose a parallel native preview API. Legacy deployment, promotion
+and backup schemas and migrations remain readers for stored history.
+
+The existing `POST /v1/drivers/verireel/app-maintenance` repair endpoint remains
+for testing and preview fixture cleanup. It uses the existing instance-scoped
+maintenance action, idempotency and allow-listed intents, and requires the
+profile's testing-verification or preview-transport declaration for that lane.
+It cannot target production. This is an extension repair path, not a release
+driver or a new grant. Routine migrations and billing schedules execute from
+the profile declarations through the shared deployment lifecycle.

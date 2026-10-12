@@ -91,7 +91,7 @@ def _policy(
             "product": "example-product",
             "context": "example-product",
             "instance": "prod",
-            "promotion_action": "verireel_prod_promotion.execute",
+            "promotion_action": "generic_web_prod_promotion.execute",
             "policy_revision": revision,
             "status": status,
             "fast_snapshot": {
@@ -128,7 +128,7 @@ def _profile() -> LaunchplaneProductProfileRecord:
             "product": "example-product",
             "display_name": "Example Product",
             "repository": "example/example-product",
-            "driver_id": "verireel",
+            "driver_id": "generic-web",
             "image": {"repository": "ghcr.io/example/example-product"},
             "lanes": [
                 {
@@ -165,7 +165,7 @@ class ProductionBackupAuthorityContractTests(unittest.TestCase):
                     product="example-product",
                     context="example-product",
                     instance="prod",
-                    promotion_action="verireel_prod_promotion.execute",
+                    promotion_action="generic_web_prod_promotion.execute",
                     generated_at="2026-09-03T00:00:00Z",
                 )
                 self.assertFalse(result.ready)
@@ -196,7 +196,7 @@ class ProductionBackupAuthorityContractTests(unittest.TestCase):
                 product="example-product",
                 context="example-product",
                 instance="prod",
-                promotion_action="verireel_prod_promotion.execute",
+                promotion_action="generic_web_prod_promotion.execute",
                 generated_at="2026-09-03T00:00:00Z",
             )
             self.assertEqual(ready.state, "ready")
@@ -208,7 +208,7 @@ class ProductionBackupAuthorityContractTests(unittest.TestCase):
                 product="example-product",
                 context="example-product",
                 instance="prod",
-                promotion_action="verireel_prod_promotion.execute",
+                promotion_action="generic_web_prod_promotion.execute",
                 generated_at="2028-09-03T00:00:00Z",
             )
             self.assertEqual(stale.state, "stale")
@@ -240,7 +240,7 @@ class ProductionBackupAuthorityContractTests(unittest.TestCase):
                 product="example-product",
                 context="example-product",
                 instance="prod",
-                promotion_action="verireel_prod_promotion.execute",
+                promotion_action="generic_web_prod_promotion.execute",
                 generated_at="2026-09-03T00:00:00Z",
             )
             self.assertEqual(retired.state, "retired")
@@ -292,7 +292,7 @@ class ProductionBackupAuthorityContractTests(unittest.TestCase):
                 product="example-product",
                 context="example-product",
                 instance="prod",
-                promotion_action="verireel_prod_promotion.execute",
+                promotion_action="generic_web_prod_promotion.execute",
                 generated_at="2026-09-03T00:00:00Z",
             )
             self.assertEqual(invalid.state, "invalid")
@@ -530,7 +530,7 @@ class ProductionBackupAuthorityProjectionTests(unittest.TestCase):
                     repository_id="1001",
                     repository_owner_id="1000",
                 ),
-                requested_action="verireel_prod_promotion.execute",
+                requested_action="generic_web_prod_promotion.execute",
                 requested_artifact_id="",
                 expected_current_artifact_id="",
                 generated_at="2026-09-03T00:00:00Z",

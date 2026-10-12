@@ -487,10 +487,7 @@ def reconcile_testing_target(
     )
     if (
         isinstance(desired, VerifiedGenericWebBuild)
-        and (
-            profile.driver_id == "verireel"
-            or declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE)
-        )
+        and declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE)
         and plan.get("reason") == "already_deployed"
     ):
         from control_plane.workflows.verireel_testing_post_deploy import (

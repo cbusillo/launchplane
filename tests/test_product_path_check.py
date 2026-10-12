@@ -655,7 +655,7 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
             check = self.check()
         self.assertEqual(getattr(check, "state"), "unknown")
         self.assertEqual(
-            _steps(check)["rollback_route"], ("unknown", "rollback_driver_unchecked", "code")
+            _steps(check)["rollback_route"], ("unknown", "rollback_driver_unread", "wait")
         )
         self.actions.assert_not_called()
         read.assert_not_called()

@@ -215,6 +215,19 @@ class GenericWebDeployProviderMutationAdapter:
             )
         resolved_target = inspection.resolved_deploy_target
         deployment_record_id = self._deployment_record_id(provider_operation_key)
+        if inspection.post_deploy_unobserved:
+            try:
+                existing = cast(_DeploymentRecordReader, self._record_store).read_deployment_record(
+                    deployment_record_id
+                )
+            except FileNotFoundError:
+                return ProviderObservation(outcome="unknown")
+            if (
+                not existing.post_deploy_update.attempted
+                or existing.post_deploy_update.status not in {"pass", "fail"}
+            ):
+                # Image presence cannot settle interrupted application effects.
+                return ProviderObservation(outcome="unknown")
         try:
             records, driver_result = record_observed_generic_web_deploy(
                 record_store=cast(GenericWebDeployStore, self._record_store),

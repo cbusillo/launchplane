@@ -22,11 +22,6 @@ from control_plane.service_auth import (
     LocalOperatorIdentity,
     TerminalAgentIdentity,
 )
-from control_plane.verireel_nonprod_http import VERIREEL_TESTING_DEPLOY_ROUTE
-from control_plane.verireel_prod_http import (
-    VERIREEL_PROD_DEPLOY_ROUTE,
-    VERIREEL_PROD_PROMOTION_ROUTE,
-)
 
 
 class AcceptedEvidenceResponse(BaseModel):
@@ -115,9 +110,6 @@ def replay_idempotent_response(
         GENERIC_WEB_DEPLOY_ROUTE,
         GENERIC_WEB_PROD_PROMOTION_ROUTE,
         GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
-        VERIREEL_PROD_DEPLOY_ROUTE,
-        VERIREEL_PROD_PROMOTION_ROUTE,
-        VERIREEL_TESTING_DEPLOY_ROUTE,
     } and isinstance(stored_result, dict):
         stored_records.pop("target_type", None)
         stored_result = {str(key): value for key, value in stored_result.items()}

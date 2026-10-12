@@ -401,11 +401,7 @@ WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/reusable-product-repo-config-authority.yml": {
         "inputs.runs_on.default": frozenset(('"ubuntu-latest"',)),
     },
-    ".github/workflows/reusable-product-driver-prod-promotion.yml": {
-        "inputs.driver.default": frozenset(("verireel",)),
-    },
     ".github/workflows/reusable-product-driver-prod-rollback.yml": {
-        "inputs.driver.default": frozenset(("verireel",)),
         "inputs.source_channel.default": frozenset(("testing",)),
     },
     ".github/workflows/runner-host-hygiene.yml": {
@@ -572,14 +568,6 @@ PRODUCT_DRIVER_REUSABLE_WITH_INPUT_KEYS = frozenset(
     )
 )
 PRODUCT_DRIVER_REUSABLE_WRAPPER_LITERAL_VALUES = {
-    ".github/workflows/reusable-product-driver-prod-launch-readiness.yml": {
-        "INSTANCE": frozenset(("prod",)),
-    },
-    ".github/workflows/reusable-product-driver-testing-reset.yml": {
-        "ACTION": frozenset(("reset-testing",)),
-        "INSTANCE": frozenset(("testing",)),
-        "INTENT": frozenset(("stable-testing-reset",)),
-    },
     ".github/workflows/reusable-product-driver-testing-deploy.yml": {
         "fail-result-paths": frozenset(('""',)),
         "route-path": frozenset(
