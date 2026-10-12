@@ -1122,6 +1122,65 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             deploy.assert_called_once()
             update.assert_called_once()
 
+    async def test_drain_deadline_returns_diagnostic_failure_without_provider_writes(self) -> None:
+        from control_plane.service_deploy_drain import read_status
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            reservation = store.reserve_mutation(
+                scope="client-release",
+                route_path="/isolated/provider-effect",
+                idempotency_key="effect",
+                request_fingerprint="effect",
+                lease_owner="worker",
+            ).record
+            assert reservation is not None
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=self._policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
+                    return_value=("https://provider.example", "synthetic"),
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
+                    return_value=self._compose_target(self._BOOTSTRAP_ENV),
+                ),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
+                ) as update,
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
+                ) as deploy,
+            ):
+                payload = self._payload(
+                    oauth_env={"LAUNCHPLANE_DEPLOYMENT_MARKER": "deadline-test"}
+                )
+                response = await _post_launchplane_self_deploy(
+                    app, payload, idempotency_key="deadline"
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                deadline = str(read_status(store)["drain_deadline_at"])
+                with patch.object(store, "_database_mutation_timestamp", return_value=deadline):
+                    for _ in range(2):
+                        response = await _post_launchplane_self_deploy(
+                            app, payload, idempotency_key="deadline"
+                        )
+                        self.assertEqual(response.status_code, 409, response.text)
+                        self.assertEqual(
+                            response.json()["error"]["code"], "self_deploy_drain_timeout"
+                        )
+                        self.assertIn(reservation.record_id, response.text)
+                update.assert_not_called()
+                deploy.assert_not_called()
+
     async def test_break_glass_conflict_supplies_inputs_that_repair_the_fence(self) -> None:
         from control_plane.dokploy import api as provider
         from control_plane.service_deploy_drain import confirm_startup, read_status

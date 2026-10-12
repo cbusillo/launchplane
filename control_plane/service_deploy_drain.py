@@ -17,6 +17,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
 from control_plane.contracts.product_reconcile import RECONCILE_SOURCE
+from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+
+
+SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS = 10 * 60
 
 
 class ServiceDeployDrainRecord(BaseModel):
@@ -31,6 +35,14 @@ class ServiceDeployDrainRecord(BaseModel):
     state: Literal["draining", "dispatching", "requested", "confirmed", "refused"]
     updated_at: str
     expires_at: str = ""
+
+
+class ServiceDeployDrainBudget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    drain_started_at: str
+    drain_deadline_at: str
+    drain_timed_out: bool = False
 
 
 class ServiceDeployDraining(ValueError):
@@ -55,6 +67,16 @@ class ServiceDeployFenceConflict(ServiceDeployOutcomeUnknown):
 
 class ServiceDeployPreEffectRefused(ValueError):
     """The provider definitely refused the first env write; no replacement started."""
+
+
+class ServiceDeployDrainTimeout(ServiceDeployPreEffectRefused):
+    """The absolute pre-effect budget elapsed; no provider write was admitted."""
+
+    def __init__(self, blockers: tuple[str, ...]) -> None:
+        super().__init__(
+            "Self-deploy drain timed out before provider effects; inspect runtime.release_drain."
+        )
+        self.blockers = blockers
 
 
 @contextmanager
@@ -113,6 +135,28 @@ def _write(session: Any, record: ServiceDeployDrainRecord) -> None:
             row.payload = record.model_dump()
 
 
+def _read_budget(session: Any, request_fingerprint: str) -> ServiceDeployDrainBudget | None:
+    from control_plane.storage.postgres import LaunchplaneServiceDeployDrainRow
+
+    row = session.get(LaunchplaneServiceDeployDrainRow, f"budget:{request_fingerprint}")
+    return ServiceDeployDrainBudget.model_validate(row.payload) if row else None
+
+
+def _write_budget(session: Any, request_fingerprint: str, budget: ServiceDeployDrainBudget) -> None:
+    from control_plane.storage.postgres import LaunchplaneServiceDeployDrainRow
+
+    # Separate receipt: older image/worker readers forbid extra fence fields.
+    # Keep their exact fence payload compatible during overlap or rollback.
+    record_id = f"budget:{request_fingerprint}"
+    row = session.get(LaunchplaneServiceDeployDrainRow, record_id)
+    if row is None:
+        session.add(
+            LaunchplaneServiceDeployDrainRow(record_id=record_id, payload=budget.model_dump())
+        )
+    else:
+        row.payload = budget.model_dump()
+
+
 def admission_allowed(session: Any, now: str) -> bool:
     _, record = _read(session)
     if record is None:
@@ -140,7 +184,7 @@ def admit_reservation(store: Any, session: Any, scope: str) -> None:
         raise ServiceDeployDraining("Launchplane is draining product provider effects.")
 
 
-def _running_operations(session: Any) -> tuple[str, ...]:
+def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[str, object], ...]:
     from control_plane.storage.postgres import (
         LaunchplaneIdempotencyRow,
         LaunchplaneOdooProdPromotionOperationRow,
@@ -149,30 +193,91 @@ def _running_operations(session: Any) -> tuple[str, ...]:
         LaunchplaneVeriReelProdBackupGateOperationRow,
     )
 
-    ids: list[str] = []
+    observations: list[dict[str, object]] = []
     for row_type in (
         LaunchplaneOdooProdPromotionOperationRow,
         LaunchplaneOdooProdRollbackOperationRow,
         LaunchplaneOdooStableTargetReplacementOperationRow,
         LaunchplaneVeriReelProdBackupGateOperationRow,
     ):
-        ids.extend(
-            session.scalars(select(row_type.operation_id).where(row_type.status == "running"))
-        )
-    ids.extend(
-        session.scalars(
-            select(LaunchplaneIdempotencyRow.record_id).where(
-                (
-                    (LaunchplaneIdempotencyRow.scope == "client-release")
-                    | LaunchplaneIdempotencyRow.scope.startswith(f"{RECONCILE_SOURCE}:")
-                ),
-                # Expiry is not provider quiescence. Inspection and terminal
-                # settlement remain runnable while fresh admission is paused.
-                LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
+        for row in session.scalars(
+            select(row_type).where(row_type.status.in_(("running", "reconciliation_required")))
+        ):
+            observations.append(
+                {
+                    "operation_id": row.operation_id,
+                    "kind": row_type.__tablename__,
+                    "state": row.status,
+                    "product": row.payload.get("product", ""),
+                    "context": row.payload.get("context", ""),
+                    "instance": row.payload.get("instance", ""),
+                    "lease_owner": row.payload.get("lease_owner", ""),
+                    "lease_expires_at": row.payload.get("lease_expires_at", ""),
+                    "blocks_drain": row.status == "running",
+                }
             )
+    observed_at = parse_launchplane_mutation_timestamp(now, field_name="observed_at")
+    from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
+    from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+
+    for row in session.scalars(
+        select(LaunchplaneIdempotencyRow).where(
+            (
+                (LaunchplaneIdempotencyRow.scope == "client-release")
+                | LaunchplaneIdempotencyRow.scope.startswith(f"{RECONCILE_SOURCE}:")
+            ),
+            LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
         )
+    ):
+        lease_active = (
+            bool(row.lease_expires_at)
+            and parse_launchplane_mutation_timestamp(
+                row.lease_expires_at, field_name="lease_expires_at"
+            )
+            > observed_at
+        )
+        # Lease expiry alone cannot rule out a provider call. The event-testing
+        # worker already holds this execution lock through its effects. Admission
+        # stays serialized until our fence commits, so a new lock owner cannot
+        # start an effect between this probe and dispatch admission.
+        execution_excluded = False
+        if (
+            row.state == "reconcile_required"
+            and not lease_active
+            and row.scope.startswith(f"{RECONCILE_SOURCE}:")
+            and row.route_path == GENERIC_WEB_DEPLOY_ROUTE
+            and row.provider_target_key
+        ):
+            with store.testing_replacement_execution_lock(
+                testing_event_execution_lock_name(row.provider_target_key)
+            ) as check:
+                if check is not None:
+                    check()
+                    execution_excluded = True
+        observations.append(
+            {
+                "operation_id": row.record_id,
+                "kind": row.route_path,
+                "state": row.state,
+                "product": row.scope.removeprefix(f"{RECONCILE_SOURCE}:")
+                if row.scope.startswith(f"{RECONCILE_SOURCE}:")
+                else "",
+                "lease_owner": row.lease_owner,
+                "lease_expires_at": row.lease_expires_at,
+                "updated_at": row.updated_at,
+                "execution_excluded": execution_excluded,
+                "blocks_drain": not execution_excluded,
+            }
+        )
+    return tuple(sorted(observations, key=lambda item: str(item["operation_id"])))
+
+
+def _running_operations(store: Any, session: Any, now: str) -> tuple[str, ...]:
+    return tuple(
+        str(item["operation_id"])
+        for item in _operation_observations(store, session, now)
+        if item["blocks_drain"]
     )
-    return tuple(sorted(ids))
 
 
 def prepare(
@@ -200,7 +305,10 @@ def prepare(
         _, current = _read(session)
         prior_row = session.get(LaunchplaneServiceDeployDrainRow, f"request:{request_fingerprint}")
         prior = ServiceDeployDrainRecord.model_validate(prior_row.payload) if prior_row else None
+        budget = _read_budget(session, request_fingerprint)
         if prior is not None:
+            if budget is not None and budget.drain_timed_out:
+                raise ServiceDeployDrainTimeout(_running_operations(store, session, now))
             if prior.state == "refused":
                 raise ServiceDeployPreEffectRefused(
                     "This self-deploy was refused before effects; use a new request after resolving the refusal."
@@ -256,7 +364,39 @@ def prepare(
             and current.expires_at > now
         ):
             raise ValueError("Another self-deploy is draining release operations.")
-        blockers = _running_operations(session)
+        blockers = _running_operations(store, session, now)
+        if budget is None:
+            drain_started_at = prior.updated_at if prior else now
+            budget = ServiceDeployDrainBudget(
+                drain_started_at=drain_started_at,
+                drain_deadline_at=(
+                    datetime.fromisoformat(drain_started_at.replace("Z", "+00:00"))
+                    + timedelta(seconds=SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS)
+                )
+                .isoformat()
+                .replace("+00:00", "Z"),
+            )
+        if prior is not None and parse_launchplane_mutation_timestamp(
+            now, field_name="observed_at"
+        ) >= parse_launchplane_mutation_timestamp(
+            budget.drain_deadline_at, field_name="drain_deadline_at"
+        ):
+            # A timed-out request must never later dispatch on a poll. Expire only
+            # this pre-effect admission pause; all product recovery fences survive.
+            _write(
+                session,
+                prior.model_copy(
+                    update={
+                        "expires_at": now,
+                        "updated_at": now,
+                    }
+                ),
+            )
+            _write_budget(
+                session, request_fingerprint, budget.model_copy(update={"drain_timed_out": True})
+            )
+            session.commit()
+            raise ServiceDeployDrainTimeout(blockers)
         state: Literal["draining", "dispatching"] = "draining" if blockers else "dispatching"
         record = ServiceDeployDrainRecord(
             request_fingerprint=request_fingerprint,
@@ -282,6 +422,7 @@ def prepare(
             ),
         )
         _write(session, record)
+        _write_budget(session, request_fingerprint, budget)
         session.commit()
         return record, blockers, not blockers
 
@@ -369,8 +510,17 @@ def read_status(store: Any) -> dict[str, object]:
         if record is None:
             return {"state": "idle", "running_operation_ids": (), "admission_paused": False}
         result = record.model_dump()
-        result["running_operation_ids"] = _running_operations(session)
-        result["admission_paused"] = not admission_allowed(
-            session, store._database_mutation_timestamp(session)
+        budget = _read_budget(session, record.request_fingerprint)
+        if budget is not None:
+            result.update(budget.model_dump())
+        now = store._database_mutation_timestamp(session)
+        observations = _operation_observations(store, session, now)
+        result["running_operation_ids"] = tuple(
+            item["operation_id"] for item in observations if item["blocks_drain"]
         )
+        result["operation_details"] = observations[:100]
+        result["operation_detail_count"] = len(observations)
+        result["operation_details_truncated"] = len(observations) > 100
+        result["drain_timeout_seconds"] = SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS
+        result["admission_paused"] = not admission_allowed(session, now)
         return result

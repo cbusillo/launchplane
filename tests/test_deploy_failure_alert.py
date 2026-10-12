@@ -29,6 +29,7 @@ class DeployFailureAlertTests(unittest.TestCase):
             self.assertTrue(replacement_may_have_dispatched(response))
             for body in (
                 {"result": {"deploy_state": "draining"}},
+                {"error": {"code": "self_deploy_drain_timeout"}},
                 {"error": {"code": "self_deploy_fence_conflict"}},
                 {"error": {"code": "authorization_denied"}},
                 {"error": {"code": "authentication_required"}},

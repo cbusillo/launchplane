@@ -4,6 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from typing import cast
 from unittest.mock import patch
 
 from control_plane.contracts.idempotency_record import (
@@ -11,7 +12,15 @@ from control_plane.contracts.idempotency_record import (
     parse_launchplane_mutation_timestamp,
 )
 from control_plane.product_reconcile import reconcile_reservation_scope
-from control_plane.service_deploy_drain import ServiceDeployDraining, confirm_startup
+from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
+from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+from control_plane.service_deploy_drain import (
+    SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS,
+    ServiceDeployDraining,
+    ServiceDeployDrainTimeout,
+    confirm_startup,
+    read_status,
+)
 from control_plane.storage.postgres import MutationReservationResult, PostgresRecordStore
 from tests.test_client_release_redeploy import _prepare, _replacement_env
 
@@ -29,7 +38,7 @@ class EventDeployRedeployTests(unittest.TestCase):
     def reserve(self, key: str = "event") -> MutationReservationResult:
         return self.store.reserve_mutation(
             scope=reconcile_reservation_scope("example-product"),
-            route_path="/isolated/event-deploy",
+            route_path=GENERIC_WEB_DEPLOY_ROUTE,
             idempotency_key=key,
             request_fingerprint=key,
             lease_owner="event-worker",
@@ -60,7 +69,7 @@ class EventDeployRedeployTests(unittest.TestCase):
         self.assertFalse(blockers)
         self.assertTrue(dispatch)
 
-    def test_expired_effect_still_blocks_after_reconciliation_transition(self) -> None:
+    def test_expired_reconciliation_hold_survives_replacement_without_blocking_it(self) -> None:
         reservation = self.reserve().record
         assert reservation is not None
         future = (
@@ -72,8 +81,28 @@ class EventDeployRedeployTests(unittest.TestCase):
         with patch.object(self.store, "_database_mutation_timestamp", return_value=future):
             self.assertEqual(self.reserve("new-event").status, "target_busy")
             _, blockers, dispatch = _prepare(self.store)
-        self.assertEqual(blockers, (reservation.record_id,))
-        self.assertFalse(dispatch)
+        self.assertFalse(blockers)
+        self.assertTrue(dispatch)
+        held = self.store.lookup_existing_mutation_reservation(
+            route_path=reservation.route_path,
+            idempotency_key=reservation.idempotency_key,
+            request_fingerprint=reservation.request_fingerprint,
+        ).record
+        assert held is not None
+        self.assertEqual(held.state, "reconcile_required")
+        self.assertEqual(held.record_id, reservation.record_id)
+        self.assertEqual(
+            self.store.renew_mutation_reservation(reservation=reservation).status, "not_running"
+        )
+        self.assertEqual(
+            self.store.checkpoint_mutation_provider_effect(
+                reservation=reservation, effect_phase="next-provider-write"
+            ).status,
+            "not_running",
+        )
+        with patch.dict("os.environ", _replacement_env()):
+            confirm_startup(self.store)
+            self.assertEqual(self.reserve("another-request").status, "target_busy")
 
     def test_confirmed_startup_rejects_old_worker_but_admits_matching_generation(self) -> None:
         _, _, dispatch = _prepare(self.store)
@@ -84,6 +113,83 @@ class EventDeployRedeployTests(unittest.TestCase):
             self.reserve()
         with patch.dict("os.environ", _replacement_env()):
             self.assertEqual(self.reserve().status, "acquired")
+
+    def test_self_deploy_proceeds_or_fails_loudly_by_its_absolute_drain_deadline(self) -> None:
+        reservation = self.reserve().record
+        assert reservation is not None
+        record, _, _ = _prepare(self.store)
+        began = parse_launchplane_mutation_timestamp(record.updated_at, field_name="updated_at")
+        deadline = began + timedelta(seconds=SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS)
+        original_deadline = read_status(self.store)["drain_deadline_at"]
+        # Repeated successful polls may renew admission, never the total budget.
+        for seconds in (
+            1,
+            SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS // 2,
+            SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS - 1,
+        ):
+            with patch.object(
+                self.store,
+                "_database_mutation_timestamp",
+                return_value=(began + timedelta(seconds=seconds)).isoformat(),
+            ):
+                _, blockers, dispatch = _prepare(self.store)
+                self.assertFalse(dispatch)
+                self.assertEqual(blockers, (reservation.record_id,))
+                self.assertEqual(read_status(self.store)["drain_deadline_at"], original_deadline)
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=deadline.isoformat()
+        ):
+            with self.assertRaises(ServiceDeployDrainTimeout) as timeout:
+                _prepare(self.store)
+            self.assertEqual(timeout.exception.blockers, (reservation.record_id,))
+            status = read_status(self.store)
+            self.assertTrue(status["drain_timed_out"])
+            self.assertFalse(status["admission_paused"])
+            with self.assertRaises(ServiceDeployDrainTimeout):
+                _prepare(self.store)
+        # The timeout does not change, retire or fabricate the product outcome.
+        observed = self.store.lookup_existing_mutation_reservation(
+            route_path=reservation.route_path,
+            idempotency_key=reservation.idempotency_key,
+            request_fingerprint=reservation.request_fingerprint,
+        ).record
+        self.assertEqual(observed, reservation)
+
+    def test_active_reconciliation_tail_blocks_but_expired_hold_is_diagnostic_only(self) -> None:
+        reservation = self.reserve().record
+        assert reservation is not None
+        held = self.store.mark_mutation_reconcile_required(
+            reservation=reservation, reconciliation_key=reservation.reconciliation_key
+        ).record
+        assert held is not None
+        _, blockers, dispatch = _prepare(self.store)
+        self.assertEqual(blockers, (held.record_id,))
+        self.assertFalse(dispatch)
+        details = cast(tuple[dict[str, object], ...], read_status(self.store)["operation_details"])
+        self.assertEqual(details[0]["lease_owner"], held.lease_owner)
+        self.assertEqual(details[0]["product"], "example-product")
+        self.assertTrue(details[0]["blocks_drain"])
+        expired = parse_launchplane_mutation_timestamp(
+            held.lease_expires_at, field_name="lease_expires_at"
+        ) + timedelta(seconds=1)
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=expired.isoformat()
+        ):
+            with self.store.testing_replacement_execution_lock(
+                testing_event_execution_lock_name(held.provider_target_key)
+            ) as check:
+                assert check is not None
+                _, blockers, dispatch = _prepare(self.store)
+                self.assertEqual(blockers, (held.record_id,))
+                self.assertFalse(dispatch)
+            _, blockers, dispatch = _prepare(self.store)
+            self.assertFalse(blockers)
+            self.assertTrue(dispatch)
+            details = cast(
+                tuple[dict[str, object], ...], read_status(self.store)["operation_details"]
+            )
+            self.assertEqual(details[0]["state"], "reconcile_required")
+            self.assertFalse(details[0]["blocks_drain"])
 
     def test_drain_keeps_observation_but_refuses_retried_effect_admission(self) -> None:
         reservation = self.reserve().record

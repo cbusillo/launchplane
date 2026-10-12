@@ -492,7 +492,10 @@ replacements retain their existing lane ownership, authorization and uncertain-e
 reconciliation rules. Production release and backup gates are unchanged. Completed step IDs
 are reused after replacement, so polling or a worker restart cannot duplicate
 their effects. The release read explains the pause; the engineering runtime read
-exposes `runtime.release_drain` and its running operation IDs.
+exposes `runtime.release_drain`, its running operation IDs, and up to 100
+operation details with kind, state, product, lease owner and expiry. Total and
+truncation fields distinguish a complete diagnostic list from a partial one;
+provider coordinates, request bodies and idempotency keys are not exposed.
 
 `POST /v1/drivers/launchplane/self-deploy` uses its existing authorization and a
 fresh, never-reused `deploy.oauth_env.LAUNCHPLANE_DEPLOYMENT_MARKER`. The workflow
@@ -503,6 +506,14 @@ or caching that poll as a completed idempotent response. Repeat the same payload
 and key until it returns `requested`. The Deploy Launchplane workflow does this
 with its existing request action. Each drain poll renews a two-minute pre-effect
 fence; an abandoned drain expires without stranding pending Client releases.
+The drain also has an absolute ten-minute pre-effect budget. Its persisted
+`drain_started_at` and `drain_deadline_at` survive polling and process restart;
+legacy drains anchor those fields to their last stored observation on first
+updated poll. At the deadline the route returns `409/self_deploy_drain_timeout`
+with remaining blocker IDs, expires its admission pause and admits no provider
+write. That request cannot later dispatch; retry after diagnosis with a new
+intent and fresh marker. Product recovery fences are retained. This budget is
+independent of the longer worker stop/provider/health budget after dispatch.
 Final admission rechecks the fence and running operations under the same lock.
 The typed Odoo and shared backup queues also contain workflow-started operations;
 their claims pause at this worker boundary and resume after replacement. Worker
@@ -510,14 +521,19 @@ debug logs report that pause, and the runtime read exposes its cause. Generic-we
 workflow requests outside Client releases retain their existing reservations;
 this boundary covers Client-started generic-web releases and product-event effects.
 An active provider request returns pollable `dispatch_in_progress`, also without
-caching the intermediate response. An expired release lease stays a drain
-blocker: losing its heartbeat does not prove the provider effect ended. Admitted
-event and Client-release reservations remain blockers in `reconcile_required`
-until terminal settlement. Exact-request replay, expiry reconciliation, provider
+caching the intermediate response. Running reservations remain blockers even
+after lease expiry: losing a heartbeat does not prove a provider call ended.
+An expired `reconcile_required` event-testing deploy is diagnostic only when
+the existing target execution lock confirms that no old worker owns its effects.
+Its lane reservation and unknown outcome remain held; replacement does not
+authorize replay, retry or retirement. Occupied locks, active leases and effect
+families without that exclusion proof still block, ending in the bounded
+diagnostic refusal if they cannot settle. Terminal records do not block.
+Exact-request replay, expiry reconciliation, provider
 observation, admitted heartbeats and terminal writes remain usable during the
 drain; fresh/retried effects are refused. Matching image/marker startup admits
-only the new worker generation. Reconcile
-that operation through its existing recovery route before replacement.
+only the new worker generation. Reconcile an uncertain product operation through
+its existing recovery route before retrying that product.
 The request action tolerates network errors while polling the drain. Its
 latest drain response is retained on timeout; a later failed request clears that
 response to retain uncertainty. Rollback skips only positively pre-effect

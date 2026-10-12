@@ -41,6 +41,7 @@ def replacement_may_have_dispatched(response_file: Path) -> bool:
         and error.get("code")
         in {
             "self_deploy_refused",
+            "self_deploy_drain_timeout",
             "self_deploy_fence_conflict",
             "invalid_request",
             "authorization_denied",
