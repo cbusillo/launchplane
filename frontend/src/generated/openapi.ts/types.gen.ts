@@ -3501,6 +3501,7 @@ export type ProductPromotionEvidence = {
     deployment_record_id: string;
     deployment_status: 'pending' | 'pass' | 'fail' | 'skipped';
     environment: string;
+    health_provenance: DataProvenance | null;
     health_status: 'pending' | 'pass' | 'fail' | 'skipped';
     inventory_stale_after: string;
     inventory_updated_at: string;
@@ -3877,6 +3878,27 @@ export type ProductWebsiteCleanupRequest = {
     schema_version?: 1;
 };
 
+export type ProductionBackupAuthorityReadModel = {
+    context: string;
+    generated_at: string;
+    instance: string;
+    policy: ProductionBackupPolicySummary | null;
+    product: string;
+    promotion_action: string;
+    ready: boolean;
+    reason_codes: Array<string>;
+    schema_version: number;
+    state: 'ready' | 'missing' | 'invalid' | 'stale' | 'retired';
+    summary: string;
+    targets: Array<ProductionBackupTargetSummary>;
+};
+
+export type ProductionBackupAuthorityReadResponse = {
+    authority: ProductionBackupAuthorityReadModel;
+    status: 'ok';
+    trace_id: string;
+};
+
 export type ProductionBackupAuthorityStatus = {
     generated_at: string;
     promotion_action: string;
@@ -3885,6 +3907,35 @@ export type ProductionBackupAuthorityStatus = {
     schema_version: number;
     state: 'ready' | 'missing' | 'invalid' | 'stale' | 'retired';
     summary: string;
+};
+
+export type ProductionBackupAuthorityWriteEnvelope = {
+    expected_current_policy_record_id?: string;
+    expected_current_target_record_ids?: {
+        [key: string]: string;
+    };
+    mode: 'dry_run' | 'apply';
+    policy: ProductionBackupPolicyRecord;
+    reviewed_authority_digest?: string;
+    schema_version?: number;
+    targets?: Array<ProductionBackupTargetRecord>;
+};
+
+export type ProductionBackupAuthorityWriteResponse = {
+    original_trace_id?: string | null;
+    replayed?: boolean | null;
+    result: ProductionBackupAuthorityWriteResult;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type ProductionBackupAuthorityWriteResult = {
+    authority_digest: string;
+    mode: 'dry_run' | 'apply';
+    policy: ProductionBackupPolicySummary;
+    schema_version: number;
+    status: 'would_apply' | 'applied' | 'replayed';
+    targets: Array<ProductionBackupTargetSummary>;
 };
 
 export type ProductionBackupGateRequest = {
@@ -3908,6 +3959,83 @@ export type ProductionBackupGateResponse = {
     operation_status: string;
     status: 'accepted';
     trace_id: string;
+};
+
+export type ProductionBackupPolicyRecord = {
+    context: string;
+    effective_at: string;
+    fast_snapshot: ProductionFastSnapshotPolicy;
+    independent_backup: ProductionIndependentBackupPolicy;
+    instance: string;
+    policy_digest?: string;
+    policy_id?: string;
+    policy_revision: number;
+    product: string;
+    promotion_action: string;
+    reason: string;
+    record_id?: string;
+    review_after: string;
+    schema_version?: number;
+    source: string;
+    status?: 'active' | 'superseded' | 'retired';
+    supersedes_record_id?: string | null;
+};
+
+export type ProductionBackupPolicySummary = {
+    destination_target_id: string;
+    effective_at: string;
+    policy_id: string;
+    policy_revision: number;
+    promotion_action: string;
+    record_id: string;
+    review_after: string;
+    source_target_id: string;
+    status: 'active' | 'superseded' | 'retired';
+};
+
+export type ProductionBackupTargetRecord = {
+    destination: ({
+        destination_kind: 'proxmox_guest';
+    } & ProxmoxGuestBackupDestinationReference) | ({
+        destination_kind: 'proxmox_storage';
+    } & ProxmoxStorageBackupDestinationReference);
+    effective_at: string;
+    reason: string;
+    record_id?: string;
+    review_after: string;
+    schema_version?: number;
+    source: string;
+    status?: 'active' | 'superseded' | 'retired';
+    supersedes_record_id?: string | null;
+    target_digest?: string;
+    target_id: string;
+    target_revision: number;
+};
+
+export type ProductionBackupTargetSummary = {
+    destination_kind: 'proxmox_guest' | 'proxmox_storage';
+    effective_at: string;
+    provider_type: 'proxmox';
+    record_id: string;
+    review_after: string;
+    status: 'active' | 'superseded' | 'retired';
+    target_id: string;
+    target_revision: number;
+};
+
+export type ProductionFastSnapshotPolicy = {
+    max_evidence_age_seconds: number;
+    operation?: 'fast_snapshot';
+    retention_count: number;
+    snapshot_prefix: string;
+    source_target_id: string;
+};
+
+export type ProductionIndependentBackupPolicy = {
+    destination_target_id: string;
+    max_evidence_age_seconds: number;
+    operation?: 'independent_backup';
+    source_target_id: string;
 };
 
 export type PromotionRecordOutput = {
@@ -3970,6 +4098,23 @@ export type ProviderTargetRecord = {
     target_category: 'application' | 'compose' | 'container' | 'service' | 'static' | 'unknown';
     target_id: string;
     updated_at: string;
+};
+
+export type ProxmoxGuestBackupDestinationReference = {
+    destination_kind?: 'proxmox_guest';
+    guest_id: string;
+    guest_kind: 'lxc' | 'qemu';
+    host: string;
+    provider_type?: 'proxmox';
+    username: string;
+};
+
+export type ProxmoxStorageBackupDestinationReference = {
+    destination_kind?: 'proxmox_storage';
+    host: string;
+    provider_type?: 'proxmox';
+    storage_id: string;
+    username: string;
 };
 
 export type PublicPauseRecord = {
@@ -5239,6 +5384,38 @@ export type ReadProductReviewResponses = {
 
 export type ReadProductReviewResponse = ReadProductReviewResponses[keyof ReadProductReviewResponses];
 
+export type ReadProductionBackupAuthorityData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query: {
+        product: string;
+        context: string;
+        instance: string;
+        promotion_action: string;
+    };
+    url: '/v1/production-backup-authority';
+};
+
+export type ReadProductionBackupAuthorityErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ReadProductionBackupAuthorityError = ReadProductionBackupAuthorityErrors[keyof ReadProductionBackupAuthorityErrors];
+
+export type ReadProductionBackupAuthorityResponses = {
+    200: ProductionBackupAuthorityReadResponse;
+};
+
+export type ReadProductionBackupAuthorityResponse = ReadProductionBackupAuthorityResponses[keyof ReadProductionBackupAuthorityResponses];
+
 export type ReadProductionBackupGateOperationData = {
     body?: never;
     headers?: {
@@ -6304,6 +6481,34 @@ export type RetryProductReviewFeedbackResponses = {
 };
 
 export type RetryProductReviewFeedbackResponse = RetryProductReviewFeedbackResponses[keyof RetryProductReviewFeedbackResponses];
+
+export type ApplyProductionBackupAuthorityData = {
+    body: ProductionBackupAuthorityWriteEnvelope;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/production-backup-authority/apply';
+};
+
+export type ApplyProductionBackupAuthorityErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ApplyProductionBackupAuthorityError = ApplyProductionBackupAuthorityErrors[keyof ApplyProductionBackupAuthorityErrors];
+
+export type ApplyProductionBackupAuthorityResponses = {
+    200: ProductionBackupAuthorityWriteResponse;
+};
+
+export type ApplyProductionBackupAuthorityResponse = ApplyProductionBackupAuthorityResponses[keyof ApplyProductionBackupAuthorityResponses];
 
 export type EnqueueProductionBackupGateData = {
     body: ProductionBackupGateRequest;
