@@ -72,11 +72,13 @@ DOCKER_IMAGE_REFERENCE="$image" LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK=unused-fixt
   jq --arg image "$image" --arg postgres_image "$postgres_image" --arg env_file "$fixture_dir/.env" '
     {services: (.services | with_entries(select(.key == "launchplane" or
       .key == "launchplane-odoo-workers" or .key == "launchplane-verireel-workers" or
-      .key == "launchplane-ordinary-agent-workers") |
+      .key == "launchplane-ordinary-agent-workers" or .key == "launchplane-browser") |
       .value.image = $image | .value.pull_policy = "never" | .value.restart = "no" |
       .value.deploy.replicas = 1 |
-      .value.env_file = [$env_file] | .value.networks = ["qualification"] |
-      .value.environment.DOCKER_IMAGE_REFERENCE = $image)),
+      .value.networks = ["qualification"] |
+      if .key == "launchplane-browser" then . else
+        .value.env_file = [$env_file] | .value.environment.DOCKER_IMAGE_REFERENCE = $image
+      end)),
       volumes: .volumes, networks: {qualification: {internal: true}}} |
     .services.postgres = {
       image: $postgres_image, pull_policy: "never", networks: ["qualification"],
@@ -131,8 +133,37 @@ PY
   done
 }
 
+check_testing_browser() {
+  # Exercise the actual packaged caller services, including the event worker.
+  for service in launchplane launchplane-odoo-workers; do
+    run_interruptible "${compose[@]}" exec -T "$service" /app/.venv/bin/python - <<'PY'
+import time
+from playwright.sync_api import sync_playwright
+from control_plane.workflows.verireel_testing_post_deploy import launch_testing_browser
+deadline = time.monotonic() + 60
+while True:
+    try:
+        with sync_playwright() as playwright:
+            browser = launch_testing_browser(playwright.chromium)
+            try:
+                page = browser.new_page()
+                heading = "Packaged testing qualification"
+                page.set_content(f"<h1>{heading}</h1>")
+                assert page.locator("h1").inner_text() == heading
+            finally:
+                browser.close()
+        break
+    except Exception:
+        if time.monotonic() >= deadline:
+            raise
+        time.sleep(1)
+PY
+  done
+}
+
 run_interruptible "${compose[@]}" up --detach --no-build --pull never --wait --wait-timeout 120
 check_workers
+check_testing_browser
 before="$("${compose[@]}" ps --quiet "${services[@]}" | sort)"
 run_interruptible "${compose[@]}" exec -T launchplane /app/.venv/bin/python - <<'PY'
 import os
@@ -158,6 +189,7 @@ after="$("${compose[@]}" ps --quiet "${services[@]}" | sort)"
 test -n "$after"
 test -z "$(comm -12 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
 check_workers
+check_testing_browser
 run_interruptible "${compose[@]}" exec -T launchplane /app/.venv/bin/python - <<'PY'
 import json
 import os

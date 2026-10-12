@@ -310,7 +310,10 @@ class GenericWebDeployProviderMutationAdapter:
             observation.deployment_status
         ) and (
             self._lane.generic_web_extensions.configured
-            or generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None
+            or generic_web_post_deploy_executor_for_driver_id(
+                self._profile.driver_id, instance=self._lane.instance
+            )
+            is not None
         )
         deployment_record_id = self._deployment_record_id(provider_operation_key)
         existing = None
@@ -401,11 +404,19 @@ class GenericWebDeployProviderMutationAdapter:
                 self._record_store,
                 context=self._lane.context,
                 instance=self._lane.instance,
+                deployment_record_id=self._deployment_record_id(provider_operation_key)
+                if provider_operation_key
+                else "",
                 artifact_id=resolved_deploy_target.ship_request.artifact_id,
                 source_git_ref=resolved_deploy_target.ship_request.source_git_ref,
             )
             or self._lane.generic_web_extensions.configured
-            or (generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None)
+            or (
+                generic_web_post_deploy_executor_for_driver_id(
+                    self._profile.driver_id, instance=self._lane.instance
+                )
+                is not None
+            )
         ):
             return None
         return self._runtime_close_out_evidence(resolved_deploy_target)
