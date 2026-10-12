@@ -152,3 +152,34 @@ test("read-only users receive no environment setup controls", async ({ page }) =
   await expect(page.getByRole("region", { name: "Set up a non-production environment" })).toHaveCount(0);
   expect(writes).toEqual([]);
 });
+
+
+test("incomplete setup metadata leaves existing product controls available and sends no setup writes", async ({ page }) => {
+  await page.goto("/ui/products/atlas-commerce?fixture=products");
+  const data = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return { products: fixtures.productsForFixture("products"), identity: fixtures.fixtureIdentity };
+  });
+  const writes: string[] = [];
+  const errors: string[] = [];
+  page.on("request", request => { if (request.method() === "POST") writes.push(request.url()); });
+  page.on("pageerror", error => errors.push(error.message));
+  await page.route("**/v1/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    const response = path.endsWith("/auth/session") ? { csrf_token: "csrf", identity: data.identity }
+      : path.endsWith("/products") ? { products: data.products }
+      : path.endsWith("/product-profiles/atlas-commerce") ? { profile: {
+        repository: "example/atlas-commerce", owner: { github_login: "example-owner", github_id: "9001" },
+        image: { repository: "ghcr.io/example/atlas-commerce" }, production_use: "unknown",
+      } }
+      : { product: data.products[0] };
+    await route.fulfill({ json: { status: "ok", trace_id: "partial-profile", ...response } });
+  });
+  await page.goto("/ui/products/atlas-commerce");
+  const setup = page.getByRole("region", { name: "Set up a non-production environment" });
+  await expect(setup.getByRole("alert")).toBeVisible();
+  await expect(setup.getByRole("button", { name: "Run dry-run", exact: true })).toHaveCount(0);
+  await page.getByRole("region", { name: "example-owner (id 9001)", exact: true }).getByLabel("GitHub login").fill("another-client");
+  expect(writes).toEqual([]);
+  expect(errors).toEqual([]);
+});

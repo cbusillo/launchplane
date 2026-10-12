@@ -25,7 +25,13 @@ export function ProductSetupPanel({ product, onApplied }: { product: string; onA
   useEffect(() => {
     const controller = new AbortController();
     setError("");
+    setProfile(null);
     readProductProfile(product, controller.signal).then(payload => {
+      if (payload.profile?.product !== product || !Array.isArray(payload.profile.lanes)
+          || !Array.isArray(payload.profile.expected_config?.managed_secret_bindings)
+          || payload.profile.lanes.some(lane => !lane || typeof lane.context !== "string" || typeof lane.instance !== "string")) {
+        throw new Error("Product setup metadata is incomplete. Engineering must check the product profile before setup can continue.");
+      }
       setProfile(payload.profile);
       setContext(current => current || payload.profile.lanes[0]?.context || "");
     }).catch(cause => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Product setup is unavailable."); });
