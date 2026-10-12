@@ -1228,6 +1228,17 @@ discovery, the stale probe is retained as evidence but cannot open, update, or
 resolve an incident; the next monitor cycle reconciles against current
 authority.
 
+### TLS observation reader compatibility
+
+TLS observation readers also accept `route_binding_status: missing` and
+`source_kind: profile_intent` independently. A profile-intent writer can use both
+to identify a public HTTPS name without claiming route-management authority. Incident readers
+preserve the same missing authority. This additive reader stage does not change
+monitor discovery or produce that metadata. Deploy and retain this reader as the
+rollback version before enabling a writer that emits the new values; an older
+reader cannot parse them.
+
+
 ## Product Environment Topology Projection
 
 Product environment detail and summary reads expose one provider-neutral
