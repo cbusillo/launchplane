@@ -4089,7 +4089,7 @@ class LaunchplaneAuthzPolicyRuntime:
                 return evaluate_policy()
             try:
                 owner = self._context_product_resolver(context)
-            except (TypeError, ValueError, RuntimeError, SQLAlchemyError):
+            except (TypeError, ValueError, OSError, RuntimeError, SQLAlchemyError):
                 return evaluate_policy()
             if not owner or (product != _LAUNCHPLANE_SERVICE_CONTEXT and product != owner):
                 return evaluate_policy()
@@ -4516,7 +4516,7 @@ def create_launchplane_fastapi_app(
                 )
                 for product in reader()
             )
-        except (TypeError, ValueError, RuntimeError, SQLAlchemyError):
+        except (TypeError, ValueError, OSError, RuntimeError, SQLAlchemyError):
             return False
 
     resolved_authz_policy_runtime.configure_context_product_resolver(
@@ -5553,11 +5553,19 @@ def create_launchplane_fastapi_app(
             owners = product_context_owner_map(profiles)
             for record in inventory:
                 matches = owners.get(record.context.casefold(), frozenset())
-                if len(matches) != 1 or not policy.agent_read_role_allows(
-                    identity=identity,
-                    product=next(iter(matches)),
-                    context=record.context,
-                    target=AuthorizationTarget(scope="instance", instances=(record.instance,)),
+                if (
+                    len(matches) != 1
+                    or not is_exclusive_product_lane_context(
+                        context=record.context,
+                        product=next(iter(matches)),
+                        owners=owners,
+                    )
+                    or not policy.agent_read_role_allows(
+                        identity=identity,
+                        product=next(iter(matches)),
+                        context=record.context,
+                        target=AuthorizationTarget(scope="instance", instances=(record.instance,)),
+                    )
                 ):
                     return False
             return True
@@ -19390,6 +19398,23 @@ def create_launchplane_fastapi_app(
             schema_version=record.policy.schema_version,
         )
 
+    def policy_metadata_reader(
+        identity: LaunchplaneIdentity, *, candidate_preview: bool = False
+    ) -> bool:
+        if (
+            isinstance(identity, LocalAdminIdentity)
+            or (isinstance(identity, GitHubHumanIdentity) and identity.role == "admin")
+            or (isinstance(identity, LocalOperatorIdentity) and not candidate_preview)
+        ):
+            return True
+        return isinstance(
+            identity, LocalOperatorIdentity | TerminalAgentIdentity
+        ) and resolved_authz_policy_runtime.policy.agent_read_role_allows(
+            identity=identity,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        )
+
     def require_authz_policy_administration_read(
         *,
         identity: LaunchplaneIdentity,
@@ -19403,7 +19428,7 @@ def create_launchplane_fastapi_app(
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
             inherit_agent_read_role=True,
         )
-        if not preflight_authorized:
+        if not policy_metadata_reader(identity) or not preflight_authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -19596,7 +19621,7 @@ def create_launchplane_fastapi_app(
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
             inherit_agent_read_role=True,
         )
-        if not preflight_authorized:
+        if not policy_metadata_reader(identity) or not preflight_authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -19701,11 +19726,8 @@ def create_launchplane_fastapi_app(
         trace_id = next_trace_id()
         eligible_reader = isinstance(
             identity,
-            GitHubHumanIdentity
-            | LocalOperatorIdentity
-            | LocalAdminIdentity
-            | TerminalAgentIdentity,
-        )
+            GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity,
+        ) or (isinstance(identity, TerminalAgentIdentity) and policy_metadata_reader(identity))
         preflight = resolved_authz_policy_runtime.evaluate(
             identity=identity,
             action=AUTHZ_REPOSITORY_SCOPE_READ_ACTION,
@@ -19823,7 +19845,7 @@ def create_launchplane_fastapi_app(
             ).decision
             == "allowed"
         )
-        if not preflight_authorized:
+        if not policy_metadata_reader(identity, candidate_preview=True) or not preflight_authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -19902,7 +19924,7 @@ def create_launchplane_fastapi_app(
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
             inherit_agent_read_role=True,
         )
-        if not preflight_authorized:
+        if not policy_metadata_reader(identity) or not preflight_authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,

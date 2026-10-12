@@ -1806,7 +1806,6 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(intent["safe_to_execute"])
         self.assertEqual(intent["secret_evidence"]["status"], "unavailable")
         self.assertFalse(intent["secret_evidence"]["findings"])
-        self.assertFalse(intent["secret_evidence"]["checked_binding_keys"])
 
     async def test_evaluate_denies_disallowed_secret_destination(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

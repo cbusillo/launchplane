@@ -531,6 +531,154 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(records.status_code, 200, records.text)
 
+    async def test_read_role_cannot_create_an_operative_retirement_plan(self) -> None:
+        with _database_app(reader_policy()) as (store, _, app):
+            with patch.object(
+                store,
+                "write_product_retirement_record",
+                side_effect=AssertionError("Read role must not create operative plans"),
+            ) as write:
+                async with lifespan_client(app) as client:
+                    response = await client.post(
+                        "/v1/product-retirement",
+                        headers={
+                            "Authorization": "Bearer reader-token",
+                            "Idempotency-Key": "role-plan",
+                        },
+                        json={
+                            "mode": "plan",
+                            "product": "sample",
+                            "instance": "testing",
+                            "no_target": True,
+                            "reason": "Inspect retirement",
+                            "related_issue": "https://github.com/example/sample/issues/1",
+                        },
+                    )
+                    self.assertEqual(response.status_code, 403, response.text)
+                write.assert_not_called()
+
+    async def test_repository_lookup_does_not_inherit_service_metadata_scope(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            product_profile_payload("foreign-site")
+        )
+        with _database_app(reader_policy()) as (store, _, app):
+            store.write_product_profile_record(profile)
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/authz-diagnostics/repository-scope/read",
+                    headers={"Authorization": "Bearer reader-token"},
+                    json={"candidates": [{"repository": profile.repository}]},
+                )
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertNotIn(profile.repository, response.text)
+
+    async def test_workflow_grants_do_not_gain_policy_diagnostic_identity_access(self) -> None:
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import GitHubActionsPolicyRule
+        from tests.support.auth import StubVerifier, identity
+
+        caller = identity()
+        actions = (
+            "authz_policy_administration.read",
+            "authz_policy_health.read",
+            "authz_policy_candidate_preview.read",
+            "authz_policy_effective_access.read",
+        )
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository=caller.repository,
+                    workflow_refs=(caller.workflow_ref,),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=actions,
+                ),
+            ),
+        )
+        for action in actions:
+            self.assertTrue(
+                policy.allows(
+                    identity=caller, action=action, product="launchplane", context="launchplane"
+                )
+            )
+        with _database_app(policy) as (store, _, _):
+            app = create_launchplane_fastapi_app(
+                verifier=StubVerifier(caller),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+            )
+            async with lifespan_client(app) as client:
+                for method, path, payload in (
+                    ("GET", "/v1/authz-policies/administration", None),
+                    ("GET", "/v1/authz-diagnostics/active-policy/health", None),
+                    (
+                        "POST",
+                        "/v1/authz-diagnostics/candidate-policy/preview",
+                        {"candidate_policy": policy.model_dump(mode="json")},
+                    ),
+                    (
+                        "POST",
+                        "/v1/authz-diagnostics/effective-access/evaluate",
+                        {
+                            "principal": {
+                                "principal_type": "local_operator",
+                                "subject": "record-reader",
+                                "token_label": "record-reader-label",
+                            },
+                            "action": "product_profile.read",
+                            "product": "sample",
+                            "context": "launchplane",
+                            "target_scope": "context",
+                        },
+                    ),
+                ):
+                    response = await client.request(
+                        method, path, headers={"Authorization": "Bearer valid-token"}, json=payload
+                    )
+                    self.assertEqual(response.status_code, 403, response.text)
+
+    async def test_explicit_intent_writer_reads_only_its_granted_secret_destination(self) -> None:
+        from tests.http_app_test_support import _seed_agent_write_intent_secret_binding
+
+        product = "sellyouroutboard"
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            local_operators=(
+                LocalOperatorPolicyRule(
+                    subjects=("record-reader",),
+                    token_labels=("record-reader-label",),
+                    products=(product,),
+                    contexts=(product,),
+                    actions=("product_config.apply", "product_config.apply.secret"),
+                ),
+            ),
+        )
+        with _database_app(policy) as (store, _, app):
+            _seed_agent_write_intent_secret_binding(store, binding_instance="prod")
+            async with lifespan_client(app) as client:
+                for context, expected in ((product, "allowed"), ("foreign-site", "denied")):
+                    response = await client.post(
+                        "/v1/agent/write-intents/evaluate",
+                        headers={"Authorization": "Bearer reader-token"},
+                        json={
+                            "intent": "product_config_apply",
+                            "product": product,
+                            "context": product,
+                            "source_url": "https://github.com/example/sample/issues/1",
+                            "reason": "Inspect intent",
+                            "secret_bindings": ["SMTP_PASSWORD"],
+                            "destination": {"context": context, "instance": "prod"},
+                        },
+                    )
+                    self.assertEqual(response.status_code, 202, response.text)
+                    result = response.json()["result"]["intent"]
+                    self.assertEqual(result["status"], expected)
+                    self.assertFalse(result["safe_to_execute"])
+                    if expected == "denied":
+                        self.assertEqual(result["secret_evidence"]["status"], "unavailable")
+                        self.assertFalse(result["secret_evidence"]["findings"])
+
     async def test_service_product_scope_does_not_authorize_other_product_aggregates(self) -> None:
         profiles = tuple(
             LaunchplaneProductProfileRecord.model_validate(product_profile_payload(product))

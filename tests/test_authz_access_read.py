@@ -881,7 +881,7 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
-    async def test_authorized_operator_previews_candidate_without_policy_write(self) -> None:
+    async def test_operator_preview_grant_cannot_substitute_for_the_scoped_read_role(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
                 "schema_version": 2,
@@ -914,7 +914,7 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
                         json={"candidate_policy": {"schema_version": 2}},
                     )
 
-            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.status_code, 403, response.text)
             self.assertEqual(tuple(store.list_authz_policy_records()), (_record,))
 
     async def test_candidate_preview_rechecks_fresh_database_policy_without_denial_write(

@@ -103,8 +103,10 @@ inherit authority for other read actions. Policy refresh and
 revocation apply to the role on every request, as to other DB grants.
 
 Pure dry runs and inert evidence can use this role. Queuing execution, taking
-leases, creating operative plans, revealing credentials and copying secret
-values retain separate write or explicit source permissions. Existing terminal
+leases, creating operative plans (including stored product-retirement lifecycle
+plans), revealing credentials and copying secret values retain separate write or
+explicit source permissions. Service-side authenticated provider reads do not
+return the credential used to perform them. Existing terminal
 credential transport restrictions remain; the `local_operator` transport covers
 the Director's full planning surface. A Client's own agent can use the same
 product-scoped model later; no Client-agent access is installed by source code.
@@ -123,6 +125,10 @@ evaluations, including denied requests, do not establish product scopes. Snapsho
 checks the actual exported profiles and inventory inside the same read-only
 transaction. The Delivery selector GET uses ordinary DB read
 authorization; its configuration and credential retirement keep their admin gates.
+
+Non-agent policy-diagnostic identity gates remain; the exact agent read role
+adds the supported agent path. Repository-scope lookups containing product
+records require those product scopes.
 
 Source delivery installs no grant. After the deployed source is qualified,
 prepare one managed-policy proposal bound to the current exact agent and explicit
