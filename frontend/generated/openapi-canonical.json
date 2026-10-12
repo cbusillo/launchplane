@@ -32651,7 +32651,8 @@
             },
             "readOnly": true,
             "title": "Historical Transport",
-            "type": "object"
+            "type": "object",
+            "x-launchplane-optional-response": true
           },
           "omitted_env_keys": {
             "default": [],

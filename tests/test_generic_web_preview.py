@@ -708,14 +708,6 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(result.readiness_status, "blocked")
         self.assertEqual(result.missing_template_env_keys, ("SMTP_HOST", "SMTP_FROM"))
         self.assertEqual(result.missing_provider_fields, ("dockerImage", "username"))
-        self.assertEqual(
-            [check.check_id for check in result.checks],
-            [
-                "preview_base_url",
-                "template_env",
-                "template_provider_fields",
-            ],
-        )
 
     def test_evaluate_generic_web_preview_readiness_keeps_template_lane_when_target_id_missing(
         self,

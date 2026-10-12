@@ -36,6 +36,25 @@ from control_plane.workflows.generic_web_preview import (
 from tests.test_generic_web_preview import _GenericWebPreviewStore, _profile
 
 
+def _ready_template(
+    profile: LaunchplaneProductProfileRecord,
+) -> tuple[DokployTargetDefinition, dict[str, str], str]:
+    return (
+        DokployTargetDefinition(
+            context=profile.lanes[0].context,
+            instance="testing",
+            target_type="application",
+            target_id="template",
+        ),
+        {
+            "env": "SMTP_HOST=smtp.example\nSMTP_FROM=hello@example.test",
+            "dockerImage": "image",
+            "username": "registry-user",
+        },
+        "",
+    )
+
+
 class PreviewTransportCompatibilityTests(unittest.TestCase):
     def test_admin_and_onboarding_reject_unimplemented_intent(self) -> None:
         for model in (ProductPreviewProfile, ProductOnboardingPreviewManifest):
@@ -84,10 +103,6 @@ class PreviewTransportCompatibilityTests(unittest.TestCase):
                         ),
                         saved,
                     )
-                    with self.assertRaises(ValidationError):
-                        LaunchplaneProductProfileRecord.model_validate(
-                            saved.model_dump(mode="json"), context={"product_profile_input": True}
-                        )
                     if mode == "driver":
                         with (
                             patch(
@@ -110,11 +125,12 @@ class PreviewTransportCompatibilityTests(unittest.TestCase):
                     store = _GenericWebPreviewStore(saved)
                     with (
                         patch(
-                            "control_plane.workflows.generic_web_preview._read_template_payload"
-                        ) as read_template,
+                            "control_plane.workflows.generic_web_preview._read_template_payload",
+                            return_value=_ready_template(saved),
+                        ),
                         patch(
-                            "control_plane.workflows.generic_web_preview._ensure_application"
-                        ) as create_application,
+                            "control_plane.workflows.generic_web_preview.dokploy_api.dokploy_request"
+                        ) as provider_request,
                     ):
                         readiness = evaluate_generic_web_preview_readiness(
                             control_plane_root=root,
@@ -140,8 +156,7 @@ class PreviewTransportCompatibilityTests(unittest.TestCase):
                             profile=saved,
                         )
                         self.assertEqual(result.refresh_status, "blocked")
-                        read_template.assert_not_called()
-                        create_application.assert_not_called()
+                        provider_request.assert_not_called()
                     replacement = saved.model_dump(mode="json")
                     replacement["preview"] = profile.preview.model_dump(mode="json")
                     repaired = LaunchplaneProductProfileRecord.model_validate(replacement)
@@ -187,20 +202,7 @@ class PreviewTransportCompatibilityTests(unittest.TestCase):
             profile.preview.data_transport_mode = mode
             with patch(
                 "control_plane.workflows.generic_web_preview._read_template_payload",
-                return_value=(
-                    DokployTargetDefinition(
-                        context=profile.lanes[0].context,
-                        instance="testing",
-                        target_type="application",
-                        target_id="template",
-                    ),
-                    {
-                        "env": "SMTP_HOST=smtp.example\nSMTP_FROM=hello@example.test",
-                        "dockerImage": "image",
-                        "username": "registry-user",
-                    },
-                    "",
-                ),
+                return_value=_ready_template(profile),
             ):
                 readiness = evaluate_generic_web_preview_readiness(
                     control_plane_root=Path("."),
@@ -266,6 +268,9 @@ class PreviewTransportHttpCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 payload=updated.model_dump(mode="json"),
             )
             self.assertEqual(rejected.status_code, 400, rejected.text)
+            self.assertEqual(
+                rejected.json()["error"]["code"], "unsupported_preview_transport_history"
+            )
             replacement = updated.model_dump(mode="json")
             replacement["preview"] = original.preview.model_dump(mode="json")
             accepted = await _asgi_request(

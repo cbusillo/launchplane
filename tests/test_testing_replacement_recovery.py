@@ -2,6 +2,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -61,6 +62,41 @@ class _FilesystemServiceStore(FilesystemRecordStore):
 
 
 class TestingReplacementRecoveryTests(unittest.TestCase):
+    def test_filesystem_recovery_preserves_unsupported_preview_intent(self) -> None:
+        for store, root in self.stores():
+            if not isinstance(store, FilesystemRecordStore):
+                continue
+            profile = store.read_product_profile_record("site")
+            path = store.write_product_profile_record(profile)
+            payload = profile.model_dump(mode="json")
+            payload["preview"]["data_transport_mode"] = "bootstrap"
+            path.write_text(json.dumps(payload))
+            operation = self.running(store)
+            with guard_testing_replacement(store, operation, "worker", lambda _: None):
+                with patch.object(api, "_dokploy_request", return_value={}):
+                    api.dokploy_request(
+                        host="https://provider.test",
+                        token="fixture-token",
+                        path="/api/compose.update",
+                        method="POST",
+                        payload={"composeId": "compose-123", "env": "FIXTURE=value"},
+                    )
+                self.fence(store)
+            with self.provider():
+                self.assertEqual(
+                    recover_stranded_testing_replacements(store, root), (operation.operation_id,)
+                )
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(
+                    operation.operation_id
+                ).status,
+                "cancelled",
+            )
+            self.assertEqual(
+                store.read_product_profile_record("site").preview.historical_transport,
+                {"data_transport_mode": "bootstrap"},
+            )
+
     def stores(self) -> Iterator[tuple[TestingRecoveryStore, Path]]:
         with TemporaryDirectory() as directory:
             root = Path(directory)

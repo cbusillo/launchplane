@@ -12444,9 +12444,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             )
         try:
-            profile = LaunchplaneProductProfileRecord.model_validate(
-                raw_payload, context={"product_profile_input": True}
-            )
+            profile = LaunchplaneProductProfileRecord.model_validate(raw_payload)
         except ValidationError as error:
             raise _launchplane_http_error(
                 status_code=400,
@@ -12465,6 +12463,16 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="authorization_denied",
                 message="Workflow cannot write the requested product profile.",
+            )
+        if profile.preview.historical_transport:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="unsupported_preview_transport_history",
+                message=(
+                    "Replace preview settings with supported none/driver configuration and omit "
+                    "preview.historical_transport; archived transport intent is read-only."
+                ),
             )
         try:
             profile.validate_write_contract()

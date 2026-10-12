@@ -27770,7 +27770,8 @@
             },
             "readOnly": true,
             "title": "Historical Transport",
-            "type": "object"
+            "type": "object",
+            "x-launchplane-optional-response": true
           },
           "omitted_env_keys": {
             "default": [],
@@ -27839,7 +27840,6 @@
           "data_transport_mode",
           "domain_certificate_type",
           "enabled",
-          "historical_transport",
           "omitted_env_keys",
           "override_env",
           "preview_domain_env_keys",

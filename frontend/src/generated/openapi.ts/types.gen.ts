@@ -3388,7 +3388,7 @@ export type ProductPreviewProfile = {
     data_transport_mode: 'none' | 'driver';
     domain_certificate_type: 'none' | 'letsencrypt';
     enabled: boolean;
-    readonly historical_transport: {
+    readonly historical_transport?: {
         [key: string]: string;
     };
     omitted_env_keys: Array<string>;
