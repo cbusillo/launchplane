@@ -510,6 +510,17 @@ sorts, waits for the next candidate. A failed candidate keeps the whole-queue
 comparison described under Blocker Isolation. `max_batch_size` caps each new
 candidate.
 
+At a new candidate boundary, pending or unknown engineering heads step aside
+when another eligible head has passing checks and known mergeability. Their
+queue entries report the deferred head and its check/mergeability reason;
+unknown evidence never counts as passing. The next fresh snapshot reconsiders
+them at their original age, without a label change. If nothing is ready, the
+controller retains its normal current-head wait or refresh action. Client
+feature grouping, stack discovery, individual-landing boundaries and batch caps
+still apply. Selected heads still require normal branch refresh, candidate
+checks and fresh landing admission. This readiness filter does not rebuild
+recorded active candidates or change failed-candidate recovery lineage.
+
 While Launchplane runs a release its Client accepted, the repositories that
 release was built from (the product repository, the checklist's shared sources,
 and unchanged sources and selectors in the accepted candidate artifact) are

@@ -309,6 +309,7 @@ def build_merge_train_dry_run_result(
     policy: MergeTrainPolicy,
     snapshot: MergeTrainDryRunSnapshot,
     batch_landing: bool = False,
+    new_candidate: bool = False,
     planned_dependency_heads: frozenset[tuple[int, str]] = frozenset(),
 ) -> MergeTrainDryRunResult:
     repository_policy = policy.find_repository_policy(
@@ -358,6 +359,38 @@ def build_merge_train_dry_run_result(
                 if entry.eligible
                 and entry.owner_review_required
                 and (entry.required_checks_status != "pass" or entry.mergeable == "conflicting")
+                else entry
+                for entry in queue
+            )
+            eligible_entries = tuple(entry for entry in queue if entry.eligible)
+        if new_candidate and any(
+            entry.required_checks_status == "pass"
+            and entry.mergeable == "mergeable"
+            and not entry.client_test_notes_error
+            for entry in eligible_entries
+        ):
+            # Readiness only chooses a new batch. Recorded candidates and final
+            # admission rebuild their own membership without this filter.
+            queue = tuple(
+                entry.model_copy(
+                    update={
+                        "eligible": False,
+                        "ineligible_reasons": (
+                            *entry.ineligible_reasons,
+                            f"Engineering head {entry.head_sha} deferred: "
+                            f"checks {entry.required_checks_status}, mergeability {entry.mergeable}",
+                        ),
+                    }
+                )
+                if entry.eligible
+                and not entry.owner_review_required
+                and not entry.client_test_notes_error
+                and entry.required_checks_status != "fail"
+                and entry.mergeable != "conflicting"
+                and (
+                    entry.required_checks_status in {"pending", "unknown"}
+                    or entry.mergeable == "unknown"
+                )
                 else entry
                 for entry in queue
             )
