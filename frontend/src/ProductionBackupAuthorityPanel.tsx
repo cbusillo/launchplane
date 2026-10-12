@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { ShieldCheck } from "lucide-react";
-import { applyProductionBackupAuthority, readAuthSession, readProductionBackupAuthority } from "./api";
+import { applyProductionBackupAuthority, LaunchplaneApiError, readAuthSession, readProductionBackupAuthority } from "./api";
 import type { ProductionBackupAuthorityReadModel, ProductionBackupAuthorityWriteEnvelope, ProductionBackupAuthorityWriteResponse, ProductEnvironmentDetail } from "./generated/openapi.ts";
 import { recoverBrowserOperationState } from "./browser-operation";
 import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
@@ -9,6 +9,13 @@ import { backupProposalStorageKey, readBackupProposal } from "./production-backu
 import { useBrowserOperationController } from "./use-browser-operation";
 
 type Review = { request: ProductionBackupAuthorityWriteEnvelope; digest: string };
+function approvalFailureCertainty(error: unknown, dispatched: boolean) {
+  // This conflict follows idempotency replay preflight and the atomic locked write.
+  // Auth/validation refusals precede replay, so they cannot settle a lost response.
+  if (error instanceof LaunchplaneApiError && error.statusCode === 409 &&
+      error.code === "production_backup_authority_conflict") return "settled" as const;
+  return productConfigFailureCertainty(error, dispatched);
+}
 export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh }: {
   detail: ProductEnvironmentDetail; fixtureMode: boolean; onRefresh: () => void;
 }) {
@@ -29,20 +36,28 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
   });
   const [admin, setAdmin] = useState(false);
   const [authority, setAuthority] = useState<ProductionBackupAuthorityReadModel | null>(null);
+  const [readingAuthority, setReadingAuthority] = useState(false);
   const [review, setReview] = useState<Review | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [checking, setChecking] = useState(false);
   const generation = useRef(0);
   const plan = useBrowserOperationController<ProductionBackupAuthorityWriteEnvelope, ProductionBackupAuthorityWriteResponse>({
     scope: `${scope}:plan`, readOnly: true, execute: applyProductionBackupAuthority,
     failureCertainty: productConfigFailureCertainty, failureFor: productConfigOperationFailure,
   });
   const apply = useBrowserOperationController<ProductionBackupAuthorityWriteEnvelope, ProductionBackupAuthorityWriteResponse>({
-    scope, execute: applyProductionBackupAuthority, failureCertainty: productConfigFailureCertainty, failureFor: productConfigOperationFailure,
+    scope, execute: applyProductionBackupAuthority, failureCertainty: approvalFailureCertainty, failureFor: productConfigOperationFailure,
   });
-  const busy = [plan.state.phase, apply.state.phase].some(phase => ["queued", "submitting"].includes(phase));
+  const busy = checking || [plan.state.phase, apply.state.phase].some(phase => ["queued", "submitting"].includes(phase));
   const uncertain = apply.state.requiresIdempotencyContinuity;
   const proposalLoad = useRef(0);
+  useEffect(() => {
+    if (apply.state.phase === "failed" && !apply.state.requiresIdempotencyContinuity) {
+      setPending(null); setReview(null);
+      try { sessionStorage.removeItem(`${storageKey}:pending`); } catch { /* Settled refusal. */ }
+    }
+  }, [apply.state.phase, apply.state.requiresIdempotencyContinuity, storageKey]);
   useEffect(() => {
     if (fixtureMode) return;
     const controller = new AbortController();
@@ -54,9 +69,11 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
     generation.current += 1; setReview(null); setAuthority(null);
     if (!proposal || fixtureMode) return;
     const controller = new AbortController();
+    setReadingAuthority(true);
     void readProductionBackupAuthority(proposal.policy, controller.signal).then(response => {
       if (!controller.signal.aborted) setAuthority(response.authority);
-    }).catch(failure => { if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Backup authority could not be read."); });
+    }).catch(failure => { if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Backup authority could not be read."); })
+      .finally(() => { if (!controller.signal.aborted) setReadingAuthority(false); });
     return () => controller.abort();
   }, [proposal, fixtureMode]);
 
@@ -106,7 +123,8 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
       return;
     }
     setPending(null); setReview(null);
-    sessionStorage.removeItem(`${storageKey}:pending`);
+    try { sessionStorage.removeItem(`${storageKey}:pending`); } catch { /* The response settled approval. */ }
+    setChecking(true);
     try {
       const current = await readProductionBackupAuthority(request.policy);
       setAuthority(current.authority);
@@ -114,9 +132,11 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
         setMessage("Approval completed, but current backup authority is not ready or differs. Refresh and inspect before another change.");
       } else {
         setMessage("Backup policy approved and read back. No capture or release was started.");
-        sessionStorage.removeItem(storageKey); setProposal(null); onRefresh();
+        try { sessionStorage.removeItem(storageKey); } catch { /* A reload still needs a fresh dry run. */ }
+        setProposal(null); onRefresh();
       }
     } catch { setMessage("Approval completed; its authority read-back could not be confirmed. Refresh before another change."); }
+    finally { setChecking(false); }
   }
   const snapshot = proposal?.policy.fast_snapshot;
   const backup = proposal?.policy.independent_backup;
@@ -125,10 +145,12 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
       <p className="eyebrow">Production protection</p><h2 id={`${id}-title`}>Production backup authority</h2>
       <p>Review and approve this product's snapshot and independent backup policy. Approval changes backup records; it does not take a backup or release the product.</p>
     </div></header>
-    <p>Current authority: <strong>{authority?.state ?? (proposal ? "Reading…" : "Load a prepared proposal to inspect")}</strong></p>
+    <p>Current authority: <strong>{authority?.state ?? (proposal ? readingAuthority ? "Reading…" : "Unknown" : "Load a prepared proposal to inspect")}</strong></p>
     {!admin ? <p>A signed-in administrator with access to this product must review the proposal.</p> : null}
     <div className="product-config-field"><label htmlFor={`${id}-file`}>Prepared backup proposal</label>
-      <input id={`${id}-file`} type="file" accept="application/json,.json" disabled={!admin || busy || uncertain || fixtureMode} onChange={event => void load(event.target.files?.[0])} />
+      <input id={`${id}-file`} type="file" accept="application/json,.json" disabled={!admin || busy || uncertain || fixtureMode} onChange={event => {
+        const file = event.target.files?.[0]; event.target.value = ""; void load(file);
+      }} />
       <small>Preparation uses a private proposal file. It stays in this tab until approval; credentials are never part of it.</small>
     </div>
     {proposal && snapshot && backup ? <div className="product-owner-plan">
@@ -150,8 +172,8 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
     </div> : null}
     <OperationNotice state={plan.state} label="Dry run" /><OperationNotice state={apply.state} label="Approval" />
     {error ? <InlineFormError message={error} /> : null}
-    {message ? <p role="status">{message}</p> : null}
-    {review ? <p className="backup-authority-digest">Reviewed digest: <code>{review.digest}</code></p> : null}
+    {message ? <p role="status" aria-label="Backup authority result">{message}</p> : null}
+    {review || (uncertain && pending) ? <p className="backup-authority-digest">Reviewed digest: <code>{review?.digest ?? pending?.reviewed_authority_digest}</code></p> : null}
     {uncertain ? <p role="status">The approval outcome is uncertain. Keep the original proposal and retry only the same request and key.</p> : null}
     <div className="product-config-actions">
       <button type="button" className="button" disabled={!admin || !proposal || busy || uncertain || fixtureMode} onClick={() => void dryRun()}>Run backup authority dry run</button>

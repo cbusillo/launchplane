@@ -28,6 +28,7 @@ export function readBackupProposal(text: string, lane: Pick<ProductEnvironmentDe
   for (const item of value.targets) {
     const target = object(item, [...recordFields, "target_id", "target_revision", "destination", "target_digest"]);
     if (typeof target.target_id !== "string" || (target.status && target.status !== "active")) throw new Error("The proposal needs active, named targets.");
+    if (![snapshot.source_target_id, backup.destination_target_id].includes(target.target_id)) throw new Error("Every target revision must belong to this policy's snapshot or independent backup.");
     const destination = object(target.destination, ["provider_type", "destination_kind", "host", "username", "guest_kind", "guest_id", "storage_id"]);
     if (typeof destination.host !== "string" || typeof destination.username !== "string" ||
         !["proxmox_guest", "proxmox_storage"].includes(String(destination.destination_kind))) throw new Error("Each target needs an explicit backup destination.");

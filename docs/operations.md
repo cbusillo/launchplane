@@ -302,11 +302,19 @@ administrator reviews it; no terminal command or bearer token is needed from
 the person approving. Proposal loading does not submit or activate a policy.
 
 Browser writes use the existing CSRF-checked session dependency and the unchanged
-`production_backup_authority.write` authorization check. The card retains the
+`production_backup_authority.write` authorization model. A browser target revision
+also checks this action on every active lane using that target, including inside
+the locked write. A product-scoped caller cannot revise another product's target;
+an administrator already authorized on every affected lane retains that authority.
+The card accepts only target revisions used by the submitted policy. It retains the
 private proposal and, for an uncertain approval, the original request and
 idempotency key in that tab's session storage. A changed file invalidates review;
 an uncertain result locks replacement and permits only the original request's
-retry. The card reads authority back after approval. Approval does not enqueue
+retry. A stale-authority conflict returned after the route's replay preflight
+settles that original request and permits a fresh review. An authorization refusal
+occurs before replay and does not prove a lost response never committed; it keeps
+the original request locked. The card reads authority back after approval and
+keeps replacement disabled during that read. Approval does not enqueue
 a capture, restore, promotion or deployment; worker credentials and real capture
 qualification remain separate prerequisites. Existing target-only policy updates
 are bound to the current target revisions by the service digest.

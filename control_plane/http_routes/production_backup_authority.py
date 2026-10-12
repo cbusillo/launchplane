@@ -9,6 +9,7 @@ from control_plane.contracts.production_backup_authority import (
     PRODUCTION_BACKUP_AUTHORITY_READ_ACTION,
     PRODUCTION_BACKUP_AUTHORITY_WRITE_ACTION,
     ProductionBackupAuthorityReadModel,
+    ProductionBackupPolicyRecord,
 )
 from control_plane.http_routes.mutation_support import idempotency_scope, request_fingerprint
 from control_plane.http_routes.support import (
@@ -35,6 +36,7 @@ from control_plane.production_backup_migration import (
 )
 from control_plane.service_auth import (
     AuthorizationTarget,
+    GitHubHumanIdentity,
     LaunchplaneIdentity,
     LocalOperatorIdentity,
 )
@@ -291,8 +293,10 @@ def _execute_write(
         return replay
     try:
         authority_store = require_production_backup_authority_store(record_store)
-        if isinstance(identity, LocalOperatorIdentity):
-            target_refusal = lane_bound_target_revision_refusal(
+        if isinstance(identity, (LocalOperatorIdentity, GitHubHumanIdentity)):
+            target_refusal = _target_revision_refusal(
+                dependencies=dependencies,
+                identity=identity,
                 policy_records=authority_store.list_production_backup_policy_records(),
                 envelope=envelope,
             )
@@ -300,7 +304,9 @@ def _execute_write(
                 raise dependencies.http_error(
                     status_code=403,
                     trace_id=current_trace_id,
-                    code="local_operator_lane_scope_required",
+                    code="local_operator_lane_scope_required"
+                    if isinstance(identity, LocalOperatorIdentity)
+                    else "authorization_denied",
                     message=target_refusal,
                 )
         plan = plan_production_backup_authority_write(
@@ -353,11 +359,14 @@ def _execute_write(
             # change can't slip between the check above and the write.
             revision_guard=(
                 (
-                    lambda policy_records: lane_bound_target_revision_refusal(
-                        policy_records=policy_records, envelope=envelope
+                    lambda policy_records: _target_revision_refusal(
+                        dependencies=dependencies,
+                        identity=identity,
+                        policy_records=policy_records,
+                        envelope=envelope,
                     )
                 )
-                if isinstance(identity, LocalOperatorIdentity)
+                if isinstance(identity, (LocalOperatorIdentity, GitHubHumanIdentity))
                 else None
             ),
         )
@@ -365,7 +374,9 @@ def _execute_write(
         raise dependencies.http_error(
             status_code=403,
             trace_id=current_trace_id,
-            code="local_operator_lane_scope_required",
+            code="local_operator_lane_scope_required"
+            if isinstance(identity, LocalOperatorIdentity)
+            else "authorization_denied",
             message=str(error),
         ) from error
     except (
@@ -409,6 +420,32 @@ def _execute_write(
         trace_id=current_trace_id,
         result=write_result.result,
     )
+
+
+def _target_revision_refusal(
+    *,
+    dependencies: ProductionBackupAuthorityWriteRouteDependencies,
+    identity: LaunchplaneIdentity,
+    policy_records: tuple[ProductionBackupPolicyRecord, ...],
+    envelope: ProductionBackupAuthorityWriteEnvelope,
+) -> str:
+    if isinstance(identity, LocalOperatorIdentity):
+        return lane_bound_target_revision_refusal(policy_records=policy_records, envelope=envelope)
+    revised = {target.target_id for target in envelope.targets}
+    for policy in policy_records:
+        if policy.status != "active" or not revised.intersection(policy.target_ids):
+            continue
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action=PRODUCTION_BACKUP_AUTHORITY_WRITE_ACTION,
+            product=policy.product,
+            context=policy.context,
+            target=AuthorizationTarget(scope="instance", instances=(policy.instance,)),
+        ):
+            return (
+                "Target revision affects backup authority outside this identity's authorized lanes."
+            )
+    return ""
 
 
 def _preflight_apply(
