@@ -1864,6 +1864,48 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_read_only_recovery_classifies_legacy_journal_and_preserves_fence(self) -> None:
+        from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests
+
+        fixtures = TestingReplacementRecoveryTests()
+        self.addCleanup(fixtures.doCleanups)
+        for store, root in fixtures.stores():
+            fixtures.running(store)
+            operation = fixtures.fence(store)
+            app = create_launchplane_fastapi_app(
+                control_plane_root_path=root,
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(
+                    action="operations.read",
+                    products=("launchplane",),
+                    contexts=(operation.context,),
+                    instances=("testing",),
+                    schema_version=2,
+                ),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.testing_replacement_recovery.api.dokploy_request"
+            ) as provider_read:
+                response = await _asgi_get(
+                    app,
+                    f"/v1/drivers/odoo/target-replacement/operations/{operation.operation_id}",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            self.assertEqual(payload["recovery"]["journal"], "absent")
+            self.assertEqual(payload["recovery"]["provider_effects"], "unknown")
+            self.assertIn(payload["recovery"]["reason"], payload["operation"]["error_description"])
+            self.assertFalse(payload["recovery"]["safe_to_release"])
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+                operation,
+            )
+            provider_read.assert_not_called()
+            for private_field in ("authorization", "request", "recovery_journal", "target_id"):
+                self.assertNotIn(private_field, payload["operation"])
+
     async def test_pending_odoo_operation_can_be_cancelled_idempotently(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

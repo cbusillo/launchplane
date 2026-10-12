@@ -312,6 +312,95 @@ def inspect_testing_replacement(
     return inspection
 
 
+def testing_replacement_recovery_read(
+    store: TestingRecoveryStore,
+    operation: OdooStableTargetReplacementOperationRecord,
+    root: Path,
+) -> dict[str, object]:
+    """Classify persisted evidence without publishing or retiring an operation.
+
+    This view contains fixed codes, counts and agreement facts only. Historical
+    dispatch references, coordinates and authorization stay inside the service.
+    Missing journal is persisted absence, never provider-effect absence.
+    """
+    journal = operation.recovery_journal
+    view: dict[str, object] = {
+        "status": "refused",
+        "reason": "recovery_scope_unsupported",
+        "journal": "present" if journal is not None else "absent",
+        "attempt_matches": journal.attempt == operation.attempt if journal else None,
+        "binding_matches": None,
+        "effect_count": len(journal.effects) if journal else 0,
+        "effects_acknowledged": all(effect.acknowledged for effect in journal.effects)
+        if journal
+        else None,
+        "provider_effects": "unknown",
+        "provider_inspected": False,
+        "safe_to_release": False,
+    }
+    if not service_testing_operation(operation) or operation.status != "reconciliation_required":
+        return view
+
+    def refuse(reason: str) -> dict[str, object]:
+        view["reason"] = reason
+        return view
+
+    try:
+        with store.testing_replacement_execution_lock(operation.operation_id) as check_lock:
+            if check_lock is None:
+                return refuse("recovery_execution_owner_present")
+            current = store.read_odoo_stable_target_replacement_operation_record(
+                operation.operation_id
+            )
+            if current != operation:
+                return refuse("recovery_operation_changed")
+            assert current.authorization is not None
+            if not launchplane_reconcile_authorization_allows(
+                authorization=current.authorization,
+                product=current.product,
+                context=current.context,
+                instances=("testing",),
+                record_store=store,
+            ):
+                return refuse("recovery_authorization_changed")
+            if journal is None:
+                return refuse("recovery_journal_absent")
+            if not view["attempt_matches"]:
+                return refuse("recovery_attempt_changed")
+            view["binding_matches"] = (
+                current_binding_fingerprint(store, current) == journal.target_fingerprint
+            )
+            if not view["binding_matches"]:
+                return refuse("recovery_binding_changed")
+            if not view["effects_acknowledged"]:
+                return refuse("recovery_dispatch_unacknowledged")
+            if any(
+                effect.path
+                not in _SYNCHRONOUS_PATHS
+                | {"/api/compose.deploy", "/api/compose.redeploy", "/api/schedule.runManually"}
+                for effect in journal.effects
+            ):
+                return refuse("recovery_effect_unsupported")
+            if _now() < current.updated_at:
+                return refuse("recovery_inspection_before_fence")
+            view["provider_inspected"] = True
+            inspection = inspect_testing_replacement(current, root)
+            if inspection is None:
+                return refuse("recovery_provider_evidence_incomplete")
+            check_lock()
+            if (
+                store.read_odoo_stable_target_replacement_operation_record(operation.operation_id)
+                != current
+                or current_binding_fingerprint(store, current) != journal.target_fingerprint
+            ):
+                return refuse("recovery_operation_or_binding_changed")
+            view.update(status="eligible", reason="", provider_effects="quiescent_safe_to_retry")
+            # Eligibility is a read-time observation, never a cancellation attestation.
+            return view
+    except Exception:
+        return refuse("recovery_evidence_unavailable")
+
+
 def recover_stranded_testing_replacements(
     store: TestingRecoveryStore, root: Path
 ) -> tuple[str, ...]:

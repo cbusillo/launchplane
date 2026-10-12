@@ -21655,6 +21655,18 @@
             "title": "Operation",
             "type": "object"
           },
+          "recovery": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery"
+          },
           "result": {
             "anyOf": [
               {

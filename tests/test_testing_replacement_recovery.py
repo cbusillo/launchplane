@@ -27,6 +27,7 @@ from control_plane.testing_replacement_recovery import (
     guard_testing_replacement,
     inspect_testing_replacement,
     recover_stranded_testing_replacements,
+    testing_replacement_recovery_read,
 )
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerStore,
@@ -62,6 +63,119 @@ class _FilesystemServiceStore(FilesystemRecordStore):
 
 
 class TestingReplacementRecoveryTests(unittest.TestCase):
+    def test_classification_reports_persisted_absence_without_provider_read_or_retirement(
+        self,
+    ) -> None:
+        for store, root in self.stores():
+            self.running(store)
+            operation = self.fence(store)
+            with patch.object(api, "dokploy_request") as provider_read:
+                view = testing_replacement_recovery_read(store, operation, root)
+            self.assertEqual(view["journal"], "absent")
+            self.assertEqual(view["reason"], "recovery_journal_absent")
+            self.assertEqual(view["provider_effects"], "unknown")
+            self.assertFalse(view["safe_to_release"])
+            provider_read.assert_not_called()
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+                operation,
+            )
+
+    def test_classification_excludes_worker_and_reports_journal_eligibility_without_mutation(
+        self,
+    ) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            with guard_testing_replacement(
+                store, operation, "worker", lambda _: None
+            ) as checkpoint:
+                checkpoint("preparing")
+                fenced = self.fence(store)
+                view = testing_replacement_recovery_read(store, fenced, root)
+                self.assertEqual(view["reason"], "recovery_execution_owner_present")
+            with self.provider():
+                view = testing_replacement_recovery_read(store, fenced, root)
+            self.assertEqual(view["status"], "eligible")
+            self.assertTrue(view["attempt_matches"])
+            self.assertTrue(view["binding_matches"])
+            self.assertEqual(view["provider_effects"], "quiescent_safe_to_retry")
+            self.assertFalse(view["safe_to_release"])
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+                fenced,
+            )
+            self.assertNotIn("compose-123", str(view))
+            self.assertFalse(getattr(store, "list_product_reconcile_requests")(product="site"))
+
+    def test_classification_refuses_changed_binding_unacknowledged_and_unknown_effects(
+        self,
+    ) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            with guard_testing_replacement(
+                store, operation, "worker", lambda _: None
+            ) as checkpoint:
+                checkpoint("preparing")
+                fenced = self.fence(store)
+            assert fenced.recovery_journal is not None
+            from control_plane.contracts.testing_replacement_recovery import (
+                TestingReplacementEffect,
+            )
+
+            variants = (
+                (
+                    fenced.recovery_journal.model_copy(update={"attempt": 2}),
+                    "recovery_attempt_changed",
+                ),
+                (
+                    fenced.recovery_journal.model_copy(update={"target_fingerprint": "changed"}),
+                    "recovery_binding_changed",
+                ),
+                (
+                    fenced.recovery_journal.model_copy(
+                        update={
+                            "effects": (
+                                TestingReplacementEffect(
+                                    reference="private",
+                                    path="/api/compose.deploy",
+                                    dispatched_at=stamp(),
+                                ),
+                            )
+                        }
+                    ),
+                    "recovery_dispatch_unacknowledged",
+                ),
+                (
+                    fenced.recovery_journal.model_copy(
+                        update={
+                            "effects": (
+                                TestingReplacementEffect(
+                                    reference="private",
+                                    path="records_commit",
+                                    dispatched_at=stamp(),
+                                    acknowledged=True,
+                                ),
+                            )
+                        }
+                    ),
+                    "recovery_effect_unsupported",
+                ),
+            )
+            for journal, reason in variants:
+                changed = fenced.model_copy(update={"recovery_journal": journal})
+                getattr(store, "write_odoo_stable_target_replacement_operation_record")(changed)
+                with patch.object(api, "dokploy_request") as provider_read:
+                    view = testing_replacement_recovery_read(store, changed, root)
+                self.assertEqual(view["reason"], reason)
+                provider_read.assert_not_called()
+                self.assertEqual(
+                    store.read_odoo_stable_target_replacement_operation_record(
+                        operation.operation_id
+                    ),
+                    changed,
+                )
+                self.assertNotIn("private", str(view))
+
     def test_recovery_preserves_stored_preview_transport_compatibility(self) -> None:
         for mode, command in (("none", ""), ("bootstrap", "/app/seed")):
             for store, root in self.stores():

@@ -582,6 +582,20 @@ A timeout never means that an effect did not happen. Legacy attempts without a
 journal, including attempts started before this capability, remain fenced;
 provider idleness or a newer runtime identity cannot replace their missing proof.
 
+The existing target-replacement operation GET also returns a value-free
+`recovery` classification under scoped `operations.read`. It reports persisted
+journal presence or absence, attempt/binding agreement, effect acknowledgement,
+provider inspection and an eligibility/refusal code. It excludes the execution
+owner and rechecks the operation and binding after inspection. Missing journal
+means unknown historical effects, never an absent provider dispatch. The read
+does not cancel, publish an attestation, queue reconciliation or change incidents;
+`safe_to_release` remains false even when the read observes eligibility. Raw
+references, target coordinates and authorization stay inside the service. For
+held testing operations its fixed `error_description` also carries the recovery
+reason, journal state and effect classification so the maintained bounded
+operation-read helper preserves the diagnosis while omitting the structured
+extension. Recovery still gathers and checks its own fresh proof before action.
+
 Only a proved-quiescent attempt is cancelled with the existing timestamped
 `safe_to_release=true` attestation. The observed references are persisted beside
 that attestation, and storage rechecks the original operation and product/target
