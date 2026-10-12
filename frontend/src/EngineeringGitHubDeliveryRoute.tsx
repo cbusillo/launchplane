@@ -1,8 +1,8 @@
 import { KeyRound } from "lucide-react";
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
-import { configureServiceGitHubDelivery, LaunchplaneApiError, readServiceGitHubDelivery, retireServiceGitHubTokens } from "./api";
-import type { BrowserOperationOptions } from "./browser-operation";
+import { checkServiceDeliveryApplyReceipt, configureServiceGitHubDelivery, LaunchplaneApiError, readServiceGitHubDelivery, retireServiceGitHubTokens } from "./api";
+import { stableRequestFingerprint, type BrowserOperationOptions } from "./browser-operation";
 import { EngineeringResourceControls, EngineeringResourceGate, EngineeringRouteFrame } from "./EngineeringRouteUi";
 import { useEngineeringResource } from "./engineering-resource";
 import type { DeliveryGitHubAppConfigurationRequest, DeliveryGitHubAppConfigurationResponse, ServiceGitHubDeliveryStatus, ServiceTokenRetirementRequest, ServiceTokenRetirementResponse } from "./generated/openapi.ts";
@@ -31,7 +31,7 @@ export function EngineeringGitHubDeliveryRoute({ actorId }: { actorId: number })
   </EngineeringRouteFrame>;
 }
 
-type ReviewRequest = { mode?: "dry-run" | "apply"; expected_plan_digest?: string; reason: string };
+type ReviewRequest = DeliveryGitHubAppConfigurationRequest | ServiceTokenRetirementRequest;
 type ReviewResponse = { trace_id: string; plan_digest: string };
 
 function recoverRequest<T extends ReviewRequest>(storageKey: string): T | null {
@@ -45,6 +45,9 @@ function useReviewedChange<T extends ReviewRequest, R extends ReviewResponse>({ 
   scope: string; draft: T; execute: (payload: T, options: BrowserOperationOptions) => Promise<R>;
   readback: (status: ServiceGitHubDeliveryStatus, payload: T) => boolean; onApplied: () => void;
 }) {
+  const recoveryAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => recoveryAbort.current?.abort(), []);
+  const [checking, setChecking] = useState(false);
   const storageKey = `launchplane:service-delivery-draft:${scope}`;
   const [saved, setSaved] = useState<T | null>(() => recoverRequest<T>(storageKey));
   const [review, setReview] = useState<{ key: string; result: R } | null>(null);
@@ -58,7 +61,7 @@ function useReviewedChange<T extends ReviewRequest, R extends ReviewResponse>({ 
   const applyOperation = useBrowserOperationController<T, R>({ ...operationOptions, scope: `${scope}:apply` });
   const busy = [planOperation.state.phase, applyOperation.state.phase].some(phase => ["queued", "submitting"].includes(phase));
   const uncertain = applyOperation.state.requiresIdempotencyContinuity;
-  const locked = busy || uncertain;
+  const locked = busy || uncertain || checking;
   const draftKey = JSON.stringify(draft);
   const matches = Boolean(review && review.key === draftKey);
   async function preview() {
@@ -90,8 +93,37 @@ function useReviewedChange<T extends ReviewRequest, R extends ReviewResponse>({ 
       setNotice(`Applied and read back. Trace ${response.trace_id}`);
     } catch (error) { setError(`Apply completed; read-back is unavailable. Refresh metadata before another change. ${error instanceof Error ? error.message : ""}`); }
   }
-  return { preview, apply, saved, review: matches ? review?.result : null, confirmed: matches && confirmed, setConfirmed, locked, busy, uncertain,
-    canApply: !busy && (uncertain ? Boolean(saved) : matches && confirmed), error, notice, planOperation, applyOperation,
+  async function checkOriginalApply() {
+    const identity = applyOperation.state.identity;
+    if (!identity || !uncertain || busy || checking) return;
+    const controller = new AbortController();
+    recoveryAbort.current = controller; setChecking(true); setError(""); setNotice("");
+    try {
+      if (!saved || await stableRequestFingerprint({ request: saved, scope: `${scope}:apply` }) !== identity.requestFingerprint) {
+        setError("The exact original request is unavailable. Keep its operation key; another change remains locked."); return;
+      }
+      if (controller.signal.aborted) return;
+      const receipt = await checkServiceDeliveryApplyReceipt(saved, identity.idempotencyKey, controller.signal);
+      if (controller.signal.aborted) return;
+      const operation = "secret_ids" in saved ? "service-token-retirement" : "delivery-selection";
+      if (receipt.state !== "completed" || receipt.operation !== operation || receipt.idempotency_key !== identity.idempotencyKey || !receipt.original_trace_id) {
+        setNotice("No matching completed receipt was found. Keep the original request and key; another change remains locked."); return;
+      }
+      if (!applyOperation.reconcile(identity, { trace_id: receipt.trace_id, original_trace_id: receipt.original_trace_id, replayed: true })) {
+        setNotice("The retained operation changed while checking. Keep its request and key and check again."); return;
+      }
+      try { sessionStorage.removeItem(storageKey); } catch { /* Completed evidence settles this operation. */ }
+      setSaved(null); setReview(null); setConfirmed(false); onApplied();
+      setNotice(`Original Apply completed. Trace ${receipt.original_trace_id}`);
+    } catch (error) {
+      if (!controller.signal.aborted) setError(error instanceof Error ? error.message : "The receipt could not be checked. Keep the original request and key.");
+    } finally {
+      if (recoveryAbort.current === controller) recoveryAbort.current = null;
+      if (!controller.signal.aborted) setChecking(false);
+    }
+  }
+  return { checkOriginalApply, checking, preview, apply, saved, review: matches ? review?.result : null, confirmed: matches && confirmed, setConfirmed, locked, busy, uncertain,
+    canApply: !busy && !checking && (uncertain ? Boolean(saved) : matches && confirmed), error, notice, planOperation, applyOperation,
     edit: () => { setConfirmed(false); setReview(null); setError(""); setNotice(""); } };
 }
 
@@ -112,8 +144,9 @@ function ReviewActions<T extends ReviewRequest, R extends ReviewResponse>({ chan
     <div className="product-config-actions">
       <button type="button" className="button" disabled={change.locked || stale || !canPlan} onClick={() => void change.preview()}>Dry run</button>
       <button type="button" className="button button-primary" disabled={!change.canApply || (!change.uncertain && stale)} onClick={() => void change.apply()}>{change.uncertain ? "Retry Apply" : "Apply"}</button>
+      {change.uncertain ? <button type="button" className="button" disabled={change.busy || change.checking} onClick={() => void change.checkOriginalApply()}>{change.checking ? "Checking original Apply" : "Check original Apply"}</button> : null}
     </div>
-    {change.uncertain ? <p>The result is uncertain. The reviewed request and operation key are retained; retry the same Apply.</p> : null}
+    {change.uncertain ? <p>The result is uncertain. The reviewed request and operation key are retained. Check the original Apply receipt or retry the same Apply.</p> : null}
   </>;
 }
 

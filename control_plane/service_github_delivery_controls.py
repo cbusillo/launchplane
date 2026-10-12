@@ -6,7 +6,12 @@ import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy.exc import IntegrityError
 
+from control_plane.delivery_apply_receipt import (
+    delivery_request_fingerprint,
+    read_delivery_apply_receipt,
+)
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretAuditEvent, SecretBinding, SecretRecord
@@ -166,7 +171,7 @@ def read_service_github_delivery(
     ):
         try:
             record, binding = _key_binding(store, integration)
-        except (ValueError, FileNotFoundError):
+        except (ValueError, FileNotFoundError, IntegrityError):
             continue
         keys.append(
             ExistingDeliveryKey(
@@ -308,38 +313,53 @@ def apply_service_token_retirement(
     idempotency_key: str,
 ) -> ServiceTokenRetirementResponse:
     scope = f"service-token-retirement:{actor}"
-    fingerprint = hashlib.sha256(
-        json.dumps(request.model_dump(mode="json"), sort_keys=True).encode()
-    ).hexdigest()
+    fingerprint = delivery_request_fingerprint(request)
     if request.mode == "apply":
         if not idempotency_key.strip():
             raise ValueError("Service-token retirement requires Idempotency-Key.")
-        previous = store.read_idempotency_record(
+        previous = read_delivery_apply_receipt(
+            store=store,
+            request=request,
+            actor=actor,
             scope=scope,
             route_path=SERVICE_TOKEN_RETIREMENT_ROUTE,
             idempotency_key=idempotency_key,
         )
         if previous is not None:
-            if previous.state != "completed" or previous.request_fingerprint != fingerprint:
-                raise ValueError("Service-token retirement idempotency conflict.")
             return ServiceTokenRetirementResponse.model_validate(previous.response_payload)
-    result, bundle = plan_service_token_retirement(
-        store=store, request=request, actor=actor, trace_id=trace_id
-    )
-    if request.mode == "dry-run":
+    try:
+        result, bundle = plan_service_token_retirement(
+            store=store, request=request, actor=actor, trace_id=trace_id
+        )
+        if request.mode == "dry-run":
+            return result
+        if request.expected_plan_digest != result.plan_digest:
+            raise ValueError("Service-token retirement changed since the reviewed dry-run.")
+        receipt = LaunchplaneIdempotencyRecord(
+            record_id=f"idempotency-{trace_id}",
+            scope=scope,
+            route_path=SERVICE_TOKEN_RETIREMENT_ROUTE,
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+            response_status_code=200,
+            response_trace_id=trace_id,
+            recorded_at=datetime.now(UTC).isoformat(),
+            response_payload=result.model_dump(mode="json"),
+        )
+        store.write_product_authority_bundle(
+            bundle.model_copy(update={"idempotency_record": receipt})
+        )
         return result
-    if request.expected_plan_digest != result.plan_digest:
-        raise ValueError("Service-token retirement changed since the reviewed dry-run.")
-    receipt = LaunchplaneIdempotencyRecord(
-        record_id=f"idempotency-{trace_id}",
-        scope=scope,
-        route_path=SERVICE_TOKEN_RETIREMENT_ROUTE,
-        idempotency_key=idempotency_key,
-        request_fingerprint=fingerprint,
-        response_status_code=200,
-        response_trace_id=trace_id,
-        recorded_at=datetime.now(UTC).isoformat(),
-        response_payload=result.model_dump(mode="json"),
-    )
-    store.write_product_authority_bundle(bundle.model_copy(update={"idempotency_record": receipt}))
-    return result
+    except (ValueError, FileNotFoundError, IntegrityError):
+        if request.mode == "apply":
+            previous = read_delivery_apply_receipt(
+                store=store,
+                request=request,
+                actor=actor,
+                scope=scope,
+                route_path=SERVICE_TOKEN_RETIREMENT_ROUTE,
+                idempotency_key=idempotency_key,
+            )
+            if previous is not None:
+                return ServiceTokenRetirementResponse.model_validate(previous.response_payload)
+        raise

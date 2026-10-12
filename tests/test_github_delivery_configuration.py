@@ -15,6 +15,7 @@ from control_plane.github_delivery_configuration import (
     apply_delivery_github_configuration,
     plan_delivery_github_configuration,
 )
+from control_plane.service_delivery_recovery import SERVICE_DELIVERY_APPLY_RECEIPT_ROUTE
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import (
     GitHubHumanIdentity,
@@ -271,6 +272,68 @@ class DeliveryConfigurationHttpTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
                 self.assertEqual(applied.status_code, 200, applied.text)
+                original_request: dict[str, object] = {
+                    **payload,
+                    "mode": "apply",
+                    "expected_plan_digest": preview.json()["plan_digest"],
+                }
+                recovery: dict[str, object] = {
+                    "original_request": {
+                        **payload,
+                        "mode": "apply",
+                        "expected_plan_digest": preview.json()["plan_digest"],
+                    },
+                    "idempotency_key": "delivery-config",
+                }
+                with patch.object(
+                    store,
+                    "write_product_authority_bundle",
+                    side_effect=AssertionError("Receipt read is inert"),
+                ):
+                    recovered = await _asgi_request(
+                        app,
+                        "POST",
+                        SERVICE_DELIVERY_APPLY_RECEIPT_ROUTE,
+                        headers=_browser_mutation_headers(manager, session),
+                        payload=recovery,
+                    )
+                    self.assertEqual(recovered.status_code, 200, recovered.text)
+                    self.assertEqual(recovered.json()["state"], "completed")
+                    self.assertEqual(
+                        recovered.json()["original_trace_id"], applied.json()["trace_id"]
+                    )
+                    self.assertNotIn("response_payload", recovered.json())
+                    self.assertNotIn("set-cookie", recovered.headers)
+                    missing = await _asgi_request(
+                        app,
+                        "POST",
+                        SERVICE_DELIVERY_APPLY_RECEIPT_ROUTE,
+                        headers=_browser_mutation_headers(manager, session),
+                        payload={**recovery, "idempotency_key": "missing"},
+                    )
+                    self.assertEqual(missing.json()["state"], "unknown")
+                    conflict = await _asgi_request(
+                        app,
+                        "POST",
+                        SERVICE_DELIVERY_APPLY_RECEIPT_ROUTE,
+                        headers=_browser_mutation_headers(manager, session),
+                        payload={
+                            **recovery,
+                            "original_request": {
+                                **original_request,
+                                "reason": "Changed",
+                            },
+                        },
+                    )
+                    self.assertEqual(conflict.status_code, 409, conflict.text)
+                    csrf_rejected = await _asgi_request(
+                        app,
+                        "POST",
+                        SERVICE_DELIVERY_APPLY_RECEIPT_ROUTE,
+                        headers={"Cookie": manager.session_cookie_header(session)},
+                        payload=recovery,
+                    )
+                    self.assertIn(csrf_rejected.status_code, (400, 403))
                 other = manager.issue(identity=replace(identity, github_id=43))
                 denied = await _asgi_request(
                     app,
@@ -280,5 +343,14 @@ class DeliveryConfigurationHttpTests(unittest.IsolatedAsyncioTestCase):
                     payload=payload,
                 )
                 self.assertEqual(denied.status_code, 403, denied.text)
+                denied_recovery = await _asgi_request(
+                    app,
+                    "POST",
+                    SERVICE_DELIVERY_APPLY_RECEIPT_ROUTE,
+                    headers=_browser_mutation_headers(manager, other),
+                    payload=recovery,
+                )
+                self.assertEqual(denied_recovery.status_code, 403, denied_recovery.text)
+
             finally:
                 store.close()

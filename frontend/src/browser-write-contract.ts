@@ -1,5 +1,6 @@
 import type {
   RestartLaneServiceData,
+  ReadServiceDeliveryApplyReceiptData,
   ApplyProductEnvironmentConfigData,
   ApplyProductImageRepositoryData,
   ApplyProductProductionUseData,
@@ -31,6 +32,7 @@ import type {
 
 export const BROWSER_WRITE_ROUTES = {
   laneServiceRestart: "/v1/drivers/odoo/service-restart" satisfies RestartLaneServiceData["url"],
+  serviceDeliveryReceiptRead: "/v1/service/delivery/apply-receipt" satisfies ReadServiceDeliveryApplyReceiptData["url"],
   serviceGitHubDeliveryConfigure: "/v1/service/github-delivery/configuration" satisfies ConfigureLaunchplaneGithubDeliveryData["url"],
   serviceGitHubTokenRetire: "/v1/service/github-delivery/token-retirement" satisfies RetireServiceGithubTokensData["url"],
   ownerSecretSubmit: "/v1/owner-secret-inputs/submit" satisfies SubmitOwnerSecretInputData["url"],
