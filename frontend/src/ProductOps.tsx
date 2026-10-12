@@ -20,6 +20,7 @@ import { ProductGenericWebTransitionPanel } from "./ProductGenericWebTransitionP
 import { ProductDisplayNamePanel } from "./ProductDisplayNamePanel";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductWebsiteCleanupPanel } from "./ProductWebsiteCleanupPanel";
+import { ProductSetupPanel } from "./ProductSetupPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
@@ -152,12 +153,14 @@ export function ProductIndexRoute({
 }
 
 export function ProductWorkspaceRoute({
+  admin,
   onSaved,
   fixtureMode,
   fixtureResource,
   productKey,
   refreshToken,
 }: {
+  admin: boolean;
   fixtureMode: DevFixtureMode;
   fixtureResource: ResourceState<ProductSiteOverview[]> | null;
   onSaved: () => void;
@@ -271,6 +274,7 @@ export function ProductWorkspaceRoute({
 
   return (
     <ProductWorkspace
+      admin={admin}
       onSaved={() => { setRetryToken(value => value + 1); onSaved(); }}
       fixtureMode={fixtureMode}
       refreshToken={refreshToken}
@@ -370,6 +374,7 @@ function DirectoryLane({
 }
 
 function ProductWorkspace({
+  admin,
   onSaved,
   fixtureMode,
   refreshToken,
@@ -379,6 +384,7 @@ function ProductWorkspace({
   traceId,
   updating,
 }: {
+  admin: boolean;
   onSaved: () => void;
   fixtureMode: DevFixtureMode;
   refreshToken: number;
@@ -450,6 +456,7 @@ function ProductWorkspace({
       </header>
 
       <ProductWorkspaceNav product={product} route={route} />
+      {admin && !fixtureMode ? <a className="button" href="#product-setup-title">Environment setup</a> : null}
 
       <a className="mobile-next-inspection" href={`#${inspection.targetId}`}>
         <span>
@@ -557,6 +564,7 @@ function ProductWorkspace({
       <ProductDisplayNamePanel key={`name:${product.product}`} fixtureMode={fixtureMode} product={product.product} onSaved={onSaved} />
       <ProductOwnerPanel fixtureMode={fixtureMode} product={product.product} />
       <ProductWebsiteCleanupPanel key={`website:${product.product}`} fixtureMode={fixtureMode} product={product.product} onSaved={onSaved} />
+      {admin && !fixtureMode ? <ProductSetupPanel key={`setup:${product.product}`} product={product.product} onApplied={onSaved} /> : null}
 
       <ProductGenericWebTransitionPanel key={`driver:${product.product}`} fixtureMode={fixtureMode} product={product.product} onSaved={onSaved} />
       <ProductDiagnostics product={product} />

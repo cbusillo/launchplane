@@ -1061,3 +1061,19 @@ export function checkServiceDeliveryApplyReceipt(
 ): Promise<import("./generated/openapi.ts").ServiceDeliveryApplyReceiptResponse> {
   return requestJson(BROWSER_WRITE_ROUTES.serviceDeliveryReceiptRead, "POST", { original_request: originalRequest, idempotency_key: idempotencyKey }, signal);
 }
+
+export function applyProductExpectedConfig(
+  payload: import("./generated/openapi.ts").ApplyProductExpectedConfigData["body"],
+  options: BrowserOperationOptions,
+): Promise<import("./generated/openapi.ts").AcceptedEvidenceResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.productExpectedConfigApply, "POST", payload,
+    options.signal, options.idempotencyKey, options.onDispatch);
+}
+
+export function applyProductStableLaneRepair(
+  payload: import("./generated/openapi.ts").ApplyProductStableLaneRepairData["body"],
+  options: BrowserOperationOptions,
+): Promise<import("./generated/openapi.ts").AcceptedEvidenceResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.productStableLaneRepairApply, "POST", payload,
+    options.signal, options.idempotencyKey, options.onDispatch);
+}
