@@ -3283,6 +3283,11 @@
   margin-top: 16px;
 }
 
+.product-website-cleanup-plan {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
 .product-owner-plan {
   margin: 0;
   border-left: 3px solid var(--accent);
