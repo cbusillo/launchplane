@@ -226,6 +226,7 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
     def test_timed_out_drain_does_not_request_service_rollback(self) -> None:
         for payload in (
             {"result": {"deploy_state": "draining"}},
+            {"error": {"code": "self_deploy_drain_timeout"}},
             {"error": {"code": "invalid_request"}},
             {"error": {"code": "authorization_denied"}},
             {"error": {"code": "authentication_required"}},
