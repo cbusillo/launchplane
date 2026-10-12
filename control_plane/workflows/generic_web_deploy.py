@@ -555,6 +555,16 @@ def execute_generic_web_deploy(
     image_effect_attempted = False
     provider_deployment_observation: GenericWebProviderDeploymentObservation | None = None
     post_deploy_update = PostDeployUpdateEvidence()
+    try:
+        prior_attempt = record_store.read_deployment_record(record_id)
+    except FileNotFoundError:
+        pass
+    else:
+        if recorded_application_lifecycle(prior_attempt) is not None:
+            # Pre-effect refusals must not erase the original attempt's receipt.
+            post_deploy_update = PostDeployUpdateEvidence(
+                evidence=prior_attempt.post_deploy_update.evidence
+            )
     key_readback: IntegrationKeyReadbackEvidence | None = None
     verified_build_evidence: dict[str, str] = {}
     application_lifecycle: GenericWebApplicationLifecycle | None = None

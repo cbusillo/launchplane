@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 import unittest
@@ -287,8 +288,34 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             )
         close_out.assert_called_once()
 
+    def test_changed_declaration_cannot_erase_existing_attempt_receipt(self) -> None:
+        _result, store = self._deploy()
+        record_id = store.deployments[0].record_id
+        original = recorded_application_lifecycle(store.read_deployment_record(record_id))
+        lane = store.profile.lanes[0].model_copy(
+            update={"generic_web_extensions": GenericWebLaneExtensions()}
+        )
+        store.profile = store.profile.model_copy(update={"lanes": (lane,)})
+        provider = _LifecycleDeployProvider(target_id="app-123")
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=_request(),
+            deployment_record_id=record_id,
+            deploy_provider=provider,
+        )
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertFalse(result.provider_effect_attempted)
+        self.assertEqual(provider.runtime_identities, [])
+        self.assertEqual(
+            recorded_application_lifecycle(store.read_deployment_record(record_id)), original
+        )
+
     def test_removed_declaration_removes_only_previously_managed_schedule(self) -> None:
+        clock = self.enterContext(patch("control_plane.workflows.ship.datetime", wraps=datetime))
+        clock.now.return_value = datetime.now(UTC)
         result, store = self._deploy()
+        first_record_id = result.deployment_record_id
         self.assertEqual(result.post_deploy_status, "pass")
         self._api_context()
         unrelated = {**self.original, "name": "unrelated"}
@@ -304,6 +331,7 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             deploy_provider=_LifecycleDeployProvider(target_id="app-123"),
         )
         self.assertEqual(result.post_deploy_status, "pass")
+        self.assertNotEqual(result.deployment_record_id, first_record_id)
         self.assertNotIn("billing-recovery", self.schedules)
         self.assertEqual(self.schedules["unrelated"], unrelated)
 

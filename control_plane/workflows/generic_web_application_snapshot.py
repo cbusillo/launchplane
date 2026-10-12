@@ -164,6 +164,10 @@ def application_snapshot_for_deploy(
             prior = latest
     same_attempt = read_snapshot(deployment_record_id)
     if same_attempt is not None:
+        if same_attempt.extensions != extensions and not rollback:
+            raise click.ClickException(
+                "Application lifecycle declarations changed for this reserved attempt; use a new operation after exact recovery."
+            )
         if (same_attempt.artifact_id, same_attempt.source_git_ref) != (artifact_id, source_git_ref):
             raise click.ClickException("Application lifecycle attempt identity changed.")
         prior = same_attempt

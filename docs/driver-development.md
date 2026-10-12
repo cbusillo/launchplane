@@ -102,8 +102,9 @@ The lifecycle pauses existing declared schedules before deploying, runs the
 declared maintenance before product post-deploy verification, then runs each
 enabled schedule once as a canary before enabling its recurring invocation.
 Disabled schedules remain disabled. Provider readback must match the exact
-application and schedule. Failure restores the original schedule payload under
-the same effect fence and records failed post-deploy evidence. A lost fence
+application and schedule. Failure before an image effect restores original
+schedules under the same effect fence; failure after an image effect holds jobs
+disabled until a qualified rollback. Both record failed post-deploy evidence. A lost fence
 cannot perform restoration, and runtime-image evidence alone cannot close out
 an operation whose application lifecycle remains unobserved. Managed cron
 expressions use the grammar in [`control_plane/cron.py`](../control_plane/cron.py).
@@ -445,3 +446,8 @@ use `-app`; record that suffix explicitly when switching its profile. The named
 `verireel-postgres` transport retains VeriReel's Prisma, seed and environment
 interfaces while its template lane, product identity and resource prefixes come
 from the profile. It does not imply compatibility with other applications.
+
+A reservation keeps its original lifecycle declaration. Changing a declaration
+requires a new operation after exact recovery of the previous attempt; refusal
+does not erase that attempt's receipt. Held snapshots remain available even
+when the interrupted attempt never reached environment inventory.
