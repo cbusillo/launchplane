@@ -951,6 +951,21 @@ class PublicIngressMonitorTests(unittest.TestCase):
                         incident.material_fingerprint.route_authority.route_binding_status,
                         "missing",
                     )
+                persisted = PostgresRecordStore(database_url="sqlite+pysqlite:///:memory:")
+                try:
+                    persisted.ensure_schema()
+                    persisted.write_public_ingress_observation_record(observation)
+                    self.assertEqual(
+                        persisted.list_public_ingress_observation_records(), (observation,)
+                    )
+                    for incident in result.incidents:
+                        persisted.write_public_ingress_incident_record(incident)
+                        self.assertEqual(
+                            persisted.read_public_ingress_incident_record(incident.incident_id),
+                            incident,
+                        )
+                finally:
+                    persisted.close()
 
     def test_live_disabled_binding_is_preserved_in_tls_observation(self) -> None:
         store = _Store((_profile().model_copy(update={"production_use": "live"}),))
