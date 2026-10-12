@@ -205,6 +205,7 @@ class OwnerReviewStatusPublisher:
                         labels=facts.labels,
                         review_label=profile.owner.review_label,
                         pure_dependency_update=facts.pure_dependency_update,
+                        director_standing=profile.release_on_acceptance == "director_standing",
                     )
                     synthetic = not intent.explicit_override and recorded_train_candidate(
                         store=store,
@@ -354,6 +355,7 @@ class OwnerReviewStatusPublisher:
             labels=facts.labels,
             review_label=profile.owner.review_label,
             pure_dependency_update=facts.pure_dependency_update,
+            director_standing=profile.release_on_acceptance == "director_standing",
         )
         if not intent.review_required:
             decisions = store.list_product_review_decision_records(
@@ -369,7 +371,9 @@ class OwnerReviewStatusPublisher:
             )
             status = OwnerReviewStatus(
                 state="neutral",
-                description="Engineering-only change; no Client preview review required",
+                description="Director standing acceptance; no Client preview review required"
+                if profile.release_on_acceptance == "director_standing"
+                else "Engineering-only change; no Client preview review required",
             )
             if current is not None and current.decision == "changes_requested":
                 status = owner_review_status(

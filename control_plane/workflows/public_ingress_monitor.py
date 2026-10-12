@@ -975,7 +975,7 @@ def _store_monitor_observation(
                 _outbox_incident_event_id(delivery) == incident_event.event_id
                 for delivery in outbox_deliveries
             ):
-                direct_destination_kinds = ("email", "discord")
+                direct_destination_kinds = ()
             delivery_attempts.extend(
                 deliver_public_ingress_incident_notifications(
                     record_store=record_store,
@@ -1207,7 +1207,7 @@ def _public_ingress_notification_outbox_deliveries(
             )
         for policy in policies:
             for destination in policy.destinations:
-                if destination.kind != "github_issue" or destination.status != "enabled":
+                if destination.status != "enabled":
                     continue
                 attempt_id = build_public_ingress_notification_attempt_id(
                     incident_id=incident.incident_id,
@@ -1264,7 +1264,14 @@ def _public_ingress_notification_outbox_deliveries(
                                 "observation_id": incident_event.observation_id,
                                 "incident_event_id": incident_event.event_id,
                             },
-                            "destination": _github_notification_destination_payload(destination),
+                            "destination": (
+                                _github_notification_destination_payload(destination)
+                                if destination.kind == "github_issue"
+                                else {
+                                    "destination_id": destination.destination_id,
+                                    "kind": destination.kind,
+                                }
+                            ),
                             "body": body,
                             "existing_issue_url": _latest_external_url(previous_attempts),
                             "marker": attempt_id,
@@ -3120,6 +3127,7 @@ class PublicIngressNotificationDriverSet:
         incident: PublicIngressIncidentRecord,
         observation: PublicIngressObservationRecord,
         previous_attempts: tuple[PublicIngressNotificationAttemptRecord, ...] = (),
+        notification_body: str = "",
     ) -> PublicIngressNotificationDelivery:
         try:
             if destination.kind == "github_issue":
@@ -3138,6 +3146,7 @@ class PublicIngressNotificationDriverSet:
                     incident=incident,
                     observation=observation,
                     email_sender=self.email_sender,
+                    notification_body=notification_body,
                     secret_resolver=lambda secret_name: self._resolve_secret(secret_name, incident),
                 )
             if destination.kind == "discord":
@@ -3147,6 +3156,7 @@ class PublicIngressNotificationDriverSet:
                     incident=incident,
                     observation=observation,
                     discord_sender=self.discord_sender,
+                    notification_body=notification_body,
                     secret_resolver=lambda secret_name: self._resolve_secret(secret_name, incident),
                 )
         except Exception as error:  # noqa: BLE001 - delivery failures are recorded per destination.
@@ -3223,14 +3233,21 @@ def deliver_public_ingress_notification_outbox_delivery(
     record: OutboxDeliveryRecord,
     drivers: PublicIngressNotificationDriverSet,
     mark_provider_started: Callable[[str, str], None],
+    record_store: PublicIngressNotificationOutboxStore | None = None,
 ) -> OutboxDeliveryRecord:
     delivery_record = record
     try:
         payload = record.payload
         attempt_payload = _dict_payload(payload.get("attempt"))
-        destination = PublicIngressNotificationDestination.model_validate(
-            _dict_payload(payload.get("destination"))
-        )
+        destination_payload = _dict_payload(payload.get("destination"))
+        if destination_payload.get("kind") in {"email", "discord"}:
+            return _deliver_direct_notification_outbox(
+                record=record,
+                drivers=drivers,
+                record_store=record_store,
+                mark_provider_started=mark_provider_started,
+            )
+        destination = PublicIngressNotificationDestination.model_validate(destination_payload)
         body = _required_payload_text(payload, "body")
         marker = _required_payload_text(payload, "marker")
         existing_issue_url = _optional_payload_text(payload, "existing_issue_url")
@@ -3346,6 +3363,97 @@ def deliver_public_ingress_notification_outbox_delivery(
             delivery_record,
             error_code=_public_ingress_provider_safe_error_code(error),
         )
+
+
+class PublicIngressNotificationOutboxStore(PublicIngressMonitorStore, Protocol):
+    def read_public_ingress_incident_record(
+        self, incident_id: str
+    ) -> PublicIngressIncidentRecord: ...
+
+    def read_public_ingress_observation_record(
+        self, record_id: str
+    ) -> PublicIngressObservationRecord: ...
+
+
+def _deliver_direct_notification_outbox(
+    *,
+    record: OutboxDeliveryRecord,
+    drivers: PublicIngressNotificationDriverSet,
+    record_store: PublicIngressNotificationOutboxStore | None,
+    mark_provider_started: Callable[[str, str], None],
+) -> OutboxDeliveryRecord:
+    payload = record.payload
+    attempt_payload = _dict_payload(payload.get("attempt"))
+    destination_payload = _dict_payload(payload.get("destination"))
+    if record.provider_operation_key:
+        # Neither SMTP nor Discord can reconcile an interrupted send by event identity.
+        return record.model_copy(
+            update={
+                "state": "failed",
+                "error_code": "delivery_outcome_unknown",
+                "lease_owner": "",
+                "lease_expires_at": "",
+            }
+        )
+    if record_store is None:
+        raise ValueError("direct notification outbox requires record store")
+    incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
+    observation = record_store.read_public_ingress_observation_record(
+        str(attempt_payload["observation_id"])
+    )
+    destination = next(
+        (
+            destination
+            for policy in _matching_notification_policies(
+                record_store=record_store, incident=incident
+            )
+            if policy.policy_id == attempt_payload.get("policy_id")
+            for destination in policy.destinations
+            if destination.destination_id == destination_payload.get("destination_id")
+            and destination.kind == destination_payload.get("kind")
+            and destination.status == "enabled"
+        ),
+        None,
+    )
+    if destination is None:
+        return record.model_copy(
+            update={
+                "state": "failed",
+                "error_code": "destination_unavailable",
+                "lease_owner": "",
+                "lease_expires_at": "",
+            }
+        )
+    operation_key = str(attempt_payload["attempt_id"])
+    mark_provider_started(operation_key, destination.kind)
+    delivery = drivers.send(
+        destination=destination,
+        event=_public_ingress_event_value(attempt_payload.get("event")),
+        incident=incident,
+        observation=observation,
+        notification_body=_required_payload_text(payload, "body"),
+    )
+    attempt = PublicIngressNotificationAttemptRecord.model_validate(
+        {
+            **attempt_payload,
+            "delivery_status": delivery.delivery_status,
+            "action": delivery.action,
+            "error_message": "Delivery failed." if delivery.delivery_status == "failed" else "",
+        }
+    )
+    return record.model_copy(
+        update={
+            "state": "pending" if delivery.delivery_status == "failed" else "delivered",
+            "provider_id": destination.kind,
+            # A returned failure is retryable; a process interruption retains the durable marker.
+            "provider_operation_key": "",
+            "action": delivery.action,
+            "error_code": "provider_error" if delivery.delivery_status == "failed" else "",
+            "lease_owner": "",
+            "lease_expires_at": "",
+            "payload": {**payload, "attempt_result": attempt.model_dump(mode="json")},
+        }
+    )
 
 
 def _deliver_github_issue_notification(
@@ -3552,6 +3660,7 @@ def _deliver_email_notification(
     observation: PublicIngressObservationRecord,
     email_sender: Callable[[PublicIngressNotificationDestination, EmailMessage], object],
     secret_resolver: Callable[[str], str],
+    notification_body: str = "",
 ) -> PublicIngressNotificationDelivery:
     smtp_username = secret_resolver(destination.smtp_username_secret).strip()
     smtp_password = secret_resolver(destination.smtp_password_secret).strip()
@@ -3570,7 +3679,8 @@ def _deliver_email_notification(
         f"[Launchplane] Public ingress {event}: {incident.product}/{incident.instance}"
     )
     message.set_content(
-        public_ingress_incident_notification_body(
+        notification_body
+        or public_ingress_incident_notification_body(
             event=event, incident=incident, observation=observation
         )
     )
@@ -3586,6 +3696,7 @@ def _deliver_discord_notification(
     observation: PublicIngressObservationRecord,
     discord_sender: Callable[[str, dict[str, object]], object],
     secret_resolver: Callable[[str], str],
+    notification_body: str = "",
 ) -> PublicIngressNotificationDelivery:
     webhook_url = secret_resolver(destination.discord_webhook_secret).strip()
     if not webhook_url:
@@ -3608,7 +3719,8 @@ def _deliver_discord_notification(
             "embeds": [
                 {
                     "title": f"Public ingress {event}: {incident.product}/{incident.instance}",
-                    "description": public_ingress_incident_notification_body(
+                    "description": notification_body
+                    or public_ingress_incident_notification_body(
                         event=event, incident=incident, observation=observation
                     ),
                     "color": color,

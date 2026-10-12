@@ -321,6 +321,7 @@ def pull_request_client_review(
     label: str,
     record_store: object = None,
     client_set: bool = True,
+    director_standing: bool = False,
 ) -> bool:
     from control_plane.client_test_notes import ClientTestNotesRequired, change_client_review
     from control_plane.client_release_repositories import recorded_train_candidate
@@ -351,6 +352,7 @@ def pull_request_client_review(
         body=str(payload.get("body") or ""),
         labels=labels,
         review_label=label,
+        director_standing=director_standing,
     )
     base = payload.get("base")
     if not intent.explicit_override and recorded_train_candidate(

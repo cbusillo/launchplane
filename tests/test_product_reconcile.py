@@ -3351,6 +3351,33 @@ class FakeGenericWebPreviewDriver:
 
 
 class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
+    def test_director_standing_preview_needs_valid_notes_without_a_client_invitation(self) -> None:
+        payload = _generic_web_preview_profile().model_dump(mode="json")
+        payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
+        payload["release_on_acceptance"] = "director_standing"
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        for body, labels in (
+            ("## Client test notes\nTry the approval buttons.", []),
+            (
+                "## Client test notes\nTry the changed page.",
+                [{"name": "owner-review"}],
+            ),
+        ):
+            with self.subTest(body=body, labels=labels):
+                self.github.pull_request.update(body=body, labels=labels)
+                self.request("preview", 5)
+                result = self.reconcile()
+                self.assertIn(result["action"], ("apply", "none"))
+                self.assertIs(result["owner_review_requested"], False)
+                for comment in self.comments.on(5):
+                    self.assertNotIn("@site-owner", cast(str, comment["body"]))
+        self.github.pull_request["body"] = ""
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["action"], "wait")
+
     def test_reset_preview_head_keeps_the_serving_build(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)

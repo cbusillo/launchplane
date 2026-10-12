@@ -6,6 +6,32 @@ from control_plane.client_test_notes import change_client_review, client_test_no
 
 
 class ClientTestNotesTests(unittest.TestCase):
+    def test_director_standing_preserves_note_validation_and_dependency_exemption(self) -> None:
+        for notes in (
+            "",
+            "Nothing for the Client to test",
+            "Nothing for the Client to test: CI only.",
+            "Try the new buttons.",
+        ):
+            with self.subTest(notes=notes):
+                intent = change_client_review(
+                    body="## Client test notes\n" + notes,
+                    labels=("owner-review",),
+                    review_label="owner-review",
+                    director_standing=True,
+                )
+                self.assertFalse(intent.review_required)
+                self.assertEqual(intent.error, client_test_notes(notes, review_override=True).error)
+        intent = change_client_review(
+            body="Bumps a dependency.",
+            labels=(),
+            review_label="owner-review",
+            director_standing=True,
+            pure_dependency_update=True,
+        )
+        self.assertFalse(intent.review_required)
+        self.assertFalse(intent.error)
+
     def test_real_notes_request_review_without_a_label(self) -> None:
         intent = change_client_review(
             body="## Client test notes\nTry the new price list.",
@@ -133,7 +159,12 @@ class ClientTestNotesTests(unittest.TestCase):
             ),
         ):
 
-            def read(record_store: object = None, *, client_set: bool = True) -> bool:
+            def read(
+                record_store: object = None,
+                *,
+                client_set: bool = True,
+                director_standing: bool = False,
+            ) -> bool:
                 return pull_request_client_review(
                     control_plane_root=Path("."),
                     context="test",
@@ -141,14 +172,18 @@ class ClientTestNotesTests(unittest.TestCase):
                     label="owner-review",
                     record_store=record_store,
                     client_set=client_set,
+                    director_standing=director_standing,
                 )
 
             self.assertTrue(read())
+            self.assertFalse(read(director_standing=True))
             self.assertFalse(read(store))
             payload["body"] = "Synthetic train candidate."
             self.assertFalse(read(store))
             with self.assertRaises(ClientTestNotesRequired):
                 read()
+            with self.assertRaises(ClientTestNotesRequired):
+                read(director_standing=True)
             payload["body"] = "## Client test notes\nTry the price list."
             payload["base"] = {"ref": "other-base"}
             self.assertTrue(read(store))
