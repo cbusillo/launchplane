@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import signal
 import socket
-from threading import Event
+from threading import Event, Thread
 import time
 from typing import cast
 import uuid
@@ -22,6 +22,7 @@ from control_plane.merge_train_scheduler import (
     run_merge_train_scheduler_pass,
 )
 from control_plane.merge_train_events import MergeTrainEventListener
+from control_plane.merge_train_stall_monitor import run_stall_monitor_loop
 from control_plane.outbox_worker import (
     DEFAULT_OUTBOX_WORKER_ERROR_BACKOFF_SECONDS,
     DEFAULT_OUTBOX_WORKER_LEASE_SECONDS,
@@ -592,9 +593,21 @@ def service_merge_train_workers_run(
     previous_sigterm = signal.signal(signal.SIGTERM, _request_stop)
     previous_sigint = signal.signal(signal.SIGINT, _request_stop)
     listener = MergeTrainEventListener(database_url)
+    record_store = _store(state_dir=state_dir, database_url=database_url)
+    monitor = Thread(
+        target=run_stall_monitor_loop,
+        kwargs={
+            "store": record_store,
+            "root": control_plane_root or _control_plane_root(),
+            "stop_event": stop_event,
+        },
+        name="merge-train-stall-monitor",
+        daemon=True,
+    )
+    monitor.start()
     try:
         run_merge_train_scheduler_loop(
-            record_store=_store(state_dir=state_dir, database_url=database_url),
+            record_store=record_store,
             control_plane_root=control_plane_root or _control_plane_root(),
             interval_seconds=interval_seconds,
             stop_event=stop_event,
@@ -602,6 +615,8 @@ def service_merge_train_workers_run(
             wait_for_event=listener.wait,
         )
     finally:
+        stop_event.set()
+        monitor.join(timeout=10)
         listener.close()
         signal.signal(signal.SIGTERM, previous_sigterm)
         signal.signal(signal.SIGINT, previous_sigint)

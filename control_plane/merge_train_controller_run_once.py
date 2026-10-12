@@ -1,3 +1,4 @@
+import hashlib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -5083,11 +5084,11 @@ def _retry_closed_candidate_after_passing_checks(
         "required_checks_status": observed.required_checks_status,
         "closed_batch_pull_request_number": closed["number"],
     }
-    retry_used = failed.check_retry_of or any(
-        record.candidate.check_retry_of
-        and _merge_train_candidate_matches_dry_run_queue(
-            candidate=record.candidate, dry_run_result=dry_run_result, base_sha=snapshot.base_sha
-        )
+    # One replacement per failed record, not per unchanged queue. A replacement
+    # may itself fail transiently and later pass its exact-head rerun. Earlier
+    # recovery on the same base must not leave that new failure stuck forever.
+    retry_used = any(
+        record.candidate.check_retry_of == active_candidate_record.record_id
         for record in _candidate_history_on_base(
             candidate_store=candidate_store,
             repository=repository,
@@ -5435,7 +5436,12 @@ def _plan_failed_candidate_replacement(
         # A separate ref keeps the retry from rediscovering the failed run and batch PR.
         check_retry = reason_code == "candidate_checks_recovered"
         suffix, retry_field = retry_kind
-        batch_id = candidate.batch_id + "-" + suffix
+        retry_identity = (
+            "-" + hashlib.sha256(active_candidate_record.record_id.encode()).hexdigest()[:12]
+            if check_retry
+            else ""
+        )
+        batch_id = candidate.batch_id + retry_identity + "-" + suffix
         candidate = MergeTrainBatchCandidate.model_validate(
             {
                 **candidate.model_dump(),

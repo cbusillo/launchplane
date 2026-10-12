@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
+    build_merge_train_batch_candidate_ref,
     build_merge_train_batch_candidate_record,
 )
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
@@ -189,6 +190,24 @@ class RecoveryDiagnosticsTests(TestCase):
         )
         self.store = FilesystemRecordStore(self.path / "retry")
         self.store.write_merge_train_batch_candidate_record(self.failed)
+        retry_id = candidate.batch_id + "-used-check-retry"
+        consumed = build_merge_train_batch_candidate_record(
+            candidate=candidate.model_copy(
+                update={
+                    "batch_id": retry_id,
+                    "candidate_ref": build_merge_train_batch_candidate_ref(
+                        repository=candidate.repository,
+                        base_branch=candidate.base_branch,
+                        batch_id=retry_id,
+                    ),
+                    "check_retry_of": self.failed.record_id,
+                }
+            ),
+            source="consumed-check-retry",
+            updated_at=candidate.updated_at,
+            status="superseded",
+        )
+        self.store.write_merge_train_batch_candidate_record(consumed)
         self.client.observe_batch_candidate_checks.return_value = candidate.model_copy(
             update={"required_checks_status": "pass", "status": "passed"}
         )

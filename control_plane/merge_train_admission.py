@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
+
 from datetime import datetime, timezone
 from typing import Callable, Literal, Protocol, cast
 
@@ -201,6 +203,11 @@ class MergeTrainControllerStatusReadModel(BaseModel):
         default=None, description="Last observed pass, not current readiness or landing authority."
     )
     last_controller_result_policy_status: MergeTrainControllerPolicyStatus = "unchecked"
+    stall: MergeTrainStallRecord | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     controller_diagnostics: MergeTrainControllerLeaseDiagnostics | None = None
     controller_records: tuple[MergeTrainControllerRecordSummary, ...]
     reconciliation_diagnostics: tuple[MergeTrainReconciliationDiagnostic, ...] = ()
@@ -388,7 +395,15 @@ def build_merge_train_controller_status_read_model(
         except ValueError:
             # Imported Level 1 dry-run history may not contain a parseable date.
             pass
+    stall = None
+    read_stall = getattr(store, "read_merge_train_stall_record", None)
+    if callable(read_stall):
+        try:
+            stall = read_stall(repository)
+        except FileNotFoundError:
+            pass
     return MergeTrainControllerStatusReadModel(
+        stall=stall,
         repository=repository,
         base_branch=base_branch,
         generated_at=generated_at,
