@@ -596,6 +596,13 @@ def execute_generic_web_deploy(
                 _recorded_generic_build(record_store, resolved_profile, desired_build)
                 or desired_build
             )
+        if (
+            resolved_lane.generic_web_extensions.verification_extension
+            and post_deploy_executor is None
+        ):
+            raise click.ClickException(
+                "Declared product verification has no supported post-deploy executor."
+            )
         verified_build_evidence = lane_build_proof(desired_build)
         snapshot = application_snapshot_for_deploy(
             store=record_store,

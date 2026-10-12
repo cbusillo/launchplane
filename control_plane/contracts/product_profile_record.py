@@ -704,6 +704,13 @@ class LaunchplaneProductProfileRecord(BaseModel):
                 raise ValueError("enabled product preview requires health_path")
         if self.lifecycle_state != "active" and self.preview.enabled:
             raise ValueError("non-active product profiles cannot retain enabled previews")
+        for lane in self.lanes:
+            if lane.generic_web_extensions.verification_extension and (
+                self.driver_id.strip() != "generic-web" or lane.instance != "testing"
+            ):
+                raise ValueError(
+                    "declared VeriReel testing verification requires a generic-web testing lane"
+                )
         lane_instances = [lane.instance.strip().lower() for lane in self.lanes]
         if len(lane_instances) != len(set(lane_instances)):
             raise ValueError("product profile lane instances must be unique")

@@ -402,6 +402,32 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             )
         close_out.assert_not_called()
 
+    def test_declared_product_verification_cannot_be_skipped_or_requested_in_production(
+        self,
+    ) -> None:
+        extensions = GenericWebLaneExtensions(verification_extension="verireel-testing")
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(update={"generic_web_extensions": extensions})
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        provider = _LifecycleDeployProvider(target_id="app-123")
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=_GenericWebDeployStore(profile),
+            request=_request(),
+            deploy_provider=provider,
+        )
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertFalse(result.provider_effect_attempted)
+        self.assertEqual(provider.runtime_identities, [])
+        for change in (
+            {"driver_id": "verireel"},
+            {"lanes": (lane.model_copy(update={"instance": "prod"}),)},
+        ):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                type(profile).model_validate(
+                    profile.model_copy(update=change).model_dump(mode="json")
+                )
+
     def test_unsupported_lifecycle_provider_refuses_before_deploy(self) -> None:
         profile = _profile()
         lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})

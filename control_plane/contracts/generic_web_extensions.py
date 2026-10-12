@@ -1,5 +1,7 @@
 """Product-owned application lifecycle declarations for the shared web driver."""
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.cron import validate_cron_expression
 
@@ -34,6 +36,11 @@ class GenericWebApplicationSchedule(GenericWebMaintenanceCommand):
 class GenericWebLaneExtensions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    verification_extension: Literal["", "verireel-testing"] = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     maintenance: tuple[GenericWebMaintenanceCommand, ...] = ()
     schedules: tuple[GenericWebApplicationSchedule, ...] = ()
 
@@ -46,4 +53,4 @@ class GenericWebLaneExtensions(BaseModel):
 
     @property
     def configured(self) -> bool:
-        return bool(self.maintenance or self.schedules)
+        return bool(self.maintenance or self.schedules or self.verification_extension)
