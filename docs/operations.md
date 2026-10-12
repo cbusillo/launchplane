@@ -553,6 +553,21 @@ request matches the held reservation's fingerprint. This includes legacy
 reservations whose original reconcile inputs were overwritten by a newer build.
 Keep the reservation held. The explicit recovery path requires independently
 proven original coordinates; a current build or a key hash cannot replace them.
+The service's normal testing reconciler can retire this unavailable-original
+attempt as a terminal failed reservation when it proves there is no live effect.
+It excludes surviving event workers with the provider-target execution lock,
+requires an expired lease, unchanged product/target bindings and the exact
+service-originated testing reservation, and refuses post-deploy/data-work effects.
+The Dokploy inspector currently qualifies only a testing compose with complete
+terminal-failure history, no containers of any state, no schedules and no queued
+or running compose work. Missing lists, unreadable provider state, a successful
+deployment, target drift or an available original request keep the fence held.
+The failed reservation retains a value-free recovery audit; the normal verified
+build path then reserves and deploys the fresh request. This performs no provider
+mutation during inspection, adopts no runtime identity and suppresses no incident.
+It introduces no caller permission or production recovery path. The existing
+reconcile/environment reads show the subsequent deployment; only actual matching
+identity, passing health and monitor-resolved incidents prove lane recovery.
 Other changed, cross-lane or ambiguous evidence retains
 `recovery_evidence_conflict`. Neither refusal inspects the provider or changes
 the reservation.

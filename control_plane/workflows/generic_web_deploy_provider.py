@@ -441,6 +441,13 @@ class GenericWebDeployRuntimeArtifactProvider(Protocol):
     ) -> GenericWebRuntimeArtifactObservation: ...
 
 
+@runtime_checkable
+class GenericWebDeployNoLiveEffectProvider(Protocol):
+    def observe_testing_no_live_effect(
+        self, *, control_plane_root: Path, target: GenericWebProviderReconciliationTarget
+    ) -> dict[str, object] | None: ...
+
+
 class DokployGenericWebDeployProvider:
     provider_id = "dokploy"
     delegated_executor = "control-plane.dokploy"
@@ -683,6 +690,74 @@ class DokployGenericWebDeployProvider:
                 target_type=target.target_type,
             ),
         )
+
+    def observe_testing_no_live_effect(
+        self, *, control_plane_root: Path, target: GenericWebProviderReconciliationTarget
+    ) -> dict[str, object] | None:
+        """Complete negative evidence for a never-successful, empty testing compose.
+
+        Running-container filters and permissive history parsers cannot prove
+        absence: paused/stopped containers, missing lists and malformed provider
+        responses are all refusals here.
+        """
+        if (
+            target.instance != "testing"
+            or target.target_type != "compose"
+            or target.provider_id != self.provider_id
+        ):
+            return None
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
+        payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="compose", target_id=target.target_id
+        )
+        app_name = payload.get("appName")
+        if (
+            payload.get("composeId") != target.target_id
+            or not isinstance(app_name, str)
+            or not app_name.strip()
+            or payload.get("composeStatus") not in {"idle", "done", "error"}
+        ):
+            return None
+        schedules = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/schedule.list",
+            query={"id": target.target_id, "scheduleType": "compose"},
+        )
+        if schedules != []:
+            return None
+        history = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/deployment.allByType",
+            query={"id": target.target_id, "type": "compose"},
+        )
+        if not isinstance(history, list) or any(
+            not isinstance(item, dict)
+            or dokploy_api.deployment_status(item)
+            not in {"error", "failed", "cancelled", "canceled"}
+            or not dokploy_api.deployment_key(item)
+            or not item.get("finishedAt")
+            for item in history
+        ):
+            return None
+        query: dict[str, str | int] = {"appName": app_name, "appType": "docker-compose"}
+        server_id = payload.get("serverId")
+        if not isinstance(server_id, str) or not server_id.strip():
+            return None
+        query["serverId"] = server_id
+        containers = dokploy_api.dokploy_request(
+            host=host, token=token, path="/api/docker.getContainersByAppNameMatch", query=query
+        )
+        if containers != []:
+            return None
+        # No values or provider coordinates are part of the public audit.
+        return {
+            "state": "no_live_effect",
+            "terminal_failed_deployments": len(history),
+            "container_count": 0,
+            "schedule_count": 0,
+        }
 
     def observe_runtime_artifact(
         self,

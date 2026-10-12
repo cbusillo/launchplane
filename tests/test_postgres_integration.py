@@ -9552,6 +9552,22 @@ class RealPostgresServiceTokenRetirementTests(unittest.TestCase):
 
 
 class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
+    def test_event_recovery_retirement_and_binding_drift_on_postgres(self) -> None:
+        from tests.test_testing_event_deploy_recovery import TestingEventDeployRecoveryTests
+
+        for scenario in (
+            "test_absence_retires_with_failed_audit_and_releases_target_for_normal_deploy",
+            "test_target_change_during_inspection_and_stale_attempt_refuse_atomic_retirement",
+        ):
+            with self.subTest(scenario=scenario), _head_postgres_database() as url:
+                fixture = TestingEventDeployRecoveryTests(scenario)
+                fixture.database_url = url
+                try:
+                    fixture.setUp()
+                    getattr(fixture, scenario)()
+                finally:
+                    fixture.doCleanups()
+
     def test_execution_exclusion_is_cross_connection_and_releases_on_exit(self) -> None:
         with _head_postgres_database() as url:
             first = PostgresRecordStore(database_url=url)
