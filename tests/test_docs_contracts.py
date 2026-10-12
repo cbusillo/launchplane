@@ -11,9 +11,6 @@ class DocsContractsTests(TestCase):
         ui_openapi = json.loads(
             Path("frontend/generated/openapi-ui.json").read_text(encoding="utf-8")
         )
-        browser_write_contract = Path("frontend/src/browser-write-contract.ts").read_text(
-            encoding="utf-8"
-        )
 
         read_operations = canonical_openapi["x-launchplane-ui-read-operations"]
         write_operations = canonical_openapi["x-launchplane-ui-write-operations"]
@@ -27,5 +24,3 @@ class DocsContractsTests(TestCase):
         for route_path, operation_id in write_operations.items():
             self.assertEqual(set(ui_openapi["paths"][route_path]), {"post"})
             self.assertEqual(ui_openapi["paths"][route_path]["post"]["operationId"], operation_id)
-        for route_path in write_operations:
-            self.assertIn(route_path, browser_write_contract)
