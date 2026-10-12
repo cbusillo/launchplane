@@ -2008,9 +2008,12 @@ The added lane has no public URLs or fabricated monitoring check. Configure
 its private endpoint and enabled `private_http` monitoring through their
 reviewed service paths before treating the lane as verified. An already
 registered private lane is refused rather than rewritten. Website products
-still require a tracked HTTPS origin. The Product Onboarding Manifest
-(Advanced) wrapper uses its same-revision reusable repair workflow so the
-public/private request contract is evaluated by the reviewed implementation.
+still require a tracked HTTPS origin. The deployed service evaluates the request contract. The protected Product
+Onboarding Manifest (Advanced) wrapper retains its existing immutable worker
+pin. Its pinned version still requires a public origin: private registration
+needs a separately qualified supported service/UI caller or a reviewed pinned
+worker activation before dispatch. Source delivery alone does not update that
+transport or its managed authority.
 
 ### Product profile endpoints
 

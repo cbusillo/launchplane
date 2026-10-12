@@ -24,11 +24,15 @@ function readReview(response: AcceptedEvidenceResponse, product: string, reason:
       reviewed_plan_sha256: result.plan_sha256 } };
 }
 
+export function productDisplayNameDraftKey(product: string): string {
+  return `launchplane:product-profile-draft:${product}:display-name`;
+}
+
 export function ProductDisplayNamePanel({ product, fixtureMode, onSaved }: {
   product: string; fixtureMode: DevFixtureMode; onSaved: () => void;
 }) {
   const scope = `${product}:display-name:apply`;
-  const storageKey = `launchplane:product-profile-draft:${product}:display-name`;
+  const storageKey = productDisplayNameDraftKey(product);
   const [review, setReview] = useState<Review | null>(() => {
     try {
       if (!recoverBrowserOperationState(scope).requiresIdempotencyContinuity) {
@@ -162,7 +166,7 @@ export function ProductDisplayNamePanel({ product, fixtureMode, onSaved }: {
       <p className="eyebrow">Product profile</p><h2 id="product-display-name-title">Display name</h2>
       <p>Choose the name shown in the sidebar and product workspace.</p>
     </div></header>
-    <p>Current: {current ?? (fixtureMode ? "Unavailable in fixtures" : "Reading profile…")}</p>
+    <p>Current: <output aria-label="Current display name">{current ?? (fixtureMode ? "Unavailable in fixtures" : "Reading profile…")}</output></p>
     <fieldset disabled={locked || Boolean(fixtureMode) || current === null}>
       <div className="product-config-field"><label htmlFor="product-display-name-value">New display name</label><input type="text" id="product-display-name-value" value={displayName} onChange={event => { setDisplayName(event.target.value); setNotice(""); }} /></div>
       <ReasonField reason={reason} onChange={value => { setReason(value); setNotice(""); }} />

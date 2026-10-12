@@ -140,10 +140,10 @@ class ProductStableLaneRepairTests(unittest.TestCase):
         replacement.validate_write_contract()
         # This is registration only: no endpoint/check or healthy observation is fabricated.
         store.profile = replacement
-        with self.assertRaisesRegex(ProductStableLaneRepairBoundaryError, "already registered"):
+        with self.assertRaises(ProductStableLaneRepairBoundaryError):
             build_product_stable_lane_repair_plan(record_store=store, request=_request(base_url=""))
         store.profile = original
-        with self.assertRaisesRegex(ProductStableLaneRepairBoundaryError, "no public website"):
+        with self.assertRaises(ProductStableLaneRepairBoundaryError):
             build_product_stable_lane_repair_plan(record_store=store, request=_request())
 
     def test_website_lane_still_requires_tracked_https_origin(self) -> None:

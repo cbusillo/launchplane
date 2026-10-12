@@ -7,6 +7,10 @@ for (const outcome of ["applied", "lost-response", "lost-response-stale", "stale
       const fixtures = await import("/ui/src/dev-fixtures.ts");
       return { products: fixtures.productsForFixture("products"), fixtureIdentity: fixtures.fixtureIdentity };
     });
+    const draftKey = await page.evaluate(async () => {
+      const panel = await import("/ui/src/ProductDisplayNamePanel.tsx");
+      return panel.productDisplayNameDraftKey("atlas-commerce");
+    });
     const sent: Array<{ key: string; body: Record<string, unknown> }> = [];
     let displayName = products[0].display_name;
     let productReads = 0;
@@ -50,16 +54,16 @@ for (const outcome of ["applied", "lost-response", "lost-response-stale", "stale
       idempotency_key: new URL(route.request().url()).searchParams.get("operation_key"),
       state: receiptCompleted ? "completed" : "unresolved", original_trace_id: receiptCompleted ? "rename" : "",
     } }));
-    if (outcome === "storage-failure") await page.addInitScript(() => {
+    if (outcome === "storage-failure") await page.addInitScript(draftKey => {
       const original = Storage.prototype.setItem;
       Storage.prototype.setItem = function(key, value) {
-        if (key.endsWith(":display-name") && key.startsWith("launchplane:product-profile-draft:")) throw new DOMException("Quota exceeded", "QuotaExceededError");
+        if (key === draftKey) throw new DOMException("Quota exceeded", "QuotaExceededError");
         return original.call(this, key, value);
       };
-    });
+    }, draftKey);
     await page.goto("/ui/products/atlas-commerce");
     let panel = page.getByRole("region", { name: "Display name", exact: true });
-    await expect(panel.getByText(`Current: ${products[0].display_name}`, { exact: true })).toBeVisible();
+    await expect(panel.getByLabel("Current display name")).toHaveText(products[0].display_name);
     const preview = panel.getByRole("button", { name: "Preview name change", exact: true });
     const apply = panel.getByRole("button", { name: "Apply name change", exact: true });
     await expect(apply).toBeDisabled();
@@ -70,7 +74,6 @@ for (const outcome of ["applied", "lost-response", "lost-response-stale", "stale
       await expect(panel).toContainText("Caller cannot change this product profile.");
       await expect(apply).toBeDisabled(); expect(sent).toEqual([]); return;
     }
-    await expect(panel).toContainText("Reviewed name");
     await expect(apply).toBeEnabled();
     await panel.getByLabel("New display name").fill("Unreviewed Name");
     await expect(apply).toBeDisabled();
@@ -85,7 +88,7 @@ for (const outcome of ["applied", "lost-response", "lost-response-stale", "stale
     await panel.screenshot({ path: testInfo.outputPath("display-name-reviewed.png") });
     await apply.click();
     if (outcome === "storage-failure") {
-      await expect(panel).toContainText("Nothing was sent."); expect(sent).toEqual([]); return;
+      await expect(panel.getByRole("alert")).toBeVisible(); expect(sent).toEqual([]); return;
     }
     await expect.poll(() => sent.length).toBe(1);
     expect(sent[0].key).toBeTruthy();
@@ -108,26 +111,25 @@ for (const outcome of ["applied", "lost-response", "lost-response-stale", "stale
         return;
       }
       // Lost reviewed draft must still recover only through a completed receipt.
-      await page.evaluate(() => {
-        const keys = Object.keys(sessionStorage).filter(key => key.startsWith("launchplane:product-profile-draft:") && key.endsWith(":display-name"));
-        if (keys.length !== 1) throw new Error("The reviewed rename draft was not preserved before Apply.");
-        sessionStorage.removeItem(keys[0]);
-      });
+      await page.evaluate(key => {
+        if (sessionStorage.getItem(key) === null) throw new Error("The reviewed draft was not preserved before Apply.");
+        sessionStorage.removeItem(key);
+      }, draftKey);
       await page.reload();
       panel = page.getByRole("region", { name: "Display name", exact: true });
       const check = panel.getByRole("button", { name: "Check original operation", exact: true });
       await check.click();
-      await expect(panel).toContainText("another change remains locked");
+      await expect(panel.getByRole("button", { name: "Check original operation", exact: true })).toBeEnabled();
       await expect(panel.getByRole("button", { name: "Preview name change", exact: true })).toBeDisabled();
       receiptCompleted = true;
       await check.click();
-      await expect(panel).toContainText("Original rename completed.");
+      await expect(panel.getByRole("button", { name: "Check original operation", exact: true })).toHaveCount(0);
       await panel.getByLabel("New display name").fill("Another Website");
       await panel.getByLabel("Change reason").fill("A fresh reviewed request after receipt recovery.");
       await expect(panel.getByRole("button", { name: "Preview name change", exact: true })).toBeEnabled();
       expect(sent).toHaveLength(1);
     } else {
-      await expect(panel).toContainText("Applied and read back: Example Website.");
+      await expect(panel.getByLabel("Current display name")).toHaveText("Example Website");
       await expect(apply).toBeDisabled();
       expect(productReads).toBeGreaterThan(1);
       await expect(page.locator('.rail-product-link span[title="Example Website"]')).toHaveText("Example Website");

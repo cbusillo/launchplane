@@ -41,7 +41,7 @@ name: Product Onboarding Manifest (Advanced)
         default: ""
         type: string
       base_url:
-        description: Tracked HTTPS origin for website products; empty for a product recorded with no public website.
+        description: HTTPS origin selected from tracked target domains.
         required: false
         default: ""
         type: string
@@ -74,7 +74,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: ./.github/workflows/reusable-stable-lane-repair.yml
+    uses: cbusillo/launchplane/.github/workflows/reusable-stable-lane-repair.yml@1fae6fda68dd5994f34df227e66b7275b3a9cacb # main
     with:
       mode: ${{ inputs.mode }}
       product: ${{ inputs.product }}
