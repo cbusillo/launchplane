@@ -13,7 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class LaunchplaneServiceComposeTests(unittest.TestCase):
-    @unittest.skipUnless(shutil.which("docker"), "Docker CLI is required to render Compose")
+    @unittest.skipUnless(
+        shutil.which("docker") or os.environ.get("CI"), "Docker CLI is required to render Compose"
+    )
     def test_services_use_the_supplied_image_and_credentialed_services_receive_it(self) -> None:
         image_reference = "example.invalid/fixture/runtime@sha256:" + "a" * 64
         with TemporaryDirectory() as directory:
@@ -34,6 +36,11 @@ class LaunchplaneServiceComposeTests(unittest.TestCase):
                 cwd=root,
                 env={
                     "PATH": os.environ["PATH"],
+                    **{
+                        key: os.environ[key]
+                        for key in ("HOME", "DOCKER_CONFIG")
+                        if key in os.environ
+                    },
                     ARTIFACT_IMAGE_REFERENCE_ENV_KEY: image_reference,
                     "LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK": "fixture-network",
                 },
@@ -44,10 +51,14 @@ class LaunchplaneServiceComposeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         services = json.loads(result.stdout)["services"]
         self.assertTrue(services)
+        env_file_services = {name for name, service in services.items() if service.get("env_file")}
+        self.assertTrue(
+            env_file_services, "Rendered Compose lost all service env-file declarations"
+        )
         for name, service in services.items():
             with self.subTest(service=name):
                 self.assertEqual(service["image"], image_reference)
-                if service.get("env_file"):
+                if name in env_file_services:
                     self.assertEqual(
                         service["environment"].get(ARTIFACT_IMAGE_REFERENCE_ENV_KEY),
                         image_reference,
