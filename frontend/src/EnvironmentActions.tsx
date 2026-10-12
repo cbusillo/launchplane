@@ -20,6 +20,7 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 import { OdooReleasePanel } from "./OdooReleasePanel";
 import { ServiceRestartPanel } from "./ServiceRestartPanel";
 import { HealthMonitoringPanel } from "./HealthMonitoringPanel";
+import { BackupWorkerCredentialsPanel } from "./BackupWorkerCredentialsPanel";
 import { ProductionBackupAuthorityPanel } from "./ProductionBackupAuthorityPanel";
 import { ProductPromotionFlow } from "./ProductPromotionFlow";
 import { EvidenceBadge, MissingEvidenceState, humanize } from "./ProductOps";
@@ -68,6 +69,7 @@ export function EnvironmentActionsView({
         key={`backup:${detail.product}:${detail.context}:${detail.environment}`}
         detail={detail} fixtureMode={!!fixtureMode} onRefresh={onRefresh}
       /> : null}
+      {detail.environment === "prod" ? <BackupWorkerCredentialsPanel key={`credentials:${detail.product}:${detail.context}`} detail={detail} fixtureMode={!!fixtureMode} /> : null}
       <HealthMonitoringPanel
         key={`monitoring:${detail.product}:${detail.context}:${detail.environment}`}
         detail={detail} fixtureMode={!!fixtureMode} onRefresh={onRefresh} refreshToken={refreshToken}

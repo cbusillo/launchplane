@@ -1,4 +1,5 @@
 import type {
+  RebindBackupWorkerCredentialsData,
   ApplyProductionBackupAuthorityData,
   ApplyProductGenericWebTransitionData,
   ApplyProductDisplayNameData,
@@ -31,6 +32,7 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  backupWorkerBindings: "/v1/products/{product}/environments/prod/backup-worker-bindings/apply" satisfies RebindBackupWorkerCredentialsData["url"],
   productionBackupAuthorityApply: "/v1/production-backup-authority/apply" satisfies ApplyProductionBackupAuthorityData["url"],
   productGenericWebTransition: "/v1/product-profiles/{product}/generic-web-transition" satisfies ApplyProductGenericWebTransitionData["url"],
   productDisplayName: "/v1/product-profiles/{product}/display-name" satisfies ApplyProductDisplayNameData["url"],

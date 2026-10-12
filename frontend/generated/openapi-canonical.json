@@ -3532,6 +3532,44 @@
         "title": "AuthzWorkflowEvidenceCandidate",
         "type": "object"
       },
+      "BackupCredentialBindingRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "bindings": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Bindings",
+            "type": "object"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bindings",
+          "reason"
+        ],
+        "title": "BackupCredentialBindingRequest",
+        "type": "object"
+      },
       "BackupGateEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -81351,6 +81389,106 @@
         "summary": "Refuse new legacy runtime backup migrations; use typed authority apply"
       }
     },
+    "/v1/production-backup-authority/preflight": {
+      "get": {
+        "operationId": "qualify_production_backup_preflight",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "promotion_action",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Promotion Action",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Preflight"
+      }
+    },
     "/v1/production-backup-gates": {
       "post": {
         "operationId": "enqueue_production_backup_gate",
@@ -82459,6 +82597,166 @@
           }
         },
         "summary": "List product environments"
+      }
+    },
+    "/v1/products/{product}/environments/prod/backup-worker-bindings": {
+      "get": {
+        "operationId": "read_backup_worker_bindings",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Bindings"
+      }
+    },
+    "/v1/products/{product}/environments/prod/backup-worker-bindings/apply": {
+      "post": {
+        "operationId": "rebind_backup_worker_credentials",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCredentialBindingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Rebind"
       }
     },
     "/v1/products/{product}/environments/{environment}": {
@@ -90433,12 +90731,14 @@
     "/v1/product-profiles/{product}/reconcile-requests": "read_product_reconcile_requests",
     "/v1/product-review": "read_product_review",
     "/v1/production-backup-authority": "read_production_backup_authority",
+    "/v1/production-backup-authority/preflight": "qualify_production_backup_preflight",
     "/v1/production-backup-gates/operations/{operation_id}": "read_production_backup_gate_operation",
     "/v1/products": "list_products",
     "/v1/products/{product}": "read_product",
     "/v1/products/{product}/activity": "read_product_activity",
     "/v1/products/{product}/contexts/{context}/instances/{instance}/operational-readiness": "read_product_operational_readiness",
     "/v1/products/{product}/environments": "list_product_environments",
+    "/v1/products/{product}/environments/prod/backup-worker-bindings": "read_backup_worker_bindings",
     "/v1/products/{product}/environments/{environment}": "read_product_environment",
     "/v1/products/{product}/environments/{environment}/config-status": "read_product_environment_config_status",
     "/v1/products/{product}/environments/{environment}/promotion-status": "read_product_promotion_status",
@@ -90475,6 +90775,7 @@
     "/v1/product-review/feedback/retry": "retry_product_review_feedback",
     "/v1/production-backup-authority/apply": "apply_production_backup_authority",
     "/v1/production-backup-gates": "enqueue_production_backup_gate",
+    "/v1/products/{product}/environments/prod/backup-worker-bindings/apply": "rebind_backup_worker_credentials",
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",
     "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": "dispatch_product_promotion_workflow",

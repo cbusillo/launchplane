@@ -265,6 +265,9 @@ from control_plane.http_routes.odoo_prod_release_operation import (
     OdooProdReleaseOperationRouteDependencies,
     register_odoo_prod_release_operation_routes,
 )
+from control_plane.http_routes.production_backup_credentials import (
+    register_production_backup_credential_routes,
+)
 from control_plane.http_routes.production_backup_gate import (
     ProductionBackupGateRouteDependencies,
     register_production_backup_gate_routes,
@@ -26708,6 +26711,9 @@ def create_launchplane_fastapi_app(
     register_production_backup_authority_read_routes(
         app,
         dependencies=read_route_dependencies,
+    )
+    register_production_backup_credential_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_operator_mutation_identity
     )
     register_production_backup_gate_routes(
         app,

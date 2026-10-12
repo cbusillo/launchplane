@@ -38700,6 +38700,122 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def compare_and_rebind_worker_credentials(
+        self,
+        *,
+        expected_profile: LaunchplaneProductProfileRecord,
+        context: str,
+        instance: str,
+        expected_records: tuple[SecretRecord, ...],
+        expected_bindings: tuple[SecretBinding, ...],
+        replacements: tuple[SecretBinding, ...],
+        mutation: DbOnlyMutationRequest,
+        reason: str,
+    ) -> tuple[str, LaunchplaneIdempotencyRecord]:
+        """Rename worker bindings and receipt atomically; never touch encrypted versions."""
+        from control_plane.secrets import LAUNCHPLANE_WORKER_SECRET_INTEGRATION
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            status, reservation_row, reservation = self._reserve_db_only_mutation_in_session(
+                session=session,
+                mutation=mutation,
+            )
+            if status != "acquired":
+                return status, reservation
+            assert reservation_row is not None
+            self._lock_product_authority_bundle_write(session)
+            profile_row = session.scalar(
+                select(LaunchplaneProductProfileRow)
+                .where(
+                    LaunchplaneProductProfileRow.product == expected_profile.product,
+                )
+                .with_for_update()
+            )
+            records = tuple(
+                SecretRecord.model_validate(row.payload)
+                for row in session.scalars(
+                    select(LaunchplaneSecretRow)
+                    .where(
+                        LaunchplaneSecretRow.integration == LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+                        LaunchplaneSecretRow.context == context,
+                        LaunchplaneSecretRow.instance == instance,
+                        LaunchplaneSecretRow.scope == "context_instance",
+                    )
+                    .with_for_update()
+                ).all()
+            )
+            bindings = tuple(
+                SecretBinding.model_validate(row.payload)
+                for row in session.scalars(
+                    select(LaunchplaneSecretBindingRow)
+                    .where(
+                        LaunchplaneSecretBindingRow.integration
+                        == LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+                        LaunchplaneSecretBindingRow.context == context,
+                        LaunchplaneSecretBindingRow.instance == instance,
+                    )
+                    .with_for_update()
+                ).all()
+            )
+            if (
+                profile_row is None
+                or self._read_product_profile_payload(profile_row.payload) != expected_profile
+                or sorted(records, key=lambda r: r.secret_id)
+                != sorted(expected_records, key=lambda r: r.secret_id)
+                or sorted(bindings, key=lambda b: b.binding_id)
+                != sorted(expected_bindings, key=lambda b: b.binding_id)
+            ):
+                raise SecretCopySourceConflictError(
+                    "Worker credential metadata changed before commit."
+                )
+            require_bundle_context_owner(
+                ProductAuthorityBundle(required_context_owner=(expected_profile.product, context)),
+                (
+                    self._read_product_profile_payload(row.payload)
+                    for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                ),
+            )
+            originals = {binding.binding_id: binding for binding in bindings}
+            for binding in replacements:
+                before = originals[binding.binding_id]
+                if (
+                    before.model_copy(
+                        update={
+                            "binding_key": binding.binding_key,
+                            "updated_at": binding.updated_at,
+                        }
+                    )
+                    != binding
+                ):
+                    raise ValueError("Worker rebinding must preserve the credential and scope.")
+                session.merge(self._secret_binding_row(binding))
+                event = SecretAuditEvent(
+                    event_id=f"{binding.binding_id}-rebound-{uuid4().hex}",
+                    secret_id=binding.secret_id,
+                    event_type="relabelled",
+                    recorded_at=_utc_now_timestamp(),
+                    actor=mutation.scope,
+                    detail=reason,
+                    metadata={
+                        "from_key": before.binding_key,
+                        "binding_key": binding.binding_key,
+                        "source": "backup-worker-rebinding",
+                    },
+                )
+                session.merge(self._secret_audit_event_row(event))
+                self._after_product_authority_bundle_step("rebind_worker_credential")
+            completion = complete_launchplane_mutation_reservation(
+                reservation,
+                response_status_code=mutation.response_status_code,
+                response_trace_id=mutation.response_trace_id,
+                completed_at=self._database_mutation_timestamp(session),
+                response_payload=mutation.response_payload,
+            )
+            self._sync_idempotency_row(reservation_row, completion)
+            session.commit()
+            return "written", completion
+
     def write_secret_version(self, version: SecretVersion) -> None:
         self._write_row(self._secret_version_row(version))
 

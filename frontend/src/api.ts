@@ -1,3 +1,4 @@
+import type { BackupCredentialBindingRequest, AcceptedEvidenceResponse, QualifyProductionBackupPreflightData } from "./generated/openapi.ts";
 import type {
   ApiErrorPayload,
   AuthSessionPayload,
@@ -1076,4 +1077,14 @@ export function applyProductStableLaneRepair(
 ): Promise<import("./generated/openapi.ts").AcceptedEvidenceResponse> {
   return requestJson(BROWSER_WRITE_ROUTES.productStableLaneRepairApply, "POST", payload,
     options.signal, options.idempotencyKey, options.onDispatch);
+}
+
+export function readBackupWorkerBindings(product: string, signal?: AbortSignal): Promise<AcceptedEvidenceResponse> {
+  return requestJson(`/v1/products/${encodeURIComponent(product)}/environments/prod/backup-worker-bindings`, "GET", undefined, signal);
+}
+export function rebindBackupWorkerCredentials(product: string, body: BackupCredentialBindingRequest, options: BrowserOperationOptions): Promise<AcceptedEvidenceResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.backupWorkerBindings.replace("{product}", encodeURIComponent(product)), "POST", body, options.signal, options.idempotencyKey, options.onDispatch);
+}
+export function qualifyProductionBackupPreflight(query: QualifyProductionBackupPreflightData["query"]): Promise<AcceptedEvidenceResponse> {
+  return requestJson(`/v1/production-backup-authority/preflight?${new URLSearchParams(query)}`, "GET");
 }
