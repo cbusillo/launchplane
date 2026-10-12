@@ -78,7 +78,9 @@ export function App() {
     ResourceState<ProductSiteOverview[]>
   >(emptyResource());
   const [signingOut, setSigningOut] = useState(false);
-  const [inventoryReceivedAt, setInventoryReceivedAt] = useState<number | null>(null);
+  const [inventoryReceivedAt, setInventoryReceivedAt] = useState<{
+    wallTime: number; monotonicTime: number;
+  } | null>(null);
   const [sessionNotice, setSessionNotice] = useState("");
   useEvidenceRefresh(route.kind,
     !fixtureMode && authState.status === "signed_in" && authState.identity.role !== "owner" &&
@@ -193,7 +195,7 @@ export function App() {
             )
           : await listProducts(controller.signal).then((payload) => payload.products);
         if (active) {
-          setInventoryReceivedAt(Date.now());
+          setInventoryReceivedAt({ wallTime: Date.now(), monotonicTime: performance.now() });
           setProductsResource({
             status: "ready",
             data: [...products].sort((left, right) =>

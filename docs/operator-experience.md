@@ -818,7 +818,7 @@ mark for unverified evidence, and minus for absent or unsupported lanes. Hover
 labels and the accessible status name identify the lane, state and known
 diagnostic layers. An alert can include an open warning-severity incident;
 its tone follows the shared operational health calculation. Colors are tuned separately for light and dark themes;
-the sidebar uses the same operational health calculation as the product view.
+fresh sidebar signals use the same operational health calculation as the product view.
 Amber hover labels explain missing runtime identity, incomplete public DNS/TLS
 observations, or returned warning details. Route authority diagnostics alone
 do not turn healthy observed runtime evidence into a failure.

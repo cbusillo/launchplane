@@ -65,18 +65,18 @@ export function AppShell({
   onRefresh: () => void;
   onThemeChange: (theme: Theme) => void;
   productsResource: ResourceState<ProductSiteOverview[]>;
-  inventoryReceivedAt: number | null;
+  inventoryReceivedAt: { wallTime: number; monotonicTime: number } | null;
   route: AppRoute;
   selectedProduct: ProductSiteOverview | null;
   signingOut: boolean;
   theme: Theme;
 }) {
-  const [now, setNow] = useState(Date.now);
+  const [now, setNow] = useState(performance.now());
   useEffect(() => {
-    const update = () => setNow(Date.now());
+    const update = () => setNow(performance.now());
     update();
     const timer = inventoryReceivedAt === null ? undefined : window.setTimeout(update,
-      Math.max(1, inventoryReceivedAt + 2 * READ_REFRESH_INTERVAL_MS - Date.now()));
+      Math.max(1, inventoryReceivedAt.monotonicTime + 2 * READ_REFRESH_INTERVAL_MS - performance.now()));
     window.addEventListener("focus", update);
     document.addEventListener("visibilitychange", update);
     return () => {
@@ -86,9 +86,9 @@ export function AppShell({
     };
   }, [inventoryReceivedAt]);
   const inventoryStale = productsResource.status === "error" || inventoryReceivedAt === null ||
-    now >= inventoryReceivedAt + 2 * READ_REFRESH_INTERVAL_MS;
+    now >= inventoryReceivedAt.monotonicTime + 2 * READ_REFRESH_INTERVAL_MS;
   const staleDescription = inventoryStale ? `Stale data${inventoryReceivedAt === null ? "" :
-    `; data from ${new Date(inventoryReceivedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}` : "";
+    `; data from ${new Date(inventoryReceivedAt.wallTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}` : "";
   const products = (productsResource.data ?? []).map(product => expireProductEvidence(product));
   useEvidenceExpiry(products.flatMap(product => product.environments));
   const selectedProductKey = routeProductKey(route);

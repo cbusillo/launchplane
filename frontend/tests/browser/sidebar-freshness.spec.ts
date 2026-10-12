@@ -67,7 +67,7 @@ for (const theme of ["dark", "light"] as const) {
     await expect(testing).toHaveAttribute("data-tone", "warning");
     if (testInfo.project.name === "desktop") await testing.hover();
     await expect(testing).toHaveAttribute("title", /DNS\/TLS/);
-    await expect(testing.locator(".lucide-triangle-alert")).toBeAttached();
+    const warningSymbol = await testing.locator("svg").innerHTML();
     await screenshot("warning");
     mode = "alert";
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS + 10);
@@ -77,7 +77,7 @@ for (const theme of ["dark", "light"] as const) {
     await expect(page.locator(".rail-freshness")).toContainText("Stale data");
     for (const dot of await dots.all()) {
       await expect(dot).toHaveAttribute("data-tone", "stale");
-      await expect(dot.locator(".lucide-clock-3")).toBeAttached();
+      expect(await dot.locator("svg").innerHTML()).not.toBe(warningSymbol);
     }
     await screenshot("stale");
     mode = "fresh";
@@ -88,12 +88,19 @@ for (const theme of ["dark", "light"] as const) {
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS + 10);
     await expect.poll(() => Boolean(release)).toBe(true);
     const pendingReads = reads;
+    // A wall-clock correction cannot extend the inventory's freshness bound.
+    await page.clock.setSystemTime(new Date(fixtures.now - 3600_000));
     await page.clock.runFor(2 * READ_REFRESH_INTERVAL_MS);
     expect(reads).toBe(pendingReads);
     await expect(testing).toHaveAttribute("data-tone", "stale");
     mode = "fresh";
     release!();
     await expect(testing).toHaveAttribute("data-tone", "verified");
+    await page.goto(`/ui/products/${fixtures.products[0].product}/activity`);
+    await expect(testing).toHaveAttribute("data-tone", "verified");
+    const activityReads = reads;
+    await page.clock.runFor(READ_REFRESH_INTERVAL_MS + 10);
+    await expect.poll(() => reads).toBe(activityReads + 1);
     expect(mutations).toEqual([]);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   });

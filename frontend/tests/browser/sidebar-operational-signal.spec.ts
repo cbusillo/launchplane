@@ -55,12 +55,13 @@ for (const state of cases) {
       product.environments = state === "absent" ? [] : [lane];
       const products = [product];
       if (state === "healthy") {
-        for (const extraState of ["warning", "failing", "unknown"]) {
+        for (const extraState of ["warning", "stale", "failing", "unknown"]) {
           const extra = structuredClone(product);
           extra.product = `example-${extraState}`;
           extra.display_name = `${extraState[0].toUpperCase() + extraState.slice(1)} example`;
           const extraLane = extra.environments[0];
-          if (extraState === "warning") extraLane.provenance.stale_after = new Date(now - 1000).toISOString();
+          if (extraState === "stale") extraLane.provenance.stale_after = new Date(now - 1000).toISOString();
+          if (extraState === "warning") extraLane.topology.observed.tls_domains = [];
           if (extraState === "failing") {
             extraLane.health_monitoring.checks[0].status = "fail";
             extraLane.health_monitoring.checks[0].failure_code = "dns_failure";
@@ -121,7 +122,7 @@ for (const state of cases) {
     }
     if (state === "healthy") {
       const signals = await page.locator('.rail-product-link [data-lane="testing"]').evaluateAll(icons =>
-        icons.map(icon => `${getComputedStyle(icon).color};${icon.querySelector("svg")?.getAttribute("class")}`));
+        icons.map(icon => `${getComputedStyle(icon).color};${icon.querySelector("svg")?.innerHTML}`));
       expect(new Set(signals).size).toBe(signals.length);
     }
     expect(mutations).toEqual([]);
