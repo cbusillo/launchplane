@@ -966,8 +966,8 @@ of the deployment. Verified lane evidence requires passing health and matching
 expected and observed identities for the current deployment, with no probe
 predating the product profile, deployment, or private endpoint authority.
 Missing identity, a newer failure, or a changed deployment cannot reuse an
-older pass. Evidence expires within the shared monitor cadence
-(`PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS`, currently 30 minutes); public HTTP
+older pass. Evidence expires within its lane's
+[monitor cadence](operations.md#lane-health-monitoring); public HTTP
 topology and health-check summaries use that same expiry. Observations refresh
 the read model without rewriting deployment history or inventory timestamps.
 The environment detail's target identity fields use the same observed placement

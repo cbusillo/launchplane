@@ -9,10 +9,6 @@ import type {
   ApplyProductImageRepositoryData,
   ApplyProductProductionUseData,
   ApplyProductOwnerData,
-  ApproveOrdinaryAgentOperationData,
-  CancelOrdinaryAgentOperationData,
-  RevokeOrdinaryAgentSessionData,
-  DisconnectOrdinaryAgentPrincipalData,
   ApproveHumanPrivilegedOperationData,
   DispatchProductPromotionWorkflowData,
   DryRunProductPromotionData,
@@ -21,10 +17,7 @@ import type {
   EnqueueProductionBackupGateData,
   RankWorkGraphSnapshotData,
   RevokeHumanPrivilegedOperationData,
-  PlanOrdinaryAgentDeliveryActivationData,
   PrepareAuthorizationCandidateData,
-  PrepareOrdinaryAgentMergeTrainTargetData,
-  PrepareOrdinaryAgentDeliveryPolicyData,
   WriteProductReviewDecisionData,
   RetryProductReviewFeedbackData,
   WriteReleaseReviewDecisionData,
@@ -46,10 +39,6 @@ export const BROWSER_WRITE_ROUTES = {
   ownerSecretSubmit: "/v1/owner-secret-inputs/submit" satisfies SubmitOwnerSecretInputData["url"],
   releaseReviewDecision: "/v1/release-review/decisions" satisfies WriteReleaseReviewDecisionData["url"],
   releaseReviewUrgentOpening: "/v1/release-review/urgent-openings" satisfies OpenUrgentReleaseReviewData["url"],
-  ordinaryAgentApprove: "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve" satisfies ApproveOrdinaryAgentOperationData["url"],
-  ordinaryAgentCancel: "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel" satisfies CancelOrdinaryAgentOperationData["url"],
-  ordinaryAgentRevokeSession: "/v1/ordinary-agent-sessions/{principal_id}/{session_id}/revoke" satisfies RevokeOrdinaryAgentSessionData["url"],
-  ordinaryAgentDisconnect: "/v1/ordinary-agent-connections/{principal_id}/disconnect" satisfies DisconnectOrdinaryAgentPrincipalData["url"],
   productEnvironmentConfigApply:
     "/v1/products/{product}/environments/{environment}/config/apply" satisfies ApplyProductEnvironmentConfigData["url"],
   productImageRepositoryApply: "/v1/product-profiles/{product}/image-repository" satisfies ApplyProductImageRepositoryData["url"],
@@ -76,14 +65,8 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/privileged-operations/plans/{operation_id}/approve" satisfies ApproveHumanPrivilegedOperationData["url"],
   privilegedOperationRevoke:
     "/v1/privileged-operations/plans/{operation_id}/revoke" satisfies RevokeHumanPrivilegedOperationData["url"],
-  ordinaryAgentDeliveryActivationPlan:
-    "/v1/privileged-operations/ordinary-agent-delivery-activation/plans" satisfies PlanOrdinaryAgentDeliveryActivationData["url"],
   authorizationCandidatePrepare:
     "/v1/privileged-operations/authorization-candidates/prepare" satisfies PrepareAuthorizationCandidateData["url"],
-  ordinaryMergeTrainTargetPrepare:
-    "/v1/privileged-operations/merge-train-targets/prepare" satisfies PrepareOrdinaryAgentMergeTrainTargetData["url"],
-  ordinaryAgentDeliveryPolicyPrepare:
-    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/prepare" satisfies PrepareOrdinaryAgentDeliveryPolicyData["url"],
 } as const;
 
 export type BrowserWriteRoute =

@@ -825,111 +825,16 @@ grant, so it is a Director decision.
 
 ### Inspecting Pilot Preparation Inputs
 
-This and the next section describe the retired ordinary-agent pilot's code,
-which [#2437](https://github.com/cbusillo/launchplane/issues/2437) deletes. Do
-not use or extend it.
+The dedicated ordinary-agent preparation routes and browser callers are removed.
+Historical preparation context remains readable; new generic proposals cannot
+supply it. Remaining domain/storage retirement is tracked by
+[launchplane#2437](https://github.com/cbusillo/launchplane/issues/2437).
 
-The Agent delivery workbench offers **Check setup prerequisites** when preparing
-delivery. Its parameterless read uses the existing managed
-`authz_policy_operation.propose` authority and strict immutable-ID admin
-checks against the current runtime and active DB policy. The five
-activation lifecycle actions alone do not authorize this inspection.
-
-The response reports current authorization-policy provenance, tracked repository
-inventory, and branches explicitly configured in the unique active merge-train
-policy. Inventory contains no branch default. Selection uses the highest
-inventory revision first, so a retired latest record never revives an older
-tracked record. Multiple configured branches are valid; conflicting current
-records, unavailable storage, and incomplete bounded reads remain explicit.
-An incomplete read cannot establish that no configuration exists.
-
-These are configuration inputs, not proof of pilot eligibility, preview health,
-or delivery readiness. The read does not inspect agent registration. Initial
-enrollment follows installation of its exact ordinary-agent policy rule and
-requires the principal to be absent; an existing enrolled principal is not a
-prerequisite for preparing the first policy package.
-
-The same read reports whether the service's configured trusted terminal identity
-has exactly one managed `ordinary_agent_enrollment.propose` rule for the
-Launchplane global target. It reports configured identity absence, missing,
-unmanaged, mismatched, or ambiguous capability without returning the identity,
-token, managed IDs, or policy selectors. When the capability is missing and the
-managed set is unoccupied, **Allow the trusted terminal to request a client
-connection** creates the existing closed managed-policy candidate for separate
-review. The server derives the identity and narrow rule. Existing unmanaged,
-mismatched, or duplicate rules remain conflicts; preparation does not adopt or
-delete them. The stored plan binds those reviewed selectors; a later bootstrap
-identity change does not rebind it. Removing this managed set blocks future terminal enrollment
-propose/status access under that rule only; it does not revoke ordinary
-credentials, sessions, ordinary rules, or an existing delivery activation.
-
-The same parameterless inspection includes bounded metadata for the separate
-provider-inspection App needed by delivery setup. It reads only the code-defined
-App-ID key in Launchplane's DB-backed service-context runtime record and the
-exact inspection integration's configured managed-secret record and private-key
-binding metadata. It accepts no caller-selected context, key, integration, or
-secret. This is an input projection for the existing immutable administrator's
-proposal task; it adds no permission or descriptor and does not authorize
-generic `secret.list` access for admins or agents.
-
-The projection distinguishes a missing runtime record, an unreadable record,
-a missing or malformed App-ID value, missing binding metadata, and ambiguous
-records. Bounded exact storage reads cannot silently turn incomplete evidence
-into absence. A `metadata_recorded` result means only that the recorded selector
-and binding metadata agree. The current-version ID is an unverified pointer;
-the read does not establish version existence, key validity, App identity or
-installation, provider permissions, protection, custody, or delivery readiness.
-Technical identifiers remain collapsed in the workbench.
-
-This inspection reads no product-environment details, ordinary delivery-App
-bindings, principals, credentials, secret-version objects, ciphertext, audit or
-version history, or plaintext. It does not decrypt, construct an App identity,
-call a provider, or persist a proposal, grant, session, activation, or operation.
-Unavailable inspection metadata leaves the existing policy/inventory diagnostics
-usable. It cannot repair missing administrator authority or replace the
-separately reviewed policy, activation, custody, and worker-start steps. No
-later proposal consumes this display snapshot as authority; its own preparation
-and execution resolve current records independently.
 
 ### Preparing The First Ordinary Client Policy
 
-After **Check setup prerequisites**, **Prepare client access** accepts a
-client label and a recorded project/branch. The browser generates an independent
-random client principal and a separate request identity; neither comes from the
-repository name or branch. It retains the submitted metadata for an exact retry
-after interruption. No credential or private key is stored in this form.
-The terminal enrollment capability must be ready first, so the first client can
-request its connection after separately governed setup. Every connection still
-requires its own administrator approval.
-**Discard saved setup** allows revised choices after a rejected or abandoned
-request. It removes only the browser's saved request; a proposal already recorded
-in Launchplane remains available for review and is not cancelled by that action.
-
-`POST /v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/prepare`
-uses the existing managed proposal authority and immutable human administrator
-checks. It resolves current tracked inventory, the configured branch and the
-active authorization policy, then prepares one managed ordinary rule. The
-service owns the managed identifiers and routine reason. An occupied identity
-or conflicting request is not an instruction to replace another client's scope.
-
-The proposal uses the existing managed authorization lifecycle and preserves
-unrelated policy. Schema 2 requires its explicit mediated migration to schema 3;
-schema 3 retains its existing reconciliation behavior. Preparation context binds
-the original typed intent and record provenance, while historical requests omit
-the new optional context. Generic proposal callers cannot supply that context.
-After the first such proposal is persisted, rollback must retain a reader that
-supports this preparation context. Do not strip context from stored proposals
-or restore an older reader that rejects it.
-
-The saved proposal appears in the existing delivery setup choices. The browser
-carries its reference forward without asking the administrator to copy an ID.
-Preparing either plan does not approve it, install a policy, enroll a principal,
-or activate delivery. Existing reauthentication, quorum, exact review, activation,
-custody and runtime qualification checks remain separate. This operation adds no
-generic secret access and does not change the parameterless input read above.
-
-**Preserved history:** Phase 1 introduced planning-only actions without grants.
-That history does not describe the deployed Phase 2 worker flow.
+The first-client preparation route is removed. Its persisted context remains
+part of historical policy records.
 
 ## Existing-identity policy version compatibility
 

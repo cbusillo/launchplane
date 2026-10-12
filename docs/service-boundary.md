@@ -125,7 +125,8 @@ governed expectation, custody and currentness contract.
 - native FastAPI Launchplane service runtime reads:
   - `GET /v1/service/health-monitor/status`, requiring
     `launchplane_service.read` for the Launchplane service context; returns
-    bounded persisted scheduler completion and watchdog report receipts, with
+    bounded persisted scheduler completion, watchdog and on-change receipts;
+    `instance=prod|testing` selects that cadence's slot window, with
     no request payloads, keys, leases or monitor invocation. See
     [health monitoring operations](operations.md)
     for paging and the separate notification-delivery qualification.
