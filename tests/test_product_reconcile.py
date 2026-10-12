@@ -3241,7 +3241,7 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         for body, labels in (
             ("## Client test notes\nTry the approval buttons.", []),
             (
-                "## Client test notes\nNothing for the Client to test: CI only.",
+                "## Client test notes\nTry the changed page.",
                 [{"name": "owner-review"}],
             ),
         ):

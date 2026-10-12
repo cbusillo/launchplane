@@ -7,7 +7,12 @@ from control_plane.client_test_notes import change_client_review, client_test_no
 
 class ClientTestNotesTests(unittest.TestCase):
     def test_director_standing_preserves_note_validation_and_dependency_exemption(self) -> None:
-        for notes in ("", "Nothing for the Client to test", "Try the new buttons."):
+        for notes in (
+            "",
+            "Nothing for the Client to test",
+            "Nothing for the Client to test: CI only.",
+            "Try the new buttons.",
+        ):
             with self.subTest(notes=notes):
                 intent = change_client_review(
                     body="## Client test notes\n" + notes,
@@ -16,7 +21,7 @@ class ClientTestNotesTests(unittest.TestCase):
                     director_standing=True,
                 )
                 self.assertFalse(intent.review_required)
-                self.assertEqual(intent.error, client_test_notes(notes).error)
+                self.assertEqual(intent.error, client_test_notes(notes, review_override=True).error)
         intent = change_client_review(
             body="Bumps a dependency.",
             labels=(),
