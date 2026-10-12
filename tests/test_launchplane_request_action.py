@@ -70,10 +70,14 @@ global.fetch = async (url, init) => {{
   const configuredStatusCodes = String(process.env.TEST_STATUS_SEQUENCE || '').split(',').filter(Boolean);
   const statusCode = Number(configuredStatusCodes[launchplaneRequestCount - 1] || process.env.TEST_STATUS || '200');
   const configuredRuntimeImages = String(process.env.TEST_RUNTIME_IMAGES || '').split(',').filter(Boolean);
+  const configuredRuntimeMarkers = String(process.env.TEST_RUNTIME_MARKERS || '').split(',').filter(Boolean);
   if (configuredRuntimeImages.length > 0) {{
     const imageReference = configuredRuntimeImages[launchplaneRequestCount - 1] || configuredRuntimeImages.at(-1);
     return new Response(JSON.stringify({{
-      runtime: {{ docker_image_reference: imageReference }}
+      runtime: {{
+        docker_image_reference: imageReference,
+        deployment_marker: configuredRuntimeMarkers[launchplaneRequestCount - 1] || configuredRuntimeMarkers.at(-1)
+      }}
     }}), {{status: statusCode}});
   }}
   const configuredStatuses = String(process.env.TEST_REFRESH_STATUSES || '').split(',').filter(Boolean);
@@ -179,6 +183,41 @@ process.on('beforeExit', () => {{
                 ]
                 self.assertLess(len(mutations), 10)
                 self.assertIsNone(json.loads(response.read_text()))
+
+    def test_replacement_deadline_starts_at_marker_and_carries_elapsed_outage(self) -> None:
+        for outage in (False, True):
+            with self.subTest(outage=outage), TemporaryDirectory() as directory:
+                markers = ["old", "old", "forward"] if outage else ["old"] * 6 + ["forward"]
+                clock_step = 1000
+                short_budget = 4000
+                output = Path(directory) / "output"
+                result = self.run_action(
+                    output_path=output,
+                    inputs={
+                        "launchplane-url": "https://launchplane.example",
+                        "route-path": "/v1/service/runtime",
+                        "method": "GET",
+                        "poll-until-path": "runtime.deployment_marker",
+                        "poll-until-value": markers[-1],
+                        "poll-retry-on-request-error": "true",
+                        "poll-unavailable-timeout-ms": str(short_budget),
+                        "poll-timeout-ms": "30000",
+                        "poll-interval-ms": "1",
+                        "retry-attempts": "1",
+                    },
+                    environment={
+                        "TEST_CLOCK_STEP_MS": str(clock_step),
+                        "TEST_RUNTIME_IMAGES": "registry.example/service@sha256:same-image",
+                        "TEST_RUNTIME_MARKERS": ",".join(markers),
+                        "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "2" if outage else "",
+                    },
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                deadline = int(
+                    output.read_text().split("observation-deadline-epoch<<")[1].splitlines()[1]
+                )
+                window_start = clock_step if outage else len(markers) * clock_step
+                self.assertEqual(deadline, (window_start + short_budget) // 1000)
 
     def test_posts_oidc_authenticated_json_with_idempotency_key(self) -> None:
         with TemporaryDirectory() as temporary_directory:
