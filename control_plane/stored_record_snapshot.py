@@ -87,9 +87,23 @@ def snapshot_failure_diagnostics(error: Exception) -> dict[str, Any]:
 class _Scrubber:
     def __init__(self) -> None:
         self._salt = secrets.token_bytes(32)
+        self._numbers: dict[str, int] = {}
+        self._used_numbers: set[int] = set()
 
     def _digest(self, value: str) -> str:
         return hmac.new(self._salt, value.encode(), hashlib.sha256).hexdigest()
+
+    def number(self, value: str) -> int:
+        if value not in self._numbers:
+            # Indexed PR numbers use PostgreSQL Integer. Keep numeric identities
+            # consistent across strings/payloads/projections and avoid collisions.
+            maximum = (1 << 31) - 1
+            candidate = int(self._digest(value)[:12], 16) % maximum + 1
+            while candidate in self._used_numbers or str(candidate) == value:
+                candidate = candidate % maximum + 1
+            self._numbers[value] = candidate
+            self._used_numbers.add(candidate)
+        return self._numbers[value]
 
     def string(self, value: str, name: str, *, protocol: bool = False) -> str:
         if not value or value == "*":
@@ -109,7 +123,7 @@ class _Scrubber:
             except ValueError:
                 pass
         if value.isdecimal():
-            return str(int(digest[:12], 16))
+            return str(self.number(value))
         if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
             return digest[: len(value)]
         if name == "slug_template":
@@ -194,9 +208,17 @@ class _Scrubber:
                 not declared
                 or name.endswith("_id")
                 or name.endswith("_ids")
-                or name in {"number", "selected_pr_number", "queue_order"}
+                or name
+                in {
+                    "number",
+                    "selected_pr_number",
+                    "pull_request_number",
+                    "root_pull_request_number",
+                    "queue_order",
+                    "stack_order",
+                }
             ):
-                pseudonym = int(self._digest(str(value))[:12], 16)
+                pseudonym = self.number(str(value))
                 return float(pseudonym) if isinstance(value, float) else pseudonym
         return value
 

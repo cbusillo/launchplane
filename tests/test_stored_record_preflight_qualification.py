@@ -12,6 +12,30 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class StoredRecordPreflightQualificationTests(unittest.TestCase):
+    def test_supplied_image_requires_its_configured_repository_and_digest(self) -> None:
+        script = ROOT / "scripts/deploy/validate-image-reference.py"
+        repository = "ghcr.io/example/service"
+        for image, accepted in (
+            (repository + "@sha256:" + "a" * 64, True),
+            ("ghcr.io/other/service@sha256:" + "a" * 64, False),
+            (repository + ":latest", False),
+            (repository + "@sha256:" + "A" * 64, False),
+        ):
+            with self.subTest(image=image):
+                result = subprocess.run(
+                    [sys.executable, str(script)],
+                    cwd=ROOT,
+                    env={
+                        **os.environ,
+                        "CANDIDATE_IMAGE": image,
+                        "LAUNCHPLANE_IMAGE_REPOSITORY": repository,
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
     def test_endpoint_uses_existing_health_origin_and_refuses_output_injection(self) -> None:
         script = ROOT / "scripts/deploy/resolve-service-endpoint.py"
         with TemporaryDirectory() as directory:
@@ -44,16 +68,17 @@ class StoredRecordPreflightQualificationTests(unittest.TestCase):
 
     def test_qualification_executes_shared_wrapper_and_preserves_candidate_failure(self) -> None:
         workflow = load_workflow(".github/workflows/deploy-launchplane.yml")
-        step = workflow.step_named(
-            "qualify-stored-record-preflight", "Qualify isolated candidate on deploy runner"
+        step = next(
+            step
+            for step in workflow.steps("qualify-stored-record-preflight")
+            if "run-stored-record-preflight.sh" in step.run
         )
-        assert step is not None
         with TemporaryDirectory() as directory:
             root = Path(directory)
             docker = root / "docker"
             docker.write_text("""#!/bin/bash
 for argument in "$@"; do
-  if [[ "$argument" == --entrypoint || "$argument" == --entrypoint=* ]]; then exit 23; fi
+  if [[ "$argument" == "$CANDIDATE_IMAGE" ]]; then exit 23; fi
 done
 exit 0
 """)

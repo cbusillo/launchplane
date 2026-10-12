@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 # Clean only the current workflow job's evidence and explicitly labelled fixture.
 set -euo pipefail
-owner="${LAUNCHPLANE_PREFLIGHT_OWNER:?exact rehearsal owner required}"
-if [[ ! "$owner" =~ ^[a-zA-Z0-9_.:-]{1,160}$ ]]; then
-  echo "Invalid rehearsal owner." >&2
-  exit 1
-fi
-selector="launchplane.stored-record-preflight.owner=$owner"
+# shellcheck source=scripts/deploy/preflight-resource-owner.sh
+source "$(dirname "${BASH_SOURCE[0]}")/preflight-resource-owner.sh"
+selector="$(preflight_owner_label "${LAUNCHPLANE_PREFLIGHT_OWNER:?exact rehearsal owner required}")"
 if [[ -n "${RUNNER_TEMP:-}" ]]; then
   rm -f -- "$RUNNER_TEMP/launchplane-stored-record-snapshot.json"
 fi

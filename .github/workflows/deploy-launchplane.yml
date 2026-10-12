@@ -171,23 +171,6 @@ jobs:
             fi
           }
 
-          validate_immutable_image_reference() {
-            local image_reference="$1"
-            local image_repository="$2"
-            local expected_image_prefix="${image_repository}@sha256:"
-            local image_digest=""
-
-            if [[ "$image_reference" != "$expected_image_prefix"* ]]; then
-              echo "image_reference must use the configured Launchplane image repository and an immutable sha256 digest." >&2
-              exit 1
-            fi
-            image_digest="${image_reference#"$expected_image_prefix"}"
-            if [[ ! "$image_digest" =~ ^[0-9a-f]{64}$ ]]; then
-              echo "image_reference must end with a lowercase sha256 digest." >&2
-              exit 1
-            fi
-          }
-
           if [ "$EVENT_NAME" = "workflow_run" ]; then
             checkout_ref="$WORKFLOW_RUN_HEAD_SHA"
           else
@@ -207,7 +190,7 @@ jobs:
 
           deploy_image_reference="$DISPATCH_IMAGE_REFERENCE"
           if [ -n "$deploy_image_reference" ]; then
-            validate_immutable_image_reference "$deploy_image_reference" "$image_repository"
+            validate_single_line_value "image_reference" "$deploy_image_reference"
             should_build="false"
           else
             should_build="true"
@@ -332,6 +315,13 @@ jobs:
       - name: Install Python
         run: uv python install 3.13
 
+      - name: Validate supplied candidate image
+        if: steps.prep.outputs.should_build == 'false'
+        env:
+          CANDIDATE_IMAGE: ${{ steps.prep.outputs.deploy_image_reference }}
+          LAUNCHPLANE_IMAGE_REPOSITORY: ${{ steps.prep.outputs.image_repository }}
+        run: uv run python scripts/deploy/validate-image-reference.py
+
       - name: Resolve Launchplane service endpoint
         id: service
         run: uv run python scripts/deploy/resolve-service-endpoint.py
@@ -341,6 +331,7 @@ jobs:
         uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
 
       - name: Log in to GHCR
+        if: steps.prep.outputs.should_build == 'true'
         shell: bash
         env:
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
@@ -1727,6 +1718,11 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - name: Install qualification Python
         run: uv python install 3.13
+      - name: Validate qualification candidate image
+        env:
+          CANDIDATE_IMAGE: ${{ inputs.image_reference }}
+          LAUNCHPLANE_IMAGE_REPOSITORY: ${{ vars.LAUNCHPLANE_IMAGE_REPOSITORY }}
+        run: uv run python scripts/deploy/validate-image-reference.py
       - name: Resolve qualification endpoint
         id: service
         env:
@@ -1736,11 +1732,7 @@ jobs:
       - name: Authenticate the existing image read
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          registry_config="$(mktemp -d "$RUNNER_TEMP/launchplane-preflight-registry-XXXXXX")"
-          printf 'DOCKER_CONFIG=%s\n' "$registry_config" >> "$GITHUB_ENV"
-          printf '%s' "$GITHUB_TOKEN" | DOCKER_CONFIG="$registry_config" docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        run: bash scripts/deploy/authenticate-preflight-registry.sh
       - name: Read scrubbed Launchplane stored records
         uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         timeout-minutes: 1

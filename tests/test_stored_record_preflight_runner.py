@@ -20,7 +20,7 @@ printf '\\n' >> "$PREFLIGHT_TEST_LOG"
 if [[ "$1" == ps || "$1 $2" == 'network ls' ]]; then
   [[ "${PREFLIGHT_TEST_FAILURE:-}" != true ]] || exit 9
   for arg in "$@"; do
-    if [[ "$arg" == 'label=launchplane.stored-record-preflight.owner=job:123' ]]; then
+    if [[ "$arg" == "label=$PREFLIGHT_TEST_SELECTOR" ]]; then
       if [[ "$1" == ps ]]; then echo owned-container; else echo owned-network; fi
       exit 0
     fi
@@ -34,10 +34,22 @@ fi
             snapshot.write_text("scrubbed fixture")
             unrelated = root / "other-job-snapshot.json"
             unrelated.write_text("other job")
+            selector = subprocess.check_output(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; preflight_owner_label "$2"',
+                    "label-helper",
+                    str(RUNNER.with_name("preflight-resource-owner.sh")),
+                    "job:123",
+                ],
+                text=True,
+            )
             env = {
                 **os.environ,
                 "PATH": f"{root}:{os.environ['PATH']}",
                 "PREFLIGHT_TEST_LOG": str(log),
+                "PREFLIGHT_TEST_SELECTOR": selector,
                 "LAUNCHPLANE_PREFLIGHT_OWNER": "job:123",
                 "RUNNER_TEMP": str(root),
             }
@@ -85,7 +97,7 @@ forwarded=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --read-only|--read-only=true) readonly=true ;;
-    --entrypoint|--entrypoint=*) candidate=true ;;
+    "$PREFLIGHT_TEST_CANDIDATE_IMAGE") candidate=true ;;
     -e|--env)
       shift
       if [[ "$1" == *=* ]]; then forwarded+="${1#*=}"; else forwarded+="${!1}"; fi
@@ -126,6 +138,7 @@ exit 0
                     "PREFLIGHT_TEST_READONLY": str(readonly),
                     "PREFLIGHT_TEST_FORWARDED": str(forwarded),
                     "LIVE_TOKEN_SENTINEL": "never-forward",
+                    "PREFLIGHT_TEST_CANDIDATE_IMAGE": "example/candidate@sha256:" + "a" * 64,
                 },
                 capture_output=True,
                 text=True,
