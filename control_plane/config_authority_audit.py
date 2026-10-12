@@ -853,6 +853,7 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
                 "${{ runner.temp }}/launchplane-deployed-runtime-wait.json",
                 "${{ runner.temp }}/launchplane-deployed-runtime-final.json",
                 "${{ runner.temp }}/launchplane-previous-runtime.json",
+                "${{ runner.temp }}/launchplane-stored-record-snapshot.json",
                 "${{ runner.temp }}/launchplane-rollback-marker-final.json",
                 "${{ runner.temp }}/launchplane-rollback-marker-wait.json",
                 "${{ runner.temp }}/launchplane-rollback-runtime-final.json",
@@ -862,7 +863,13 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
                 "${{ runner.temp }}/launchplane-self-deploy-rollback-response.json",
             )
         ),
-        "route-path": frozenset(("/v1/service/runtime", "/v1/drivers/launchplane/self-deploy")),
+        "route-path": frozenset(
+            (
+                "/v1/service/runtime",
+                "/v1/drivers/launchplane/self-deploy",
+                "/v1/service/stored-record-snapshot",
+            )
+        ),
         "timeout-ms": frozenset(('"30000"',)),
     },
     ".github/workflows/launchplane-config-authority.yml": {

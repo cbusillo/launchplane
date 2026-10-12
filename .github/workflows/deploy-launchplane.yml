@@ -416,6 +416,47 @@ jobs:
           fi
           printf 'image_reference=%s\n' "$image_reference" >> "$GITHUB_OUTPUT"
 
+      - name: Read scrubbed Launchplane stored records
+        id: stored_record_snapshot
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/service/stored-record-snapshot
+          method: GET
+          expected-status: "200"
+          timeout-ms: "30000"
+          response-output-file: ${{ runner.temp }}/launchplane-stored-record-snapshot.json
+          log-response-body: "false"
+
+      - name: Preflight candidate against stored records
+        id: stored_record_preflight
+        shell: bash
+        timeout-minutes: 5
+        env:
+          CANDIDATE_IMAGE: ${{ steps.image.outputs.image_reference }}
+        run: |
+          set -euo pipefail
+          timeout --kill-after=15s 240s bash <<'PREFLIGHT' | tee "$RUNNER_TEMP/launchplane-stored-record-preflight-result.json"
+          set -euo pipefail
+          # CI owns the PostgreSQL test-image pin; do not copy it into deploys.
+          postgres_image="$(uv run --extra dev python - <<'PY'
+          from pathlib import Path
+          import yaml
+          workflow = yaml.safe_load(Path('.github/workflows/ci.yml').read_text())
+          print(workflow['env']['LAUNCHPLANE_CI_POSTGRES_IMAGE'])
+          PY
+          )"
+          bash scripts/deploy/stored-record-preflight.sh \
+            "$CANDIDATE_IMAGE" "$RUNNER_TEMP/launchplane-stored-record-snapshot.json" \
+            "$postgres_image"
+          PREFLIGHT
+
+      - name: Remove scrubbed snapshot material
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/launchplane-stored-record-snapshot.json"
+
       - name: Read previous Launchplane runtime
         id: previous_runtime
         continue-on-error: true
