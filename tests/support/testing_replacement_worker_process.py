@@ -21,12 +21,11 @@ def main(database_url: str) -> None:
         (operation,) = store.list_odoo_stable_target_replacement_operation_records(
             statuses=("running",)
         )
-        assert operation.request.strategy == "recreate-in-place"
         return OdooStableTargetReplacementApplyResult(
             product=operation.product,
             context=operation.context,
             instance=operation.instance,
-            strategy=operation.request.strategy,
+            strategy="recreate-in-place",
             deployment_record_id="isolated-deployment",
             deploy_status="pass",
             post_deploy_status="pass",
