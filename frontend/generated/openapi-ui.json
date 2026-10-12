@@ -28828,6 +28828,16 @@
             "title": "Environment",
             "type": "string"
           },
+          "health_provenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DataProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "health_status": {
             "default": "skipped",
             "enum": [
@@ -28891,6 +28901,7 @@
           "deployment_record_id",
           "deployment_status",
           "environment",
+          "health_provenance",
           "health_status",
           "inventory_stale_after",
           "inventory_updated_at",

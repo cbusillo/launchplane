@@ -24,6 +24,7 @@ class LaneRuntimeVerification:
     provenance: DataProvenance
     observation: PublicIngressObservationRecord | None = None
     runtime_target: PublicIngressTargetObservation | None = None
+    observation_applicable: bool = False
 
 
 def lane_expected_runtime_identity(summary: LaunchplaneLaneSummary) -> RuntimeIdentity | None:
@@ -196,13 +197,18 @@ def read_lane_runtime_verification(
         passed = (
             current
             and observation.status == "pass"
-            and target is not None
-            and target.status == "pass"
-            and target.runtime_identity_status == "match"
-            and compare_runtime_identity(
-                expected=expected, observed=target.observed_runtime_identity
-            )[0]
-            == "match"
+            and (
+                not check.require_runtime_identity
+                or (
+                    target is not None
+                    and target.status == "pass"
+                    and target.runtime_identity_status == "match"
+                    and compare_runtime_identity(
+                        expected=expected, observed=target.observed_runtime_identity
+                    )[0]
+                    == "match"
+                )
+            )
         )
         if provenance.freshness_status == "verified" and not passed:
             provenance = provenance.model_copy(update={"freshness_status": "recorded"})
@@ -216,7 +222,7 @@ def read_lane_runtime_verification(
             )
             else None
         )
-        results.append(LaneRuntimeVerification(provenance, observation, placement_target))
+        results.append(LaneRuntimeVerification(provenance, observation, placement_target, current))
     # Every effective check must pass; never pick an older success over a failure.
     provenance = min(
         results,
@@ -241,13 +247,55 @@ def read_lane_runtime_verification(
         ),
         None,
     )
-    evidence = identity_failure or next(
-        (result for result in results if result.runtime_target is not None), None
+    identity_evidence = next(
+        (
+            result
+            for result in results
+            if result.provenance.freshness_status == "verified"
+            and result.runtime_target is not None
+            and result.runtime_target.runtime_identity_status == "match"
+            and compare_runtime_identity(
+                expected=expected, observed=result.runtime_target.observed_runtime_identity
+            )[0]
+            == "match"
+        ),
+        None,
     )
+    if provenance.freshness_status == "verified" and (
+        identity_failure is not None or identity_evidence is None
+    ):
+        provenance = provenance.model_copy(update={"freshness_status": "recorded"})
+    failed_evidence = next(
+        (
+            result
+            for result in results
+            if result.provenance.freshness_status != "verified" and result.observation is not None
+        ),
+        None,
+    )
+    health_failure = next(
+        (
+            result
+            for result in results
+            if result.observation is not None
+            and result.observation.status == "fail"
+            and result.observation_applicable
+        ),
+        None,
+    )
+    evidence = (
+        identity_failure
+        or health_failure
+        or failed_evidence
+        or identity_evidence
+        or next((result for result in results if result.runtime_target is not None), None)
+    )
+    runtime_evidence = identity_failure or identity_evidence or evidence
     return LaneRuntimeVerification(
         provenance,
         evidence.observation if evidence else None,
-        evidence.runtime_target if evidence else None,
+        runtime_evidence.runtime_target if runtime_evidence else None,
+        evidence.observation_applicable if evidence else False,
     )
 
 

@@ -78,10 +78,13 @@ export function App() {
     ResourceState<ProductSiteOverview[]>
   >(emptyResource());
   const [signingOut, setSigningOut] = useState(false);
+  const [inventoryReceivedAt, setInventoryReceivedAt] = useState<{
+    wallTime: number; monotonicTime: number;
+  } | null>(null);
   const [sessionNotice, setSessionNotice] = useState("");
   useEvidenceRefresh(route.kind,
     !fixtureMode && authState.status === "signed_in" && authState.identity.role !== "owner" &&
-      (route.kind === "product-index" || route.kind === "product-workspace" || route.kind === "product-environment"),
+      (route.kind === "product-index" || route.kind === "product-workspace" || route.kind === "product-environment" || route.kind === "product-activity"),
     productsResource, () => setInventoryRefreshToken(value => value + 1));
 
   useEffect(() => {
@@ -171,6 +174,7 @@ export function App() {
       route.kind === "owner-review" || route.kind === "owner-secrets"
     ) {
       setProductsResource(emptyResource());
+      setInventoryReceivedAt(null);
       return;
     }
     let active = true;
@@ -191,6 +195,7 @@ export function App() {
             )
           : await listProducts(controller.signal).then((payload) => payload.products);
         if (active) {
+          setInventoryReceivedAt({ wallTime: Date.now(), monotonicTime: performance.now() });
           setProductsResource({
             status: "ready",
             data: [...products].sort((left, right) =>
@@ -327,6 +332,7 @@ export function App() {
       onRefresh={refreshProducts}
       onThemeChange={window.launchplaneTheme.set}
       productsResource={productsResource}
+      inventoryReceivedAt={inventoryReceivedAt}
       route={route}
       selectedProduct={selectedProduct}
       signingOut={signingOut}

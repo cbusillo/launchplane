@@ -97,7 +97,7 @@ for (const detail of [false, true]) test(`an open ${detail ? "environment" : "wo
   await page.clock.runFor(2000);
   await expect(signal).toHaveAttribute("data-tone", "warning");
   await expect(signal).toContainText("Stale");
-  await expect(sidebarDot).toHaveAttribute("data-tone", "warning");
+  await expect(sidebarDot).toHaveAttribute("data-tone", "stale");
 });
 
 test("historical runtime match cannot show green without current monitor proof", async ({ page }) => {
