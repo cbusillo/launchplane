@@ -11450,6 +11450,117 @@
         "title": "ExistingDeliveryKey",
         "type": "object"
       },
+      "GenericWebApplicationSchedule": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Command",
+            "type": "string"
+          },
+          "cron_expression": {
+            "minLength": 1,
+            "title": "Cron Expression",
+            "type": "string"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "default": 300,
+            "maximum": 3600,
+            "minimum": 1,
+            "title": "Timeout Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command",
+          "cron_expression",
+          "enabled",
+          "name",
+          "timeout_seconds"
+        ],
+        "title": "GenericWebApplicationSchedule",
+        "type": "object"
+      },
+      "GenericWebLaneExtensions": {
+        "additionalProperties": false,
+        "properties": {
+          "maintenance": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GenericWebMaintenanceCommand"
+            },
+            "title": "Maintenance",
+            "type": "array"
+          },
+          "schedules": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GenericWebApplicationSchedule"
+            },
+            "title": "Schedules",
+            "type": "array"
+          },
+          "verification_extension": {
+            "default": "",
+            "enum": [
+              "",
+              "verireel-testing"
+            ],
+            "title": "Verification Extension",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          }
+        },
+        "title": "GenericWebLaneExtensions",
+        "type": "object",
+        "required": [
+          "maintenance",
+          "schedules"
+        ]
+      },
+      "GenericWebMaintenanceCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Command",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "default": 300,
+            "maximum": 3600,
+            "minimum": 1,
+            "title": "Timeout Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command",
+          "name",
+          "timeout_seconds"
+        ],
+        "title": "GenericWebMaintenanceCommand",
+        "type": "object"
+      },
       "GenericWebProdPromotionRecords": {
         "additionalProperties": false,
         "properties": {
@@ -26504,6 +26615,10 @@
             "title": "Context",
             "type": "string"
           },
+          "generic_web_extensions": {
+            "$ref": "#/components/schemas/GenericWebLaneExtensions",
+            "x-launchplane-optional-response": true
+          },
           "health_monitoring": {
             "$ref": "#/components/schemas/ProductLaneHealthMonitoringPolicy"
           },
@@ -27242,6 +27357,11 @@
             "title": "Data Authority",
             "type": "string"
           },
+          "destructive_replacement_proof_required": {
+            "default": true,
+            "title": "Destructive Replacement Proof Required",
+            "type": "boolean"
+          },
           "prelaunch_rebuild_allowed": {
             "default": false,
             "title": "Prelaunch Rebuild Allowed",
@@ -27256,16 +27376,6 @@
             "default": "",
             "title": "Prelaunch Rebuild Data Source Mode",
             "type": "string"
-          },
-          "requires_backup_before_destroy": {
-            "default": true,
-            "title": "Requires Backup Before Destroy",
-            "type": "boolean"
-          },
-          "requires_restore_proof": {
-            "default": true,
-            "title": "Requires Restore Proof",
-            "type": "boolean"
           },
           "requires_runtime_identity": {
             "default": true,
@@ -27293,11 +27403,10 @@
         "required": [
           "allowed_rebuild_sources",
           "data_authority",
+          "destructive_replacement_proof_required",
           "prelaunch_rebuild_allowed",
           "prelaunch_rebuild_approval_issue_url",
           "prelaunch_rebuild_data_source_mode",
-          "requires_backup_before_destroy",
-          "requires_restore_proof",
           "requires_runtime_identity",
           "rollback_artifact_id",
           "rollback_deployment_record_id",
@@ -27330,16 +27439,6 @@
             "title": "Data Authority",
             "type": "string"
           },
-          "requires_backup_before_destroy": {
-            "default": true,
-            "title": "Requires Backup Before Destroy",
-            "type": "boolean"
-          },
-          "requires_restore_proof": {
-            "default": true,
-            "title": "Requires Restore Proof",
-            "type": "boolean"
-          },
           "requires_runtime_identity": {
             "default": true,
             "title": "Requires Runtime Identity",
@@ -27356,8 +27455,6 @@
         "required": [
           "allowed_rebuild_sources",
           "data_authority",
-          "requires_backup_before_destroy",
-          "requires_restore_proof",
           "requires_runtime_identity",
           "upstream_source"
         ]
@@ -27994,6 +28091,14 @@
             "title": "App Name Prefix",
             "type": "string"
           },
+          "app_name_suffix": {
+            "default": "",
+            "maxLength": 40,
+            "pattern": "^(-[a-z0-9-]+)?$",
+            "title": "App Name Suffix",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "context": {
             "default": "",
             "title": "Context",
@@ -28095,6 +28200,23 @@
             "default": "testing",
             "title": "Template Instance",
             "type": "string"
+          },
+          "transport_database_prefix": {
+            "default": "",
+            "maxLength": 40,
+            "title": "Transport Database Prefix",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
+          "transport_extension": {
+            "default": "",
+            "enum": [
+              "",
+              "verireel-postgres"
+            ],
+            "title": "Transport Extension",
+            "type": "string",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "ProductPreviewProfile",

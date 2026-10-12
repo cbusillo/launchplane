@@ -115,7 +115,9 @@ def execute_generic_web_rollback_result(
         control_plane_root=control_plane_root,
         record_store=cast(GenericWebRollbackApplyStore, record_store),
         request=request.rollback,
-        post_deploy_executor=_generic_web_post_deploy_executor_for_profile(profile),
+        post_deploy_executor=_generic_web_post_deploy_executor_for_profile(
+            profile, instance=request.rollback.instance
+        ),
     )
     records: dict[str, object] = {
         "generic_web_rollback_plan_id": driver_result.plan_id,
