@@ -18,7 +18,7 @@ from control_plane.contracts.ship_request import ShipRequest
 
 
 def generate_deployment_record_id(*, context_name: str, instance_name: str) -> str:
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     return f"deployment-{timestamp}-{uuid4().hex}-{context_name}-{instance_name}"
 
 
