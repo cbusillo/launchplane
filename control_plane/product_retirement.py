@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal, Protocol, cast
 
 import click
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -15,6 +15,7 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_retirement import (
     MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH,
     ProductRetirementAuthoritySnapshot,
+    ProductRetirementPreviewPlan,
     ProductRetirementIdentity,
     ProductRetirementMutationEvidence,
     ProductRetirementProviderObservation,
@@ -242,7 +243,10 @@ def bind_product_retirement_authority(
         or provider_target.provider_target_type != "application"
         or dokploy_target.target_type != "application"
         or len(target_ids) != 1
-        or request.expected_target_sha256 != provider_identifier_sha256(provider_target.target_id)
+        or (
+            request.expected_target_sha256 != provider_identifier_sha256(provider_target.target_id)
+            and not (request.include_previews and not request.expected_target_sha256)
+        )
     ):
         raise ProductRetirementBlockedError(
             "Product retirement requires exact tracked Dokploy application authority."
@@ -255,11 +259,22 @@ def bind_product_retirement_authority(
         context_name=context,
         instance_name=request.instance,
     )
-    if active_preview_ids(record_store=record_store, profile=profile):
+    if not request.include_previews and active_preview_ids(
+        record_store=record_store, profile=profile
+    ):
         raise ProductRetirementBlockedError(
             "Product retirement is blocked by active preview evidence."
         )
+    previews: tuple[PreviewRecord, ...] = ()
+    if request.include_previews:
+        from control_plane.product_retirement_previews import validate_product_scope, owned_previews
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        store = cast(PostgresRecordStore, record_store)
+        validate_product_scope(store, profile, request.instance)
+        previews = tuple(bound.preview for bound in owned_previews(store, profile))
     return BoundProductRetirement(
+        previews=previews,
         profile=profile,
         context=context,
         provider_target=provider_target,
@@ -375,6 +390,8 @@ def build_provider_observation(
         "environment_id": str(payload.get("environmentId") or "").strip(),
         "server_id": str(payload.get("serverId") or "").strip(),
         "source_type": str(payload.get("sourceType") or "").strip(),
+        "image": str(payload.get("dockerImage") or "").strip(),
+        "repository": str(payload.get("repository") or payload.get("customGitUrl") or "").strip(),
     }
     return ProductRetirementProviderObservation(
         observed_at=observed_at,
@@ -395,6 +412,7 @@ def build_provider_observation(
         domain_ids=tuple(item[0] for item in domain_evidence),
         domain_id_sha256=tuple(provider_identifier_sha256(item[0]) for item in domain_evidence),
         domain_host_sha256=tuple(canonical_sha256(item[1]) for item in domain_evidence),
+        domain_hosts=tuple(item[1] for item in domain_evidence),
         deployment_status=deployment_status,
         retirable=retirable,
     )
@@ -436,6 +454,7 @@ def build_product_retirement_plan_record(
     requested_at: str,
     bound: BoundProductRetirement,
     observation: ProductRetirementProviderObservation,
+    preview_plans: tuple[ProductRetirementPreviewPlan, ...] = (),
 ) -> ProductRetirementRecord:
     if request.mode != "plan":
         raise ValueError("Product retirement plan records require plan mode.")
@@ -457,11 +476,13 @@ def build_product_retirement_plan_record(
             "Product retirement requires a present, idle, retirable application."
         )
     snapshot = authority_snapshot(bound)
-    plan_payload = {
+    plan_payload: dict[str, object] = {
         "continuity_sha256": request.continuity_sha256,
         "authority_snapshot": snapshot.model_dump(mode="json"),
         "provider_observation": observation.model_dump(mode="json"),
     }
+    if request.include_previews:
+        plan_payload["preview_plans"] = [p.model_dump(mode="json") for p in preview_plans]
     record_id = (
         "product-retirement-plan-"
         f"{
@@ -493,6 +514,9 @@ def build_product_retirement_plan_record(
         plan_sha256=canonical_sha256(plan_payload),
         provider_observation=observation,
         authority_snapshot=snapshot,
+        preview_plans=preview_plans,
+        profile_record=bound.profile if request.include_previews else None,
+        application_name=bound.dokploy_target.target_name,
     )
 
 
@@ -542,6 +566,8 @@ class DokployProductRetirementAdapter:
         self._lifecycle_before_value: Literal["active", "retiring", "retired"] | None = None
         self._terminal_error_message = ""
         self._finalization_record: ProductRetirementRecord | None = None
+        self._closed_preview_ids: list[str] = []
+        self._operation_key = ""
 
     def target_key(self) -> str:
         return f"provider-target:dokploy:application:{self._plan.provider_observation.target_id}"
@@ -580,7 +606,7 @@ class DokployProductRetirementAdapter:
             current=observation,
         ):
             return ProviderObservation(outcome="unknown")
-        if active_preview_ids(
+        if not self._request.include_previews and active_preview_ids(
             record_store=self._record_store,
             profile=self._record_store.read_product_profile_record(self._request.product),
         ):
@@ -588,6 +614,23 @@ class DokployProductRetirementAdapter:
         return ProviderObservation(outcome="absent", retry_safe=True)
 
     def apply(
+        self, provider_operation_key: str, lease: ProviderOperationLease
+    ) -> ProviderMutationOutcome:
+        from control_plane.workflows.generic_web_preview import (
+            serialize_generic_web_product_operation,
+        )
+
+        if self._request.include_previews:
+            with serialize_generic_web_product_operation(
+                record_store=self._record_store, product=self._request.product
+            ):
+                try:
+                    return self._apply(provider_operation_key, lease)
+                except SQLAlchemyError as error:
+                    raise self._unknown_provider_error(error) from error
+        return self._apply(provider_operation_key, lease)
+
+    def _apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         try:
@@ -629,6 +672,28 @@ class DokployProductRetirementAdapter:
                             raise ProductRetirementBlockedError(
                                 "Provider application is not idle and retirable."
                             )
+                elif self._request.include_previews:
+                    normalized = authority_snapshot(current_bound).model_copy(
+                        update={
+                            "profile_sha256": self._plan.authority_snapshot.profile_sha256,
+                            "profile_updated_at": self._plan.authority_snapshot.profile_updated_at,
+                            "preview_record_refs": self._plan.authority_snapshot.preview_record_refs,
+                            "preview_record_sha256": self._plan.authority_snapshot.preview_record_sha256,
+                        }
+                    )
+                    if normalized != self._plan.authority_snapshot:
+                        raise ProductRetirementBlockedError(
+                            "Testing authority changed during retirement."
+                        )
+                    if (
+                        current_observation.state != "absent"
+                        and not _observation_allows_reconciliation(
+                            planned=self._plan.provider_observation, current=current_observation
+                        )
+                    ):
+                        raise ProductRetirementBlockedError(
+                            "Testing provider changed during retirement."
+                        )
                 elif (
                     not _observation_allows_reconciliation(
                         planned=self._plan.provider_observation,
@@ -650,6 +715,19 @@ class DokployProductRetirementAdapter:
 
         self._ensure_retiring_profile()
         self._checkpoint(lease, "profile_retiring")
+        if self._request.include_previews:
+            from control_plane.product_retirement_previews import retire_product_previews
+
+            try:
+                retire_product_previews(self, lease, provider_operation_key)
+            except (
+                ValueError,
+                FileNotFoundError,
+                click.ClickException,
+                OSError,
+                TimeoutError,
+            ) as error:
+                raise self._unknown_provider_error(error) from error
         if current_observation.state == "absent":
             try:
                 self._finalize_authority(provider_operation_key)
@@ -777,17 +855,89 @@ class DokployProductRetirementAdapter:
             )
         )
         self._started = True
+        self._operation_key = provider_operation_key
 
     def _unknown_provider_error(self, error: Exception) -> ProviderMutationUnknownError:
         self._terminal_error_message = _redacted_terminal_error_message(str(error))
         return ProviderMutationUnknownError(self._terminal_error_message)
 
     def _checkpoint(self, lease: ProviderOperationLease, phase: str) -> None:
+        if self._request.include_previews:
+            from control_plane.product_retirement_previews import validate_product_scope
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            assert self._plan.profile_record is not None
+            validate_product_scope(
+                cast(PostgresRecordStore, self._record_store),
+                self._plan.profile_record,
+                self._plan.instance,
+            )
+            active = set(
+                active_preview_ids(
+                    record_store=self._record_store, profile=self._plan.profile_record
+                )
+            )
+            if (
+                not active <= {p.preview.preview_id for p in self._plan.preview_plans}
+                or phase.startswith("delete_")
+                and active
+            ):
+                raise ProductRetirementBlockedError(
+                    "Unreviewed or active preview evidence blocks this destructive step."
+                )
         lease.checkpoint_effect(phase)
         self._phases.append(phase)
 
     def _ensure_retiring_profile(self) -> LaunchplaneProductProfileRecord:
         profile = self._record_store.read_product_profile_record(self._request.product)
+        if self._request.include_previews and profile.lifecycle_state != "retired":
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            store = cast(PostgresRecordStore, self._record_store)
+            fence_id = f"product-retirement-fence-{canonical_sha256(self._operation_key)}"
+            if profile.lifecycle_state == "retiring":
+                fence = store.read_product_retirement_record(fence_id)
+                if (
+                    fence.plan_sha256 != self._plan.plan_sha256
+                    or fence.identity != self._identity
+                    or fence.mutation_evidence.retiring_profile_sha256
+                    != canonical_sha256(profile.model_dump(mode="json"))
+                ):
+                    raise ProductRetirementBlockedError(
+                        "Retiring profile does not match this operation checkpoint."
+                    )
+                return profile
+            if profile != self._plan.profile_record:
+                raise ProductRetirementBlockedError("Reviewed product profile changed.")
+            replacement = profile.model_copy(
+                update={
+                    "lifecycle_state": "retiring",
+                    "preview": profile.preview.model_copy(update={"enabled": False}),
+                    "updated_at": self._requested_at,
+                    "source": "service:product-retirement",
+                }
+            )
+            fence = self._build_terminal_record(
+                outcome="started",
+                provider_operation_key=self._operation_key,
+                provider_absence_verified=False,
+            )
+            fence = fence.model_copy(
+                update={
+                    "record_id": fence_id,
+                    "mutation_evidence": fence.mutation_evidence.model_copy(
+                        update={
+                            "retiring_profile_sha256": canonical_sha256(
+                                replacement.model_dump(mode="json")
+                            )
+                        }
+                    ),
+                }
+            )
+            store.commit_product_retirement_fence(
+                expected=profile, replacement=replacement, checkpoint=fence
+            )
+            return replacement
         if profile.lifecycle_state == "retired":
             return profile
         if profile.lifecycle_state == "retiring":
@@ -891,6 +1041,10 @@ class DokployProductRetirementAdapter:
         return profile
 
     def _finalize_authority(self, provider_operation_key: str) -> None:
+        if self._request.include_previews:
+            from control_plane.product_retirement_previews import verify_retired_previews
+
+            verify_retired_previews(self, provider_operation_key)
         profile = self._record_store.read_product_profile_record(self._request.product)
         if self._finalization_record is not None:
             profile = self._validate_finalization_authority()
@@ -1198,6 +1352,9 @@ class DokployProductRetirementAdapter:
             reviewed_plan_sha256=self._plan.plan_sha256,
             provider_observation=self._plan.provider_observation,
             authority_snapshot=self._plan.authority_snapshot,
+            preview_plans=self._plan.preview_plans,
+            profile_record=self._plan.profile_record,
+            application_name=self._plan.application_name,
             mutation_evidence=ProductRetirementMutationEvidence(
                 provider_operation_key=provider_operation_key,
                 mutation_reservation_id=mutation_reservation_id,
@@ -1210,6 +1367,7 @@ class DokployProductRetirementAdapter:
                 deleted_authority_refs=tuple(self._deleted_authority_refs),
                 disabled_secret_record_sha256=tuple(self._disabled_secret_record_sha256),
                 secret_disable_event_sha256=tuple(self._secret_disable_event_sha256),
+                closed_preview_ids=tuple(self._closed_preview_ids),
                 lifecycle_before=self._lifecycle_before_value or "retiring",
                 lifecycle_after=cast(
                     "Literal['', 'active', 'retiring', 'retired']",
@@ -1255,6 +1413,9 @@ def build_started_product_retirement_record(
         reviewed_plan_sha256=plan.plan_sha256,
         provider_observation=plan.provider_observation,
         authority_snapshot=plan.authority_snapshot,
+        preview_plans=plan.preview_plans,
+        profile_record=plan.profile_record,
+        application_name=plan.application_name,
         mutation_evidence=ProductRetirementMutationEvidence(
             provider_operation_key=provider_operation_key,
             reconciliation_key=f"product-retirement:{plan.plan_sha256}",
@@ -1282,6 +1443,49 @@ def redacted_product_retirement_response(record: ProductRetirementRecord) -> dic
             "no_target": record.provider_observation.no_target,
             "closed_preview_ids": list(evidence.closed_preview_ids),
             "planned_preview_ids": list(record.authority_snapshot.preview_record_refs),
+            **(
+                {
+                    "confirmation": f"retire product {record.product} including its previews"
+                    if record.profile_record
+                    else "",
+                    "preview_plan": [
+                        {
+                            "preview_id": p.preview.preview_id,
+                            "application_name": p.application_name,
+                            "provider_state": "present" if p.provider_observation else "absent",
+                            "target_sha256": p.provider_observation.target_id_sha256
+                            if p.provider_observation
+                            else "",
+                            "routes": list(p.routes),
+                            "affected_records": list(p.affected_record_refs),
+                            "ownership": "exclusive product context and exact preview identity",
+                        }
+                        for p in record.preview_plans
+                    ],
+                    "testing_plan": {
+                        "application_name": record.application_name,
+                        "target_sha256": record.provider_observation.target_id_sha256,
+                        "routes": sorted(
+                            set(record.provider_observation.domain_hosts)
+                            | (
+                                {record.profile_record.lanes[0].base_url}
+                                if record.profile_record and record.profile_record.lanes[0].base_url
+                                else set()
+                            )
+                        ),
+                        "affected_records": [
+                            f"provider_target:{record.context}:{record.instance}",
+                            f"dokploy_target:{record.context}:{record.instance}",
+                            f"dokploy_target_id:{record.context}:{record.instance}",
+                            *record.authority_snapshot.runtime_record_refs,
+                            *record.authority_snapshot.secret_record_refs,
+                        ],
+                        "ownership": "exclusive product context and tracked application",
+                    },
+                }
+                if record.profile_record is not None
+                else {}
+            ),
             "provider_observation_sha256": canonical_sha256(
                 record.provider_observation.model_dump(
                     mode="json",
@@ -1353,8 +1557,13 @@ def _observation_allows_reconciliation(
         or current.project_reference_sha256 != planned.project_reference_sha256
     ):
         return False
-    planned_domains = set(planned.domain_id_sha256)
-    return set(current.domain_id_sha256).issubset(planned_domains)
+    planned_domains = dict(zip(planned.domain_id_sha256, planned.domain_host_sha256, strict=True))
+    return all(
+        planned_domains.get(identifier) == hostname
+        for identifier, hostname in zip(
+            current.domain_id_sha256, current.domain_host_sha256, strict=True
+        )
+    )
 
 
 def _same_planned_observation(

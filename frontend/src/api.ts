@@ -1061,3 +1061,7 @@ export function checkServiceDeliveryApplyReceipt(
 ): Promise<import("./generated/openapi.ts").ServiceDeliveryApplyReceiptResponse> {
   return requestJson(BROWSER_WRITE_ROUTES.serviceDeliveryReceiptRead, "POST", { original_request: originalRequest, idempotency_key: idempotencyKey }, signal);
 }
+
+export function executeProductRetirement(payload: import("./generated/openapi.ts").ExecuteProductRetirementData["body"], options: BrowserOperationOptions): Promise<import("./generated/openapi.ts").AcceptedEvidenceResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.productRetirement, "POST", payload, options.signal, options.idempotencyKey, options.onDispatch);
+}

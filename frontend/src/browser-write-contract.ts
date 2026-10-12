@@ -1,4 +1,5 @@
 import type {
+  ExecuteProductRetirementData,
   ApplyProductionBackupAuthorityData,
   ApplyProductGenericWebTransitionData,
   ApplyProductDisplayNameData,
@@ -29,6 +30,7 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  productRetirement: "/v1/product-retirement" satisfies ExecuteProductRetirementData["url"],
   productionBackupAuthorityApply: "/v1/production-backup-authority/apply" satisfies ApplyProductionBackupAuthorityData["url"],
   productGenericWebTransition: "/v1/product-profiles/{product}/generic-web-transition" satisfies ApplyProductGenericWebTransitionData["url"],
   productDisplayName: "/v1/product-profiles/{product}/display-name" satisfies ApplyProductDisplayNameData["url"],

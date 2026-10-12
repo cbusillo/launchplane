@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
 import json
 from ipaddress import ip_address
 import time
 from pathlib import Path
-from typing import ContextManager, Literal, Protocol, cast, runtime_checkable
+from typing import Iterator, Literal, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -1350,22 +1350,39 @@ def evaluate_generic_web_preview_readiness(
     )
 
 
+@contextmanager
+def serialize_generic_web_product_operation(
+    *, record_store: object, product: str
+) -> Iterator[None]:
+    serialize = getattr(record_store, "serialize_preview_refresh", None)
+    if callable(serialize):
+        with serialize(preview_id=f"product-retirement:{product}", dedicated=True):
+            yield
+    else:
+        yield
+
+
+@contextmanager
 def serialize_generic_web_preview_operation(
     *,
     record_store: object,
     profile: LaunchplaneProductProfileRecord,
     preview_slug: str,
-) -> ContextManager[None]:
-    serialize = getattr(record_store, "serialize_preview_refresh", None)
-    if callable(serialize):
-        return cast(
-            ContextManager[None],
+) -> Iterator[None]:
+    with serialize_generic_web_product_operation(
+        record_store=record_store, product=profile.product
+    ):
+        serialize = getattr(record_store, "serialize_preview_refresh", None)
+        scope = (
             serialize(
                 preview_id=f"{profile.product}:{profile.preview.context}:{preview_slug}",
                 dedicated=True,
-            ),
+            )
+            if callable(serialize)
+            else nullcontext()
         )
-    return nullcontext()
+        with scope:
+            yield
 
 
 def execute_generic_web_preview_refresh(
@@ -1382,11 +1399,16 @@ def execute_generic_web_preview_refresh(
     with serialize_generic_web_preview_operation(
         record_store=record_store, profile=resolved, preview_slug=request.preview_slug
     ):
+        current = resolve_generic_web_preview_profile(
+            record_store=record_store, product=resolved.product
+        )
+        if not current.is_active or current != resolved:
+            raise click.ClickException("Product preview authority changed before refresh.")
         return _execute_generic_web_preview_refresh_unserialized(
             control_plane_root=control_plane_root,
             record_store=record_store,
             request=request,
-            profile=resolved,
+            profile=current,
         )
 
 

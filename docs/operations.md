@@ -4006,143 +4006,17 @@ blocked instead of guessing source inputs.
 
 ## Product Retirement
 
-Use the protected **Product Retirement** workflow; never delete a Dokploy
-application directly. Run `mode=plan` with the exact product, profile-owned
-instance, tracked target SHA-256, stable admin idempotency key, reason, and
-issue. Review the persisted plan record ID and `plan_sha256` in the redacted
-artifact and job summary. Run `mode=apply` with the same intent and idempotency
-key, the reviewed record ID/digest, and the exact confirmation shown by the
-workflow input contract.
+Use the signed-in admin **Retire product** card for a non-live generic-web
+product with one testing lane. It reviews previews and the testing application
+as one operation. [Product retirement](product-retirement.md) owns the review,
+execution, recovery, and retained-history contract. Standalone preview cleanup
+keeps its existing authorization.
 
-An apply that returns reconciliation-required must be retried with the same
-idempotency key and reviewed request after the provider can be observed. The HTTP
-endpoint delegates replay to the durable runner, which observes uncertain tracked
-completion before retrying. Changed requests or reviewed plans and different
-keys cannot take over the held operation; unavailable or changed provider
-evidence leaves it reconciliation-required. A `retiring` profile is an
-intentional fail-closed state: deploys, monitoring, previews, onboarding,
-discovery, and work-graph automation must leave it untouched while the durable
-operation reconciles. Completion verifies provider absence, removes mutable
-runtime/target authority, preserves secret and deletion evidence, disables
-preview configuration, and marks the profile `retired`. Do not delete the
-profile.
-
-Tracked retirement persists a finalization checkpoint after provider absence and
-before removing local authority. One immutable checkpoint belongs to each
-provider operation, so overlapping expired-lease retries reuse matching evidence.
-This includes a database insert race: the losing attempt reads back the sealed
-checkpoint and adopts it only when its operation, reviewed plan, request, identity
-and authority match. It then uses the current validated profile and managed-secret
-records, preserving a concurrent winner's completed state and disable timestamps.
-Refreshed secrets must still match the reviewed snapshot; rotation or addition
-during the insert race refuses cleanup of that changed authority.
-The final secret-disable write also compares the reviewed secret authority under
-the storage write lock. An approved rotation committed after the last snapshot
-keeps its new version pointer and audit event; retirement refuses the stale
-disable and retains reconciliation. An already-disabled matching secret is
-adopted without rewriting it. This behavior has fixture proof with opaque
-ciphertext, not live-provider or key-retirement proof.
-Unconfirmed checkpoint conflicts retain reconciliation
-evidence and the target fence.
-A same-key retry can resume after target records
-are removed or the profile becomes retired, using that checkpoint's exact profile
-and intended retired-profile digests. Recovery verifies provider absence again,
-checks remaining targets, runtime records and managed secrets against the reviewed
-plan, and preserves the held target fence on drift or unknown evidence. Recovery
-after target removal or profile retirement requires checkpoint evidence; historical records are not
-sufficient to invent a completed finalization. Different keys, changed requests
-and changed plans retain the existing conflict behavior. No provider delete is
-needed when absence is verified. Original attempt history remains authoritative
-for earlier provider effects; retry phases describe the retry's checkpoints.
-The tracked retirement HTTP route requires database storage. It writes
-managed-secret disable audit evidence through an insert-only path on PostgreSQL
-and SQLite. A stale absent read cannot overwrite a committed event, including
-its original timestamp. The filesystem store exposes the same insert-only create
-operation for local storage use; its concurrency proof covers that operation,
-not HTTP retirement. See [filesystem storage guarantees](records.md) for
-interruption recovery and durability limits.
-If overlapping attempts collide while inserting the deterministic disable event,
-the loser reads it back and accepts only matching secret, actor, event type,
-detail and reviewed-plan metadata; only the request timestamp may differ.
-Missing or mismatched evidence returns structured reconciliation diagnostics
-and retains the target fence instead of claiming cleanup succeeded.
-
-Tracked retirement blocks active previews in the profile's preview context for
-both the short repository anchor written by preview dispatch/reconciliation and
-historical full `owner/repo` anchors, compared without case sensitivity. Pending,
-active, failed, paused and teardown-pending previews block it: failure does not
-prove runtime absence. Previews in other contexts or for other repository anchors
-do not block that product; destroyed previews do not block it.
-Clear a blocker through the product's supported preview teardown route and verify
-provider absence. If a historical full-form or mixed-case anchor leaves the record
-unchanged, submit authorized destroyed evidence to
-`POST /v1/evidence/previews/destroyed` with its exact stored context, `anchor_repo`
-and PR number, then re-plan retirement. Evidence records teardown; it does not
-destroy the provider application. Do not mark evidence destroyed before teardown
-is verified or bypass a denied write with another identity.
-
-The service also accepts an explicit `no_target: true` retirement intent, with
-an empty `expected_target_sha256`. This narrow case requires an active generic-web
-profile with one lane, an application-name configuration, no tracked target IDs
-in its current or historical contexts, no shared context, and no preview
-generation evidence. A complete Dokploy application enumeration and fresh
-application/domain reads must show no stable name, preview prefix, repository,
-image repository, or known domain belonging to the product. Missing, malformed,
-unauthorized or incomplete provider evidence blocks planning and apply.
-
-The proof also checks normalized `appName` bases for stable and preview names:
-trim, replace each literal space with a hyphen, and lowercase, preserving dots,
-underscores and repeated spaces as repeated hyphens. Dokploy's
-[`cleanAppName` / `buildAppName` source](https://github.com/Dokploy/dokploy/blob/48504fde4eb210056f7d9f80406f9692a1a7ea8a/packages/server/src/db/schema/utils.ts)
-defines this transformation and adds a random suffix to supplied bases;
-[`updateApplication`](https://github.com/Dokploy/dokploy/blob/48504fde4eb210056f7d9f80406f9692a1a7ea8a/packages/server/src/services/application.ts)
-preserves `appName` when the display name changes. An exact normalized stable
-base or its hyphen-delimited extension, or a normalized preview prefix, blocks
-absence even with unrelated repository, image and domain evidence. Launchplane
-preview creation supplies `{product}-{preview_slug}` as `appName` independently
-of the display-name prefix, so the proof also checks the normalized product base
-and its hyphen-delimited extensions. Provider `appName` comparisons ignore case
-conservatively for historical names. Shared-base
-ambiguity refuses retirement; resolve the provider/configuration identity before
-retrying. There is no override. This is not general punctuation-removing
-slugification; current Dokploy create validation also rejects spaces in supplied
-`appName` values, so this proof conservatively covers historical normalized names.
-
-The plan binds the profile, configuration and stale preview records. Apply
-repeats the provider proof, rechecks those records under database locks, refuses
-a running product reconciler, and atomically marks the previews destroyed and
-the profile retired. The apply confirmation is `retire product PRODUCT instance
-INSTANCE with no target`. This path makes no provider writes; runtime settings,
-target configuration, secret records and artifact/package history are preserved.
-Retired profiles are already excluded from the product reconciliation sweep.
-Running either mode against shared Launchplane remains an admin action; source
-delivery does not approve a live retirement or package deletion.
-Before apply, finish or cancel other provisioning actions for the product; do
-not start onboarding or stable-lane repair concurrently with retirement. The
-database checks fence recorded authority and the reconciler, not an independent
-provider operation that has not recorded its result yet.
-
-The updated reusable worker supports this intent. The protected dispatch wrapper
-still pins the earlier tracked-target-only worker: expose `no_target` and pin the
-wrapper to the reviewed worker's merged full SHA in a separate change before
-using that workflow for no-target retirement. Existing service API authorization
-is unchanged; do not add a grant to bypass an unavailable action.
-
-Authorization rollout uses the `product-retirement` selector in **Manage
-Launchplane Authorization**, backed by managed set
-`operator.product-retirement` and secret
-`LAUNCHPLANE_AUTHZ_PRODUCT_RETIREMENT_MANAGED_SET_JSON`. The dispatch wrapper
-is pinned to an immutable reusable worker. Authorization must bind both the
-caller `workflow_ref` and the exact immutable `job_workflow_ref`. Derive the
-caller from [the dispatch wrapper](../.github/workflows/product-retirement.yml)
-on the default branch, and copy the worker reference from its `retire` job
-`uses:` value. The caller format is
-`<owner>/<repository>/<wrapper path>@refs/heads/<default branch>`. The wrapper
-is the source of the current worker revision.
-
-This describes an existing transitional authorization path, not approval to
-create or expand it. New grants and managed-set changes are a stop boundary;
-see [Who Can Do What](authorization-authority.md#who-can-do-what).
+The existing protected **Product Retirement** workflow and bearer API remain
+available for their exact lane-scoped tracked or no-target requests. They do
+not acquire product-wide preview teardown authority. The wrapper stays pinned
+to its existing worker until its owning task activates a replacement; this card
+needs no wrapper or access-policy change.
 
 ## Detached Application Retirement
 

@@ -8,7 +8,9 @@ title: Legacy Preview Reconciliation
 one legacy generic-web preview whose provider application is already absent.
 It takes an exact `product`, `preview_id`, `reason`, and `mode` (`inspect`,
 `plan`, or `apply`). It never deletes provider resources or retires a product.
-Provider-present previews require the existing authorized teardown path first.
+Provider-present standalone reconciliations require the existing authorized teardown path first.
+For retiring a product, use the [single reviewed product-retirement operation](product-retirement.md),
+which includes its own previews without separate preview-cleanup approvals.
 
 ## Review and execution
 

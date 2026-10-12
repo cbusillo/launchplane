@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.secret_record import SecretRecord
+from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 
 
 ProductRetirementMode = Literal["plan", "apply"]
@@ -52,6 +54,7 @@ class ProductRetirementRequest(BaseModel):
     instance: str
     expected_target_sha256: str = ""
     no_target: bool = False
+    include_previews: bool = False
     reason: str
     related_issue: str
     reviewed_plan_record_id: str = ""
@@ -77,8 +80,10 @@ class ProductRetirementRequest(BaseModel):
         if self.no_target:
             if self.expected_target_sha256:
                 raise ValueError("No-target retirement rejects a tracked target digest.")
-        else:
+        elif not (self.include_previews and not self.expected_target_sha256):
             _require_sha256(self.expected_target_sha256, "expected_target_sha256")
+        if self.include_previews and self.no_target:
+            raise ValueError("Integrated retirement requires a tracked testing application.")
         if self.mode == "plan":
             if self.reviewed_plan_record_id or self.reviewed_plan_sha256 or self.confirmation:
                 raise ValueError("Product retirement plan rejects apply-only fields.")
@@ -92,6 +97,8 @@ class ProductRetirementRequest(BaseModel):
 
     @property
     def expected_confirmation(self) -> str:
+        if self.include_previews:
+            return f"retire product {self.product} including its previews"
         if self.no_target:
             return f"retire product {self.product} instance {self.instance} with no target"
         return (
@@ -110,6 +117,8 @@ class ProductRetirementRequest(BaseModel):
         }
         if self.no_target:
             payload["no_target"] = True
+        if self.include_previews:
+            payload["include_previews"] = True
         return payload
 
     @property
@@ -155,6 +164,7 @@ class ProductRetirementProviderObservation(BaseModel):
     domain_ids: tuple[str, ...] = ()
     domain_id_sha256: tuple[str, ...] = ()
     domain_host_sha256: tuple[str, ...] = ()
+    domain_hosts: tuple[str, ...] = ()
     deployment_status: str = ""
     retirable: bool
     no_target: bool = False
@@ -210,6 +220,19 @@ class ProductRetirementProviderObservation(BaseModel):
         if self.state == "absent" and self.retirable:
             raise ValueError("Absent provider observations cannot be marked retirable.")
         return self
+
+
+class ProductRetirementPreviewPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preview: PreviewRecord
+    slug: str
+    application_name: str
+    authority_sha256: str
+    provider_observation: ProductRetirementProviderObservation | None = None
+    target_authority: tuple[dict[str, object], ...] = ()
+    affected_record_refs: tuple[str, ...] = ()
+    routes: tuple[str, ...] = ()
 
 
 class ProductRetirementAuthoritySnapshot(BaseModel):
@@ -273,6 +296,7 @@ class ProductRetirementMutationEvidence(BaseModel):
     lifecycle_before: Literal["", "active", "retiring", "retired"] = ""
     lifecycle_after: Literal["", "active", "retiring", "retired"] = ""
     closed_preview_ids: tuple[str, ...] = ()
+    retiring_profile_sha256: str = ""
     error_code: str = ""
     error_message: str = Field(default="", max_length=MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH)
 
@@ -319,6 +343,9 @@ class ProductRetirementRecord(BaseModel):
     reviewed_plan_sha256: str = ""
     provider_observation: ProductRetirementProviderObservation
     authority_snapshot: ProductRetirementAuthoritySnapshot
+    preview_plans: tuple[ProductRetirementPreviewPlan, ...] = ()
+    profile_record: LaunchplaneProductProfileRecord | None = None
+    application_name: str = ""
     mutation_evidence: ProductRetirementMutationEvidence = Field(
         default_factory=ProductRetirementMutationEvidence
     )
