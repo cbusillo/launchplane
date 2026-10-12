@@ -419,11 +419,12 @@ def _run_controller(
         if isinstance(diagnosis, dict)
         else controller_result.accepted_result.get("reason_code")
     )
+    action = controller_result.accepted_result.get("controller_action")
     return _target_result(
         repository_policy,
         status="ran",
-        reason_code=str(reason or ""),
-        controller_action=str(controller_result.accepted_result.get("controller_action") or ""),
+        reason_code=reason if isinstance(reason, str) else "",
+        controller_action=action if isinstance(action, str) else "",
         last_controller_result=diagnosis,
         trace_id=trace_id,
         records=controller_result.records,

@@ -76,7 +76,11 @@ def controller_last_result(
         reason = "failure_isolation_checks_pending"
     progress_at = previous.semantic_progress_at if previous is not None else ""
     if persisted and key and key != state.semantic_progress_key:
-        progress_at = _text(candidate.get("updated_at"), 64) or state.updated_at
+        progress_at = (
+            observed_at
+            if state.semantic_progress_key
+            else _text(candidate.get("updated_at"), 64) or state.updated_at
+        )
     actor: Literal["controller", "provider", "repository_agent"] = "controller"
     observation = "Run the next fenced controller pass with fresh evidence."
     if reconciliation_required:

@@ -5560,6 +5560,7 @@ def _reobserve_failed_merge_train_candidate(
     multi-entry merge batch stays failed until its queue changes.
     """
     candidate = active_candidate_record.candidate
+    lease.observe_failed_candidate(active_candidate_record)
     if candidate.required_checks_status != "fail":
         return None
     if (

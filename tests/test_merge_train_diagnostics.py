@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime, timedelta
 from tempfile import TemporaryDirectory
 from typing import cast
 from unittest import TestCase
@@ -20,6 +21,7 @@ from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainG
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_merge_train_culprit_isolation import _TrainSimulation, TEST_FAILURE
+from tests.test_merge_train_policy_recovery import _NoAdmissionEvaluator
 
 
 class RecoveryDiagnosticsTests(TestCase):
@@ -78,7 +80,7 @@ class RecoveryDiagnosticsTests(TestCase):
                 stack_collapse_store=self.store,
                 controller_state_store=self.store,
                 admission_store=self.store,
-                admission_evaluator=Mock(),
+                admission_evaluator=_NoAdmissionEvaluator(),
             )
         return result.accepted_result
 
@@ -222,6 +224,72 @@ class RecoveryDiagnosticsTests(TestCase):
         self.assertEqual(diagnosis.source_failed_record_id, self.failed.record_id)
         self.assertEqual(diagnosis.observed_candidate_sha, candidate.candidate_sha)
         self.assertEqual(diagnosis.candidate_checks_status, "pending")
+        observed_at = (
+            (
+                datetime.fromisoformat(self.state().updated_at.replace("Z", "+00:00"))
+                + timedelta(seconds=1)
+            )
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        self.client.observe_batch_candidate_checks.return_value = candidate.model_copy(
+            update={"required_checks_status": "pass", "status": "passed"}
+        )
+        with patch(
+            "control_plane.merge_train_controller_run_once.utc_now_timestamp",
+            return_value=observed_at,
+        ):
+            self.run_pass()
+        changed = self.state().last_result
+        assert changed is not None
+        self.assertEqual(changed.semantic_progress_at, observed_at)
+        self.assertNotEqual(changed.semantic_progress_at, candidate.updated_at)
+
+    def test_historical_reobservation_binds_its_own_failed_source_and_sha(self) -> None:
+        from control_plane.merge_train_controller_run_once import (
+            _reobserve_failed_merge_train_candidate,
+        )
+
+        self.run_pass()
+        lease = MergeTrainControllerLeaseContext(record=self.state())
+        lease.observe_failed_candidate(self.failed)
+        historical = build_merge_train_batch_candidate_record(
+            candidate=self.failed.candidate.model_copy(
+                update={
+                    "candidate_sha": "historical-sha",
+                    "entries": self.failed.candidate.entries[:1],
+                }
+            ),
+            source="historical",
+            updated_at=self.failed.updated_at,
+        )
+        self.client.observe_batch_candidate_checks.return_value = historical.candidate.model_copy(
+            update={"required_checks_status": "pass", "status": "passed"}
+        )
+        result = _reobserve_failed_merge_train_candidate(
+            candidate_store=self.store,
+            active_candidate_record=historical,
+            github_client=cast(GitHubMergeTrainClient, self.client),
+            merge_method="merge",
+            repository=historical.candidate.repository,
+            base_branch=historical.candidate.base_branch,
+            recorded_at=self.state().updated_at,
+            trace_id="historical-observation",
+            mutate=False,
+            lease=lease,
+            held_out=(),
+        )
+        assert result is not None
+        lease.record_result(
+            result,
+            pass_started_at=self.state().updated_at,
+            trace_id="historical-observation",
+            reconciliation_required=False,
+        )
+        diagnosis = cast(dict[str, object], result["last_controller_result"])
+        self.assertEqual(diagnosis["source_failed_record_id"], historical.record_id)
+        self.assertEqual(diagnosis["observed_candidate_sha"], historical.candidate.candidate_sha)
+        self.assertEqual(diagnosis["candidate_checks_status"], "pass")
 
     def test_dry_run_and_stale_policy_do_not_create_current_mutation_evidence(self) -> None:
         self.run_pass()
