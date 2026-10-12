@@ -21,8 +21,9 @@ name: Reusable Stable Lane Repair
         required: true
         type: string
       base_url:
-        description: HTTPS origin selected from the tracked Dokploy target domains.
-        required: true
+        description: Tracked HTTPS origin for website products; empty for a product recorded with no public website.
+        required: false
+        default: ""
         type: string
       reviewed_plan_sha256:
         description: Reviewed dry-run plan SHA-256; required for apply.
@@ -62,7 +63,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for required in PRODUCT CONTEXT INSTANCE BASE_URL REASON; do
+          for required in PRODUCT CONTEXT INSTANCE REASON; do
             if [[ -z "${!required//[[:space:]]/}" ]]; then
               echo "${required} is required for stable-lane repair." >&2
               exit 1

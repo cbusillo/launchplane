@@ -8,7 +8,11 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_display_name import ProductDisplayNameRequest, build_display_name_plan
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
-from control_plane.storage.postgres import PostgresRecordStore, ProductProfileCompareWriteResult
+from control_plane.storage.postgres import (
+    DbOnlyMutationPreflightResult,
+    PostgresRecordStore,
+    ProductProfileCompareWriteResult,
+)
 from tests.http_app_test_support import (
     _AsgiResponse,
     _RejectingVerifier,
@@ -47,7 +51,7 @@ class DisplayNameTests(unittest.TestCase):
         self.assertFalse(unchanged.changed)
 
     def test_empty_multiline_and_unreviewed_apply_are_rejected(self) -> None:
-        for name in (" ", "Name\nOther", "Name\tOther"):
+        for name in (" ", "Name\nOther", "Name\tOther", "Name\u2028Other"):
             with self.assertRaises(ValueError):
                 ProductDisplayNameRequest(display_name=name, reason="Rename")
         with self.assertRaises(ValueError):
@@ -105,6 +109,7 @@ class DisplayNameHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.post(body)).status_code, 400)
         applied = await self.post(body, "rename")
         self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertEqual(applied.json()["result"]["reason"], draft["reason"])
         after = self.store.read_product_profile_record("example-site")
         expected = before.model_dump(mode="json")
         expected.update(
@@ -121,6 +126,20 @@ class DisplayNameHttpTests(unittest.IsolatedAsyncioTestCase):
         replay = await self.post(body, "rename")
         self.assertTrue(replay.json()["replayed"])
         self.assertEqual(replay.json()["original_trace_id"], applied.json()["trace_id"])
+        original_preflight = self.store.prepare_db_only_mutation
+        calls = 0
+
+        def late_commit(**kwargs: Any) -> DbOnlyMutationPreflightResult:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return DbOnlyMutationPreflightResult(status="missing")
+            return original_preflight(**kwargs)
+
+        with patch.object(self.store, "prepare_db_only_mutation", side_effect=late_commit):
+            late_replay = await self.post(body, "rename")
+        self.assertTrue(late_replay.json()["replayed"])
+        self.assertEqual(late_replay.json()["original_trace_id"], applied.json()["trace_id"])
         conflict = await self.post({**body, "display_name": "Other Name"}, "rename")
         self.assertEqual(conflict.json()["error"]["code"], "idempotency_key_reused")
         receipt = await _asgi_request(

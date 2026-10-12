@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import unicodedata
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -23,7 +24,9 @@ class ProductDisplayNameRequest(BaseModel):
     def validate_review(self) -> "ProductDisplayNameRequest":
         self.display_name = self.display_name.strip()
         self.reason = self.reason.strip()
-        if not self.display_name or any(ord(c) < 32 for c in self.display_name):
+        if not self.display_name or any(
+            unicodedata.category(c) in {"Cc", "Zl", "Zp"} for c in self.display_name
+        ):
             raise ValueError("Supply a nonempty, single-line display name.")
         if not self.reason:
             raise ValueError("A reason is required for a display-name change.")
@@ -43,6 +46,7 @@ class ProductDisplayNamePlan(BaseModel):
     display_name_after: str
     changed: bool
     applied: bool = False
+    reason: str
     plan_sha256: str
 
 
@@ -63,6 +67,7 @@ def build_display_name_plan(
             display_name_before=profile.display_name,
             display_name_after=request.display_name,
             changed=profile.display_name != request.display_name,
+            reason=request.reason,
             plan_sha256=digest,
         ),
         profile.model_copy(update={"display_name": request.display_name}),

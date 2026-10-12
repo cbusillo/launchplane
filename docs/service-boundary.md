@@ -1999,6 +1999,19 @@ may report destroyed/cleanup-failed feedback. Unsupported/fork notices still
 require the explicit feedback grant because they are outside the normal
 refresh/destroy flow.
 
+### Private Stable Lane Registration
+
+Stable-lane repair accepts an empty `base_url` only when the stored product
+profile declares `public_website=none`. It still requires matching tracked
+provider, Dokploy target and target-id records and an existing owned context.
+The added lane has no public URLs or fabricated monitoring check. Configure
+its private endpoint and enabled `private_http` monitoring through their
+reviewed service paths before treating the lane as verified. An already
+registered private lane is refused rather than rewritten. Website products
+still require a tracked HTTPS origin. The Product Onboarding Manifest
+(Advanced) wrapper uses its same-revision reusable repair workflow so the
+public/private request contract is evaluated by the reviewed implementation.
+
 ### Product profile endpoints
 
 - `GET /v1/product-profiles`
