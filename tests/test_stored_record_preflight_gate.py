@@ -14,17 +14,19 @@ class StoredRecordPreflightGateTests(unittest.TestCase):
         script = next(
             step["run"]
             for step in workflow["jobs"]["deploy"]["steps"]
-            if "stored-record-preflight.sh" in step.get("run", "")
+            if step.get("id") == "stored_record_preflight"
         )
         with TemporaryDirectory() as directory:
             temporary = Path(directory)
             docker = temporary / "docker"
             docker.write_text("""#!/bin/bash
-for argument in "$@"; do
-  if [[ "$argument" == "$CANDIDATE_IMAGE" ]]; then
-    exit 23
-  fi
-done
+if [[ "$1" == run ]]; then
+  for argument in "$@"; do
+    if [[ "$argument" == "$CANDIDATE_IMAGE" ]]; then
+      exit 23
+    fi
+  done
+fi
 exit 0
 """)
             docker.chmod(0o755)
@@ -41,7 +43,6 @@ exit 0
                 },
                 capture_output=True,
                 text=True,
-                check=False,
                 timeout=30,
             )
             self.assertEqual(result.returncode, 23, result.stderr)
