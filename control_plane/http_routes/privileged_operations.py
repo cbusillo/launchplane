@@ -347,7 +347,13 @@ def register_privileged_operation_routes(
             and agent_read_role_covers(action)
             and dependencies.common.authorization_allows(
                 identity=identity,
-                action=AGENT_READ_ROLE_ACTION,
+                action=action,
+                product="launchplane",
+                context="launchplane",
+                target=AuthorizationTarget(scope="global"),
+            )
+            and dependencies.policy_reader().agent_read_role_allows(
+                identity=identity,
                 product="launchplane",
                 context="launchplane",
                 target=AuthorizationTarget(scope="global"),
@@ -614,14 +620,29 @@ def register_privileged_operation_routes(
             return
         active_record = read_active_policy_record(trace_id=trace_id)
         try:
-            if active_record.status != "active" or not active_record.policy.allows(
+            if active_record.status != "active":
+                raise ManagedRuleAuthorizationError("No active record-read authority.")
+            if active_record.policy.agent_read_role_allows(
+                identity=identity,
+                product="launchplane",
+                context="launchplane",
+                target=AuthorizationTarget(scope="global"),
+            ) and dependencies.common.authorization_allows(
                 identity=identity,
                 action=action,
                 product="launchplane",
                 context="launchplane",
                 target=AuthorizationTarget(scope="global"),
             ):
-                raise ManagedRuleAuthorizationError("No active record-read authority.")
+                return
+            require_single_explicit_action_managed_rule_identity(
+                policy=active_record.policy,
+                identity=identity,
+                action=action,
+                product="launchplane",
+                context="launchplane",
+                target=AuthorizationTarget(scope="global"),
+            )
         except ManagedRuleAuthorizationError as error:
             raise dependencies.common.http_error(
                 status_code=403,

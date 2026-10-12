@@ -916,12 +916,16 @@ def register_product_environment_read_routes(
                 ),
             )
 
-        if not common.authorization_allows(
+        service_reader = common.authorization_allows(
             identity=identity,
             action="product_environment.read",
             product=LAUNCHPLANE_SERVICE_CONTEXT,
             context=LAUNCHPLANE_SERVICE_CONTEXT,
             target=AuthorizationTarget(scope="context"),
+            inherit_agent_read_role=False,
+        )
+        if not service_reader and not common.read_role_products(
+            identity=identity, context=LAUNCHPLANE_SERVICE_CONTEXT
         ):
             raise common.http_error(
                 status_code=403,
@@ -952,6 +956,17 @@ def register_product_environment_read_routes(
             ProductSiteOverview.model_validate(product)
             for product in cast(list[object], payload["products"])
         )
+        if not service_reader:
+            products = tuple(
+                product
+                for product in products
+                if common.authorization_allows(
+                    identity=identity,
+                    action="product_environment.read",
+                    product=product.product,
+                    context=LAUNCHPLANE_SERVICE_CONTEXT,
+                )
+            )
         return ProductEnvironmentListResponse(trace_id=trace_id, products=products)
 
     def read_product_overview(
@@ -1320,13 +1335,6 @@ def register_product_environment_read_routes(
                     context=LAUNCHPLANE_SERVICE_CONTEXT,
                 )
             )
-            if not profiles:
-                raise common.http_error(
-                    status_code=403,
-                    trace_id=trace_id,
-                    code="authorization_denied",
-                    message="Identity cannot list the requested products.",
-                )
         return ProductProfileListResponse(
             trace_id=trace_id,
             driver_id=str(product_profile_payload["driver_id"]),

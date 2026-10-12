@@ -90,6 +90,28 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         LaunchplaneProductProfileRecord.model_validate(profile)
         self.assertEqual(before, self.store.list_authz_policy_records()[0].model_dump_json())
 
+    def test_aggregate_product_scopes_include_history_without_current_profiles(self) -> None:
+        from sqlalchemy import insert
+        from control_plane.storage.postgres import LaunchplaneOwnerAcceptanceSubjectSequenceRow
+
+        with self.store._engine.begin() as connection:
+            connection.execute(
+                insert(LaunchplaneOwnerAcceptanceSubjectSequenceRow).values(
+                    repository_id="historical-repository",
+                    pr_number=1,
+                    product="historical-product",
+                    system="runtime",
+                    owner_action="review",
+                    environment="testing",
+                    last_sequence=1,
+                )
+            )
+        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload())
+        self.store.write_product_profile_record(profile)
+        self.assertEqual(
+            set(self.store.list_recorded_product_scopes()), {profile.product, "historical-product"}
+        )
+
     def test_raw_omitted_instances_survive_export_and_new_validation_fails_rehearsal(self) -> None:
         with self.store._engine.begin() as connection:
             payload = self.store.list_authz_policy_records()[0].model_dump(mode="json")

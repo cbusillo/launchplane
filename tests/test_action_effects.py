@@ -208,6 +208,7 @@ class ActionEffectTests(unittest.TestCase):
                             product="sample",
                             context="sample",
                             target=target,
+                            inherit_agent_read_role=True,
                         )
                         expected = effect in {"read", "plan"} and (
                             target.scope == "instance"
@@ -234,6 +235,14 @@ class ActionEffectTests(unittest.TestCase):
     def test_existing_grants_scope_and_revocation_remain_authoritative(self) -> None:
         identity = LocalOperatorIdentity("record-reader", "record-reader-label")
         scoped = reader_policy(product="sample")
+        self.assertFalse(
+            scoped.allows(
+                identity=identity,
+                action="product_config.plan",
+                product="sample",
+                context="sample",
+            )
+        )
         self.assertFalse(
             scoped.allows(
                 identity=identity,
@@ -280,6 +289,45 @@ class ActionEffectTests(unittest.TestCase):
 
 
 class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_product_role_filters_global_records_from_context_collections(self) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+
+        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload("sample"))
+        lane = profile.lanes[0]
+        with _database_app(reader_policy(product=profile.product)) as (store, _, app):
+            store.write_product_profile_record(profile)
+            seed_metadata(store)
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="global",
+                    env={"SERVICE_LABEL": "global-only-control"},
+                    updated_at=profile.updated_at,
+                )
+            )
+            global_ids = {
+                record.secret_id
+                for record in store.list_secret_records()
+                if record.scope == "global"
+            }
+            async with lifespan_client(app) as client:
+                headers = {"Authorization": "Bearer reader-token"}
+                response = await client.get(
+                    f"/v1/contexts/{lane.context}/instances/{lane.instance}/secrets",
+                    headers=headers,
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertFalse(
+                    global_ids & {record["secret_id"] for record in response.json()["secrets"]}
+                )
+                response = await client.get(
+                    f"/v1/contexts/{lane.context}/instances/{lane.instance}/runtime-settings",
+                    headers=headers,
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertFalse(
+                    any(record["scope"] == "global" for record in response.json()["settings"])
+                )
+
     async def test_terminal_role_reads_redacted_metadata_but_retains_mixed_route_restrictions(
         self,
     ) -> None:
@@ -327,6 +375,89 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(denied.status_code, 403, denied.text)
 
+    async def test_service_product_scope_does_not_authorize_other_product_aggregates(self) -> None:
+        profiles = tuple(
+            LaunchplaneProductProfileRecord.model_validate(product_profile_payload(product))
+            for product in ("sample", "foreign-site")
+        )
+        with _database_app(reader_policy()) as (store, _, app):
+            for profile in profiles:
+                store.write_product_profile_record(profile)
+            headers = {"Authorization": "Bearer reader-token"}
+            async with lifespan_client(app) as client:
+                overview = await client.get("/v1/products", headers=headers)
+                self.assertEqual(overview.status_code, 200, overview.text)
+                self.assertEqual(
+                    {row["product"] for row in overview.json()["products"]}, {"sample"}
+                )
+                for path in (
+                    "/v1/service/health-monitor/status",
+                    "/v1/service/odoo-workers/status",
+                    "/v1/service/verireel-workers/status",
+                    "/v1/privileged-operations/plans?descriptor_id=managed-authz-policy-set",
+                ):
+                    with self.subTest(path=path):
+                        denied = await client.get(path, headers=headers)
+                        self.assertEqual(denied.status_code, 403, denied.text)
+                for profile in profiles:
+                    lane = profile.lanes[0]
+                    result = await client.post(
+                        "/v1/provider-targets/operations",
+                        headers=headers,
+                        json={"mode": "audit", "context": lane.context, "instance": lane.instance},
+                    )
+                    self.assertEqual(
+                        result.status_code, 202 if profile.product == "sample" else 403, result.text
+                    )
+                foreign = profiles[1]
+                lane = foreign.lanes[0]
+                denied = await client.post(
+                    "/v1/product-profiles/stable-lane-repair/apply",
+                    headers=headers,
+                    json={
+                        "mode": "dry-run",
+                        "product": foreign.product,
+                        "context": lane.context,
+                        "instance": lane.instance,
+                        "reason": "Inspect scope",
+                    },
+                )
+                self.assertEqual(denied.status_code, 403, denied.text)
+
+    async def test_snapshot_checks_records_written_after_its_preflight(self) -> None:
+        from sqlalchemy import text
+        from control_plane.contracts.stored_record_snapshot import StoredRecordSnapshot
+        from control_plane.stored_record_snapshot import SnapshotAuthorization
+
+        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload("sample"))
+        foreign = LaunchplaneProductProfileRecord.model_validate(
+            product_profile_payload("foreign-site")
+        )
+        with _database_app(reader_policy()) as (store, _, app):
+            store.write_product_profile_record(profile)
+            with store._engine.begin() as connection:
+                connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32))"))
+                connection.execute(text("INSERT INTO alembic_version VALUES ('test-revision')"))
+            export = store.export_stored_record_snapshot
+
+            def export_after_product_write(
+                *,
+                authorize_records: SnapshotAuthorization | None = None,
+            ) -> StoredRecordSnapshot:
+                store.write_product_profile_record(foreign)
+                return export(authorize_records=authorize_records)
+
+            with patch.object(
+                store, "export_stored_record_snapshot", side_effect=export_after_product_write
+            ):
+                async with lifespan_client(app) as client:
+                    response = await client.get(
+                        "/v1/service/stored-record-snapshot",
+                        headers={"Authorization": "Bearer reader-token"},
+                    )
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertNotIn(foreign.product, response.text)
+
     async def test_context_reads_authorize_the_record_product_without_service_scope_escape(
         self,
     ) -> None:
@@ -363,7 +494,12 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("test-secret-value", result.text)
                     if result.status_code == 200:
                         self.assertEqual(
-                            result.json()["settings"][0]["values"], {"SITE_LABEL": profile.product}
+                            next(
+                                row["values"]
+                                for row in result.json()["settings"]
+                                if row["context"] == lane.context
+                            ),
+                            {"SITE_LABEL": profile.product},
                         )
                 with patch.object(
                     store,
@@ -647,7 +783,8 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
                 self.assertEqual(denied.status_code, 400, denied.text)
-                self.assertEqual(ingress.calls, ["list"])
+                self.assertTrue(ingress.calls)
+                self.assertFalse(set(ingress.calls) - {"list", "get"})
                 envelope = _dry_run_envelope()
                 from tests.test_production_backup_authority import _profile as backup_profile
 

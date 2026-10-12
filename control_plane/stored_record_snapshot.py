@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -49,6 +49,15 @@ SNAPSHOT_RECORD_TYPES: tuple[tuple[Any, type[BaseModel]], ...] = (
     (LaunchplaneMergeTrainPolicyRow, MergeTrainPolicyRecord),
     (LaunchplaneMergeTrainRunRow, MergeTrainRunRecord),
 )
+
+
+SnapshotAuthorization = Callable[
+    [tuple[LaunchplaneProductProfileRecord, ...], tuple[EnvironmentInventory, ...]], bool
+]
+
+
+class SnapshotAuthorizationDenied(PermissionError):
+    pass
 
 
 class SnapshotUnavailable(ValueError):
@@ -223,9 +232,13 @@ class _Scrubber:
         return value
 
 
-def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
+def export_stored_record_snapshot(
+    engine: Engine, *, authorize_records: SnapshotAuthorization | None = None
+) -> StoredRecordSnapshot:
     scrubber = _Scrubber()
     tables: dict[str, list[dict[str, Any]]] = {}
+    profiles: list[LaunchplaneProductProfileRecord] = []
+    inventory: list[EnvironmentInventory] = []
     row_count = 0
     byte_count = 0
     deadline = time.monotonic() + 20
@@ -275,6 +288,13 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
                 byte_count += len(json.dumps(dict(raw)).encode())
                 if byte_count > SNAPSHOT_MAX_BYTES or time.monotonic() > deadline:
                     raise SnapshotUnavailable("snapshot_export_limit")
+                if authorize_records is not None:
+                    if model_type is LaunchplaneProductProfileRecord:
+                        profiles.append(
+                            LaunchplaneProductProfileRecord.model_validate(raw["payload"])
+                        )
+                    elif model_type is EnvironmentInventory:
+                        inventory.append(EnvironmentInventory.model_validate(raw["payload"]))
                 payload = scrubber.scrub(raw["payload"], schema, schema)
                 if model_type is MergeTrainRunRecord:
                     for key, nested_type in (
@@ -314,6 +334,10 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
                 row["payload"] = payload
                 rows.append(row)
             tables[table.name] = rows
+        if authorize_records is not None and not authorize_records(
+            tuple(profiles), tuple(inventory)
+        ):
+            raise SnapshotAuthorizationDenied("Snapshot records exceed the reader scope.")
         snapshot = StoredRecordSnapshot(
             captured_at=datetime.now(timezone.utc).isoformat(),
             database_schema_revision=revision,
