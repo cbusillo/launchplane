@@ -120,7 +120,12 @@ and cleanup rather than the plain preview path. Existing VeriReel profiles retai
 their current dispatch until their supported testing transition is qualified.
 This source capability does not change a live profile or production artifact.
 
-VeriReel's generic-web extension is selected only for testing deploys. It runs
+A generic-web testing lane selects `verification_extension="verireel-testing"`
+in `generic_web_extensions` to reuse VeriReel's migration and creator/admin
+qualification. The preset accepts only a recorded testing lane and exact
+reserved application target; other lanes and an absent executor are refused
+before deployment. Legacy VeriReel profiles retain their existing testing
+selection until the qualified profile transition. The extension runs
 the existing `stable-testing-migration` maintenance intent, then verifies a
 disposable creator's QR/public flow, creator denial of admin pages, and the admin
 pages after the existing smoke-maintenance intent elevates that fixture. Cleanup

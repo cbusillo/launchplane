@@ -34,8 +34,8 @@ from control_plane.workflows.generic_web_promotion import (
 from control_plane.workflows.generic_web_promotion_workflow import (
     GenericWebPromotionWorkflowRequest,
 )
-from control_plane.workflows.odoo_generic_web_post_deploy import (
-    generic_web_post_deploy_executor_for_driver_id,
+from control_plane.workflows.generic_web_post_deploy import (
+    generic_web_post_deploy_executor_for_profile,
 )
 
 
@@ -238,7 +238,7 @@ def _generic_web_post_deploy_executor_for_profile(
     *,
     instance: str = "",
 ) -> GenericWebPostDeployExecutor | None:
-    return generic_web_post_deploy_executor_for_driver_id(profile.driver_id, instance=instance)
+    return generic_web_post_deploy_executor_for_profile(profile, instance=instance)
 
 
 def _stable_verification_health_evidence(

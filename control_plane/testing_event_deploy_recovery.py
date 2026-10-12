@@ -26,8 +26,8 @@ from control_plane.workflows.generic_web_application_snapshot import (
     has_recorded_application_lifecycle,
     generic_web_provider_deployment_record_id,
 )
-from control_plane.workflows.odoo_generic_web_post_deploy import (
-    generic_web_post_deploy_executor_for_driver_id,
+from control_plane.workflows.generic_web_post_deploy import (
+    generic_web_post_deploy_executor_for_profile,
 )
 
 
@@ -74,7 +74,7 @@ def retire_unavailable_testing_event_deploy(
         )
         or reservation.provider_target_key != current_target_key
         or reservation.provider_effect_phase not in {"", "target_update", "deploy_trigger"}
-        or generic_web_post_deploy_executor_for_driver_id(profile.driver_id) is not None
+        or generic_web_post_deploy_executor_for_profile(profile, instance="testing") is not None
         or any(
             lane.context == context
             and lane.instance == "testing"

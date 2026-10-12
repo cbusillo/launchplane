@@ -672,6 +672,7 @@ export type GenericWebApplicationSchedule = {
 export type GenericWebLaneExtensions = {
     maintenance: Array<GenericWebMaintenanceCommand>;
     schedules: Array<GenericWebApplicationSchedule>;
+    verification_extension?: '' | 'verireel-testing';
 };
 
 export type GenericWebMaintenanceCommand = {

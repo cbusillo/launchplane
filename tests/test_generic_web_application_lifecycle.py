@@ -280,6 +280,13 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             )
         close_out.assert_not_called()
 
+        with patch.object(adapter, "_runtime_close_out_evidence", return_value=None) as close_out:
+            adapter.inspect_runtime_close_out(
+                resolved_deploy_target=provider.resolved_targets[0],
+                provider_operation_key="different-operation",
+            )
+        close_out.assert_called_once()
+
     def test_removed_declaration_removes_only_previously_managed_schedule(self) -> None:
         result, store = self._deploy()
         self.assertEqual(result.post_deploy_status, "pass")

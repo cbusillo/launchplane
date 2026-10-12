@@ -48,6 +48,32 @@ class GenericWebApplicationLifecycle(Protocol):
     def hold(self) -> None: ...
 
 
+@dataclass
+class RecordedApplicationLifecycle:
+    """A product verification hook needs a receipt, without provider schedule access."""
+
+    snapshot: ApplicationLifecycleSnapshot
+    effect_attempted: bool = False
+
+    def capture(self) -> None:
+        pass
+
+    def prepare(self) -> None:
+        pass
+
+    def maintain(self) -> dict[str, str]:
+        return {}
+
+    def complete(self) -> dict[str, str]:
+        return {}
+
+    def restore(self) -> None:
+        pass
+
+    def hold(self) -> None:
+        pass
+
+
 @runtime_checkable
 class GenericWebApplicationLifecycleProvider(Protocol):
     def application_lifecycle(
@@ -230,6 +256,8 @@ def application_lifecycle_for_lane(
 ) -> GenericWebApplicationLifecycle | None:
     if snapshot is None:
         return None
+    if not snapshot.managed_names and not snapshot.extensions.maintenance:
+        return RecordedApplicationLifecycle(snapshot)
     if not isinstance(provider, GenericWebApplicationLifecycleProvider):
         raise click.ClickException(
             "Deploy provider does not support the declared application lifecycle."

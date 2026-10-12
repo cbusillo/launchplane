@@ -9467,6 +9467,16 @@
             },
             "title": "Schedules",
             "type": "array"
+          },
+          "verification_extension": {
+            "default": "",
+            "enum": [
+              "",
+              "verireel-testing"
+            ],
+            "title": "Verification Extension",
+            "type": "string",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "GenericWebLaneExtensions",

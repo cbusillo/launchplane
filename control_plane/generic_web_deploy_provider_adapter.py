@@ -54,8 +54,8 @@ from control_plane.workflows.generic_web_deploy_provider import (
     generic_web_provider_deployment_succeeded,
     resolve_generic_web_provider_reconciliation_target,
 )
-from control_plane.workflows.odoo_generic_web_post_deploy import (
-    generic_web_post_deploy_executor_for_driver_id,
+from control_plane.workflows.generic_web_post_deploy import (
+    generic_web_post_deploy_executor_for_profile,
 )
 
 
@@ -310,8 +310,8 @@ class GenericWebDeployProviderMutationAdapter:
             observation.deployment_status
         ) and (
             self._lane.generic_web_extensions.configured
-            or generic_web_post_deploy_executor_for_driver_id(
-                self._profile.driver_id, instance=self._lane.instance
+            or generic_web_post_deploy_executor_for_profile(
+                self._profile, instance=self._lane.instance
             )
             is not None
         )
@@ -412,8 +412,8 @@ class GenericWebDeployProviderMutationAdapter:
             )
             or self._lane.generic_web_extensions.configured
             or (
-                generic_web_post_deploy_executor_for_driver_id(
-                    self._profile.driver_id, instance=self._lane.instance
+                generic_web_post_deploy_executor_for_profile(
+                    self._profile, instance=self._lane.instance
                 )
                 is not None
             )
