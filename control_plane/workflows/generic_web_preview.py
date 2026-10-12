@@ -266,14 +266,29 @@ class GenericWebPreviewReadinessRequest(BaseModel):
 class GenericWebPreviewTransportSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    data_transport_mode: Literal["none", "clone", "bootstrap", "migrate_seed", "driver"]
+    data_transport_mode: str
     copied_env_keys: tuple[str, ...]
     omitted_env_keys: tuple[str, ...]
     override_env_keys: tuple[str, ...]
     preview_url_env_keys: tuple[str, ...]
     preview_domain_env_keys: tuple[str, ...]
-    migration_command_configured: bool
-    seed_command_configured: bool
+    compatibility_status: Literal["supported", "unsupported_saved_intent"] = "supported"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_historical_summary(cls, value: object) -> object:
+        if isinstance(value, dict):
+            normalized = {
+                key: item
+                for key, item in value.items()
+                if key not in {"migration_command_configured", "seed_command_configured"}
+            }
+            if value.get("data_transport_mode") in {"clone", "bootstrap", "migrate_seed"} or (
+                value.get("migration_command_configured") or value.get("seed_command_configured")
+            ):
+                normalized["compatibility_status"] = "unsupported_saved_intent"
+            return normalized
+        return value
 
 
 class GenericWebPreviewReadinessCheck(BaseModel):
@@ -791,8 +806,9 @@ def _transport_summary(
         override_env_keys=tuple(sorted(profile.preview.override_env)),
         preview_url_env_keys=profile.preview.preview_url_env_keys,
         preview_domain_env_keys=profile.preview.preview_domain_env_keys,
-        migration_command_configured=bool(profile.preview.migration_command.strip()),
-        seed_command_configured=bool(profile.preview.seed_command.strip()),
+        compatibility_status=(
+            "unsupported_saved_intent" if profile.preview.historical_transport else "supported"
+        ),
     )
 
 
@@ -1139,6 +1155,32 @@ def evaluate_generic_web_preview_readiness(
             product=request.product,
         )
     checks: list[GenericWebPreviewReadinessCheck] = []
+    if resolved_profile.preview.historical_transport or (
+        resolved_profile.preview.data_transport_mode == "driver"
+    ):
+        reason = (
+            "Saved preview transport intent was never implemented; replace the preview settings "
+            "with supported none/driver configuration before refreshing."
+            if resolved_profile.preview.historical_transport
+            else "Driver transport readiness requires executed driver refresh evidence."
+        )
+        return GenericWebPreviewReadinessResult(
+            readiness_status="blocked",
+            checked_at=checked_at,
+            product=resolved_profile.product,
+            context=resolved_profile.preview.context,
+            template_context="",
+            template_instance=resolved_profile.preview.template_instance,
+            source=request.source,
+            missing_template_env_keys=(),
+            missing_provider_fields=(),
+            transport=_transport_summary(profile=resolved_profile),
+            checks=(
+                GenericWebPreviewReadinessCheck(
+                    check_id="transport_compatibility", status="blocked", message=reason
+                ),
+            ),
+        )
     preview_base_url_error = ""
     if not preview_url_override.strip():
         try:
@@ -1279,16 +1321,6 @@ def evaluate_generic_web_preview_readiness(
                 message="Template lane includes required provider fields.",
             )
         )
-    checks.append(
-        GenericWebPreviewReadinessCheck(
-            check_id="transport_policy",
-            status="pass",
-            message=(
-                "Preview transport policy is configured for "
-                f"{resolved_profile.preview.data_transport_mode!r} mode."
-            ),
-        )
-    )
     status: Literal["pass", "blocked"] = (
         "blocked"
         if preview_base_url_error or missing_env_keys or missing_provider_fields

@@ -202,7 +202,6 @@ def _odoo_compose_profile() -> LaunchplaneProductProfileRecord:
             template_instance="testing",
             override_env={"ODOO_INSTALL_MODULES": "cm_custom,cm_website"},
             preview_url_env_keys=("WEB_BASE_URL",),
-            data_transport_mode="bootstrap",
         ),
         updated_at="2026-05-09T15:00:00Z",
         source="test",
@@ -271,8 +270,6 @@ class GenericWebPreviewTests(unittest.TestCase):
                 override_env_keys=(),
                 preview_url_env_keys=(),
                 preview_domain_env_keys=(),
-                migration_command_configured=False,
-                seed_command_configured=False,
             ),
             checks=(),
         )
@@ -717,7 +714,6 @@ class GenericWebPreviewTests(unittest.TestCase):
                 "preview_base_url",
                 "template_env",
                 "template_provider_fields",
-                "transport_policy",
             ],
         )
 

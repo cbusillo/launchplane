@@ -3385,10 +3385,12 @@ export type ProductPreviewProfile = {
     app_name_prefix: string;
     context: string;
     copied_env_keys: Array<string>;
-    data_transport_mode: 'none' | 'clone' | 'bootstrap' | 'migrate_seed' | 'driver';
+    data_transport_mode: 'none' | 'driver';
     domain_certificate_type: 'none' | 'letsencrypt';
     enabled: boolean;
-    migration_command: string;
+    readonly historical_transport: {
+        [key: string]: string;
+    };
     omitted_env_keys: Array<string>;
     override_env: {
         [key: string]: string;
@@ -3397,7 +3399,6 @@ export type ProductPreviewProfile = {
     preview_url_env_keys: Array<string>;
     required_provider_fields: Array<string>;
     required_template_env_keys: Array<string>;
-    seed_command: string;
     slug_template: string;
     template_instance: string;
 };
@@ -4638,11 +4639,69 @@ export type WriterTarget = {
     writer_id: string;
 };
 
+export type LaunchplaneProductProfileRecordWritable = {
+    default_branch: string;
+    display_name: string;
+    driver_id: string;
+    expected_config: ProductExpectedConfigProfile;
+    health_path: string;
+    historical_contexts: Array<string>;
+    image: ProductImageProfile;
+    lanes: Array<ProductLaneProfile>;
+    lifecycle_state: 'active' | 'retiring' | 'retired';
+    owner: ProductOwnerProfile;
+    preview: ProductPreviewProfileWritable;
+    product: string;
+    production_use: 'unknown' | 'prelaunch' | 'live';
+    promotion_workflow: ProductPromotionWorkflowProfile;
+    public_website?: 'required' | 'none';
+    release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing';
+    repository: string;
+    repository_id: string;
+    repository_owner_id: string;
+    runtime_port: number;
+    schema_version: number;
+    source: string;
+    updated_at: string;
+};
+
 export type OwnerSecretInputEnvelopeWritable = {
     environment: string;
     product: string;
     request_revision: string;
     value: string;
+};
+
+export type ProductPreviewProfileWritable = {
+    app_name_prefix: string;
+    context: string;
+    copied_env_keys: Array<string>;
+    data_transport_mode: 'none' | 'driver';
+    domain_certificate_type: 'none' | 'letsencrypt';
+    enabled: boolean;
+    omitted_env_keys: Array<string>;
+    override_env: {
+        [key: string]: string;
+    };
+    preview_domain_env_keys: Array<string>;
+    preview_url_env_keys: Array<string>;
+    required_provider_fields: Array<string>;
+    required_template_env_keys: Array<string>;
+    slug_template: string;
+    template_instance: string;
+};
+
+export type ProductProfileListResponseWritable = {
+    driver_id: string;
+    profiles: Array<LaunchplaneProductProfileRecordWritable>;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type ProductProfileResponseWritable = {
+    profile: LaunchplaneProductProfileRecordWritable;
+    status: 'ok';
+    trace_id: string;
 };
 
 export type ReadHumanAuthSessionData = {

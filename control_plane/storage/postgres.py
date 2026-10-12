@@ -36068,7 +36068,8 @@ class PostgresRecordStore(HumanSessionStore):
                 migrate_product_profile_monitoring_intent_payload(
                     migrate_product_profile_health_monitoring_payload(payload)
                 )
-            )
+            ),
+            context={"stored_product_profile": True},
         )
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:

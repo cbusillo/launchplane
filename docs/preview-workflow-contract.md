@@ -138,6 +138,19 @@ narrow `authz_diagnostic.evaluate` grant; without it, the workflow retains the
 ordinary generic denial. Its response contains only selector categories and
 opaque fingerprints, never policy selectors or other principal rules.
 
+New preview settings accept only `data_transport_mode="none"` (ordinary preview
+provisioning with the declared environment copying) or `"driver"` (executed
+driver-owned preparation). Clone, bootstrap, migration/seed modes and generic
+migration/seed command settings were never executed and are no longer inputs.
+Stored profiles retain that unsupported intent in read-only
+`preview.historical_transport`; readiness reports `unsupported_saved_intent`
+and refresh blocks before provider mutation. To resume, replace the preview
+settings through the product-profile API with supported configuration, omitting
+the historical field. Storage reads preserve the original intent and commands;
+they do not authorize or execute them. Ordinary readiness reports only the
+prerequisites it checks. Driver transport needs successful driver execution
+evidence rather than a passing generic transport-policy check.
+
 When the stored product profile declares `preview.data_transport_mode="driver"`,
 the generic-web lifecycle route delegates refresh and destroy execution to the
 registered product-driver extension. This keeps product-specific database,

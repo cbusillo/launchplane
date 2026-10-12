@@ -4743,7 +4743,9 @@ class FilesystemRecordStore:
                 migrate_product_profile_health_monitoring_payload(payload)
             )
         )
-        record = LaunchplaneProductProfileRecord.model_validate(migrated_payload)
+        record = LaunchplaneProductProfileRecord.model_validate(
+            migrated_payload, context={"stored_product_profile": True}
+        )
         if migrated_payload != payload:
             record_path.write_text(
                 json.dumps(
