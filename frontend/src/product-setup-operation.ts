@@ -4,10 +4,14 @@ export type SetupRequest = ApplyProductExpectedConfigData["body"] | ApplyProduct
 export type SetupKind = "environment" | "declarations";
 export interface BindingDraft { binding_key: string; integration: string }
 
-export function environmentSetupRequest(product: string, context: string, instance: string, baseUrl: string, reason: string): ApplyProductStableLaneRepairData["body"] {
+export function environmentSetupRequest(product: string, context: string, instance: string, baseUrl: string, reason: string, publicWebsite: "required" | "none" = "required"): ApplyProductStableLaneRepairData["body"] {
   const lane = instance.trim();
   if (!lane || ["prod", "production"].includes(lane.toLowerCase())) throw new Error("Choose a non-production environment.");
   if (!context.trim() || !reason.trim()) throw new Error("Enter the product context and a reason.");
+  if (publicWebsite === "none") {
+    if (baseUrl.trim()) throw new Error("A product with no public website cannot declare a public origin.");
+    return { schema_version: 1, mode: "dry-run", product, context: context.trim(), instance: lane, base_url: "", reason: reason.trim() };
+  }
   const url = new URL(baseUrl.trim());
   if (url.protocol !== "https:" || url.username || url.password || url.port || url.search || url.hash || url.pathname !== "/") throw new Error("Enter the prepared target's HTTPS origin without a path or credentials.");
   return { schema_version: 1, mode: "dry-run", product, context: context.trim(), instance: lane, base_url: url.origin, reason: reason.trim() };

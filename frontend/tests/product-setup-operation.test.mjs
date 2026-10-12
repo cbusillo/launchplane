@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test, afterEach } from "node:test";
-import { declarationSetupRequest, environmentSetupRequest, reviewedSetupApply } from "../src/product-setup-operation.ts";
+import { declarationSetupRequest, environmentSetupRequest, reviewedSetupApply, verifySetupReadback } from "../src/product-setup-operation.ts";
 import { applyProductExpectedConfig, applyProductStableLaneRepair } from "../src/api.ts";
 import { BROWSER_WRITE_ROUTES } from "../src/browser-write-contract.ts";
 const originalFetch = globalThis.fetch;
@@ -43,4 +43,16 @@ test("setup API uses current CSRF and caller operation keys without bearer crede
     assert.equal(headers.get("Idempotency-Key"), key);
     assert.equal(headers.has("Authorization"), false);
   }
+});
+
+
+test("a no-website product plans and verifies a private environment without a public origin", () => {
+  const request = environmentSetupRequest("demo", "demo", "testing", "", "Isolated private runtime", "none");
+  assert.equal(request.base_url, "");
+  const result = { status: "ok", mode: "dry-run", product: request.product, context: request.context, instance: request.instance, changed: true, base_url: "", plan_sha256: "b".repeat(64) };
+  const apply = reviewedSetupApply("environment", request, { result });
+  assert.equal(apply.base_url, "");
+  assert.doesNotThrow(() => verifySetupReadback("environment", apply, { product: request.product, lanes: [{ context: request.context, instance: request.instance, base_url: "" }] }));
+  assert.throws(() => environmentSetupRequest("demo", "demo", "testing", "https://testing.example.com", "reason", "none"));
+  assert.throws(() => environmentSetupRequest("demo", "demo", "testing", "", "reason"));
 });

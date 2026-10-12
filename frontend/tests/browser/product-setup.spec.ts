@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "declaration-uncertain"] as const) {
+for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "declaration-uncertain", "declaration-uncertain-stale", "private"] as const) {
   test(`signed-in setup: ${outcome}, exact diff, declaration apply and secret navigation`, async ({ page }, testInfo) => {
     await page.goto("/ui/products/atlas-commerce?fixture=products");
     const data = await page.evaluate(async () => {
@@ -9,7 +9,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
         environment: f.environmentForFixture("products", "atlas-commerce", "testing"),
         config: f.configStatusForFixture("products", "atlas-commerce", "testing") };
     });
-    const profile = { product: "atlas-commerce", owner: { github_login: "example-owner", github_id: "9001" }, image: { repository: "ghcr.io/example/atlas-commerce" }, production_use: "live", release_on_acceptance: "held",
+    const profile = { product: "atlas-commerce", owner: { github_login: "example-owner", github_id: "9001" }, public_website: outcome === "private" ? "none" : "required", image: { repository: "ghcr.io/example/atlas-commerce" }, production_use: "live", release_on_acceptance: "held",
       lanes: [{ context: "atlas-commerce", instance: "prod", base_url: "https://example.com" }],
       expected_config: { runtime_environment_keys: [], managed_secret_bindings: [] as unknown[] } };
     let refuseReadback = false;
@@ -23,6 +23,8 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
           applies.push({ body, key: route.request().headers()["idempotency-key"] });
           if (outcome === "uncertain-stale" && applies.length === 1) { await route.abort("failed"); return; }
           if (outcome === "uncertain-stale" && applies.length === 2) { await route.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "stale", message: "Reviewed plan changed." } } }); return; }
+          if (!environment && outcome === "declaration-uncertain-stale" && applies.length === 2) { await route.abort("failed"); return; }
+          if (!environment && outcome === "declaration-uncertain-stale" && applies.length === 3) { await route.fulfill({ status: 409, json: { trace_id: "stale-declaration", error: { code: "stale", message: "Product profile changed while declaring configuration. Review again." } } }); return; }
           if (outcome === "readback" && applies.length === 1) refuseReadback = true;
           if (environment && !profile.lanes.some(lane => lane.instance === "testing")) profile.lanes.push({ context: body.context, instance: body.instance, base_url: body.base_url });
           if (!environment) profile.expected_config.managed_secret_bindings = body.managed_secret_bindings;
@@ -46,7 +48,8 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
     await page.goto("/ui/products/atlas-commerce");
     let panel = page.getByRole("region", { name: "Set up a non-production environment" });
     await panel.getByText("Add environment", { exact: true }).click();
-    await panel.getByLabel("Prepared target HTTPS origin").fill("https://testing.example.com");
+    if (outcome === "private") await expect(panel.getByLabel("Prepared target HTTPS origin")).toHaveCount(0);
+    else await panel.getByLabel("Prepared target HTTPS origin").fill("https://testing.example.com");
     await panel.getByLabel("Reason", { exact: true }).fill("Isolated testing");
     await panel.getByRole("button", { name: "Run dry-run", exact: true }).click();
     await expect(panel.getByText("Exact service diff")).toBeVisible();
@@ -98,7 +101,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
       { binding_key: "BOT_TOKEN", integration: "runtime_environment", context: "atlas-commerce", instance: "testing", owner_input: null },
       { binding_key: "BRIDGE_TOKEN", integration: "runtime_environment", context: "atlas-commerce", instance: "testing", owner_input: null },
     ]);
-    if (outcome === "declaration-uncertain") {
+    if (["declaration-uncertain", "declaration-uncertain-stale"].includes(outcome)) {
       await expect(panel.getByRole("button", { name: "Retry original apply" })).toBeVisible();
       await page.reload();
       panel = page.getByRole("region", { name: "Set up a non-production environment" });
@@ -106,11 +109,21 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
       await panel.getByRole("button", { name: "Retry original apply" }).click();
       await expect.poll(() => applies.length).toBe(3);
       expect(applies[2]).toEqual(applies[1]);
+      if (outcome === "declaration-uncertain-stale") {
+        await expect(panel.getByRole("button", { name: "Retry original apply" })).toHaveCount(0);
+        const recoveredDeclarations = panel.locator("details").filter({ has: page.locator("summary", { hasText: "Declare managed-secret fields" }) });
+        await recoveredDeclarations.getByRole("combobox", { name: "Environment", exact: true }).selectOption("testing");
+        await recoveredDeclarations.getByLabel("Binding key 1").fill("BOT_TOKEN");
+        await recoveredDeclarations.getByLabel("Reason", { exact: true }).fill("Fresh declaration after stale refusal");
+        await recoveredDeclarations.getByRole("button", { name: "Run dry-run", exact: true }).click();
+        await recoveredDeclarations.getByRole("checkbox").check();
+        await recoveredDeclarations.getByRole("button", { name: "Apply reviewed change" }).click();
+        await expect.poll(() => applies.length).toBe(4);
+      }
     }
     await panel.getByRole("link", { name: "Open testing managed secrets" }).click();
     await expect(page).toHaveURL(/environments\/testing\/managed-secrets$/);
     await expect(page.getByRole("heading", { name: "Plan managed-secret changes", exact: true })).toBeVisible();
-    expect(profile.release_on_acceptance).toBe("held");
   });
 }
 

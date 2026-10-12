@@ -848,9 +848,11 @@ the sidebar uses the same operational health calculation as the product view.
 On a product's **Overview**, an administrator can open **Set up a
 non-production environment**. **Add environment** uses the existing stable-lane
 repair endpoint: choose a context already owned by the product, enter the new
-non-production environment name and its prepared HTTPS origin, and run the
-service dry run. Review the exact service result and confirm **Apply reviewed
-change**. The target records must already exist and agree with that origin;
+non-production environment name and, for a product with a public website, its
+prepared HTTPS origin, and run the service dry run. A product whose stored
+website declaration is `none` omits that origin; it still requires matching
+prepared target records and a separately configured private health check. Review the exact service result and confirm **Apply reviewed
+change**. The target records must already exist and, when supplied, agree with that origin;
 missing or changed target authority is a visible service refusal, not permission
 to create or guess a target. The apply is bound to the reviewed plan digest.
 
@@ -861,6 +863,9 @@ and unchanged declarations, confirm the scope, and apply. This is add-only
 expected-config metadata; it contains no secret values. Both operations read
 back the product profile before reporting success. Edits invalidate the review;
 an uncertain apply preserves its original request and idempotency key for retry.
+Both endpoints replay their atomic receipt before refusing a stale write. A
+definitive stale refusal settles the original retry so a new dry run can proceed;
+a fresh authorization denial does not prove the original write failed.
 
 **Open <environment> managed secrets** reaches the existing password-entry
 screen. The signed-in administrator supplies values there through its separate
