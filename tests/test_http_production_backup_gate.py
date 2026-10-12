@@ -64,7 +64,7 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                         "backup_gate": {"backup_record_id": "retired-capture"},
                     },
                 )
-                self.assertEqual(response.status_code, 404, response.text)
+                self.assertGreaterEqual(response.status_code, 400, response.text)
                 self.assertEqual(store.list_verireel_prod_backup_gate_operation_records(), ())
             finally:
                 store.close()

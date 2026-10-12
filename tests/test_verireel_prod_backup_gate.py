@@ -1,4 +1,6 @@
 import unittest
+
+from control_plane.contracts.production_backup_failures import LEGACY_BACKUP_EXECUTION_RETIRED_CODE
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -147,7 +149,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                 operation.operation_id
             )
             self.assertEqual(persisted.status, "fail")
-            self.assertEqual(persisted.error_code, "legacy_backup_execution_retired")
+            self.assertEqual(persisted.error_code, LEGACY_BACKUP_EXECUTION_RETIRED_CODE)
             self.assertEqual(
                 store.read_backup_gate_record(operation.backup_record_id).status, "fail"
             )

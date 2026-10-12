@@ -32,7 +32,6 @@ from control_plane.workflows.verireel_stable_deploy import (
 
 
 VERIREEL_PROD_DEPLOY_ROUTE = "/v1/drivers/verireel/prod-deploy"
-VERIREEL_PROD_BACKUP_GATE_ROUTE = "/v1/drivers/verireel/prod-backup-gate"
 VERIREEL_PROD_PROMOTION_ROUTE = "/v1/drivers/verireel/prod-promotion"
 VERIREEL_PROD_ROLLBACK_ROUTE = "/v1/drivers/verireel/prod-rollback"
 

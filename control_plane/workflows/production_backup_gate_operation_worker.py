@@ -8,6 +8,7 @@ from threading import Event, Thread
 from typing import Callable, Protocol
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.production_backup_failures import LEGACY_BACKUP_EXECUTION_RETIRED_CODE
 from control_plane.contracts.verireel_prod_backup_gate import (
     VeriReelProdBackupGateResult,
 )
@@ -23,8 +24,8 @@ from control_plane.durable_operation_authorization import (
 from control_plane.workflows.production_backup_gate import (
     _build_backup_gate_record,
     _failed_backup_gate_record,
+    execute_shared_production_backup,
 )
-from control_plane.workflows.production_backup_gate import execute_shared_production_backup
 from control_plane.workflows.production_backup_provider import ProductionBackupProviderError
 
 DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_LEASE_SECONDS = 300
@@ -414,7 +415,7 @@ def _execute_operation(
                 record_progress=record_progress,
             )
         else:
-            raise ProductionBackupProviderError("legacy_backup_execution_retired")
+            raise ProductionBackupProviderError(LEGACY_BACKUP_EXECUTION_RETIRED_CODE)
         backup_gate_record = _build_backup_gate_record(
             request=running_operation.request,
             worker_result=worker_result,
@@ -461,13 +462,12 @@ def _execute_operation(
             "Production backup gate operation %s failed before producing a result.",
             operation.operation_id,
         )
-        error_code = (
-            str(error)
-            if isinstance(error, ProductionBackupProviderError)
-            else "backup_preflight_unavailable"
-            if operation.binding is not None
-            else ""
-        )
+        if isinstance(error, ProductionBackupProviderError):
+            error_code = str(error)
+        elif operation.binding is not None:
+            error_code = "backup_preflight_unavailable"
+        else:
+            error_code = ""
         error_message = error_code or str(error)
         backup_gate_record = _failed_backup_gate_record(
             request=running_operation.request,
@@ -545,7 +545,7 @@ def _start_heartbeat(
             "stop_event": stop_event,
             "heartbeat_lost_event": heartbeat_lost_event,
         },
-        name=f"verireel-prod-backup-gate-heartbeat-{operation_id}",
+        name=f"production-backup-gate-heartbeat-{operation_id}",
         daemon=True,
     )
     worker.start()

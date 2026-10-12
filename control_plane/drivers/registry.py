@@ -524,7 +524,7 @@ ODOO_DRIVER = DriverDescriptor(
         DriverCapabilityDescriptor(
             capability_id="stable_promotion",
             label="Stable promotion",
-            description="Capture backup evidence, promote testing to prod, and roll back prod to stored artifacts.",
+            description="Promote testing to prod and roll back prod to stored artifacts after shared backup capture.",
             actions=(
                 "target_replacement_apply",
                 "prod_promotion_inputs",
@@ -882,7 +882,7 @@ VERIREEL_DRIVER = DriverDescriptor(
         DriverCapabilityDescriptor(
             capability_id="stable_promotion",
             label="Stable promotion",
-            description="Capture backup evidence, promote testing to prod, and roll back prod to stored artifacts.",
+            description="Promote testing to prod and roll back prod to stored artifacts after shared backup capture.",
             actions=("prod_promotion", "prod_rollback"),
             panels=("promotion_evidence", "backup_evidence"),
         ),
@@ -1076,8 +1076,6 @@ def list_driver_descriptors() -> tuple[DriverDescriptor, ...]:
 
 
 def instance_scoped_driver_authz_actions() -> frozenset[str]:
-    # The retired capture action still scopes historical grants and cancellation.
-    # Recognizing it here does not register an executable capture route.
     return frozenset(
         authz_action
         for descriptor in list_driver_descriptors()
@@ -1085,7 +1083,7 @@ def instance_scoped_driver_authz_actions() -> frozenset[str]:
         if action.scope == "instance"
         for authz_action in (action.authz_action, *action.alternate_authz_actions)
         if authz_action
-    ) | frozenset({"verireel_prod_backup_gate.execute"})
+    )
 
 
 def operational_readiness_driver_authz_actions() -> frozenset[str]:
