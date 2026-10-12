@@ -25,6 +25,7 @@ from control_plane.testing_event_deploy_recovery import (
     retire_unavailable_testing_event_deploy,
     testing_event_execution_lock_name,
 )
+from control_plane.provider_operations import build_provider_operation_key, provider_operation_title
 from control_plane.workflows.generic_web_deploy_provider import (
     DokployGenericWebDeployProvider,
     build_generic_web_provider_reconciliation_key,
@@ -249,6 +250,17 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
     def test_post_deploy_effect_remains_held(self) -> None:
         self.assert_held_without_inspection(self.reserve(phase="post_deploy_started"))
 
+    def test_interrupted_records_publication_remains_held(self) -> None:
+        self.assert_held_without_inspection(self.reserve(phase="records_commit"))
+
+    def test_unknown_provider_classification_cannot_retire(self) -> None:
+        record = self.reserve()
+        with patch.object(
+            self.provider, "observe_testing_no_live_effect", return_value={"state": "unknown"}
+        ):
+            self.assertIsNone(self.recover(record))
+        self.assertEqual(self.current(record), record)
+
     def test_queued_trigger_missing_from_history_stays_held_and_reports_why(self) -> None:
         record = self.reserve()
         self.responses["/api/deployment.queueList"] = [
@@ -294,10 +306,92 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
         self.assertIsNone(self.recover(record))
         self.assertEqual(self.current(record), record)
 
-    def test_triggered_attempt_cannot_qualify_with_filtered_container_inventory(self) -> None:
+    def test_trigger_checkpoint_without_correlated_history_stays_held(self) -> None:
         record = self.reserve(phase="deploy_trigger")
         self.assertIsNone(self.recover(record))
         self.assertEqual(self.current(record), record)
+
+    def terminal_dispatch(self, record: LaunchplaneIdempotencyRecord) -> dict[str, object]:
+        return {
+            "deploymentId": "held-deploy",
+            "composeId": self.target.resolved_target.target_id,
+            "title": provider_operation_title(
+                build_provider_operation_key(
+                    scope=record.scope,
+                    route_path=record.route_path,
+                    idempotency_key=record.idempotency_key,
+                    request_fingerprint=record.request_fingerprint,
+                    reconciliation_key=record.reconciliation_key,
+                )
+            ),
+            "status": "done",
+            "startedAt": self.now(-120),
+            "finishedAt": self.now(-60),
+        }
+
+    def test_correlated_terminal_dispatch_retires_as_failed_not_as_absent_or_passed(self) -> None:
+        record = self.reserve(phase="deploy_trigger")
+        deployment = self.terminal_dispatch(record)
+        self.responses["/api/deployment.allByType"] = [deployment]
+        # This inventory is deliberately unavailable: terminal dispatch proof
+        # must not pretend a filtered container list proves an absent effect.
+        self.responses["/api/docker.getContainers"] = None
+        audit = self.recover(record)
+        self.assertIsNotNone(audit)
+        assert audit is not None
+        evidence = audit["provider_evidence"]
+        assert isinstance(evidence, dict)
+        self.assertEqual(evidence["state"], "quiescent_safe_to_retry")
+        completed = self.current(record)
+        self.assertEqual(completed.state, "completed")
+        self.assertGreaterEqual(completed.response_status_code or 0, 400)
+        self.assertEqual(
+            completed.response_payload["error"]["code"],
+            "testing_deploy_retired_after_terminal_dispatch",
+        )
+        self.assertNotIn("held-deploy", str(audit))
+        paths = [call.kwargs["path"] for call in self.read_mock.call_args_list]
+        self.assertNotIn("/api/docker.getContainers", paths)
+
+    def test_terminal_dispatch_requires_correlation_complete_history_and_no_pending_jobs(
+        self,
+    ) -> None:
+        record = self.reserve(phase="deploy_trigger")
+        deployment = self.terminal_dispatch(record)
+        for history in (
+            [],
+            [dict(deployment, title="unrelated")],
+            [deployment, deployment],
+            [dict(deployment, status="running")],
+            [dict(deployment, finishedAt="")],
+            [dict(deployment, deploymentId="")],
+            [dict(deployment, composeId="another-target")],
+            [dict(deployment, finishedAt=self.now(-180))],
+            [deployment, dict(deployment, title="unrelated")],
+            [deployment, {"deploymentId": "other", "status": "running"}],
+        ):
+            with self.subTest(history=history):
+                self.responses["/api/deployment.allByType"] = history
+                self.assertIsNone(self.recover(record))
+                self.assertEqual(self.current(record), record)
+        self.responses["/api/deployment.allByType"] = [deployment]
+        for path, response in (
+            (
+                "/api/deployment.queueList",
+                [
+                    {
+                        "data": {"composeId": self.target.resolved_target.target_id},
+                        "state": "waiting",
+                    }
+                ],
+            ),
+            ("/api/schedule.list", [{"scheduleId": "unknown-data-effect"}]),
+        ):
+            with self.subTest(path=path):
+                self.responses[path] = response
+                self.assertIsNone(self.recover(record))
+                self.assertEqual(self.current(record), record)
+                self.responses[path] = []
 
     def test_execution_lock_loss_prevents_provider_checkpoint(self) -> None:
         from control_plane.generic_web_deploy_provider_adapter import (
