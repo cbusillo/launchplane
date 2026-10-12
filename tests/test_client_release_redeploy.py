@@ -23,8 +23,8 @@ from control_plane.storage.postgres import PostgresRecordStore, LaunchplaneServi
 from control_plane.workflows.odoo_stable_target_replacement import (
     TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
 )
-from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
-    run_verireel_prod_backup_gate_operation_worker_once,
+from control_plane.workflows.production_backup_gate_operation_worker import (
+    run_production_backup_gate_operation_worker_once,
 )
 from tests import test_client_release as odoo
 from tests import test_generic_web_client_release as web
@@ -95,7 +95,7 @@ class ClientReleaseRedeployTests(unittest.TestCase):
         host = BackupHost(after_snapshot=interrupt)
         with (
             patch(
-                "control_plane.workflows.verireel_prod_backup_gate_operation_worker._utc_now_timestamp",
+                "control_plane.workflows.production_backup_gate_operation_worker._utc_now_timestamp",
                 side_effect=lambda: datetime.now(UTC).isoformat(),
             ),
             patch(
@@ -110,7 +110,7 @@ class ClientReleaseRedeployTests(unittest.TestCase):
                 side_effect=host.run,
             ),
         ):
-            result = run_verireel_prod_backup_gate_operation_worker_once(
+            result = run_production_backup_gate_operation_worker_once(
                 record_store=fixture.store,
                 control_plane_root_path=fixture.root,
                 lease_owner="isolated-backup-worker",

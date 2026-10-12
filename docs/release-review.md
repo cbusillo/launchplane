@@ -673,7 +673,10 @@ With `promote_with_rollback_drill` it then runs the rollback drill:
 The rollback restores the checklist's production version, so the checklist
 recompiles to the digest the Client accepted, and that acceptance covers the
 second promotion and nothing else. A product drills once. After a release's
-drill passes, `promote_with_rollback_drill` behaves as `promote`.
+drill passes, both `promote_with_rollback_drill` and `director_standing` behave as
+`promote`. Standing acceptance records the same drill sequence until a drill has
+passed for that product; the first promotion alone or a failed drill does not
+qualify it. Each decision retains the release sequence stamped when it was accepted.
 
 Odoo and generic-web products use this same sequence and acceptance checks.
 Generic web redeploys the explicitly selected passing production deployment's
@@ -774,9 +777,8 @@ in `records`. Reading this evidence never retries a stopped release.
 and `release_run`, derived from the step operations, whose ids come from the
 decision.
 
-A release that changes shared Odoo addon sources still needs an admin override,
-so it remains a hand promotion. The Client cannot undo a live release; that is
-an admin rollback.
+Shared Odoo source changes use the detailed checklist coverage requirements
+above. The Client cannot undo a live release; that is an admin rollback.
 
 Direct deploys cannot change what a production lane runs. The generic-web
 deploy, VeriReel prod-deploy, and Odoo target-replacement apply routes, and the

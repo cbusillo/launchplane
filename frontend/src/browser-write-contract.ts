@@ -1,4 +1,5 @@
 import type {
+  ApplyProductionBackupAuthorityData,
   ApplyProductDisplayNameData,
   ApplyProductHealthMonitoringData,
   ApplyProductWebsiteCleanupData,
@@ -27,6 +28,7 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  productionBackupAuthorityApply: "/v1/production-backup-authority/apply" satisfies ApplyProductionBackupAuthorityData["url"],
   productDisplayName: "/v1/product-profiles/{product}/display-name" satisfies ApplyProductDisplayNameData["url"],
   productHealthMonitoringApply: "/v1/product-profiles/health-monitoring/apply" satisfies ApplyProductHealthMonitoringData["url"],
   productWebsiteCleanup: "/v1/product-profiles/{product}/website-cleanup" satisfies ApplyProductWebsiteCleanupData["url"],

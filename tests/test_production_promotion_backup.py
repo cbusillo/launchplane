@@ -40,8 +40,8 @@ from control_plane.workflows.odoo_prod_promotion_run import (
     OdooProdPromotionRunRequest,
     execute_odoo_prod_promotion_run,
 )
-from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
-    run_verireel_prod_backup_gate_operation_worker_once,
+from control_plane.workflows.production_backup_gate_operation_worker import (
+    run_production_backup_gate_operation_worker_once,
 )
 from tests.support.durable_operations import (
     durable_operation_authorization_payload,
@@ -442,7 +442,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 side_effect=BackupHost().run,
             ),
         ):
-            result = run_verireel_prod_backup_gate_operation_worker_once(
+            result = run_production_backup_gate_operation_worker_once(
                 record_store=store, control_plane_root_path=self.root, lease_owner="test-worker"
             )
         self.assertTrue(result.terminal_write_committed)
