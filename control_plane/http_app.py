@@ -23439,6 +23439,14 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
+        except Exception as error:
+            _LOGGER.exception("Unexpected Launchplane service error", extra={"trace_id": trace_id})
+            raise _launchplane_http_error(
+                status_code=500,
+                trace_id=trace_id,
+                code="internal_error",
+                message="Unexpected Launchplane service error. Use trace_id to inspect service logs.",
+            ) from error
         response = accepted_evidence_response(trace_id=trace_id, records=records, result=result)
         if should_store_verireel_result_idempotency(result):
             store_apply_idempotency(

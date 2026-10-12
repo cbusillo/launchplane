@@ -1632,7 +1632,9 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.assertEqual(self.reconcile()["reason"], "already_deployed")
         qualify.assert_called_once()
 
-    def test_verireel_lost_effect_fence_is_held_without_repeating_post_deploy(self) -> None:
+    def test_interrupted_declared_qualification_is_failed_without_repeating_post_deploy(
+        self,
+    ) -> None:
         from control_plane.provider_operations import ProviderMutationUnknownError
 
         self.prepare_unqualified_verireel_testing()
@@ -1644,8 +1646,9 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.assertEqual(self.run_once().state, "failed")
             self.request()
             repeated = self.run_once()
-        self.assertEqual(repeated.last_plan["deploy_operation_status"], "reconcile_required")
-        self.assertTrue(self.store.list_held_provider_target_reservations())
+        self.assertEqual(repeated.last_plan["deploy_operation_status"], "adopted")
+        self.assertEqual(repeated.state, "failed")
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
         qualify.assert_called_once()
 
     def test_declared_generic_web_profile_requalifies_then_reuses_complete_evidence(self) -> None:

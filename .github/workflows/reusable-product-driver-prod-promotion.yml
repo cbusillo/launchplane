@@ -5,12 +5,12 @@ name: Reusable Product Driver Prod Promotion
   workflow_call:
     inputs:
       product:
-        description: Launchplane product key. Defaults to the caller repository name.
+        description: Explicit Launchplane product key.
         required: false
         default: ""
         type: string
       context:
-        description: Production context. Defaults to the product key.
+        description: Explicit production context.
         required: false
         default: ""
         type: string
@@ -19,42 +19,42 @@ name: Reusable Product Driver Prod Promotion
         required: true
         type: string
       artifact_id:
-        description: Immutable image or Launchplane-resolvable artifact identity.
+        description: Compatibility input; unused by Odoo, which resolves stored release evidence.
         required: false
         default: ""
         type: string
       deploy_reference:
-        description: Optional provider-facing immutable image tag for digest identities.
+        description: Compatibility input; unused by Odoo, which resolves stored release evidence.
         required: false
         default: ""
         type: string
       source_git_ref:
-        description: Source git ref attached to promotion evidence.
+        description: Compatibility input; unused by Odoo, which resolves stored release evidence.
         required: false
         default: ""
         type: string
       backup_record_id:
-        description: Backup gate record id required by the promotion.
+        description: Compatibility input; unused by Odoo, which resolves stored release evidence.
         required: false
         default: ""
         type: string
       promotion_record_id:
-        description: Promotion record id for this prod promotion.
+        description: Compatibility input; unused by Odoo, which resolves stored release evidence.
         required: false
         default: ""
         type: string
       source_health_status:
-        description: Source lane health status proven by product-owned checks.
+        description: Compatibility input; unused by Odoo, which resolves stored release evidence.
         required: false
         default: skipped
         type: string
       expected_build_revision:
-        description: Expected runtime build revision, when known.
+        description: Compatibility input; unused by Odoo, which resolves stored release evidence.
         required: false
         default: ""
         type: string
       expected_build_tag:
-        description: Expected runtime build tag, when known.
+        description: Compatibility input; unused by Odoo, which resolves stored release evidence.
         required: false
         default: ""
         type: string
@@ -141,15 +141,10 @@ jobs:
       - name: Resolve Launchplane prod promotion request
         id: request
         env:
-          ARTIFACT_ID: ${{ inputs.artifact_id }}
-          BACKUP_RECORD_ID: ${{ inputs.backup_record_id }}
           CONTEXT: ${{ inputs.context }}
-          DEPLOY_REFERENCE: ${{ inputs.deploy_reference }}
           DRIVER: ${{ inputs.driver }}
           FROM_INSTANCE: ${{ inputs.from_instance }}
           PRODUCT: ${{ inputs.product }}
-          PROMOTION_RECORD_ID: ${{ inputs.promotion_record_id }}
-          SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
           TO_INSTANCE: ${{ inputs.to_instance }}
         run: |
           set -euo pipefail

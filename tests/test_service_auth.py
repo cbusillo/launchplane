@@ -1293,6 +1293,52 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
             )
         )
 
+    def test_historical_retired_driver_grants_remain_readable_and_lane_scoped(self) -> None:
+        # These immutable legacy actions occur in stored policy history.
+        actions = (
+            "verireel_testing_deploy.execute",
+            "verireel_stable_environment.read",
+            "verireel_prod_deploy.execute",
+            "verireel_prod_promotion.execute",
+            "verireel_prod_rollback.execute",
+        )
+        for version in (2, 3):
+            with self.subTest(version=version):
+                payload = {
+                    "schema_version": version,
+                    "github_actions": [
+                        {
+                            "repository": "example/legacy-product",
+                            "products": ["legacy-product"],
+                            "contexts": ["legacy-context"],
+                            "instances": ["prod"],
+                            "actions": actions,
+                        }
+                    ],
+                }
+                policy = LaunchplaneAuthzPolicy.model_validate(payload)
+                restored = LaunchplaneAuthzPolicy.model_validate_json(policy.model_dump_json())
+                for action in actions:
+                    identity = _actions_identity(repository="example/legacy-product")
+                    self.assertTrue(
+                        restored.allows(
+                            identity=identity,
+                            action=action,
+                            product="legacy-product",
+                            context="legacy-context",
+                            target=AuthorizationTarget(scope="instance", instances=("prod",)),
+                        )
+                    )
+                    self.assertFalse(
+                        restored.allows(
+                            identity=identity,
+                            action=action,
+                            product="legacy-product",
+                            context="legacy-context",
+                            target=AuthorizationTarget(scope="instance", instances=("testing",)),
+                        )
+                    )
+
     def test_policy_schema_rejects_ambiguous_instance_rule_shapes(self) -> None:
         with self.assertRaisesRegex(
             ValidationError,

@@ -68,6 +68,8 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         list_response = await _get_driver_descriptors(app)
         show_response = await _get_driver_descriptor(app, "odoo")
 
+        retired_response = await _get_driver_descriptor(app, "verireel")
+        self.assertEqual(retired_response.status_code, 404)
         self.assertEqual(list_response.status_code, 200)
         list_payload = list_response.json()
         ingress_driver = next(

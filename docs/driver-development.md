@@ -119,7 +119,8 @@ driver is `generic-web`, declaring its isolated database namespace through
 namespace and runtime product identity come from the profile. This uses the existing isolated PostgreSQL preparation
 and cleanup rather than the plain preview path. The VeriReel testing transition
 has qualified this declared shared path; the parallel deploy, promotion and rollback driver is removed. Historical deployment
-and backup records remain readable. Production still changes only through an
+and backup records and retired instance-scoped policy grants remain readable;
+no retired release endpoint is enabled by those grants. Production still changes only through an
 accepted release.
 
 A generic-web testing lane selects `verification_extension="verireel-testing"`

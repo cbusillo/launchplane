@@ -3,13 +3,8 @@
   "projectType": "control-plane",
   "prWorkflow": {
     "preferredMergeMethod": "merge",
-    "allowedMergeMethods": [
-      "merge"
-    ],
-    "requiredStatusChecks": [
-      "ci-gate",
-      "security-gate"
-    ],
+    "allowedMergeMethods": ["merge"],
+    "requiredStatusChecks": ["ci-gate", "security-gate"],
     "mergePath": "launchplane.mergeTrain",
     "watchSkill": "babysit-pr"
   },
@@ -61,13 +56,8 @@
     "releaseReview": "docs/release-review.md",
     "productionBackupProvider": "docs/production-backup-provider.md",
     "odooOnlineBackups": "docs/odoo-online-backups.md",
-    "style": [
-      "docs/style/python.md",
-      "docs/style/testing.md"
-    ],
-    "policies": [
-      "docs/policies/coding-standards.md"
-    ]
+    "style": ["docs/style/python.md", "docs/style/testing.md"],
+    "policies": ["docs/policies/coding-standards.md"]
   },
   "qualityGate": {
     "test": {
@@ -127,24 +117,13 @@
         "python": {
           "version": "3.13",
           "moduleName": "launchplane-inspection",
-          "testRoots": [
-            "tests"
-          ],
+          "testRoots": ["tests"],
           "sync": true,
-          "extras": [
-            "dev"
-          ],
-          "requiredGeneratedState": [
-            ".venv",
-            ".idea"
-          ]
+          "extras": ["dev"],
+          "requiredGeneratedState": [".venv", ".idea"]
         }
       },
-      "scopePreference": [
-        "changed_files",
-        "directory",
-        "whole_project"
-      ]
+      "scopePreference": ["changed_files", "directory", "whole_project"]
     },
     "docsRequiredWhen": [
       "behavior changes",

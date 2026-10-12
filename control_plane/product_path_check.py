@@ -647,6 +647,16 @@ def _read_rollback_steps(
     caller_is_admin: Callable[[], bool],
     caller_can_use_generic_rollback: bool,
 ) -> tuple[PathCheckStep, ...]:
+    if profile.driver_id == "verireel":
+        return (
+            _step(
+                "rollback_route",
+                "blocked",
+                "rollback_driver_retired",
+                "Use the product workspace's reviewed Shared web driver transition before rollback.",
+                "by_hand",
+            ),
+        )
     steps: list[PathCheckStep] = []
     odoo = profile.driver_id == "odoo"
     if odoo:

@@ -5,12 +5,12 @@ name: Reusable Product Driver Prod Rollback
   workflow_call:
     inputs:
       product:
-        description: Launchplane product key. Defaults to the caller repository name.
+        description: Explicit Launchplane product key.
         required: false
         default: ""
         type: string
       context:
-        description: Production context. Defaults to the product key.
+        description: Explicit production context.
         required: false
         default: ""
         type: string
@@ -29,7 +29,7 @@ name: Reusable Product Driver Prod Rollback
         default: ""
         type: string
       backup_record_id:
-        description: Backup gate record id used to authorize rollback.
+        description: Compatibility input; unused by Odoo, which resolves stored release evidence.
         required: false
         default: ""
         type: string
@@ -49,17 +49,17 @@ name: Reusable Product Driver Prod Rollback
         default: testing
         type: string
       snapshot_name:
-        description: Backup snapshot name, when available.
+        description: Compatibility input; unused by Odoo, which resolves stored release evidence.
         required: false
         default: ""
         type: string
       expected_build_revision:
-        description: Expected runtime build revision after rollback, when known.
+        description: Compatibility input; unused by Odoo, which resolves stored release evidence.
         required: false
         default: ""
         type: string
       expected_build_tag:
-        description: Expected runtime build tag after rollback, when known.
+        description: Compatibility input; unused by Odoo, which resolves stored release evidence.
         required: false
         default: ""
         type: string

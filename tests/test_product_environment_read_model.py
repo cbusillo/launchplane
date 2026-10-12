@@ -1178,7 +1178,6 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertFalse(actions["prod_backup_gate"].enabled)
         self.assertFalse(actions["prod_promotion"].enabled)
         self.assertFalse(actions["prod_rollback"].enabled)
-        self.assertIn("prod lane", actions["prod_promotion_workflow"].disabled_reasons[0])
 
     def test_product_environment_detail_preserves_disabled_secret_bindings(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -12,6 +12,12 @@ _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
         "backup_gate.write",
         # Retired capture grants still scope historical-operation cancellation.
         "verireel_prod_backup_gate.execute",
+        # Preserve typed scopes when reading historical policies; these routes are retired.
+        "verireel_testing_deploy.execute",
+        "verireel_stable_environment.read",
+        "verireel_prod_deploy.execute",
+        "verireel_prod_promotion.execute",
+        "verireel_prod_rollback.execute",
         VERIREEL_APP_MAINTENANCE_ACTION,
         "deployment.read",
         DOKPLOY_TARGET_LANE_SETUP_ACTION,

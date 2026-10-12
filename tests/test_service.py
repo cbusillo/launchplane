@@ -7749,6 +7749,53 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(replay_payload["result"], payload["result"])
             execute_mock.assert_called_once()
 
+    def test_extension_maintenance_unexpected_error_returns_trace_without_details(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = create_launchplane_fastapi_test_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "every/verireel",
+                                "products": ["verireel"],
+                                "contexts": ["verireel"],
+                                "actions": ["verireel_app_maintenance.execute"],
+                            }
+                        ],
+                    }
+                ),
+                control_plane_root_path=root,
+                local_record_store_for_tests=_verireel_route_test_store(root / "state"),
+            )
+            with (
+                patch(
+                    "control_plane.verireel_app_maintenance_http.execute_verireel_app_maintenance",
+                    side_effect=RuntimeError("private provider details"),
+                ),
+                self.assertLogs("control_plane.http_app", level="ERROR"),
+            ):
+                status, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/app-maintenance",
+                    payload={
+                        "product": "verireel",
+                        "maintenance": {
+                            "context": "verireel",
+                            "instance": "testing",
+                            "action": "migrate",
+                            "intent": "stable-testing-migration",
+                        },
+                    },
+                )
+            self.assertEqual(status, 500)
+            self.assertEqual(payload["error"]["code"], "internal_error")
+            self.assertTrue(payload["trace_id"])
+            self.assertNotIn("private provider details", json.dumps(payload))
+
     def test_verireel_app_maintenance_driver_accepts_stable_e2e_grant_intent(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
