@@ -133,9 +133,8 @@ def recorded_verireel_testing_qualification(
         or evidence.get("driver_id") != "verireel"
     ):
         return "missing"
-    if (
-        record.post_deploy_update.status == "fail"
-        and evidence.get("authority_digest") == authority_digest
+    if record.post_deploy_update.status == "fail" and (
+        not evidence.get("authority_digest") or evidence.get("authority_digest") == authority_digest
     ):
         if (
             evidence.get("failure_kind") == "transient"

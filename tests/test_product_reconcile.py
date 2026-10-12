@@ -1508,6 +1508,24 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual(plan["reason"], "staff_testing")
         qualify.assert_not_called()
 
+    def test_verireel_failure_before_authority_snapshot_has_bounded_retries(self) -> None:
+        from control_plane.workflows.verireel_testing_post_deploy import (
+            MAX_TRANSIENT_QUALIFICATION_ATTEMPTS,
+        )
+
+        self.prepare_unqualified_verireel_testing()
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.testing_qualification_authority",
+            side_effect=FileNotFoundError("authority temporarily unavailable"),
+        ) as authority:
+            for _ in range(MAX_TRANSIENT_QUALIFICATION_ATTEMPTS):
+                self.request()
+                self.assertEqual(self.run_once().state, "failed")
+            self.request()
+            final = self.run_once()
+        self.assertEqual(final.last_plan["reason"], "testing_qualification_failed")
+        self.assertEqual(authority.call_count, MAX_TRANSIENT_QUALIFICATION_ATTEMPTS)
+
     def test_verireel_transient_qualification_failure_has_bounded_retries(self) -> None:
         from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
         from control_plane.workflows.generic_web_deploy import GenericWebPostDeployContext
