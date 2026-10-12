@@ -257,14 +257,6 @@ from control_plane.http_routes.production_backup_gate import (
     ProductionBackupGateRouteDependencies,
     register_production_backup_gate_routes,
 )
-from control_plane.http_routes.ordinary_agent_management import (
-    OrdinaryAgentManagementDependencies,
-    register_ordinary_agent_management_routes,
-)
-from control_plane.http_routes.ordinary_agent import (
-    OrdinaryAgentRouteDependencies,
-    register_ordinary_agent_routes,
-)
 from control_plane.http_routes.event_deploy_recovery import register_event_deploy_recovery_routes
 from control_plane.http_routes.generic_web_promotion_recovery import (
     register_promotion_recovery_routes,
@@ -27430,19 +27422,6 @@ def create_launchplane_fastapi_app(
     register_privileged_operation_routes(
         app,
         dependencies=privileged_operation_route_dependencies,
-    )
-    register_ordinary_agent_routes(
-        app,
-        dependencies=OrdinaryAgentRouteDependencies(common=read_route_dependencies),
-    )
-    register_ordinary_agent_management_routes(
-        app,
-        dependencies=OrdinaryAgentManagementDependencies(
-            common=read_route_dependencies,
-            read_bearer_identity=read_bearer_identity,
-            policy_record_reader=lambda: read_active_authz_policy_record(get_record_store()),
-            human_session_manager=human_session_manager,
-        ),
     )
     register_governance_projection_routes(
         app,

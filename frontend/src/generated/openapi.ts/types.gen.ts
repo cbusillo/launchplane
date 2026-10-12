@@ -197,24 +197,6 @@ export type AuthSessionResponse = {
     trace_id: string;
 };
 
-export type AuthorizationCandidateInputDiagnostic = {
-    code: string;
-    message: string;
-};
-
-export type AuthorizationCandidateMergePolicyProvenance = {
-    policy_sha256: string;
-    record_id: string;
-    updated_at: string;
-};
-
-export type AuthorizationCandidatePolicyProvenance = {
-    policy_sha256: string;
-    record_id: string;
-    revision: number;
-    schema_version: number;
-};
-
 export type AuthorizationCandidatePrepareEnvelope = {
     candidate_id: 'agent-policy-proposer' | 'ordinary-agent-delivery-administration' | 'administrator-product-evidence-read' | 'ordinary-agent-enrollment-requester' | 'agent-product-setup';
     intent: 'add' | 'remove';
@@ -827,25 +809,6 @@ export type HealthcheckEvidence = {
     verified: boolean;
 };
 
-export type InspectionSetupManagedSecretMetadata = {
-    binding_id: string | null;
-    current_version_id: string | null;
-    secret_id: string | null;
-    state: 'not_evaluated' | 'metadata_recorded' | 'secret_missing' | 'secret_unreadable' | 'secret_ambiguous' | 'binding_missing' | 'binding_unreadable' | 'binding_ambiguous' | 'binding_mismatch' | 'version_pointer_missing' | 'unavailable';
-};
-
-export type InspectionSetupMetadata = {
-    managed_secret: InspectionSetupManagedSecretMetadata;
-    runtime: InspectionSetupRuntimeMetadata;
-    state: 'not_evaluated' | 'metadata_recorded' | 'incomplete' | 'unavailable';
-};
-
-export type InspectionSetupRuntimeMetadata = {
-    app_id: string | null;
-    recorded_at: string | null;
-    state: 'not_evaluated' | 'metadata_recorded' | 'record_missing' | 'record_unreadable' | 'record_ambiguous' | 'app_id_missing' | 'app_id_invalid' | 'unavailable';
-};
-
 export type IntegrationKeyReadbackEvidence = {
     checked_binding_keys: Array<string>;
     findings: Array<IntegrationKeyReadbackFinding>;
@@ -1443,13 +1406,6 @@ export type MergeTrainDryRunQueueEntrySummary = {
     url: string;
 };
 
-export type MergeTrainEnqueuePolicyInput = {
-    allowed_actor_roles?: Array<'repo_owner' | 'repo_admin'>;
-    dependency_update_github_user_ids?: Array<number>;
-    label_required?: boolean;
-    trusted_automation_github_user_ids?: Array<number>;
-};
-
 export type MergeTrainEnqueuePolicyOutput = {
     [key: string]: unknown;
 };
@@ -1926,18 +1882,6 @@ export type OdooWebsiteBootstrapRoute = {
     url: string;
 };
 
-export type OrdinaryAgentConnectionView = {
-    principal_id: string;
-    schema_version: 1;
-    status: 'revoked';
-};
-
-export type OrdinaryAgentDeliveryActivationDurationOption = {
-    activation_expires_at: string;
-    duration_seconds: number;
-    label: string;
-};
-
 export type OrdinaryAgentDeliveryActivationExecutionEvidence = {
     action: 'setup' | 'revoke_activation';
     activation_id: string;
@@ -1952,25 +1896,6 @@ export type OrdinaryAgentDeliveryActivationExecutionEvidence = {
     result_status: 'ok' | 'error';
     schema_version: 1;
     source_operation_id: string;
-};
-
-export type OrdinaryAgentDeliveryActivationOptionsResponse = {
-    duration_options: Array<OrdinaryAgentDeliveryActivationDurationOption>;
-    revoke_options: Array<OrdinaryAgentDeliveryActivationRevokeOption>;
-    setup_options: Array<OrdinaryAgentDeliveryActivationSetupOption>;
-    status: 'ok';
-    trace_id: string;
-};
-
-export type OrdinaryAgentDeliveryActivationPlanEnvelope = {
-    expires_in_seconds?: number;
-    request: ({
-        action: 'setup';
-    } & OrdinaryAgentDeliveryActivationSetupRequest) | ({
-        action: 'revoke_activation';
-    } & OrdinaryAgentDeliveryActivationRevokeRequest);
-    schema_version?: 1;
-    source_event_id: string;
 };
 
 export type OrdinaryAgentDeliveryActivationReference = {
@@ -1990,12 +1915,6 @@ export type OrdinaryAgentDeliveryActivationRevokeHumanEvidence = {
     scope: OrdinaryAgentDeliveryActivationScope;
     source_setup_operation_id: string;
     stop_behavior: 'Revocation permanently blocks fresh work for this activation intent.';
-};
-
-export type OrdinaryAgentDeliveryActivationRevokeOption = {
-    activation: OrdinaryAgentDeliveryActivationReference;
-    label: string;
-    scope: OrdinaryAgentDeliveryActivationScope;
 };
 
 export type OrdinaryAgentDeliveryActivationRevokeRequest = {
@@ -2031,14 +1950,6 @@ export type OrdinaryAgentDeliveryActivationSetupHumanEvidence = {
     stop_behavior: 'Revocation or readiness loss blocks fresh work while preserving bounded custody cleanup.';
 };
 
-export type OrdinaryAgentDeliveryActivationSetupOption = {
-    label: string;
-    policy_operation_id: string;
-    predecessor: OrdinaryAgentDeliveryActivationReference | null;
-    repository_inventory_record_id: string;
-    scope: OrdinaryAgentDeliveryActivationScope;
-};
-
 export type OrdinaryAgentDeliveryActivationSetupRequest = {
     action: 'setup';
     activation_expires_at: string;
@@ -2047,31 +1958,6 @@ export type OrdinaryAgentDeliveryActivationSetupRequest = {
     reason: string;
     repository_inventory_record_id: string;
     schema_version: 1;
-};
-
-export type OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse = {
-    authorization_policy: AuthorizationCandidatePolicyProvenance;
-    diagnostics: Array<AuthorizationCandidateInputDiagnostic>;
-    inspection_setup: InspectionSetupMetadata;
-    inventory_state: 'complete' | 'unavailable' | 'truncated' | 'ambiguous';
-    merge_policy: AuthorizationCandidateMergePolicyProvenance | null;
-    merge_policy_state: 'available' | 'missing' | 'ambiguous' | 'unavailable' | 'truncated';
-    observed_at: string;
-    repositories: Array<OrdinaryAgentDeliveryAuthorizationCandidateRepository>;
-    schema_version: 1;
-    status: 'ok';
-    terminal_enrollment: TerminalEnrollmentCapabilityReadiness;
-    trace_id: string;
-};
-
-export type OrdinaryAgentDeliveryAuthorizationCandidateRepository = {
-    configured_branches: Array<string>;
-    inventory_revision: number;
-    inventory_sha256: string;
-    record_id: string;
-    recorded_at: string;
-    repository: string;
-    repository_id: string;
 };
 
 export type OrdinaryAgentDeliveryInventoryReference = {
@@ -2095,19 +1981,6 @@ export type OrdinaryAgentDeliveryPolicyPackageReference = {
     plan_sha256: string;
     policy_operation_id: string;
     request_sha256: string;
-};
-
-export type OrdinaryAgentDeliveryPolicyPrepareEnvelope = {
-    intent: OrdinaryAgentDeliveryPolicyIntent;
-    schema_version?: 1;
-    source_event_id: string;
-};
-
-export type OrdinaryAgentDeliveryPolicyPrepareResponse = {
-    operation_id?: string | null;
-    principal_id: string;
-    state: 'planned' | 'already_satisfied';
-    trace_id: string;
 };
 
 export type OrdinaryAgentDeliveryRuntimeCapabilityEvidence = {
@@ -2139,53 +2012,10 @@ export type OrdinaryAgentDeliveryRuntimeCapabilityEvidence = {
     worker_image_reference: string;
 };
 
-export type OrdinaryAgentDisconnectRequest = {
-    source_event_id: string;
-};
-
 export type OrdinaryAgentJobBinding = {
     binding_revision: number;
     request_id: string;
     scope_sha256: string;
-};
-
-export type OrdinaryAgentJobView = {
-    cancellation_requested: boolean;
-    completed_effects: number;
-    continuation_expires_at: number | null;
-    expires_at: number;
-    next_due_at: number | null;
-    principal_id: string;
-    pull_request_numbers: Array<number>;
-    reason_code: string | null;
-    request_id: string;
-    schema_version: 1;
-    session_id: string;
-    status: 'pending' | 'running' | 'waiting' | 'blocked' | 'cancelled' | 'partially_completed' | 'completed' | 'reconciliation_required';
-    target: OrdinaryAgentTarget;
-    total_effects: number;
-    unresolved_effects: number;
-};
-
-export type OrdinaryAgentMergeTrainTargetInputsResponse = {
-    policy: OrdinaryAgentMergeTrainTargetPolicyInput;
-    status: 'ok';
-    trace_id: string;
-    tracked_repositories: Array<OrdinaryAgentMergeTrainTargetInventoryInput>;
-};
-
-export type OrdinaryAgentMergeTrainTargetIntentInput = {
-    base_branch: string;
-    blocked_label: string;
-    engineering_review_mode?: 'advisory' | 'required';
-    enqueue: MergeTrainEnqueuePolicyInput;
-    enqueue_label: string;
-    failure_policy: 'pause_train' | 'continue_after_blocking_pr';
-    merge_identity: MergeTrainIdentity;
-    merge_method: 'merge' | 'squash' | 'rebase';
-    provider_delivery_protection_expectation?: ProviderDeliveryProtectionExpectationV1 | null;
-    repository_id: string;
-    stack_child_disposition_label?: string;
 };
 
 export type OrdinaryAgentMergeTrainTargetIntentOutput = {
@@ -2200,80 +2030,6 @@ export type OrdinaryAgentMergeTrainTargetIntentOutput = {
     provider_delivery_protection_expectation?: ProviderDeliveryProtectionExpectationV1 | null;
     repository_id: string;
     stack_child_disposition_label: string;
-};
-
-export type OrdinaryAgentMergeTrainTargetInventoryInput = {
-    inventory_digest: string;
-    inventory_record_id: string;
-    repository: string;
-    repository_id: string;
-};
-
-export type OrdinaryAgentMergeTrainTargetPolicyInput = {
-    configured_policy_keys: Array<string>;
-    policy_sha256: string;
-    record_id: string;
-    updated_at: string;
-};
-
-export type OrdinaryAgentMergeTrainTargetPrepareEnvelope = {
-    intent: OrdinaryAgentMergeTrainTargetIntentInput;
-    schema_version?: number;
-    source_event_id: string;
-};
-
-export type OrdinaryAgentMergeTrainTargetPrepareResponse = {
-    operation_id?: string | null;
-    state: 'planned' | 'already_satisfied';
-    trace_id: string;
-};
-
-export type OrdinaryAgentOperationClientResponse = {
-    operation: OrdinaryAgentSessionOperationView;
-    review_url: string;
-    schema_version: 1;
-};
-
-export type OrdinaryAgentSessionAttenuation = {
-    action_limit: number;
-    actions: Array<'self_read' | 'preflight' | 'guarded_merge'>;
-    continuation_expires_at: number | null;
-    lease_expires_at: number;
-    pull_request_limit: number;
-    refresh_allowance: number;
-    session_expires_at: number;
-};
-
-export type OrdinaryAgentSessionLeaseSelector = {
-    action: 'self_read' | 'preflight' | 'guarded_merge';
-    expires_at: number;
-    lease_id: string;
-    revoked_at: number | null;
-};
-
-export type OrdinaryAgentSessionOperationView = {
-    applied: boolean;
-    attenuation: OrdinaryAgentSessionAttenuation | null;
-    can_approve: boolean;
-    credential_expires_at: number;
-    credential_id: string;
-    credential_version: number;
-    current_policy_actions: Array<'self_read' | 'preflight' | 'guarded_merge'>;
-    current_policy_execution_profile: 'read_only' | 'guarded_executor' | null;
-    delivery_expires_at: number | null;
-    kind: 'initial' | 'existing';
-    lease_selectors: Array<OrdinaryAgentSessionLeaseSelector>;
-    operation_id: string;
-    principal_id: string;
-    reason_code: string | null;
-    requester_kind: 'terminal_agent' | 'ordinary_agent';
-    requester_subject: string;
-    requester_token_label: string | null;
-    schema_version: 1;
-    session_expires_at: number | null;
-    session_id: string | null;
-    status: 'pending' | 'approved' | 'expired' | 'revoked' | 'blocked' | 'cancelled';
-    target: OrdinaryAgentTarget;
 };
 
 export type OrdinaryAgentTarget = {
@@ -4749,10 +4505,6 @@ export type TenantMergeEligibilityEvidenceInputs = {
     trusted_maintenance: TenantAdmissionPathResult | null;
 };
 
-export type TerminalEnrollmentCapabilityReadiness = {
-    state: 'configured_identity_absent' | 'ready' | 'missing' | 'unmanaged' | 'mismatched' | 'ambiguous' | 'unavailable';
-};
-
 export type UrgentReleaseReviewEnvelope = {
     checklist_digest: string;
     product: string;
@@ -5164,52 +4916,6 @@ export type ReadOdooProdRollbackOperationResponses = {
 
 export type ReadOdooProdRollbackOperationResponse = ReadOdooProdRollbackOperationResponses[keyof ReadOdooProdRollbackOperationResponses];
 
-export type ReadHumanOrdinaryAgentJobData = {
-    body?: never;
-    path: {
-        principal_id: string;
-        request_id: string;
-    };
-    query?: never;
-    url: '/v1/ordinary-agent-jobs/{principal_id}/{request_id}';
-};
-
-export type ReadHumanOrdinaryAgentJobErrors = {
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type ReadHumanOrdinaryAgentJobError = ReadHumanOrdinaryAgentJobErrors[keyof ReadHumanOrdinaryAgentJobErrors];
-
-export type ReadHumanOrdinaryAgentJobResponses = {
-    200: OrdinaryAgentJobView;
-};
-
-export type ReadHumanOrdinaryAgentJobResponse = ReadHumanOrdinaryAgentJobResponses[keyof ReadHumanOrdinaryAgentJobResponses];
-
-export type ReadHumanOrdinaryAgentOperationData = {
-    body?: never;
-    path: {
-        principal_id: string;
-        operation_id: string;
-    };
-    query?: never;
-    url: '/v1/ordinary-agent-operations/{principal_id}/{operation_id}';
-};
-
-export type ReadHumanOrdinaryAgentOperationErrors = {
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type ReadHumanOrdinaryAgentOperationError = ReadHumanOrdinaryAgentOperationErrors[keyof ReadHumanOrdinaryAgentOperationErrors];
-
-export type ReadHumanOrdinaryAgentOperationResponses = {
-    200: OrdinaryAgentOperationClientResponse;
-};
-
-export type ReadHumanOrdinaryAgentOperationResponse = ReadHumanOrdinaryAgentOperationResponses[keyof ReadHumanOrdinaryAgentOperationResponses];
-
 export type ReadOwnerSecretInputsData = {
     body?: never;
     headers?: {
@@ -5300,81 +5006,6 @@ export type ReadPreviewHistoryResponses = {
 };
 
 export type ReadPreviewHistoryResponse = ReadPreviewHistoryResponses[keyof ReadPreviewHistoryResponses];
-
-export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsData = {
-    body?: never;
-    headers?: {
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs';
-};
-
-export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsErrors = {
-    403: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsError = ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsErrors[keyof ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsErrors];
-
-export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsResponses = {
-    200: OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse;
-};
-
-export type ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsResponse = ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsResponses[keyof ReadOrdinaryAgentDeliveryAuthorizationCandidateInputsResponses];
-
-export type ReadOrdinaryAgentMergeTrainTargetInputsData = {
-    body?: never;
-    headers?: {
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/privileged-operations/merge-train-targets/inputs';
-};
-
-export type ReadOrdinaryAgentMergeTrainTargetInputsErrors = {
-    403: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type ReadOrdinaryAgentMergeTrainTargetInputsError = ReadOrdinaryAgentMergeTrainTargetInputsErrors[keyof ReadOrdinaryAgentMergeTrainTargetInputsErrors];
-
-export type ReadOrdinaryAgentMergeTrainTargetInputsResponses = {
-    200: OrdinaryAgentMergeTrainTargetInputsResponse;
-};
-
-export type ReadOrdinaryAgentMergeTrainTargetInputsResponse = ReadOrdinaryAgentMergeTrainTargetInputsResponses[keyof ReadOrdinaryAgentMergeTrainTargetInputsResponses];
-
-export type ReadOrdinaryAgentDeliveryActivationOptionsData = {
-    body?: never;
-    headers?: {
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/privileged-operations/ordinary-agent-delivery-activation/options';
-};
-
-export type ReadOrdinaryAgentDeliveryActivationOptionsErrors = {
-    403: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type ReadOrdinaryAgentDeliveryActivationOptionsError = ReadOrdinaryAgentDeliveryActivationOptionsErrors[keyof ReadOrdinaryAgentDeliveryActivationOptionsErrors];
-
-export type ReadOrdinaryAgentDeliveryActivationOptionsResponses = {
-    200: OrdinaryAgentDeliveryActivationOptionsResponse;
-};
-
-export type ReadOrdinaryAgentDeliveryActivationOptionsResponse = ReadOrdinaryAgentDeliveryActivationOptionsResponses[keyof ReadOrdinaryAgentDeliveryActivationOptionsResponses];
 
 export type ListHumanPrivilegedOperationsData = {
     body?: never;
@@ -6300,97 +5931,6 @@ export type EnqueueOdooProdRollbackResponses = {
 
 export type EnqueueOdooProdRollbackResponse = EnqueueOdooProdRollbackResponses[keyof EnqueueOdooProdRollbackResponses];
 
-export type DisconnectOrdinaryAgentPrincipalData = {
-    body: OrdinaryAgentDisconnectRequest;
-    path: {
-        principal_id: string;
-    };
-    query?: never;
-    url: '/v1/ordinary-agent-connections/{principal_id}/disconnect';
-};
-
-export type DisconnectOrdinaryAgentPrincipalErrors = {
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type DisconnectOrdinaryAgentPrincipalError = DisconnectOrdinaryAgentPrincipalErrors[keyof DisconnectOrdinaryAgentPrincipalErrors];
-
-export type DisconnectOrdinaryAgentPrincipalResponses = {
-    200: OrdinaryAgentConnectionView;
-};
-
-export type DisconnectOrdinaryAgentPrincipalResponse = DisconnectOrdinaryAgentPrincipalResponses[keyof DisconnectOrdinaryAgentPrincipalResponses];
-
-export type ApproveOrdinaryAgentOperationData = {
-    body?: never;
-    path: {
-        principal_id: string;
-        operation_id: string;
-    };
-    query?: never;
-    url: '/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve';
-};
-
-export type ApproveOrdinaryAgentOperationErrors = {
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type ApproveOrdinaryAgentOperationError = ApproveOrdinaryAgentOperationErrors[keyof ApproveOrdinaryAgentOperationErrors];
-
-export type ApproveOrdinaryAgentOperationResponses = {
-    200: OrdinaryAgentOperationClientResponse;
-};
-
-export type ApproveOrdinaryAgentOperationResponse = ApproveOrdinaryAgentOperationResponses[keyof ApproveOrdinaryAgentOperationResponses];
-
-export type CancelOrdinaryAgentOperationData = {
-    body?: never;
-    path: {
-        principal_id: string;
-        operation_id: string;
-    };
-    query?: never;
-    url: '/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel';
-};
-
-export type CancelOrdinaryAgentOperationErrors = {
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type CancelOrdinaryAgentOperationError = CancelOrdinaryAgentOperationErrors[keyof CancelOrdinaryAgentOperationErrors];
-
-export type CancelOrdinaryAgentOperationResponses = {
-    200: OrdinaryAgentOperationClientResponse;
-};
-
-export type CancelOrdinaryAgentOperationResponse = CancelOrdinaryAgentOperationResponses[keyof CancelOrdinaryAgentOperationResponses];
-
-export type RevokeOrdinaryAgentSessionData = {
-    body?: never;
-    path: {
-        principal_id: string;
-        session_id: string;
-    };
-    query?: never;
-    url: '/v1/ordinary-agent-sessions/{principal_id}/{session_id}/revoke';
-};
-
-export type RevokeOrdinaryAgentSessionErrors = {
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type RevokeOrdinaryAgentSessionError = RevokeOrdinaryAgentSessionErrors[keyof RevokeOrdinaryAgentSessionErrors];
-
-export type RevokeOrdinaryAgentSessionResponses = {
-    200: OrdinaryAgentOperationClientResponse;
-};
-
-export type RevokeOrdinaryAgentSessionResponse = RevokeOrdinaryAgentSessionResponses[keyof RevokeOrdinaryAgentSessionResponses];
-
 export type SubmitOwnerSecretInputData = {
     body: OwnerSecretInputEnvelopeWritable;
     headers?: {
@@ -6414,31 +5954,6 @@ export type SubmitOwnerSecretInputResponses = {
 };
 
 export type SubmitOwnerSecretInputResponse = SubmitOwnerSecretInputResponses[keyof SubmitOwnerSecretInputResponses];
-
-export type PrepareOrdinaryAgentDeliveryPolicyData = {
-    body: OrdinaryAgentDeliveryPolicyPrepareEnvelope;
-    headers?: {
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/prepare';
-};
-
-export type PrepareOrdinaryAgentDeliveryPolicyErrors = {
-    403: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type PrepareOrdinaryAgentDeliveryPolicyError = PrepareOrdinaryAgentDeliveryPolicyErrors[keyof PrepareOrdinaryAgentDeliveryPolicyErrors];
-
-export type PrepareOrdinaryAgentDeliveryPolicyResponses = {
-    200: OrdinaryAgentDeliveryPolicyPrepareResponse;
-};
-
-export type PrepareOrdinaryAgentDeliveryPolicyResponse = PrepareOrdinaryAgentDeliveryPolicyResponses[keyof PrepareOrdinaryAgentDeliveryPolicyResponses];
 
 export type PrepareAuthorizationCandidateData = {
     body: AuthorizationCandidatePrepareEnvelope;
@@ -6464,56 +5979,6 @@ export type PrepareAuthorizationCandidateResponses = {
 };
 
 export type PrepareAuthorizationCandidateResponse = PrepareAuthorizationCandidateResponses[keyof PrepareAuthorizationCandidateResponses];
-
-export type PrepareOrdinaryAgentMergeTrainTargetData = {
-    body: OrdinaryAgentMergeTrainTargetPrepareEnvelope;
-    headers?: {
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/privileged-operations/merge-train-targets/prepare';
-};
-
-export type PrepareOrdinaryAgentMergeTrainTargetErrors = {
-    403: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type PrepareOrdinaryAgentMergeTrainTargetError = PrepareOrdinaryAgentMergeTrainTargetErrors[keyof PrepareOrdinaryAgentMergeTrainTargetErrors];
-
-export type PrepareOrdinaryAgentMergeTrainTargetResponses = {
-    200: OrdinaryAgentMergeTrainTargetPrepareResponse;
-};
-
-export type PrepareOrdinaryAgentMergeTrainTargetResponse = PrepareOrdinaryAgentMergeTrainTargetResponses[keyof PrepareOrdinaryAgentMergeTrainTargetResponses];
-
-export type PlanOrdinaryAgentDeliveryActivationData = {
-    body: OrdinaryAgentDeliveryActivationPlanEnvelope;
-    headers?: {
-        Authorization?: string;
-        Cookie?: string;
-    };
-    path?: never;
-    query?: never;
-    url: '/v1/privileged-operations/ordinary-agent-delivery-activation/plans';
-};
-
-export type PlanOrdinaryAgentDeliveryActivationErrors = {
-    403: LaunchplaneErrorResponse;
-    409: LaunchplaneErrorResponse;
-    503: LaunchplaneErrorResponse;
-};
-
-export type PlanOrdinaryAgentDeliveryActivationError = PlanOrdinaryAgentDeliveryActivationErrors[keyof PlanOrdinaryAgentDeliveryActivationErrors];
-
-export type PlanOrdinaryAgentDeliveryActivationResponses = {
-    200: PrivilegedOperationHumanResponse;
-};
-
-export type PlanOrdinaryAgentDeliveryActivationResponse = PlanOrdinaryAgentDeliveryActivationResponses[keyof PlanOrdinaryAgentDeliveryActivationResponses];
 
 export type ApproveHumanPrivilegedOperationData = {
     body: PrivilegedOperationApprovalEnvelope;

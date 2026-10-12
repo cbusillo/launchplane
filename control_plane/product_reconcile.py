@@ -11,6 +11,7 @@ the plan on its request.
 from __future__ import annotations
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
+from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.lane_movement import (
     LANE_MOVEMENT_REFUSALS,
     LaneBuild,
@@ -21,6 +22,7 @@ from control_plane.lane_movement import (
 )
 
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -68,7 +70,10 @@ from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     parse_launchplane_mutation_timestamp,
 )
-from control_plane.storage.postgres import ExistingMutationReservationLookupResult
+from control_plane.storage.postgres import (
+    ExistingMutationReservationLookupResult,
+    PostgresRecordStore,
+)
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -682,6 +687,7 @@ def _deploy_generic_web_testing(
         )
         plan["deploy_idempotency_key"] = idempotency_key
         request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))
+        provider = testing_hooks.generic_web_deploy_provider()
         adapter = GenericWebDeployProviderMutationAdapter(
             control_plane_root=control_plane_root,
             record_store=record_store,
@@ -689,71 +695,118 @@ def _deploy_generic_web_testing(
             profile=profile,
             lane=lane,
             trace_id=trace_id,
-            deploy_provider=testing_hooks.generic_web_deploy_provider(),
+            deploy_provider=provider,
             retain_event_request=True,
         )
-        # The reconcile request's lane lease serializes these decisions. A new
-        # authority key must not bypass an unresolved old attempt, even after a
-        # binding repair points at a different provider application. The same
-        # key still goes through the runner's normal observation/recovery path.
-        # Recover an old key automatically only when its provider target and
-        # request identity match; recovery must never act on a repointed app.
-        lane_prefix = f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
-        for reservation in cast(
-            _TestingLaneAuthorityStore, record_store
-        ).list_held_provider_target_reservations():
-            if (
-                reservation.scope == reconcile_reservation_scope(profile.product)
-                and reservation.route_path == GENERIC_WEB_DEPLOY_ROUTE
-                and reservation.idempotency_key.startswith(lane_prefix)
-                and reservation.idempotency_key != idempotency_key
-            ):
+        execution_lock = (
+            record_store.testing_replacement_execution_lock(
+                testing_event_execution_lock_name(adapter.target_key())
+            )
+            if isinstance(record_store, PostgresRecordStore)
+            else nullcontext(lambda: None)
+        )
+        with execution_lock as check_execution_lock:
+            if check_execution_lock is None:
+                return ReconcileOutcome({**plan, "deferred": "lane_busy"}, deferred=True)
+            adapter.execution_check = check_execution_lock
+            # The target execution lock excludes an old worker through provider effects. A new
+            # authority key must not bypass an unresolved old attempt, even after a
+            # binding repair points at a different provider application. The same
+            # key still goes through the runner's normal observation/recovery path.
+            # Recover an old key automatically only when its provider target and
+            # request identity match; recovery must never act on a repointed app.
+            lane_prefix = f"{RECONCILE_SOURCE}:{profile.product}:{lane.context}:{TESTING_INSTANCE}:"
+            for reservation in cast(
+                _TestingLaneAuthorityStore, record_store
+            ).list_held_provider_target_reservations():
                 if (
-                    reservation.provider_target_key == adapter.target_key()
-                    and reservation.request_fingerprint == request_fingerprint
+                    reservation.scope == reconcile_reservation_scope(profile.product)
+                    and reservation.route_path == GENERIC_WEB_DEPLOY_ROUTE
+                    and reservation.idempotency_key.startswith(lane_prefix)
+                    and reservation.idempotency_key != idempotency_key
                 ):
-                    idempotency_key = reservation.idempotency_key
-                    plan["deploy_idempotency_key"] = idempotency_key
-                    continue
-                if reservation.state == "running":
-                    lookup = cast(
-                        _TestingLaneAuthorityStore, record_store
-                    ).lookup_existing_mutation_reservation(
-                        route_path=reservation.route_path,
-                        idempotency_key=reservation.idempotency_key,
-                        request_fingerprint=reservation.request_fingerprint,
-                    )
-                    if lookup.status == "found" and lookup.record is not None:
-                        reservation = lookup.record
-                        if reservation.state == "completed":
+                    if (
+                        reservation.provider_target_key == adapter.target_key()
+                        and reservation.request_fingerprint == request_fingerprint
+                    ):
+                        idempotency_key = reservation.idempotency_key
+                        plan["deploy_idempotency_key"] = idempotency_key
+                        continue
+                    recovery_reservation = reservation
+                    if reservation.state == "running":
+                        lookup = cast(
+                            _TestingLaneAuthorityStore, record_store
+                        ).lookup_existing_mutation_reservation(
+                            route_path=reservation.route_path,
+                            idempotency_key=reservation.idempotency_key,
+                            request_fingerprint=reservation.request_fingerprint,
+                        )
+                        if lookup.status == "found" and lookup.record is not None:
+                            reservation = lookup.record
+                            recovery_reservation = lookup.record
+                            if reservation.state == "completed":
+                                continue
+                            if (
+                                reservation.state == "running"
+                                and parse_launchplane_mutation_timestamp(
+                                    reservation.lease_expires_at, field_name="lease_expires_at"
+                                )
+                                <= parse_launchplane_mutation_timestamp(
+                                    lookup.observed_at, field_name="observed_at"
+                                )
+                            ):
+                                # Read-only classification; recovery owns the stored transition.
+                                reservation = reservation.model_copy(
+                                    update={"state": "reconcile_required"}
+                                )
+                        elif lookup.status == "missing":
                             continue
-                        if reservation.state == "running" and parse_launchplane_mutation_timestamp(
-                            reservation.lease_expires_at, field_name="lease_expires_at"
-                        ) <= parse_launchplane_mutation_timestamp(
-                            lookup.observed_at, field_name="observed_at"
-                        ):
-                            # Read-only classification; recovery owns the stored transition.
+                        else:
                             reservation = reservation.model_copy(
                                 update={"state": "reconcile_required"}
                             )
-                    elif lookup.status == "missing":
+                    from control_plane.testing_event_deploy_recovery import (
+                        retire_unavailable_testing_event_deploy,
+                    )
+
+                    recovery = retire_unavailable_testing_event_deploy(
+                        store=record_store,
+                        reservation=recovery_reservation,
+                        profile=profile,
+                        context=lane.context,
+                        current_target_key=adapter.target_key(),
+                        provider=provider,
+                        root=control_plane_root,
+                        trace_id=trace_id,
+                        check_execution_lock=check_execution_lock,
+                        record_refusal=lambda code: plan.__setitem__(
+                            "testing_deploy_recovery_refusal", code
+                        ),
+                    )
+                    if recovery is not None:
+                        plan.pop("testing_deploy_recovery_refusal", None)
+                        plan["testing_deploy_recovery"] = recovery
                         continue
-                    else:
-                        reservation = reservation.model_copy(update={"state": "reconcile_required"})
-                return _generic_web_testing_outcome(
-                    plan=plan,
-                    result=DurableProviderOperationResult("target_busy", reservation, 409, {}),
-                )
-        result = run_durable_provider_operation(
-            store=cast(DurableProviderOperationStore, record_store),
-            scope=reconcile_reservation_scope(profile.product),
-            route_path=GENERIC_WEB_DEPLOY_ROUTE,
-            idempotency_key=idempotency_key,
-            request_fingerprint=request_fingerprint,
-            lease_owner=trace_id,
-            response_trace_id=trace_id,
-            adapter=adapter,
-        )
+                    held_outcome = _generic_web_testing_outcome(
+                        plan=plan,
+                        result=DurableProviderOperationResult("target_busy", reservation, 409, {}),
+                    )
+                    refusal = plan.get("testing_deploy_recovery_refusal")
+                    if held_outcome.error and isinstance(refusal, str):
+                        return ReconcileOutcome(
+                            plan, error=f"{held_outcome.error} Testing recovery refused: {refusal}."
+                        )
+                    return held_outcome
+            result = run_durable_provider_operation(
+                store=cast(DurableProviderOperationStore, record_store),
+                scope=reconcile_reservation_scope(profile.product),
+                route_path=GENERIC_WEB_DEPLOY_ROUTE,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+                lease_owner=trace_id,
+                response_trace_id=trace_id,
+                adapter=adapter,
+            )
     except (FileNotFoundError, ValueError, click.ClickException) as error:
         # Refused before any provider change; the next event or sweep tries again. The
         # message can name provider targets, so it goes to the worker log only.

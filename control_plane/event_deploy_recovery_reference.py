@@ -104,16 +104,25 @@ def resolve_event_deploy_recovery_coordinates(
         and isinstance(source_commit, str)
         and source_commit
     ):
-        envelope = event_testing_deploy_request(
-            product=product, image_reference=image_reference, source_commit=source_commit
-        )
-        if (
-            fingerprint(
-                route_path=GENERIC_WEB_DEPLOY_ROUTE, payload=envelope.model_dump(mode="json")
+        # Both shipped event request shapes can be rebuilt from the saved plan.
+        # Only an exact original fingerprint establishes evidence; no candidate
+        # is returned merely because it names the currently desired build.
+        repository = image_reference.partition("@")[0]
+        references = ("", f"{repository}:sha-{source_commit}") if "@" in image_reference else ("",)
+        for deploy_reference in references:
+            envelope = event_testing_deploy_request(
+                product=product,
+                image_reference=image_reference,
+                source_commit=source_commit,
+                deploy_reference=deploy_reference,
             )
-            == reservation.request_fingerprint
-        ):
-            matches[envelope.model_dump_json()] = envelope
+            if (
+                fingerprint(
+                    route_path=GENERIC_WEB_DEPLOY_ROUTE, payload=envelope.model_dump(mode="json")
+                )
+                == reservation.request_fingerprint
+            ):
+                matches[envelope.model_dump_json()] = envelope
     if not matches:
         raise OriginalEventDeployEvidenceUnavailable(
             "No saved original event deploy request matches the held reservation."

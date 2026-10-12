@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
-import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
@@ -12,11 +11,6 @@ from unittest.mock import Mock, patch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict
 
-from control_plane.authz_candidate_preparation import (
-    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS,
-    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
-    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
-)
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -46,7 +40,6 @@ from tests.merge_train_policy_fixtures import (
     build_test_merge_train_policy,
     build_test_merge_train_policy_record,
 )
-from tests.support.http import lifespan_client
 from tests.support.stores import _sqlite_database_url
 from tests.test_privileged_operation_http import _human, _policy, _policy_record
 
@@ -651,173 +644,6 @@ class OrdinaryAgentDeliveryAuthorizationInputServiceTests(unittest.TestCase):
 
         self.assertEqual(response.merge_policy_state, "ambiguous")
         self.assertIsNone(response.merge_policy)
-
-
-class OrdinaryAgentDeliveryAuthorizationInputHttpTests(unittest.IsolatedAsyncioTestCase):
-    async def test_authorized_get_returns_minimal_read_only_projection(self) -> None:
-        with TemporaryDirectory() as directory:
-            store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
-            )
-            store.ensure_schema()
-            policy = _policy()
-            policy_record = store.seed_authz_policy_if_absent(_policy_record(policy))
-            inventory = _inventory(repository_id=101, repository="example/alpha")
-            store.write_repository_inventory_record(inventory)
-            store.write_merge_train_policy_record(
-                _merge_policy_with_branches(
-                    repository="example/alpha", branches=("release", "main")
-                )
-            )
-            app = _app(
-                store=store,
-                runtime_policy=policy,
-                policy_record_reader=lambda: policy_record,
-            )
-
-            async with lifespan_client(app) as client:
-                response = await client.get(_ROUTE)
-
-            operation_records = store.list_privileged_operation_records(limit=None)
-            persisted_inventories = store.list_repository_inventory_records(limit=None)
-            persisted_policies = store.list_authz_policy_records(status="active", limit=None)
-            store.close()
-
-        self.assertEqual(response.status_code, 200, response.text)
-        payload = response.json()
-        self.assertEqual(payload["authorization_policy"]["record_id"], policy_record.record_id)
-        self.assertEqual(payload["authorization_policy"]["schema_version"], 2)
-        self.assertEqual(payload["repositories"][0]["configured_branches"], ["main", "release"])
-        self.assertEqual(operation_records, ())
-        self.assertEqual(persisted_inventories, (inventory,))
-        self.assertEqual(persisted_policies, (policy_record,))
-        rendered = json.dumps(payload, sort_keys=True)
-        for sensitive_field in (
-            "repository_owner_id",
-            "source",
-            "reason",
-            "enqueue_label",
-            "github_token",
-            "principal_id",
-        ):
-            self.assertNotIn(sensitive_field, rendered)
-
-    async def test_terminal_and_lifecycle_only_callers_are_denied_before_source_reads(self) -> None:
-        lifecycle_policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "schema_version": 2,
-                "github_humans": [
-                    {
-                        "managed_set_id": ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
-                        "managed_rule_id": ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
-                        "github_ids": [123],
-                        "roles": ["admin"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": list(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS),
-                    }
-                ],
-            }
-        )
-        cases = (
-            (
-                "terminal",
-                _policy(),
-                TerminalAgentIdentity(subject="agent:planner", token_label="planner"),
-            ),
-            (
-                "local_admin",
-                _policy(),
-                LocalAdminIdentity(subject="admin:operator", token_label="operator"),
-            ),
-            ("lifecycle_only", lifecycle_policy, _human()),
-        )
-        with (
-            patch(
-                "control_plane.http_routes.privileged_operations."
-                "read_ordinary_agent_delivery_authorization_candidate_inputs"
-            ) as read_inputs,
-            patch("control_plane.secrets._decrypt_secret_value") as decrypt_secret,
-            patch("control_plane.github_app_identity.GitHubAppIdentity") as github_app_identity,
-        ):
-            for label, policy, identity in cases:
-                with self.subTest(label=label):
-                    store = _InspectionReadStore()
-                    app = _app(
-                        store=store,
-                        runtime_policy=policy,
-                        persisted_policy=_policy(),
-                        identity=identity,
-                    )
-                    async with lifespan_client(app) as client:
-                        response = await client.get(_ROUTE)
-                    self.assertEqual(response.status_code, 403, response.text)
-                    self.assertEqual(response.json()["detail"]["code"], "authorization_denied")
-                    self.assertEqual(store.inventory_reads, 0)
-                    self.assertEqual(store.merge_policy_reads, 0)
-                    self.assertEqual(store.runtime_metadata_reads, 0)
-                    self.assertEqual(store.secret_metadata_reads, 0)
-                    self.assertEqual(store.binding_metadata_reads, 0)
-            read_inputs.assert_not_called()
-            decrypt_secret.assert_not_called()
-            github_app_identity.assert_not_called()
-
-    async def test_fresh_database_policy_must_retain_strict_administration(self) -> None:
-        persisted_payload = _policy().model_dump(mode="json")
-        persisted_payload["github_humans"][1]["actions"].remove("authz_policy_grant.write")
-        persisted_policy = LaunchplaneAuthzPolicy.model_validate(persisted_payload)
-        store = _InspectionReadStore()
-        app = _app(
-            store=store,
-            runtime_policy=_policy(),
-            persisted_policy=persisted_policy,
-        )
-
-        async with lifespan_client(app) as client:
-            response = await client.get(_ROUTE)
-
-        self.assertEqual(response.status_code, 403, response.text)
-        self.assertEqual(response.json()["detail"]["code"], "authorization_denied")
-        self.assertEqual(store.inventory_reads, 0)
-        self.assertEqual(store.merge_policy_reads, 0)
-        self.assertEqual(store.runtime_metadata_reads, 0)
-        self.assertEqual(store.secret_metadata_reads, 0)
-        self.assertEqual(store.binding_metadata_reads, 0)
-
-    async def test_non_active_database_policy_is_unavailable_before_source_reads(self) -> None:
-        store = _InspectionReadStore()
-        superseded_record = _policy_record(_policy()).model_copy(update={"status": "superseded"})
-        app = _app(
-            store=store,
-            runtime_policy=_policy(),
-            policy_record_reader=lambda: superseded_record,
-        )
-
-        async with lifespan_client(app) as client:
-            response = await client.get(_ROUTE)
-
-        self.assertEqual(response.status_code, 503, response.text)
-        self.assertEqual(response.json()["detail"]["code"], "authz_policy_unavailable")
-        self.assertEqual(store.inventory_reads, 0)
-        self.assertEqual(store.merge_policy_reads, 0)
-        self.assertEqual(store.runtime_metadata_reads, 0)
-        self.assertEqual(store.secret_metadata_reads, 0)
-        self.assertEqual(store.binding_metadata_reads, 0)
-
-    async def test_openapi_exposes_parameterless_human_get(self) -> None:
-        app = _app(store=_ReadStore(), runtime_policy=_policy())
-
-        operation = app.openapi()["paths"][_ROUTE]["get"]
-
-        self.assertEqual(
-            operation["operationId"],
-            "read_ordinary_agent_delivery_authorization_candidate_inputs",
-        )
-        self.assertNotIn("requestBody", operation)
-        self.assertEqual(
-            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse",
-        )
 
 
 class MergeTrainPolicyBoundedReadTests(unittest.TestCase):
