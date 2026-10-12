@@ -328,6 +328,12 @@ def product_config_service_error(
         error_message = "Launchplane runtime key-safety policy is unavailable."
     if error_code == "runtime_key_safety_failed":
         error_message = "Product config runtime key-safety gate failed."
+    if error_code == "runtime_key_safety_target_required":
+        error_message = (
+            "Runtime secrets require a context and instance for key-safety evaluation. "
+            "For a shared secret, keep scope context and name an owned stable lane "
+            "as the top-level instance."
+        )
     if error_code == "provider_env_unavailable":
         status_code = 503
         error_message = "Launchplane could not read the lane's provider env."

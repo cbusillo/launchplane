@@ -20,6 +20,10 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _post_product_config_apply
 from tests.support.auth import _identity, _StubVerifier
@@ -102,6 +106,31 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                             driver=driver, mode=mode, target=("own-site", instance)
                         )
 
+    async def test_context_runtime_secret_needs_a_lane_for_key_safety(self) -> None:
+        for mode in ("dry-run", "apply"):
+            with self.subTest(mode=mode):
+                await self._request_config(
+                    mode=mode,
+                    target=("own-site", ""),
+                    context_secret=True,
+                    config_error="runtime_key_safety_target_required",
+                )
+
+    async def test_context_runtime_secret_can_use_an_owned_safety_lane(self) -> None:
+        for mode in ("dry-run", "apply"):
+            with self.subTest(mode=mode):
+                await self._request_config(mode=mode, context_secret=True)
+
+    async def test_context_worker_secret_does_not_need_a_runtime_safety_lane(self) -> None:
+        for mode in ("dry-run", "apply"):
+            with self.subTest(mode=mode):
+                await self._request_config(
+                    mode=mode,
+                    target=("own-site", ""),
+                    context_secret=True,
+                    secret_integration="launchplane_worker",
+                )
+
     async def test_persisted_padded_lanes_plan_and_apply_without_rewriting_profiles(self) -> None:
         for driver in ("generic-web", "odoo"):
             for instance in ("testing", ""):
@@ -179,6 +208,8 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
         shared_lane: bool = False,
         historical: bool = False,
         context_secret: bool = False,
+        config_error: str = "",
+        secret_integration: str = "runtime_environment",
         add_foreign_claim_on_commit: bool = False,
         stored_lane: tuple[str, str] = ("own-site", "testing"),
         foreign_lane: tuple[str, str] = ("own-site", "testing"),
@@ -225,8 +256,28 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 payload["secrets"] = [{"name": "SMTP_PASSWORD", "value": "private-secret"}]
             if context_secret:
                 payload["secrets"] = [
-                    {"name": "SMTP_PASSWORD", "value": "private-secret", "scope": "context"}
+                    {
+                        "name": "SMTP_PASSWORD",
+                        "value": "private-secret",
+                        "scope": "context",
+                        "integration": secret_integration,
+                    }
                 ]
+                store.write_runtime_key_safety_policy_record(
+                    RuntimeKeySafetyPolicyRecord(
+                        record_id="context-secret-policy",
+                        source="test",
+                        updated_at="2026-10-12T00:00:00Z",
+                        rules=(
+                            RuntimeSecretSafetyRule(
+                                binding_key="SMTP_PASSWORD",
+                                secret_class="shared_safe",
+                                allowed_contexts=("own-site",),
+                                allowed_instances=("testing",),
+                            ),
+                        ),
+                    )
+                )
             original_write = store.write_product_authority_bundle
 
             def change_then_write(bundle: ProductAuthorityBundle) -> None:
@@ -270,7 +321,16 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     response = await _post_product_config_apply(
                         app, payload, idempotency_key="ownership-test"
                     )
-                    if refused:
+                    if config_error:
+                        self.assertEqual(response.status_code, 400, response.text)
+                        error_payload = response.json()
+                        self.assertEqual(error_payload["error"]["code"], config_error)
+                        self.assertTrue(error_payload["trace_id"].startswith("launchplane_req_"))
+                        self.assertNotIn("private-secret", response.text)
+                        self.assertEqual(store.list_runtime_environment_records(), ())
+                        self.assertEqual(store.list_secret_records(), ())
+                        writer.assert_not_called()
+                    elif refused:
                         self.assertEqual(
                             response.status_code,
                             409 if change_profile or add_foreign_claim_on_commit else 403,
@@ -300,6 +360,14 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                             )
                         else:
                             self.assertEqual(store.list_runtime_environment_records(), ())
+                        if context_secret:
+                            if mode == "apply":
+                                secret = store.list_secret_records()[0]
+                                self.assertEqual(secret.scope, "context")
+                                self.assertEqual(secret.context, target[0])
+                                self.assertEqual(secret.instance, "")
+                            else:
+                                self.assertEqual(store.list_secret_records(), ())
                     if replay_after_change:
                         store.write_product_profile_record(profile.model_copy(update={"lanes": ()}))
                         replay = await _post_product_config_apply(
