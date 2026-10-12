@@ -64,7 +64,8 @@ const INGRESS_RETRY_ATTEMPTS = 6;
 
 // Launchplane always answers with a JSON object. A 404/502/503/504 with any
 // other body comes from the proxy in front of it while a container is being
-// replaced, so the request never reached Launchplane and is safe to send again.
+// replaced. Gateway errors can follow a dispatched request with a lost reply;
+// retries keep the same payload and idempotency key.
 async function isIngressResponse(response) {
   if (![404, 502, 503, 504].includes(response.status)) {
     return false;
@@ -77,6 +78,8 @@ async function isIngressResponse(response) {
   }
 }
 
+class RequestPreparationError extends Error {}
+
 async function fetchWithRetry(url, initOrFactory, options) {
   const attempts = parsePositiveInteger(options.retryAttempts, "retry-attempts");
   const delayMs = parseNonNegativeInteger(options.retryDelayMs, "retry-delay-ms");
@@ -86,15 +89,29 @@ async function fetchWithRetry(url, initOrFactory, options) {
   );
   let ingressAttempt = 0;
   let lastError = null;
+  let requestOutcomeUncertain = false;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let requestAttempted = false;
     try {
-      const init = typeof initOrFactory === "function"
+      let init = typeof initOrFactory === "function"
         ? await initOrFactory()
         : initOrFactory;
+      const remaining = options.remainingPollMs?.();
+      if (remaining !== undefined) {
+        if (remaining <= 0) throw new Error("Launchplane observation expired.");
+        const signal = AbortSignal.timeout(Math.max(1, Math.ceil(remaining)));
+        init = {
+          ...init,
+          signal: init.signal ? AbortSignal.any([init.signal, signal]) : signal,
+        };
+      }
+      requestAttempted = true;
       const response = await fetch(url, init);
       if (!(await isIngressResponse(response))) {
         return response;
       }
+      if (response.status !== 404) requestOutcomeUncertain = true;
+      options.onUnavailable?.(response.status === 404 ? "ingress" : "request");
       ingressAttempt += 1;
       if (ingressAttempt >= INGRESS_RETRY_ATTEMPTS) {
         return response;
@@ -103,17 +120,26 @@ async function fetchWithRetry(url, initOrFactory, options) {
         `${options.label} got HTTP ${response.status} from the ingress, not Launchplane; ` +
           `retrying in ${ingressDelayMs * ingressAttempt}ms.\n`,
       );
-      await sleep(ingressDelayMs * ingressAttempt);
+      await sleep(Math.max(0, Math.min(
+        ingressDelayMs * ingressAttempt, options.remainingPollMs?.() ?? Infinity,
+      )));
       attempt -= 1;
     } catch (error) {
+      if (requestAttempted) {
+        requestOutcomeUncertain = true;
+        options.onUnavailable?.("request");
+      }
       lastError = error;
       if (isAbortError(error) || attempt >= attempts) {
         break;
       }
-      await sleep(delayMs * attempt);
+      await sleep(Math.max(0, Math.min(
+        delayMs * attempt, options.remainingPollMs?.() ?? Infinity,
+      )));
     }
   }
-  throw new Error(
+  const Failure = requestOutcomeUncertain ? Error : RequestPreparationError;
+  throw new Failure(
     `${options.label} failed after ${attempts} attempts: ${describeError(lastError)}`,
   );
 }
@@ -447,6 +473,7 @@ function getActionOptions() {
     pollResultPath: getInput("poll-result-path"),
     pollResultStatuses: getInput("poll-result-statuses", { defaultValue: "pending" }),
     pollTimeoutMs: getInput("poll-timeout-ms", { defaultValue: "600000" }),
+    pollUnavailableTimeoutMs: getInput("poll-unavailable-timeout-ms", { defaultValue: "0" }),
     pollUntilPath: getInput("poll-until-path"),
     pollUntilValue: getInput("poll-until-value"),
     retryAttempts: getInput("retry-attempts", { defaultValue: "3" }),
@@ -507,30 +534,61 @@ async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options)
     "poll-interval-ms",
   );
   const deadline = Date.now() + pollTimeoutMs;
+  const unavailableTimeoutMs = parseNonNegativeInteger(
+    options.pollUnavailableTimeoutMs, "poll-unavailable-timeout-ms",
+  );
+  let unavailableSince = null;
+  let lastKnownDraining = false;
+  let requestOutcomeRecorded = false;
+  const preserveDispatchProof = unavailableTimeoutMs > 0 && pollPath === "result.deploy_state";
+  let mayHaveDispatched = false;
+  let attemptStarted;
+  const onUnavailable = (kind) => {
+    if (kind === "ingress" && lastKnownDraining) return;
+    if (unavailableTimeoutMs && unavailableSince === null) {
+      unavailableSince = attemptStarted;
+    }
+  };
+  const currentDeadline = () => unavailableSince === null
+    ? deadline : Math.min(deadline, unavailableSince + unavailableTimeoutMs);
+  const remainingPollMs = () => !unavailableTimeoutMs || !pollPath || !pollTimeoutMs
+    ? undefined : Math.max(0, currentDeadline() - Date.now());
   let lastPollValue = "";
   let attempt = 0;
 
   while (true) {
+    attemptStarted = Date.now();
     attempt += 1;
     let response;
     let responseBody;
     let responseText;
+    let responseIsIngress = false;
     try {
       response = await fetchWithRetry(requestUrl, requestInit, {
         ...options,
+        onUnavailable,
+        remainingPollMs,
         label: "Launchplane request",
       });
+      responseIsIngress = await isIngressResponse(response);
       ({ responseBody, responseText } = await readJsonResponse(response));
     } catch (error) {
       // A failed latest attempt may have dispatched. Clear an earlier pending
       // response so callers cannot mistake stale progress for a pre-effect stop.
-      options.onPollResponse?.(null, "");
+      if (!preserveDispatchProof || !(error instanceof RequestPreparationError)) {
+        lastKnownDraining = false;
+        requestOutcomeRecorded = true;
+        mayHaveDispatched = true;
+        options.onPollResponse?.(null, "");
+      } else if (!requestOutcomeRecorded) {
+        options.onPollResponse?.({ error: { code: "request_not_sent" } }, "");
+      }
       if (!pollPath || !options.pollRetryOnRequestError) {
         throw error;
       }
       lastPollValue = describeError(error);
       assertCanContinuePolling({
-        deadline,
+        deadline: currentDeadline(),
         lastPollValue,
         options,
         pollIntervalMs,
@@ -543,18 +601,44 @@ async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options)
       await sleep(pollIntervalMs);
       continue;
     }
-    options.onPollResponse?.(responseBody, String(response.status));
-    if (!response.ok && (!options.pollUntilPath || !options.pollRetryOnUnexpectedStatus)) {
-      return { response, responseBody, responseText };
+    if (responseIsIngress && response.status !== 404) {
+      mayHaveDispatched = true;
+      lastKnownDraining = false;
+    }
+    const isDraining = response.ok && responseBody?.result?.deploy_state === "draining";
+    // The server replays dispatched results; a fenced draining state proves
+    // this same request has not dispatched, even after an earlier lost reply.
+    if (isDraining) mayHaveDispatched = false;
+    requestOutcomeRecorded = true;
+    let responseFileBody = responseBody;
+    if (preserveDispatchProof && mayHaveDispatched && !response.ok) {
+      responseFileBody = null;
+      options.onPollResponse?.(null, String(response.status));
+    } else if (!(responseIsIngress && response.status === 404 && lastKnownDraining)) {
+      options.onPollResponse?.(responseBody, String(response.status));
+    }
+    if (response.ok && !isDraining) mayHaveDispatched = true;
+    const observationDeadlineEpoch = unavailableTimeoutMs ? Math.floor(
+      (unavailableSince === null ? Math.min(deadline, Date.now() + unavailableTimeoutMs) : currentDeadline()) / 1000,
+    ) : undefined;
+    if (response.ok) {
+      unavailableSince = null;
+      lastKnownDraining = preserveDispatchProof && isDraining && !mayHaveDispatched;
+    } else onUnavailable(responseIsIngress && response.status === 404 ? "ingress" : "request");
+    const retryUnavailable = responseIsIngress && unavailableTimeoutMs
+      && options.pollRetryOnRequestError;
+    if (!response.ok && !retryUnavailable
+      && (!options.pollUntilPath || !options.pollRetryOnUnexpectedStatus)) {
+      return { response, responseBody, responseText, observationDeadlineEpoch, responseFileBody };
     }
     lastPollValue = String(readJsonPath(responseBody, pollPath) ?? "").trim();
-    if (!response.ok && options.pollUntilPath) {
+    if (!response.ok && (options.pollUntilPath || retryUnavailable)) {
       lastPollValue = `HTTP ${response.status}`;
     } else if (!shouldPollResponse(responseBody, options)) {
-      return { response, responseBody, responseText };
+      return { response, responseBody, responseText, observationDeadlineEpoch, responseFileBody };
     }
     assertCanContinuePolling({
-      deadline,
+      deadline: currentDeadline(),
       lastPollValue,
       options,
       pollIntervalMs,
@@ -690,7 +774,7 @@ async function main() {
 
   const payload = payloadConfig.payload;
 
-  const { response, responseBody, responseText } = await requestLaunchplaneUntilComplete(
+  const { response, responseBody, responseText, observationDeadlineEpoch, responseFileBody } = await requestLaunchplaneUntilComplete(
     requestUrl,
     () => requestInit(payload, idempotencyKey),
     {
@@ -703,12 +787,15 @@ async function main() {
   );
 
   setOutput("launchplane-url", requestUrl);
+  if (observationDeadlineEpoch !== undefined) {
+    setOutput("observation-deadline-epoch", observationDeadlineEpoch);
+  }
   setOutput("route-path", routePath);
   setOutput("audience", audience);
   setOutput("status-code", response.status);
   setOutput("response-body", responseText);
   writeMappedOutputs(responseBody);
-  writeResponseOutputFile(responseBody);
+  writeResponseOutputFile(responseFileBody === undefined ? responseBody : responseFileBody);
 
   if (logResponseBody) {
     process.stdout.write(`${JSON.stringify(responseBody, null, 2)}\n`);

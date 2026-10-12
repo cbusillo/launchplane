@@ -20,7 +20,7 @@ from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
 from control_plane.contracts.public_ingress_monitoring import (
-    PUBLIC_HTTP_STALE_AFTER_SECONDS,
+    health_monitor_interval_seconds,
     PublicIngressIncidentEventKind,
     PublicIngressIncidentNotificationState,
     PublicIngressIncidentRecord,
@@ -909,7 +909,7 @@ def _observed_ingress(
     )
     observed_timestamp = _parse_timestamp(latest.observed_at)
     stale_after = (
-        observed_timestamp + timedelta(seconds=PUBLIC_HTTP_STALE_AFTER_SECONDS)
+        observed_timestamp + timedelta(seconds=health_monitor_interval_seconds(lane.instance))
         if observed_timestamp is not None
         else None
     )
