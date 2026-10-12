@@ -84015,6 +84015,7 @@
                 "additionalProperties": false,
                 "properties": {
                   "base_url": {
+                    "default": "",
                     "title": "Base Url",
                     "type": "string"
                   },
@@ -84059,7 +84060,6 @@
                   "product",
                   "context",
                   "instance",
-                  "base_url",
                   "reason"
                 ],
                 "title": "ProductStableLaneRepairRequest",
