@@ -22,9 +22,13 @@ export function useEvidenceRefresh<T>(
     let timer: number;
     let requested = false;
     const dueAt = performance.now() + READ_REFRESH_INTERVAL_MS;
+    const wallDueAt = Date.now() + READ_REFRESH_INTERVAL_MS;
     const update = () => {
       if (requested || document.visibilityState !== "visible") return;
-      const remaining = dueAt - performance.now();
+      // Some browsers pause their monotonic clock during system sleep. A
+      // forward wall-clock jump catches up on wake; a backward one cannot
+      // postpone the monotonic deadline.
+      const remaining = Math.min(dueAt - performance.now(), wallDueAt - Date.now());
       if (remaining > 0) {
         window.clearTimeout(timer);
         timer = window.setTimeout(update, Math.max(1, remaining));

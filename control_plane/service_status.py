@@ -19,9 +19,9 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerStore,
     build_odoo_stable_operation_worker_status,
 )
-from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
-    VeriReelProdBackupGateOperationWorkerStore,
-    build_verireel_prod_backup_gate_operation_worker_status,
+from control_plane.workflows.production_backup_gate_operation_worker import (
+    ProductionBackupGateOperationWorkerStore,
+    build_production_backup_gate_operation_worker_status,
 )
 
 
@@ -120,7 +120,7 @@ def odoo_stable_operation_worker_status_payload(
 
 def require_verireel_prod_backup_gate_operation_worker_store(
     record_store: object,
-) -> VeriReelProdBackupGateOperationWorkerStore:
+) -> ProductionBackupGateOperationWorkerStore:
     required_methods = (
         "list_verireel_prod_backup_gate_operation_records",
         "claim_next_verireel_prod_backup_gate_operation_record",
@@ -132,7 +132,7 @@ def require_verireel_prod_backup_gate_operation_worker_store(
         "write_backup_gate_record",
     )
     if all(callable(getattr(record_store, method_name, None)) for method_name in required_methods):
-        return cast(VeriReelProdBackupGateOperationWorkerStore, record_store)
+        return cast(ProductionBackupGateOperationWorkerStore, record_store)
     raise click.ClickException(
         "VeriReel prod backup gate worker status requires Launchplane operation-record storage."
     )
@@ -143,7 +143,7 @@ def verireel_prod_backup_gate_operation_worker_status_payload(
     record_store: object,
     recent_terminal_limit: int,
 ) -> dict[str, object]:
-    worker_status = build_verireel_prod_backup_gate_operation_worker_status(
+    worker_status = build_production_backup_gate_operation_worker_status(
         record_store=require_verireel_prod_backup_gate_operation_worker_store(record_store),
         recent_terminal_limit=recent_terminal_limit,
     )

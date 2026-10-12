@@ -29,6 +29,8 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
     ProductLaneProfile,
+    ProductLaneHealthCheck,
+    ProductLaneHealthMonitoringPolicy,
     ProductPreviewProfile,
 )
 from control_plane.contracts.promotion_record import (
@@ -38,6 +40,13 @@ from control_plane.contracts.promotion_record import (
     ReleaseStatus,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    health_monitor_interval_seconds,
+    PublicIngressObservationRecord,
+    PublicIngressTargetObservation,
+)
+from control_plane.lane_runtime_verification import read_lane_runtime_verification
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.service_auth import (
     GitHubActionsIdentity,
@@ -132,6 +141,133 @@ class _AcceptingVerifier:
     def verify(self, token: str) -> GitHubActionsIdentity:
         del token
         return self.identity
+
+
+class _MonitoredPromotionStore(_PromotionStore):
+    def __init__(self, *, private: bool = False, old_inventory: bool = False) -> None:
+        original = _store()
+        policy = ProductLaneHealthMonitoringPolicy(
+            monitoring_intent="private" if private else "public",
+            checks=(
+                ProductLaneHealthCheck(
+                    name="runtime-health",
+                    kind="private_http" if private else "public_http",
+                    private_endpoint_key="private-health" if private else "",
+                    require_runtime_identity=True,
+                ),
+            ),
+        )
+        profile = original.profile.model_copy(
+            update={
+                "updated_at": (NOW - timedelta(days=2)).isoformat(),
+                "lanes": tuple(
+                    lane.model_copy(
+                        update={
+                            "health_monitoring": policy.model_copy(
+                                update={
+                                    "checks": (
+                                        policy.checks[0].model_copy(
+                                            update={
+                                                "private_endpoint_key": f"private-{lane.instance}"
+                                                if private
+                                                else ""
+                                            }
+                                        ),
+                                    )
+                                }
+                            )
+                        }
+                    )
+                    for lane in original.profile.lanes
+                ),
+            }
+        )
+        summaries = original.summaries.copy()
+        if old_inventory:
+            for key, summary in summaries.items():
+                inventory = summary.inventory
+                assert inventory is not None
+                summaries[key] = summary.model_copy(
+                    update={
+                        "inventory": inventory.model_copy(
+                            update={
+                                "updated_at": (NOW - timedelta(days=1)).isoformat(),
+                                "destination_health": HealthcheckEvidence(),
+                            }
+                        )
+                    }
+                )
+        super().__init__(profile=profile, summaries=summaries)
+        self.observations = [self.observation(lane) for lane in profile.lanes]
+
+    def observation(self, lane: ProductLaneProfile) -> PublicIngressObservationRecord:
+        inventory = self.summaries[(lane.context, lane.instance)].inventory
+        assert inventory is not None
+        return PublicIngressObservationRecord(
+            record_id=f"monitor-{lane.instance}",
+            product=self.profile.product,
+            context=lane.context,
+            instance=lane.instance,
+            check_name=lane.health_monitoring.checks[0].name,
+            check_kind=lane.health_monitoring.checks[0].kind,
+            monitoring_intent=lane.health_monitoring.monitoring_intent,
+            observed_at=(NOW - timedelta(seconds=1)).isoformat(),
+            expected_runtime_identity=inventory.runtime_identity,
+            status="pass",
+            summary="Healthy runtime.",
+            targets=(
+                PublicIngressTargetObservation(
+                    target="private_health_url"
+                    if lane.health_monitoring.monitoring_intent == "private"
+                    else "health_url",
+                    url=lane.health_url,
+                    status="pass",
+                    runtime_identity_status="match",
+                    observed_runtime_identity=inventory.runtime_identity,
+                    summary="Runtime identity matches.",
+                ),
+            ),
+        )
+
+    def list_public_ingress_observation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
+        incident_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressObservationRecord, ...]:
+        records = tuple(
+            record
+            for record in self.observations
+            if (
+                record.product,
+                record.context,
+                record.instance,
+                record.check_name,
+                record.check_kind,
+            )
+            == (product, context_name, instance_name, check_name, check_kind)
+            and (not incident_id or record.incident_id == incident_id)
+        )
+        return records[:limit] if limit is not None else records
+
+    def read_private_health_endpoint_record(self, endpoint_key: str) -> PrivateHealthEndpointRecord:
+        lane = next(
+            lane for lane in self.profile.lanes if endpoint_key == f"private-{lane.instance}"
+        )
+        return PrivateHealthEndpointRecord(
+            endpoint_key=endpoint_key,
+            product=self.profile.product,
+            context=lane.context,
+            instance=lane.instance,
+            url="http://127.0.0.1:3000/health",
+            updated_at=self.profile.updated_at,
+            source_label="test",
+        )
 
 
 def _profile() -> LaunchplaneProductProfileRecord:
@@ -319,6 +455,300 @@ def _atlas_preview_generation() -> PreviewGenerationRecord:
 
 
 class ProductPromotionStatusTests(unittest.TestCase):
+    def test_current_monitor_refreshes_old_deploy_health_without_changing_inventory(self) -> None:
+        for private in (False, True):
+            with self.subTest(private=private):
+                store = _MonitoredPromotionStore(private=private, old_inventory=True)
+                before = dict(store.summaries)
+                profile, _, status = _status(store)
+                for lane, evidence in zip(
+                    profile.lanes, (status.source, status.destination), strict=True
+                ):
+                    summary = store.summaries[(lane.context, lane.instance)]
+                    assert summary.inventory is not None
+                    verification = read_lane_runtime_verification(
+                        record_store=store,
+                        profile=profile,
+                        lane=lane,
+                        summary=summary,
+                        now=NOW,
+                    )
+                    self.assertEqual(evidence.health_provenance, verification.provenance)
+                    self.assertEqual(evidence.trust_state, "verified")
+                    self.assertEqual(evidence.health_status, "pass")
+                    self.assertEqual(evidence.runtime_identity_status, "match")
+                    self.assertEqual(
+                        evidence.inventory_updated_at,
+                        summary.inventory.updated_at,
+                    )
+                self.assertTrue(status.direct_dry_run.enabled)
+                self.assertEqual(status.source.artifact_id, TESTING_ARTIFACT)
+                self.assertEqual(status.destination.artifact_id, PROD_ARTIFACT)
+                self.assertEqual(store.summaries, before)
+
+    def test_monitor_expiry_and_authority_changes_cannot_fall_back_to_deploy_success(self) -> None:
+        for change in (
+            "missing",
+            "expired",
+            "future",
+            "profile_changed",
+            "deployment_changed",
+            "wrong_expected",
+        ):
+            with self.subTest(change=change):
+                store = _MonitoredPromotionStore(old_inventory=change == "expired")
+                observation = store.observations[0]
+                if change == "missing":
+                    store.observations.pop(0)
+                elif change in {"expired", "future"}:
+                    checked_at = (
+                        NOW
+                        - timedelta(
+                            seconds=health_monitor_interval_seconds(observation.instance) + 1
+                        )
+                        if change == "expired"
+                        else NOW + timedelta(minutes=1)
+                    )
+                    store.observations[0] = observation.model_copy(
+                        update={"observed_at": checked_at.isoformat()}
+                    )
+                elif change == "profile_changed":
+                    store.profile = store.profile.model_copy(update={"updated_at": NOW.isoformat()})
+                elif change == "deployment_changed":
+                    lane = store.profile.lanes[0]
+                    key = (lane.context, lane.instance)
+                    summary = store.summaries[key]
+                    assert summary.inventory is not None
+                    store.summaries[key] = summary.model_copy(
+                        update={
+                            "inventory": summary.inventory.model_copy(
+                                update={"updated_at": NOW.isoformat()}
+                            )
+                        }
+                    )
+                else:
+                    expected = observation.expected_runtime_identity
+                    assert expected is not None
+                    store.observations[0] = observation.model_copy(
+                        update={
+                            "expected_runtime_identity": expected.model_copy(
+                                update={"artifact_id": NEW_TESTING_ARTIFACT}
+                            )
+                        }
+                    )
+                _, _, status = _status(store)
+                self.assertFalse(status.direct_dry_run.enabled)
+                self.assertFalse(status.workflow_live.enabled)
+                self.assertNotEqual(status.source.trust_state, "verified")
+                self.assertEqual(status.source.health_status, "skipped")
+
+    def test_latest_monitor_failure_supersedes_deploy_and_older_monitor_success(self) -> None:
+        store = _MonitoredPromotionStore()
+        passed = store.observations[0]
+        target = passed.targets[0]
+        identity = target.observed_runtime_identity
+        assert identity is not None
+        failed = passed.model_copy(
+            update={
+                "record_id": "failed-monitor",
+                "status": "fail",
+                "failure_code": "wrong_runtime_identity",
+                "targets": (
+                    target.model_copy(
+                        update={
+                            "status": "fail",
+                            "failure_code": "wrong_runtime_identity",
+                            "runtime_identity_status": "mismatch",
+                            "observed_runtime_identity": identity.model_copy(
+                                update={"artifact_id": NEW_TESTING_ARTIFACT}
+                            ),
+                        }
+                    ),
+                ),
+            }
+        )
+        store.observations.insert(0, failed)
+        _, _, status = _status(store)
+        self.assertEqual(status.source.health_status, "fail")
+        self.assertEqual(status.source.runtime_identity_status, "mismatch")
+        self.assertFalse(status.workflow_live.enabled)
+
+    def test_every_effective_monitor_check_must_verify_current_runtime(self) -> None:
+        store = _MonitoredPromotionStore()
+        lane = store.profile.lanes[0]
+        extra = lane.health_monitoring.checks[0].model_copy(update={"name": "additional-health"})
+        lane = lane.model_copy(
+            update={
+                "health_monitoring": lane.health_monitoring.model_copy(
+                    update={"checks": (*lane.health_monitoring.checks, extra)}
+                )
+            }
+        )
+        store.profile = store.profile.model_copy(update={"lanes": (lane, store.profile.lanes[1])})
+        _, _, status = _status(store)
+        self.assertFalse(status.direct_dry_run.enabled)
+        self.assertNotEqual(status.source.health_status, "pass")
+        self.assertNotEqual(status.source.trust_state, "verified")
+
+        failed = store.observations[0].model_copy(
+            update={
+                "record_id": "additional-failure",
+                "check_name": extra.name,
+                "status": "fail",
+                "failure_code": "http_error",
+                "summary": "Additional endpoint returned HTTP 500.",
+                "targets": (
+                    store.observations[0]
+                    .targets[0]
+                    .model_copy(
+                        update={"status": "fail", "failure_code": "http_error", "http_status": 500}
+                    ),
+                ),
+            }
+        )
+        store.observations.append(failed)
+        verification = read_lane_runtime_verification(
+            record_store=store,
+            profile=store.profile,
+            lane=lane,
+            summary=store.summaries[(lane.context, lane.instance)],
+            now=NOW,
+        )
+        self.assertEqual(verification.observation, failed)
+        _, _, status = _status(store)
+        self.assertEqual(status.source.health_status, "fail")
+        self.assertEqual(status.source.runtime_identity_status, "match")
+        assert status.source.health_provenance is not None
+        self.assertEqual(status.source.health_provenance.detail, failed.summary)
+        self.assertFalse(status.workflow_live.enabled)
+
+        store.observations[0] = store.observations[0].model_copy(
+            update={
+                "observed_at": (
+                    NOW - timedelta(seconds=health_monitor_interval_seconds(lane.instance) + 1)
+                ).isoformat()
+            }
+        )
+        _, _, stale_status = _status(store)
+        self.assertEqual(stale_status.source.trust_state, "stale")
+        self.assertEqual(stale_status.source.health_status, "fail")
+        assert stale_status.source.health_provenance is not None
+        self.assertEqual(stale_status.source.health_provenance.detail, failed.summary)
+
+    def test_current_public_failure_is_visible_with_or_without_a_health_target(self) -> None:
+        for has_health_target in (False, True):
+            with self.subTest(has_health_target=has_health_target):
+                store = _MonitoredPromotionStore()
+                lane = store.profile.lanes[0]
+                passed = store.observations[0]
+                base_failure = PublicIngressTargetObservation(
+                    target="base_url",
+                    url=lane.base_url,
+                    status="fail",
+                    failure_code="http_error",
+                    http_status=500,
+                    summary="Public page returned HTTP 500.",
+                )
+                failure = passed.model_copy(
+                    update={
+                        "status": "fail",
+                        "failure_code": "http_error",
+                        "summary": base_failure.summary,
+                        "targets": (base_failure, *passed.targets)
+                        if has_health_target
+                        else (base_failure,),
+                    }
+                )
+                store.observations[0] = failure
+                _, _, status = _status(store)
+                self.assertEqual(status.source.health_status, "fail")
+                assert status.source.health_provenance is not None
+                self.assertEqual(status.source.health_provenance.detail, failure.summary)
+                self.assertFalse(status.workflow_live.enabled)
+
+                key = (lane.context, lane.instance)
+                summary = store.summaries[key]
+                assert summary.inventory is not None
+                store.summaries[key] = summary.model_copy(
+                    update={
+                        "inventory": summary.inventory.model_copy(
+                            update={"updated_at": NOW.isoformat()}
+                        )
+                    }
+                )
+                _, _, redeployed = _status(store)
+                self.assertEqual(redeployed.source.health_status, "skipped")
+                self.assertFalse(redeployed.workflow_live.enabled)
+
+    def test_health_only_check_uses_the_other_probe_identity_and_cannot_replace_it(self) -> None:
+        store = _MonitoredPromotionStore()
+        lane = store.profile.lanes[0]
+        health_only = lane.health_monitoring.checks[0].model_copy(
+            update={"name": "public-root", "require_runtime_identity": False}
+        )
+        lane = lane.model_copy(
+            update={
+                "health_monitoring": lane.health_monitoring.model_copy(
+                    update={"checks": (*lane.health_monitoring.checks, health_only)}
+                )
+            }
+        )
+        store.profile = store.profile.model_copy(update={"lanes": (lane, store.profile.lanes[1])})
+        passed = store.observations[0].model_copy(
+            update={
+                "record_id": "public-root-observation",
+                "check_name": health_only.name,
+                "targets": (
+                    PublicIngressTargetObservation(
+                        target="base_url",
+                        url=lane.base_url,
+                        status="pass",
+                        summary="Public page is healthy.",
+                    ),
+                ),
+            }
+        )
+        store.observations.append(passed)
+        _, _, status = _status(store)
+        self.assertTrue(status.direct_dry_run.enabled)
+        self.assertEqual(status.source.health_status, "pass")
+        self.assertEqual(status.source.runtime_identity_status, "match")
+
+        store.observations[-1] = passed.model_copy(
+            update={
+                "observed_at": (
+                    NOW - timedelta(seconds=health_monitor_interval_seconds(lane.instance) + 1)
+                ).isoformat()
+            }
+        )
+        _, _, stale = _status(store)
+        self.assertFalse(stale.workflow_live.enabled)
+        self.assertEqual(stale.source.runtime_identity_status, "match")
+
+        store.observations[-1] = passed
+        lane = lane.model_copy(
+            update={
+                "health_monitoring": lane.health_monitoring.model_copy(
+                    update={"checks": (health_only,)}
+                )
+            }
+        )
+        store.profile = store.profile.model_copy(update={"lanes": (lane, store.profile.lanes[1])})
+        _, _, no_identity = _status(store)
+        self.assertFalse(no_identity.workflow_live.enabled)
+        self.assertEqual(no_identity.source.runtime_identity_status, "unchecked")
+
+    def test_equivalent_monitor_refresh_preserves_the_reviewed_promotion_fingerprint(self) -> None:
+        store = _MonitoredPromotionStore(old_inventory=True)
+        _, _, before = _status(store)
+        store.observations[0] = store.observations[0].model_copy(
+            update={"record_id": "refreshed-monitor", "observed_at": NOW.isoformat()}
+        )
+        _, _, after = _status(store)
+        self.assertTrue(before.direct_dry_run.enabled)
+        self.assertTrue(after.direct_dry_run.enabled)
+        self.assertEqual(before.evidence_fingerprint, after.evidence_fingerprint)
+
     def test_status_derives_reviewed_identity_from_runtime_evidence(self) -> None:
         profile, lane, status = _status(_store())
 

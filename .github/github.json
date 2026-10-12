@@ -187,7 +187,6 @@
     "Reusable Product Driver Post Deploy",
     "Reusable Product Driver Testing Verification",
     "Reusable Product Driver Testing Reset",
-    "Reusable Product Driver Prod Backup Gate",
     "Reusable Product Driver Prod Launch Readiness",
     "Reusable Product Driver Prod Promotion",
     "Reusable Product Driver Prod Rollback",

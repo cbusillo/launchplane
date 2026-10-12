@@ -5,6 +5,7 @@ provider's or the script's text, which can name hosts, storages and guests.
 """
 
 BACKUP_FAILED_CODE = "backup_failed"
+LEGACY_BACKUP_EXECUTION_RETIRED_CODE = "legacy_backup_execution_retired"
 
 _STAGE_NAMES: dict[str, str] = {
     "preflight": "the preflight check",
@@ -15,6 +16,10 @@ _STAGE_NAMES: dict[str, str] = {
 
 BACKUP_FAILURE_DESCRIPTIONS: dict[str, str] = {
     BACKUP_FAILED_CODE: "The backup failed.",
+    LEGACY_BACKUP_EXECUTION_RETIRED_CODE: (
+        "This historical request cannot run. Capture a new backup through the shared "
+        "production-backup gate with typed backup authority."
+    ),
     "backup_preflight_unavailable": (
         "The backup stopped before its provider steps: its policy, targets or credentials "
         "could not be prepared."

@@ -979,11 +979,11 @@ def _build_privileged_operation_semantic_review(
             rollback=PrivilegedOperationSemanticReviewRollback(
                 rollback_class="activation_revoke",
                 summary=(
-                    "Stopping later requires a separate review."
+                    "Retired delivery history is read-only; current stop authority remains in managed policy."
                     if isinstance(
                         record.evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence
                     )
-                    else "Stopping is permanent for this setup. Starting again requires a new reviewed setup."
+                    else "This records the historical stop; new delivery setup is retired."
                 ),
             ),
             evidence=PrivilegedOperationSemanticReviewEvidence(
@@ -991,8 +991,8 @@ def _build_privileged_operation_semantic_review(
                 digests=_semantic_review_digests(record, extra_digests),
             ),
             activity=_semantic_review_activity(record.operation_id, events),
-            can_approve=record.status == "planned" and not activation_blocker_codes,
-            can_revoke=record.status == "approved" and lifecycle.expiry_state == "active",
+            can_approve=False,
+            can_revoke=False,
         )
     raise PrivilegedOperationSemanticReviewError(
         "Privileged-operation semantic review descriptor is unsupported."
@@ -1125,6 +1125,9 @@ def create_typed_privileged_operation_plan(
     )
     if source_kind != expected_source_kind:
         raise ValueError("Privileged-operation plan source does not match requester identity.")
+    registration = read_privileged_operation_descriptor(descriptor_id)
+    if registration.planner is None:
+        raise ValueError("This privileged-operation planner is retired.")
     store = require_privileged_operation_store(record_store)
     operation_id = build_privileged_operation_id_for_actor(
         descriptor_id=descriptor_id,
@@ -1142,7 +1145,6 @@ def create_typed_privileged_operation_plan(
     )
     if replay is not None:
         return replay
-    registration = read_privileged_operation_descriptor(descriptor_id)
     evidence = registration.planner(record_store, request)
     created_at = now().astimezone(timezone.utc)
     record = PrivilegedOperationRecord(

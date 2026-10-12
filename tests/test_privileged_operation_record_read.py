@@ -53,7 +53,7 @@ def _reader_policy(
 
 
 class PrivilegedOperationRecordReadTests(unittest.IsolatedAsyncioTestCase):
-    async def test_operator_reads_each_descriptor_and_activation_options(self) -> None:
+    async def test_operator_reads_current_and_historical_descriptors(self) -> None:
         with _database_app(_reader_policy()) as (_, _, app):
             async with lifespan_client(app) as client:
                 for descriptor in _DESCRIPTORS:
@@ -64,11 +64,6 @@ class PrivilegedOperationRecordReadTests(unittest.IsolatedAsyncioTestCase):
                             headers=_HEADERS,
                         )
                         self.assertEqual(response.status_code, 200, response.text)
-                response = await client.get(
-                    "/v1/privileged-operations/ordinary-agent-delivery-activation/options",
-                    headers=_HEADERS,
-                )
-                self.assertEqual(response.status_code, 200, response.text)
 
     async def test_operator_reads_old_record_without_writes_or_transition_authority(
         self,

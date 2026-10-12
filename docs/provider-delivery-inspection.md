@@ -2,6 +2,12 @@
 title: Provider Delivery Inspection
 ---
 
+The delegated-delivery HTTP routes, client review pages, preparation endpoints,
+and activation planner have been removed. The contracts and schema-3 policy
+readers remain for stored history; the descriptions below are historical.
+Remaining worker, domain, storage, and table deletion is tracked by
+[launchplane#2437](https://github.com/cbusillo/launchplane/issues/2437).
+
 > **Retired.** This design is no longer the direction and is scheduled for
 > deletion with its code. Do not build on it. See [DIRECTION.md](../DIRECTION.md).
 

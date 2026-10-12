@@ -9,20 +9,10 @@ from typing import cast
 
 from pydantic import Field, model_validator
 
-from control_plane.contracts.durable_operation_authorization import (
-    DurableOperationAuthorization,
-)
-from control_plane.contracts.verireel_prod_backup_gate import (
-    VeriReelProdBackupGateRequest,
-)
 from control_plane.drivers.dispatch import (
     _DriverRouteExecutionMetadata,
     _ProductRouteEnvelope,
     _validate_driver_envelope_product,
-)
-from control_plane.workflows.verireel_prod_backup_gate import (
-    VeriReelProdBackupGateOperationStore,
-    enqueue_verireel_prod_backup_gate,
 )
 from control_plane.workflows.verireel_prod_promotion import (
     VeriReelProdPromotionRequest,
@@ -42,7 +32,6 @@ from control_plane.workflows.verireel_stable_deploy import (
 
 
 VERIREEL_PROD_DEPLOY_ROUTE = "/v1/drivers/verireel/prod-deploy"
-VERIREEL_PROD_BACKUP_GATE_ROUTE = "/v1/drivers/verireel/prod-backup-gate"
 VERIREEL_PROD_PROMOTION_ROUTE = "/v1/drivers/verireel/prod-promotion"
 VERIREEL_PROD_ROLLBACK_ROUTE = "/v1/drivers/verireel/prod-rollback"
 
@@ -56,16 +45,6 @@ class VeriReelProdDeployEnvelope(_ProductRouteEnvelope):
         _validate_driver_envelope_product(self.product, label="VeriReel prod deploy")
         if self.deploy.instance != "prod":
             raise ValueError("VeriReel prod deploy requires instance 'prod'.")
-        return self
-
-
-class VeriReelProdBackupGateEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    backup_gate: VeriReelProdBackupGateRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelProdBackupGateEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel prod backup gate")
         return self
 
 
@@ -94,16 +73,6 @@ _VERIREEL_PROD_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=VeriReelProdDeployEnvelope,
     denial_message=(
         "Workflow cannot execute the VeriReel prod deploy driver for the requested product/context."
-    ),
-)
-
-
-_VERIREEL_PROD_BACKUP_GATE_ROUTE = _DriverRouteExecutionMetadata(
-    route_path=VERIREEL_PROD_BACKUP_GATE_ROUTE,
-    envelope_model=VeriReelProdBackupGateEnvelope,
-    denial_message=(
-        "Workflow cannot execute the VeriReel prod backup gate driver"
-        " for the requested product/context."
     ),
 )
 
@@ -169,23 +138,6 @@ def apply_verireel_prod_deploy_result(
     result = driver_result.model_dump(mode="json")
     result.pop("target_type", None)
     return {"deployment_record_id": driver_result.deployment_record_id}, result
-
-
-def apply_verireel_prod_backup_gate_result(
-    *,
-    record_store: object,
-    request: VeriReelProdBackupGateEnvelope,
-    authorization: DurableOperationAuthorization,
-) -> tuple[dict[str, object], dict[str, object]]:
-    driver_result = enqueue_verireel_prod_backup_gate(
-        record_store=cast(VeriReelProdBackupGateOperationStore, record_store),
-        request=request.backup_gate,
-        authorization=authorization,
-    )
-    return (
-        {"backup_gate_record_id": driver_result.backup_record_id},
-        driver_result.model_dump(mode="json"),
-    )
 
 
 def apply_verireel_prod_promotion_result(

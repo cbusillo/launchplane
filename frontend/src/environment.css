@@ -3303,3 +3303,7 @@
   border: 1px solid var(--border); border-radius: 6px;
   background: var(--surface); color: var(--text-strong); font: inherit;
 }
+
+.backup-authority-digest code {
+  overflow-wrap: anywhere;
+}

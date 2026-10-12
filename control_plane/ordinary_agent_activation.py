@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 import inspect
 from typing import Any, cast
 
@@ -15,18 +15,10 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
 )
 from control_plane.contracts.ordinary_agent_activation import (
-    OrdinaryAgentDeliveryActivationDurationOption,
     OrdinaryAgentDeliveryActivationRecord,
     OrdinaryAgentDeliveryActivationEvent,
     OrdinaryAgentDeliveryActivationReference,
-    OrdinaryAgentDeliveryActivationRequest,
-    OrdinaryAgentDeliveryActivationRevokeHumanEvidence,
-    OrdinaryAgentDeliveryActivationRevokeOption,
-    OrdinaryAgentDeliveryActivationRevokeRequest,
     OrdinaryAgentDeliveryActivationScope,
-    OrdinaryAgentDeliveryActivationSetupHumanEvidence,
-    OrdinaryAgentDeliveryActivationSetupOption,
-    OrdinaryAgentDeliveryActivationSetupRequest,
     OrdinaryAgentDeliveryInventoryReference,
     OrdinaryAgentDeliveryPolicyPackageReference,
     OrdinaryAgentDeliveryRuntimeCapabilityEvidence,
@@ -69,15 +61,6 @@ from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.schema_invariants import RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS
 
 
-_ACTIVATION_DURATION_OPTIONS = (
-    (60 * 60, "1 hour"),
-    (24 * 60 * 60, "1 day"),
-    (7 * 24 * 60 * 60, "7 days"),
-    (30 * 24 * 60 * 60, "30 days"),
-)
-_MAX_ACTIVATION_DURATION = timedelta(days=30)
-
-
 class OrdinaryAgentDeliveryActivationPlanningError(ValueError):
     """Raised when referenced server-owned setup data does not resolve exactly."""
 
@@ -92,12 +75,6 @@ def _same_activation_scope_identity(
         and left.managed_set_id == right.managed_set_id
         and left.managed_rule_id == right.managed_rule_id
     )
-
-
-def _activation_option_timestamp(value: str) -> str:
-    parsed = datetime.fromisoformat(value).astimezone(timezone.utc)
-    fraction = f".{parsed.microsecond:06d}" if parsed.microsecond else ""
-    return f"{parsed.strftime('%b %d, %Y at %H:%M:%S')}{fraction} UTC"
 
 
 @dataclass(frozen=True, slots=True)
@@ -739,43 +716,6 @@ def _scope_predecessor(
     return expected
 
 
-def _available_scope_predecessor(
-    record_store: object,
-    *,
-    scope: OrdinaryAgentDeliveryActivationScope,
-    observed_at: datetime,
-) -> OrdinaryAgentDeliveryActivationReference | None:
-    matching = tuple(
-        record
-        for record in _activation_records(record_store)
-        if _same_activation_scope_identity(record.scope, scope)
-    )
-    if not matching:
-        return None
-    newest_time = max(datetime.fromisoformat(record.installed_at) for record in matching)
-    newest = tuple(
-        record for record in matching if datetime.fromisoformat(record.installed_at) == newest_time
-    )
-    if len(newest) != 1:
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation history does not have one newest intent."
-        )
-    record = newest[0]
-    if (
-        not record.revoked_at
-        and not record.superseded_by_activation_id
-        and observed_at < datetime.fromisoformat(record.activation_expires_at)
-    ):
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation scope already has an unexpired guarded intent."
-        )
-    return OrdinaryAgentDeliveryActivationReference(
-        activation_id=record.activation_id,
-        revision=record.revision,
-        activation_sha256=record.activation_sha256,
-    )
-
-
 def _read_activation(
     record_store: object,
     activation_id: str,
@@ -795,216 +735,4 @@ def _read_activation(
         record
         if isinstance(record, OrdinaryAgentDeliveryActivationRecord)
         else OrdinaryAgentDeliveryActivationRecord.model_validate(record)
-    )
-
-
-def plan_ordinary_agent_delivery_activation(
-    record_store: object,
-    request: OrdinaryAgentDeliveryActivationRequest,
-    *,
-    observed_at: datetime | None = None,
-) -> (
-    OrdinaryAgentDeliveryActivationSetupHumanEvidence
-    | OrdinaryAgentDeliveryActivationRevokeHumanEvidence
-):
-    now = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    if isinstance(request, OrdinaryAgentDeliveryActivationSetupRequest):
-        expires_at = datetime.fromisoformat(request.activation_expires_at)
-        if expires_at <= now:
-            raise OrdinaryAgentDeliveryActivationPlanningError(
-                "Activation setup expiry must be in the future."
-            )
-        if expires_at > now + _MAX_ACTIVATION_DURATION:
-            raise OrdinaryAgentDeliveryActivationPlanningError(
-                "Activation setup expiry cannot exceed 30 days."
-            )
-        source = resolve_ordinary_agent_delivery_activation_setup_source(
-            record_store,
-            policy_operation_id=request.policy_operation_id,
-            repository_inventory_record_id=request.repository_inventory_record_id,
-            observed_at=now,
-        )
-        predecessor = _scope_predecessor(
-            record_store,
-            scope=source.scope,
-            requested=request.predecessor,
-            observed_at=now,
-        )
-        runtime_capability = _runtime_capability(
-            record_store,
-            observed_at=source.observed_at,
-        )
-        blockers = tuple(sorted(runtime_capability.setup_blockers))
-        plan_digest = ordinary_agent_delivery_activation_plan_sha256(
-            {
-                "action": request.action,
-                "scope": source.scope.model_dump(mode="json"),
-                "policy_package": source.policy_package.model_dump(mode="json"),
-                "inventory": source.inventory.model_dump(mode="json"),
-                "predecessor": (
-                    predecessor.model_dump(mode="json") if predecessor is not None else None
-                ),
-                "activation_expires_at": request.activation_expires_at,
-                "runtime_capability": runtime_capability.model_dump(mode="json"),
-                "blocker_codes": blockers,
-            }
-        )
-        return OrdinaryAgentDeliveryActivationSetupHumanEvidence(
-            result_status="blocked" if blockers else "ok",
-            scope=source.scope,
-            policy_package=source.policy_package,
-            inventory=source.inventory,
-            predecessor=predecessor,
-            activation_expires_at=request.activation_expires_at,
-            runtime_capability=runtime_capability,
-            blocker_codes=blockers,
-            plan_digest=plan_digest,
-        )
-    if isinstance(request, OrdinaryAgentDeliveryActivationRevokeRequest):
-        record = _read_activation(record_store, request.activation_id)
-        if (
-            record.revision != request.expected_revision
-            or record.activation_sha256 != request.expected_activation_sha256
-        ):
-            raise OrdinaryAgentDeliveryActivationPlanningError(
-                "Activation revocation target no longer matches the expected revision and digest."
-            )
-        if record.desired_state == "revoked" or record.superseded_by_activation_id:
-            raise OrdinaryAgentDeliveryActivationPlanningError(
-                "Activation revocation target is already terminal."
-            )
-        activation = OrdinaryAgentDeliveryActivationReference(
-            activation_id=record.activation_id,
-            revision=record.revision,
-            activation_sha256=record.activation_sha256,
-        )
-        return OrdinaryAgentDeliveryActivationRevokeHumanEvidence(
-            scope=record.scope,
-            activation=activation,
-            source_setup_operation_id=record.source_setup_operation_id,
-            plan_digest=ordinary_agent_delivery_activation_plan_sha256(
-                {
-                    "action": request.action,
-                    "scope": record.scope.model_dump(mode="json"),
-                    "activation": activation.model_dump(mode="json"),
-                    "source_setup_operation_id": record.source_setup_operation_id,
-                }
-            ),
-        )
-    raise OrdinaryAgentDeliveryActivationPlanningError(
-        "Activation planner received an unsupported request variant."
-    )
-
-
-def ordinary_agent_delivery_activation_duration_options(
-    *, observed_at: datetime | None = None
-) -> tuple[OrdinaryAgentDeliveryActivationDurationOption, ...]:
-    now = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    return tuple(
-        OrdinaryAgentDeliveryActivationDurationOption(
-            duration_seconds=duration_seconds,
-            activation_expires_at=(now + timedelta(seconds=duration_seconds)).isoformat(),
-            label=label,
-        )
-        for duration_seconds, label in _ACTIVATION_DURATION_OPTIONS
-    )
-
-
-def list_ordinary_agent_delivery_activation_options(
-    record_store: object,
-    *,
-    observed_at: datetime | None = None,
-) -> tuple[
-    tuple[OrdinaryAgentDeliveryActivationSetupOption, ...],
-    tuple[OrdinaryAgentDeliveryActivationRevokeOption, ...],
-]:
-    operation_reader = getattr(record_store, "list_privileged_operation_records", None)
-    inventory_reader = getattr(record_store, "list_repository_inventory_records", None)
-    if not callable(operation_reader) or not callable(inventory_reader):
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation options require operation and repository inventory storage."
-        )
-    now = (observed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    setup_options: list[OrdinaryAgentDeliveryActivationSetupOption] = []
-    for operation in operation_reader(
-        descriptor_id="managed-authz-policy-set",
-        limit=None,
-    ):
-        try:
-            typed_operation = (
-                operation
-                if isinstance(operation, PrivilegedOperationRecord)
-                else PrivilegedOperationRecord.model_validate(operation)
-            )
-            request, _ = _require_admissible_policy_operation(typed_operation)
-            scope = _activation_scope(request)
-            inventories = tuple(
-                inventory_reader(
-                    repository_id=str(scope.target.repository_id),
-                    limit=None,
-                )
-            )
-            if not inventories:
-                continue
-            typed_inventories = tuple(
-                item
-                if isinstance(item, RepositoryInventoryRecord)
-                else RepositoryInventoryRecord.model_validate(item)
-                for item in inventories
-            )
-            highest_revision = max(item.inventory_revision for item in typed_inventories)
-            current = tuple(
-                item
-                for item in typed_inventories
-                if item.inventory_revision == highest_revision and item.inventory_state == "tracked"
-            )
-            if len(current) != 1:
-                continue
-            resolve_ordinary_agent_delivery_activation_setup_source(
-                record_store,
-                policy_operation_id=typed_operation.operation_id,
-                repository_inventory_record_id=current[0].record_id,
-                observed_at=now,
-            )
-            predecessor = _available_scope_predecessor(
-                record_store,
-                scope=scope,
-                observed_at=now,
-            )
-        except (OrdinaryAgentDeliveryActivationPlanningError, TypeError, ValueError):
-            continue
-        setup_options.append(
-            OrdinaryAgentDeliveryActivationSetupOption(
-                policy_operation_id=typed_operation.operation_id,
-                repository_inventory_record_id=current[0].record_id,
-                scope=scope,
-                predecessor=predecessor,
-                label=(
-                    f"{scope.target.repository} · {scope.target.base_branch} · prepared "
-                    f"{_activation_option_timestamp(typed_operation.created_at)}"
-                ),
-            )
-        )
-    revoke_options = tuple(
-        OrdinaryAgentDeliveryActivationRevokeOption(
-            activation=OrdinaryAgentDeliveryActivationReference(
-                activation_id=record.activation_id,
-                revision=record.revision,
-                activation_sha256=record.activation_sha256,
-            ),
-            scope=record.scope,
-            label=(
-                f"{record.scope.target.repository} · {record.scope.target.base_branch} · set up "
-                f"{_activation_option_timestamp(record.installed_at)} · allowed until "
-                f"{_activation_option_timestamp(record.activation_expires_at)}"
-            ),
-        )
-        for record in _activation_records(record_store)
-        if record.desired_state == "guarded"
-        and not record.superseded_by_activation_id
-        and now < datetime.fromisoformat(record.activation_expires_at)
-    )
-    return (
-        tuple(sorted(setup_options, key=lambda option: option.label.casefold())),
-        tuple(sorted(revoke_options, key=lambda option: option.label.casefold())),
     )
