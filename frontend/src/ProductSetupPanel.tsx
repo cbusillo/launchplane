@@ -137,6 +137,9 @@ function SetupChange({ product, kind, makeRequest, onApplied, children }: { prod
     try {
       const request = makeRequest();
       applyOperation.reset();
+      // Planning is read-only: each requested review needs current metadata,
+      // rather than replaying a dry-run receipt after a lost response.
+      planOperation.reset();
       const response = await planOperation.run(request);
       if (response) { reviewedSetupApply(kind, request, response); setReviewed({ request, response }); }
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Invalid setup request."); }

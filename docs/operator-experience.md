@@ -891,6 +891,8 @@ and unchanged declarations, confirm the scope, and apply. This is add-only
 expected-config metadata; it contains no secret values. Both operations read
 back the product profile before reporting success. Edits invalidate the review;
 an uncertain apply preserves its original request and idempotency key for retry.
+Each requested dry run uses a fresh operation key to review current metadata,
+including after a lost dry-run response. This does not reset an uncertain apply.
 Both endpoints replay their atomic receipt before refusing a stale write. A
 definitive stale refusal settles the original retry so a new dry run can proceed;
 a fresh authorization denial does not prove the original write failed.

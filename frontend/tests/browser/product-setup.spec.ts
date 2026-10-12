@@ -137,7 +137,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
     }
     await panel.getByRole("link", { name: "Open testing managed secrets" }).click();
     await expect(page).toHaveURL(/environments\/testing\/managed-secrets$/);
-    await expect(page.getByRole("heading", { name: "Plan managed-secret changes", exact: true })).toBeVisible();
+    await expect(page.locator('input[type="password"]').first()).toBeVisible();
     if (["success", "private"].includes(outcome)) expect(consoleErrors).toEqual([]);
   });
 }
@@ -193,11 +193,57 @@ test("incomplete setup metadata leaves existing product controls available and s
   const setup = page.getByRole("region", { name: "Set up a non-production environment" });
   await expect(setup.getByRole("alert")).toBeVisible();
   await expect(setup.getByRole("button", { name: "Run dry-run", exact: true })).toHaveCount(0);
-  await page.getByRole("region", { name: "example-owner (id 9001)", exact: true }).getByLabel("GitHub login").fill("another-client");
+  await page.getByLabel("GitHub login", { exact: true }).fill("another-client");
   complete = true;
   await setup.getByRole("button", { name: "Retry setup read" }).click();
   await expect(setup.getByText("Add environment", { exact: true })).toBeVisible();
   await expect(setup.getByRole("alert")).toHaveCount(0);
   expect(writes).toEqual([]);
   expect(errors).toEqual([]);
+});
+
+test("a declaration review after a lost dry-run response reads current metadata", async ({ page }) => {
+  await page.goto("/ui/products/atlas-commerce?fixture=products");
+  const data = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return { products: fixtures.productsForFixture("products"), identity: fixtures.fixtureIdentity };
+  });
+  const binding = { binding_key: "BOT_TOKEN", integration: "runtime_environment", context: "atlas-commerce", instance: "testing" };
+  const profile = { product: "atlas-commerce", owner: { github_login: "example-owner", github_id: "9001" }, image: { repository: "ghcr.io/example/atlas-commerce" }, production_use: "unknown", public_website: "none", lanes: [{ context: binding.context, instance: binding.instance }], expected_config: { managed_secret_bindings: [] as unknown[] } };
+  const receipts = new Map<string, unknown>();
+  let loseResponse = true;
+  let requests = 0;
+  await page.route("**/v1/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() === "POST") {
+      const body = route.request().postDataJSON();
+      expect(body.mode).toBe("dry-run");
+      const key = route.request().headers()["idempotency-key"];
+      if (!receipts.has(key)) receipts.set(key, { status: "accepted", trace_id: "review", result: { status: "ok", mode: body.mode, product: body.product, changed: !profile.expected_config.managed_secret_bindings.length, managed_secret_bindings: { added: profile.expected_config.managed_secret_bindings.length ? [] : [binding], unchanged: profile.expected_config.managed_secret_bindings.length ? [binding] : [] } } });
+      requests++;
+      if (loseResponse) { loseResponse = false; await route.abort("failed"); return; }
+      await route.fulfill({ status: 202, json: receipts.get(key) });
+      return;
+    }
+    const response = path.endsWith("/auth/session") ? { csrf_token: "csrf", identity: data.identity }
+      : path.endsWith("/products") ? { products: data.products }
+      : path.endsWith("/product-profiles/atlas-commerce") ? { profile }
+      : { product: data.products[0] };
+    await route.fulfill({ json: { status: "ok", trace_id: "read", ...response } });
+  });
+  await page.goto("/ui/products/atlas-commerce");
+  const panel = page.getByRole("region", { name: "Set up a non-production environment" });
+  await panel.getByText("Declare managed-secret fields", { exact: true }).click();
+  const declarations = panel.locator("details").filter({ has: page.locator("summary", { hasText: "Declare managed-secret fields" }) });
+  await declarations.getByRole("combobox", { name: "Environment", exact: true }).selectOption("testing");
+  await declarations.getByLabel("Binding key 1").fill(binding.binding_key);
+  await declarations.getByLabel("Reason", { exact: true }).fill("Current testing declarations");
+  const review = declarations.getByRole("button", { name: "Run dry-run", exact: true });
+  await review.click();
+  await expect.poll(() => requests).toBe(1);
+  await expect(review).toBeEnabled();
+  // Another administrator declared the field while this response was lost.
+  profile.expected_config.managed_secret_bindings = [binding];
+  await review.click();
+  await expect(declarations.getByRole("row").filter({ hasText: binding.binding_key })).toContainText("unchanged");
 });
