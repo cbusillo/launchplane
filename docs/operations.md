@@ -293,6 +293,24 @@ Admins submit exact revisioned target and policy records to
 `POST /v1/production-backup-authority/apply`. Run `mode=dry_run`, review the
 canonical `authority_digest`, then submit the same payload with `mode=apply`,
 the reviewed digest, expected-current record IDs, and an `Idempotency-Key`.
+The production lane's **Actions → Production backup authority** card accepts
+a private prepared proposal for that exact product/context/instance. It displays
+the proposed whole-guest scope, snapshot retention, evidence ages and review date,
+runs the dry run, and approves only its returned digest through this same route.
+Preparation can load the file into the signed-in administrator's tab before the
+administrator reviews it; no terminal command or bearer token is needed from
+the person approving. Proposal loading does not submit or activate a policy.
+
+Browser writes use the existing CSRF-checked session dependency and the unchanged
+`production_backup_authority.write` authorization check. The card retains the
+private proposal and, for an uncertain approval, the original request and
+idempotency key in that tab's session storage. A changed file invalidates review;
+an uncertain result locks replacement and permits only the original request's
+retry. The card reads authority back after approval. Approval does not enqueue
+a capture, restore, promotion or deployment; worker credentials and real capture
+qualification remain separate prerequisites. Existing target-only policy updates
+are bound to the current target revisions by the service digest.
+
 Apply is PostgreSQL-only and commits all target supersessions, target revisions,
 policy supersession, policy revision, and idempotency evidence atomically.
 Conflicting revisions, changed expected-current records, invalid target kinds,

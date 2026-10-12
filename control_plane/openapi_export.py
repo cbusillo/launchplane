@@ -135,6 +135,7 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
+    "/v1/production-backup-authority": "read_production_backup_authority",
     "/v1/service/github-delivery": "read_service_github_delivery_controls",
     "/v1/ordinary-agent-jobs/{principal_id}/{request_id}": "read_human_ordinary_agent_job",
     "/v1/ordinary-agent-operations/{principal_id}/{operation_id}": "read_human_ordinary_agent_operation",
@@ -206,6 +207,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/production-backup-authority/apply": "apply_production_backup_authority",
     # POST carries the original typed request for an inert receipt lookup.
     "/v1/service/delivery/apply-receipt": "read_service_delivery_apply_receipt",
     "/v1/service/github-delivery/configuration": "configure_launchplane_github_delivery",
