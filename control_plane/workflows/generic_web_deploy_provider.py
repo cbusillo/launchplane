@@ -444,8 +444,18 @@ class GenericWebDeployRuntimeArtifactProvider(Protocol):
 @runtime_checkable
 class GenericWebDeployNoLiveEffectProvider(Protocol):
     def observe_testing_no_live_effect(
-        self, *, control_plane_root: Path, target: GenericWebProviderReconciliationTarget
+        self,
+        *,
+        control_plane_root: Path,
+        target: GenericWebProviderReconciliationTarget,
+        operation_title: str,
     ) -> dict[str, object] | None: ...
+
+
+class TestingEventDeployRecoveryRefused(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 class DokployGenericWebDeployProvider:
@@ -692,7 +702,11 @@ class DokployGenericWebDeployProvider:
         )
 
     def observe_testing_no_live_effect(
-        self, *, control_plane_root: Path, target: GenericWebProviderReconciliationTarget
+        self,
+        *,
+        control_plane_root: Path,
+        target: GenericWebProviderReconciliationTarget,
+        operation_title: str,
     ) -> dict[str, object] | None:
         """Complete negative evidence for a never-successful, empty testing compose.
 
@@ -715,9 +729,10 @@ class DokployGenericWebDeployProvider:
             payload.get("composeId") != target.target_id
             or not isinstance(app_name, str)
             or not app_name.strip()
-            or payload.get("composeStatus") not in {"idle", "done", "error"}
+            or payload.get("composeType") != "docker-compose"
+            or payload.get("composeStatus") not in {"idle", "error"}
         ):
-            return None
+            raise TestingEventDeployRecoveryRefused("provider_target_not_idle_compose")
         schedules = dokploy_api.dokploy_request(
             host=host,
             token=token,
@@ -725,7 +740,7 @@ class DokployGenericWebDeployProvider:
             query={"id": target.target_id, "scheduleType": "compose"},
         )
         if schedules != []:
-            return None
+            raise TestingEventDeployRecoveryRefused("provider_schedules_unproven_or_present")
         history = dokploy_api.dokploy_request(
             host=host,
             token=token,
@@ -740,23 +755,72 @@ class DokployGenericWebDeployProvider:
             or not item.get("finishedAt")
             for item in history
         ):
-            return None
-        query: dict[str, str | int] = {"appName": app_name, "appType": "docker-compose"}
+            raise TestingEventDeployRecoveryRefused("provider_history_unproven_or_nonfailed")
+        # A trigger may sit in the queue before any deployment row exists.
+        # queueList returns the complete job inventory; HTTP/read errors and
+        # unknown shapes are refused. Neither history nor composeStatus alone
+        # is negative dispatch evidence.
+        jobs = dokploy_api.dokploy_request(host=host, token=token, path="/api/deployment.queueList")
+        if not isinstance(jobs, list):
+            raise TestingEventDeployRecoveryRefused("provider_queue_unproven")
+        for job in jobs:
+            if not isinstance(job, dict) or not isinstance(job.get("data"), dict):
+                raise TestingEventDeployRecoveryRefused("provider_queue_unproven")
+            data = job["data"]
+            assert isinstance(data, dict)
+            if data.get("composeId") == target.target_id and job.get("state") not in {
+                "completed",
+                "failed",
+            }:
+                raise TestingEventDeployRecoveryRefused("provider_dispatch_unproven")
+        # The name-filtered Dokploy endpoint converts provider/SSH failures to
+        # an empty list. Instead require a nonempty full host inventory and
+        # successfully inspect every returned container before proving absence.
+        # That inventory omits Dokploy-named containers, so such app names cannot
+        # be qualified by this reader.
+        if "dokploy" in app_name.lower():
+            raise TestingEventDeployRecoveryRefused("provider_container_inventory_incomplete")
+        query: dict[str, str | int] = {}
         server_id = payload.get("serverId")
-        if not isinstance(server_id, str) or not server_id.strip():
-            return None
-        query["serverId"] = server_id
+        if server_id is not None and not isinstance(server_id, str):
+            raise TestingEventDeployRecoveryRefused("provider_server_unproven")
+        if isinstance(server_id, str) and server_id.strip():
+            query["serverId"] = server_id
         containers = dokploy_api.dokploy_request(
-            host=host, token=token, path="/api/docker.getContainersByAppNameMatch", query=query
+            host=host, token=token, path="/api/docker.getContainers", query=query
         )
-        if containers != []:
-            return None
+        if not isinstance(containers, list) or not containers:
+            raise TestingEventDeployRecoveryRefused("provider_container_inventory_unproven")
+        for container in containers:
+            if not isinstance(container, dict):
+                raise TestingEventDeployRecoveryRefused("provider_container_identity_unproven")
+            container_id = container.get("containerId")
+            if not isinstance(container_id, str) or not container_id:
+                raise TestingEventDeployRecoveryRefused("provider_container_identity_unproven")
+            inspected = dokploy_api.dokploy_request(
+                host=host,
+                token=token,
+                path="/api/docker.getConfig",
+                query={**query, "containerId": container_id},
+            )
+            if not isinstance(inspected, dict):
+                raise TestingEventDeployRecoveryRefused("provider_container_identity_unproven")
+            config = inspected.get("Config")
+            if not isinstance(config, dict):
+                raise TestingEventDeployRecoveryRefused("provider_container_identity_unproven")
+            labels = config.get("Labels")
+            if labels is not None and not isinstance(labels, dict):
+                raise TestingEventDeployRecoveryRefused("provider_container_identity_unproven")
+            if isinstance(labels, dict) and labels.get("com.docker.compose.project") == app_name:
+                raise TestingEventDeployRecoveryRefused("provider_containers_present")
         # No values or provider coordinates are part of the public audit.
         return {
             "state": "no_live_effect",
             "terminal_failed_deployments": len(history),
             "container_count": 0,
             "schedule_count": 0,
+            "pending_target_jobs": 0,
+            "operation_marker_sha256": hashlib.sha256(operation_title.encode()).hexdigest(),
         }
 
     def observe_runtime_artifact(

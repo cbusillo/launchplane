@@ -555,12 +555,17 @@ Keep the reservation held. The explicit recovery path requires independently
 proven original coordinates; a current build or a key hash cannot replace them.
 The service's normal testing reconciler can retire this unavailable-original
 attempt as a terminal failed reservation when it proves there is no live effect.
-It excludes surviving event workers with the provider-target execution lock,
+It excludes other testing reconcilers with the provider-target execution lock,
 requires an expired lease, unchanged product/target bindings and the exact
 service-originated testing reservation, and refuses post-deploy/data-work effects.
 The Dokploy inspector currently qualifies only a testing compose with complete
 terminal-failure history, no containers of any state, no schedules and no queued
-or running compose work. Missing lists, unreadable provider state, a successful
+or running compose work. It reads the provider's complete deployment queue;
+empty history or an idle compose alone cannot rule out a queued trigger.
+Because Dokploy's filtered container reader swallows failures as empty results,
+qualification requires a nonempty host inventory and successful container
+inspections. An empty host or an omitted Dokploy-named compose remains unproven.
+Missing lists, unreadable provider state, a successful
 deployment, target drift or an available original request keep the fence held.
 The failed reservation retains a value-free recovery audit; the normal verified
 build path then reserves and deploys the fresh request. This performs no provider

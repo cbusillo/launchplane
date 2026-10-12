@@ -11,6 +11,7 @@ the plan on its request.
 from __future__ import annotations
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
+from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.lane_movement import (
     LANE_MOVEMENT_REFUSALS,
     LaneBuild,
@@ -698,7 +699,9 @@ def _deploy_generic_web_testing(
             retain_event_request=True,
         )
         execution_lock = (
-            record_store.testing_replacement_execution_lock(f"event-deploy:{adapter.target_key()}")
+            record_store.testing_replacement_execution_lock(
+                testing_event_execution_lock_name(adapter.target_key())
+            )
             if isinstance(record_store, PostgresRecordStore)
             else nullcontext(lambda: None)
         )
@@ -729,6 +732,7 @@ def _deploy_generic_web_testing(
                         idempotency_key = reservation.idempotency_key
                         plan["deploy_idempotency_key"] = idempotency_key
                         continue
+                    recovery_reservation = reservation
                     if reservation.state == "running":
                         lookup = cast(
                             _TestingLaneAuthorityStore, record_store
@@ -739,6 +743,7 @@ def _deploy_generic_web_testing(
                         )
                         if lookup.status == "found" and lookup.record is not None:
                             reservation = lookup.record
+                            recovery_reservation = lookup.record
                             if reservation.state == "completed":
                                 continue
                             if (
@@ -767,7 +772,7 @@ def _deploy_generic_web_testing(
 
                         recovery = retire_unavailable_testing_event_deploy(
                             store=record_store,
-                            reservation=reservation,
+                            reservation=recovery_reservation,
                             profile=profile,
                             context=lane.context,
                             current_target_key=adapter.target_key(),
@@ -775,14 +780,23 @@ def _deploy_generic_web_testing(
                             root=control_plane_root,
                             trace_id=trace_id,
                             check_execution_lock=check_execution_lock,
+                            record_refusal=lambda code: plan.__setitem__(
+                                "testing_deploy_recovery_refusal", code
+                            ),
                         )
                         if recovery is not None:
                             plan["testing_deploy_recovery"] = recovery
                             continue
-                    return _generic_web_testing_outcome(
+                    held_outcome = _generic_web_testing_outcome(
                         plan=plan,
                         result=DurableProviderOperationResult("target_busy", reservation, 409, {}),
                     )
+                    refusal = plan.get("testing_deploy_recovery_refusal")
+                    if held_outcome.error and isinstance(refusal, str):
+                        return ReconcileOutcome(
+                            plan, error=f"{held_outcome.error} Testing recovery refused: {refusal}."
+                        )
+                    return held_outcome
             result = run_durable_provider_operation(
                 store=cast(DurableProviderOperationStore, record_store),
                 scope=reconcile_reservation_scope(profile.product),

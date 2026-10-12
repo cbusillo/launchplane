@@ -119,7 +119,11 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
                     _generic_web_recovery_target(),
                     product=self.product,
                     original_event_deploy=None
-                    if self._testMethodName == "test_legacy_saved_plan_requires_exact_fingerprint"
+                    if self._testMethodName
+                    in {
+                        "test_legacy_saved_plan_requires_exact_fingerprint",
+                        "test_legacy_sha_tagged_plan_returns_the_exact_original_reference",
+                    }
                     else self.original,
                 ),
             }
@@ -420,6 +424,34 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             self.manifest.source_commit,
         ):
             self.assertNotIn(sensitive, json.dumps([missing, refused]))
+
+    def test_legacy_sha_tagged_plan_returns_the_exact_original_reference(self) -> None:
+        from control_plane.event_deploy_recovery_reference import (
+            resolve_event_deploy_recovery_coordinates,
+        )
+        from control_plane.http_app import idempotency_request_fingerprint
+
+        deploy = self.original["deploy"]
+        assert isinstance(deploy, dict)
+        plan = {
+            "desired_artifact_id": deploy["artifact_id"],
+            "desired_commit": deploy["source_git_ref"],
+        }
+        with patch.object(
+            self.store,
+            "read_product_reconcile_request",
+            return_value=SimpleNamespace(last_plan=plan),
+        ):
+            code, read = self.read()
+            self.assertEqual(code, 200, read)
+            coordinates = resolve_event_deploy_recovery_coordinates(
+                store=self.store,
+                product=self.product,
+                context="sellyouroutboard-testing",
+                fingerprint=idempotency_request_fingerprint,
+            )
+        self.assertEqual(coordinates.original_deploy.model_dump(mode="json"), self.original)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), (self.reservation,))
 
     def test_retry_preserves_retained_request_and_completes_existing_reservation(self) -> None:
         provider = _RecoveryObservationProvider(

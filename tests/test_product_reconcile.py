@@ -2036,7 +2036,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             reserved = self.store.reserve_mutation(
                 scope=reconcile_reservation_scope("site"),
                 route_path=GENERIC_WEB_DEPLOY_ROUTE,
-                idempotency_key="launchplane-reconcile:site:cm:testing:original",
+                idempotency_key=f"{RECONCILE_SOURCE}:site:cm:testing:original",
                 request_fingerprint=_fingerprint(original.model_dump(mode="json")),
                 lease_owner="old-worker",
                 reconciliation_key=build_generic_web_provider_reconciliation_key(

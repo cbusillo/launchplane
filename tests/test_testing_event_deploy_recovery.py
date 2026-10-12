@@ -18,9 +18,12 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.event_testing_deploy import event_testing_deploy_request
 from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
 from control_plane.http_app import idempotency_request_fingerprint
-from control_plane.product_reconcile import reconcile_reservation_scope
+from control_plane.product_reconcile import RECONCILE_SOURCE, reconcile_reservation_scope
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.testing_event_deploy_recovery import retire_unavailable_testing_event_deploy
+from control_plane.testing_event_deploy_recovery import (
+    retire_unavailable_testing_event_deploy,
+    testing_event_execution_lock_name,
+)
 from control_plane.workflows.generic_web_deploy_provider import (
     DokployGenericWebDeployProvider,
     build_generic_web_provider_reconciliation_key,
@@ -90,11 +93,16 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
             "appName": "fixture",
             "serverId": "server",
             "composeStatus": "error",
+            "composeType": "docker-compose",
         }
         self.responses: dict[str, object] = {
             "/api/deployment.allByType": [],
             "/api/schedule.list": [],
-            "/api/docker.getContainersByAppNameMatch": [],
+            "/api/deployment.queueList": [],
+            "/api/docker.getContainers": [{"containerId": "unrelated-container"}],
+            "/api/docker.getConfig": {
+                "Config": {"Labels": {"com.docker.compose.project": "unrelated"}}
+            },
         }
         config_mock = patch.object(
             self.provider,
@@ -118,11 +126,11 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
         return (datetime.now(timezone.utc) + timedelta(seconds=offset)).isoformat()
 
     def read(self, **kwargs: object) -> object:
-        self.assertNotIn("method", kwargs)
-        return self.responses[str(kwargs["path"])]
+        self.assertEqual(kwargs.get("method", "GET"), "GET")
+        return self.responses.get(str(kwargs["path"]))
 
     def reserve(
-        self, *, retained: bool = False, phase: str = "deploy_trigger", expired: bool = True
+        self, *, retained: bool = False, phase: str = "target_update", expired: bool = True
     ) -> LaunchplaneIdempotencyRecord:
         with patch.object(
             self.store,
@@ -132,7 +140,7 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
             record = self.store.reserve_mutation(
                 scope=reconcile_reservation_scope(self.profile.product),
                 route_path=GENERIC_WEB_DEPLOY_ROUTE,
-                idempotency_key=f"launchplane-reconcile:{self.profile.product}:{self.context}:testing:old",
+                idempotency_key=f"{RECONCILE_SOURCE}:{self.profile.product}:{self.context}:testing:old",
                 request_fingerprint=idempotency_request_fingerprint(
                     route_path=GENERIC_WEB_DEPLOY_ROUTE, payload=self.original
                 ),
@@ -158,7 +166,7 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
 
     def recover(self, record: LaunchplaneIdempotencyRecord) -> dict[str, object] | None:
         with self.store.testing_replacement_execution_lock(
-            f"event-deploy:{self.target_key}"
+            testing_event_execution_lock_name(self.target_key)
         ) as check:
             assert check is not None
             return retire_unavailable_testing_event_deploy(
@@ -224,8 +232,62 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
     def test_post_deploy_effect_remains_held(self) -> None:
         self.assert_held_without_inspection(self.reserve(phase="post_deploy_started"))
 
+    def test_queued_trigger_missing_from_history_stays_held_and_reports_why(self) -> None:
+        record = self.reserve(phase="deploy_trigger")
+        self.responses["/api/deployment.queueList"] = [
+            {"data": {"composeId": self.target.resolved_target.target_id}, "state": "waiting"}
+        ]
+        refusals: list[str] = []
+        with self.store.testing_replacement_execution_lock(
+            testing_event_execution_lock_name(self.target_key)
+        ) as check:
+            assert check is not None
+            result = retire_unavailable_testing_event_deploy(
+                store=self.store,
+                reservation=record,
+                profile=self.profile,
+                context=self.context,
+                current_target_key=self.target_key,
+                provider=self.provider,
+                root=self.root,
+                trace_id="test",
+                check_execution_lock=check,
+                record_refusal=refusals.append,
+            )
+        self.assertIsNone(result)
+        self.assertTrue(refusals)
+        self.assertEqual(self.current(record), record)
+
+    def test_local_provider_complete_negative_reads_qualify_failed_attempt(self) -> None:
+        from control_plane.provider_operations import (
+            build_provider_operation_key,
+            provider_operation_title,
+        )
+
+        record = self.reserve(phase="deploy_trigger")
+        title = provider_operation_title(
+            build_provider_operation_key(
+                scope=record.scope,
+                route_path=record.route_path,
+                idempotency_key=record.idempotency_key,
+                request_fingerprint=record.request_fingerprint,
+                reconciliation_key=record.reconciliation_key,
+            )
+        )
+        self.payload["serverId"] = None
+        self.responses["/api/deployment.allByType"] = [
+            {
+                "deploymentId": "failed-job",
+                "status": "error",
+                "title": title,
+                "finishedAt": self.now(-1),
+            }
+        ]
+        self.assertIsNotNone(self.recover(record))
+
     def test_provider_unknown_nonempty_and_incomplete_evidence_preserves_fence(self) -> None:
         record = self.reserve()
+        initial_responses = dict(self.responses)
         for path in self.responses:
             results: tuple[object, ...] = (
                 None,
@@ -240,7 +302,7 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
                     self.responses[path] = result
                     self.assertIsNone(self.recover(record))
                     self.assertEqual(self.current(record), record)
-            self.responses[path] = []
+            self.responses[path] = initial_responses[path]
         for status in (None, "running", "queued"):
             self.payload["composeStatus"] = status
             self.assertIsNone(self.recover(record))
@@ -251,6 +313,18 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
             side_effect=click.ClickException("provider unavailable"),
         ):
             self.assertIsNone(self.recover(record))
+        self.assertEqual(self.current(record), record)
+
+    def test_swallowed_container_read_errors_and_stopped_project_container_stay_held(self) -> None:
+        record = self.reserve()
+        self.responses["/api/docker.getContainers"] = []
+        self.assertIsNone(self.recover(record))
+        self.responses["/api/docker.getContainers"] = [{"containerId": "stopped"}]
+        self.responses["/api/docker.getConfig"] = {
+            "Config": {"Labels": {"com.docker.compose.project": self.payload["appName"]}},
+            "State": {"Running": False},
+        }
+        self.assertIsNone(self.recover(record))
         self.assertEqual(self.current(record), record)
 
     def test_target_change_during_inspection_and_stale_attempt_refuse_atomic_retirement(
@@ -282,13 +356,17 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
         snapshot.instance = "prod"
         self.assertIsNone(
             self.provider.observe_testing_no_live_effect(
-                control_plane_root=self.root, target=snapshot
+                control_plane_root=self.root,
+                target=snapshot,
+                operation_title="",
             )
         )
         self.assertIsNone(self.recover(record.model_copy(update={"scope": "caller-scope"})))
-        with self.store.testing_replacement_execution_lock(f"event-deploy:{self.target_key}"):
+        with self.store.testing_replacement_execution_lock(
+            testing_event_execution_lock_name(self.target_key)
+        ):
             with self.store.testing_replacement_execution_lock(
-                f"event-deploy:{self.target_key}"
+                testing_event_execution_lock_name(self.target_key)
             ) as check:
                 self.assertIsNone(check)
         self.read_mock.assert_not_called()
