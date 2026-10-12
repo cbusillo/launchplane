@@ -26470,7 +26470,9 @@ def create_launchplane_fastapi_app(
             },
         )
 
-    register_operation_status_read_routes(app, dependencies=read_route_dependencies)
+    register_operation_status_read_routes(
+        app, dependencies=read_route_dependencies, control_plane_root=resolved_control_plane_root
+    )
     register_retirement_record_read_routes(app, dependencies=read_route_dependencies)
     register_protected_artifact_read_routes(
         app,

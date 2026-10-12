@@ -21685,6 +21685,16 @@
             "title": "Operation",
             "type": "object"
           },
+          "recovery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingReplacementRecoveryRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "result": {
             "anyOf": [
               {
@@ -45169,6 +45179,118 @@
           }
         },
         "title": "TerminalAgentPolicyRule",
+        "type": "object"
+      },
+      "TestingReplacementRecoveryRead": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_matches": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attempt Matches"
+          },
+          "binding_matches": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binding Matches"
+          },
+          "effect_count": {
+            "minimum": 0.0,
+            "title": "Effect Count",
+            "type": "integer"
+          },
+          "effects_acknowledged": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effects Acknowledged"
+          },
+          "journal": {
+            "enum": [
+              "present",
+              "absent",
+              "unknown"
+            ],
+            "title": "Journal",
+            "type": "string"
+          },
+          "provider_effects": {
+            "enum": [
+              "unknown",
+              "quiescent_observed"
+            ],
+            "title": "Provider Effects",
+            "type": "string"
+          },
+          "provider_inspected": {
+            "title": "Provider Inspected",
+            "type": "boolean"
+          },
+          "reason": {
+            "enum": [
+              "",
+              "recovery_scope_unsupported",
+              "recovery_operation_not_held",
+              "recovery_execution_exclusion_unavailable",
+              "recovery_operation_changed",
+              "recovery_authorization_changed",
+              "recovery_journal_absent",
+              "recovery_attempt_changed",
+              "recovery_binding_changed",
+              "recovery_dispatch_unacknowledged",
+              "recovery_effect_unsupported",
+              "recovery_inspection_before_fence",
+              "recovery_provider_evidence_incomplete",
+              "recovery_operation_or_binding_changed",
+              "recovery_evidence_unavailable"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "safe_to_release": {
+            "const": false,
+            "default": false,
+            "title": "Safe To Release",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "refused",
+              "eligible"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "reason",
+          "journal",
+          "attempt_matches",
+          "binding_matches",
+          "effect_count",
+          "effects_acknowledged",
+          "provider_effects",
+          "provider_inspected"
+        ],
+        "title": "TestingReplacementRecoveryRead",
         "type": "object"
       },
       "TrackedTargetLogDeploymentResponse": {
