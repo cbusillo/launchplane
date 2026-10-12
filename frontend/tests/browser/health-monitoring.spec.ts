@@ -148,10 +148,17 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
       await expect.poll(() => applies.length).toBe(2);
       expect(applies[1]).toEqual(applies[0]);
       if (outcome === "uncertain-stale") {
-        await expect(panel.getByLabel("Reason", { exact: true })).toBeDisabled();
-        await panel.getByRole("button", { name: "Retry original monitoring request" }).click();
+        await expect(panel.getByRole("button", { name: "Retry original monitoring request" })).toHaveCount(0);
+        await expect(panel.getByLabel("Reason", { exact: true })).toBeEnabled();
+        await panel.getByRole("combobox", { name: "Monitoring intent", exact: true }).selectOption("public");
+        await panel.getByLabel("Check enabled", { exact: true }).check();
+        await panel.getByLabel("Require runtime identity", { exact: true }).check();
+        await panel.getByLabel("Reason", { exact: true }).fill("Review again after the stale refusal.");
+        await panel.getByRole("button", { name: "Review monitoring change" }).click();
+        await panel.getByLabel("I confirm this monitoring change on testing.").check();
+        await panel.getByRole("button", { name: "Apply reviewed monitoring" }).click();
         await expect.poll(() => applies.length).toBe(3);
-        expect(applies[2]).toEqual(applies[0]);
+        expect(applies[2].key).not.toBe(applies[0].key);
       }
     }
     if (outcome === "stale") {
@@ -165,7 +172,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
     if (outcome === "private") await expect(panel.getByLabel("Stored check")).toHaveValue("public-ingress");
     await expect(page.getByRole("status", { name: "Lane status" })).toHaveText(initialLaneStatus);
     expect(applies[0].key).toBeTruthy();
-    expect(applies[0].body).toEqual({ ...plans.at(-1), mode: "apply", reviewed_plan_sha256: "a".repeat(64) });
+    expect(applies.at(-1)!.body).toEqual({ ...plans.at(-1), mode: "apply", reviewed_plan_sha256: "a".repeat(64) });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await panel.screenshot({ path: testInfo.outputPath(`monitoring-${outcome}.png`) });
   });

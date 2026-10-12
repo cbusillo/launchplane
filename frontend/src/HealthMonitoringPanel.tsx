@@ -1,9 +1,10 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { applyProductHealthMonitoring, readAuthSession, readProductProfile } from "./api";
+import { applyProductHealthMonitoring, LaunchplaneApiError, readAuthSession, readProductProfile } from "./api";
 import type { ApplyProductHealthMonitoringData, ProductEnvironmentDetail, ProductHealthMonitoringPlan, ProductLaneProfile } from "./generated/openapi.ts";
 import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
 import { useBrowserOperationController } from "./use-browser-operation";
 import { recoverBrowserOperationState } from "./browser-operation";
+import type { BrowserOperationFailureCertainty } from "./browser-operation";
 
 type MonitoringRequest = ApplyProductHealthMonitoringData["body"];
 
@@ -20,6 +21,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
   const checkNameRef = useRef(checkName);
   checkNameRef.current = checkName;
   const profileRevisionRef = useRef(0);
+  const refreshedStaleOperationRef = useRef("");
   const [intent, setIntent] = useState<MonitoringRequest["monitoring_intent"]>("prelaunch");
   const [enabled, setEnabled] = useState(false);
   const [identityRequired, setIdentityRequired] = useState(false);
@@ -47,7 +49,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
   });
   const applyOperation = useBrowserOperationController({
     scope, execute: applyProductHealthMonitoring,
-    failureCertainty: productConfigFailureCertainty, failureFor: productConfigOperationFailure,
+    failureCertainty: monitoringFailureCertainty, failureFor: productConfigOperationFailure,
   });
   const uncertain = applyOperation.state.requiresIdempotencyContinuity;
   const busy = [planOperation.state.phase, applyOperation.state.phase].some(phase => ["queued", "submitting"].includes(phase));
@@ -82,6 +84,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
 
   async function inspect() {
     if (locked || !supported || !check) return;
+    if (!applyOperation.reset()) return;
     edited();
     const reviewedProfileRevision = profileRevisionRef.current;
     const response = await planOperation.run({
@@ -149,8 +152,14 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
   useEffect(() => {
     if (applyOperation.state.phase === "failed" && !uncertain) {
       sessionStorage.removeItem(storageKey); setPending(null); setReview(null); setConfirmed(false);
+      const key = applyOperation.state.identity?.idempotencyKey ?? "";
+      if (applyOperation.state.failure?.code === "stale" && key && refreshedStaleOperationRef.current !== key) {
+        refreshedStaleOperationRef.current = key;
+        setMessage("The reviewed profile changed. Refreshing stored monitoring before a new review; no successful apply is claimed.");
+        onRefresh();
+      }
     }
-  }, [applyOperation.state.phase, uncertain, storageKey]);
+  }, [applyOperation.state.phase, applyOperation.state.identity?.idempotencyKey, applyOperation.state.failure?.code, uncertain, storageKey]);
 
   const failure = applyOperation.state.failure ?? planOperation.state.failure;
   return <section className="promotion-control monitoring-control" aria-labelledby={`${id}-title`} aria-busy={loading || busy}>
@@ -189,10 +198,17 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
     </div> : null}
     {uncertain ? <div role="status"><p>The previous apply has not settled. Keep its original request and operation key.</p>
       {pending ? <button className="secondary-button" disabled={fixtureMode || !admin || busy} onClick={() => void apply()}>Retry original monitoring request</button>
-        : <p>Original request unavailable in browser storage. Inspect the operation receipt before starting another change.</p>}
+        : <p>Original request unavailable in browser storage. Keep this change unresolved for administrator diagnosis.</p>}
     </div> : null}
     {failure ? <p role="alert">{failure.message} {failure.traceId ? `Trace: ${failure.traceId}` : ""}</p> : null}
     {profileError ? <p role="alert">{profileError}</p> : null}
     {message ? <p role="status" aria-label="Monitoring change result">{message}</p> : null}
   </section>;
+}
+
+function monitoringFailureCertainty(error: unknown, dispatched: boolean): BrowserOperationFailureCertainty {
+  // Same-key replay precedes stale checks, and profile CAS prevents a late conflicting write.
+  // Refresh the current policy after this refusal without treating it as successful apply.
+  if (dispatched && error instanceof LaunchplaneApiError && error.statusCode === 409 && error.code === "stale") return "settled";
+  return productConfigFailureCertainty(error, dispatched);
 }
