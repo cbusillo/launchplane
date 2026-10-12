@@ -242,8 +242,12 @@ without build cache only when cache-key computation reports the missing-layer
 `httpReadSeeker` error; unrelated failures and a failed retry remain blocking.
 The loaded image still runs every Compose qualification and vulnerability scan.
 
-The CI container-scan jobs pin the setup action and request Docker Compose
-v5.3.1 before that qualification. Local reproduction requires a compatible
+CI container and unittest jobs install Docker Compose with the pinned setup
+action at the version declared once in `ci.yml`. The service Compose test
+renders synthetic image and network inputs without starting containers. It
+requires Docker in CI and checks image propagation before the runtime
+qualification can overwrite those settings. Dockerless local runs skip that
+rendering test. Local reproduction requires a compatible
 `docker compose` command, GNU `timeout`, the Docker engine, and built image.
 The fixture uses bounded detached `up` calls and explicit running, absence, and
 container-identity checks because Compose v5.3.1 `--wait` incorrectly requires
@@ -272,6 +276,18 @@ CI uses a bounded worker count in `frontend/playwright.config.ts`, including
 self-hosted candidate lanes. Shared-host CPU count is not a per-job browser
 budget. Local runs retain Playwright's default concurrency; use its `--workers`
 option for a measured diagnostic comparison.
+
+Browser smoke runs in every CI run that needs fresh proof, including main pushes. The verified-tree
+shortcut above can reuse a previously successful tree; it does not selectively
+skip browser coverage. Keep that reuse rather than duplicating a full browser
+run for the same tree. For a clock-sensitive flake, install Playwright's clock
+before loading the page, pause at a safely future time, and await the rendered
+response state before advancing to the next read. Repeat the unchanged behavior
+assertions with `CI=true` to select the worker count from the Playwright config:
+
+```bash
+CI=true pnpm --dir frontend exec playwright test sidebar-freshness --repeat-each=30
+```
 
 The suite uses only repo-local
 development fixtures. Product-detail journeys use `?fixture=products`; product
