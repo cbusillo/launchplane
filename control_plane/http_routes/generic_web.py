@@ -129,6 +129,7 @@ from control_plane.product_promotion_http import (
     product_promotion_intent_matches,
 )
 from control_plane.service_auth import (
+    AuthorizationTarget,
     GitHubHumanIdentity,
     LaunchplaneIdentity,
     LocalAdminIdentity,
@@ -1324,7 +1325,7 @@ def build_generic_web_write_route_handlers(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> GenericWebProdPromotionResponse | JSONResponse:
         trace_id = dependencies.next_trace_id()
-        if isinstance(identity, TerminalAgentIdentity):
+        if isinstance(identity, TerminalAgentIdentity) and not promotion_request.promotion.dry_run:
             raise dependencies.http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -1380,6 +1381,21 @@ def build_generic_web_write_route_handlers(
                 promotion_request.promotion.from_instance,
                 promotion_request.promotion.to_instance,
             ),
+        ) and not (
+            promotion_request.promotion.dry_run
+            and dependencies.authorization_allows(
+                identity=identity,
+                action="generic_web_prod_promotion.dry_run",
+                product=profile.product,
+                context=lane.context.strip(),
+                target=AuthorizationTarget(
+                    scope="instance",
+                    instances=(
+                        promotion_request.promotion.from_instance,
+                        promotion_request.promotion.to_instance,
+                    ),
+                ),
+            )
         ):
             raise dependencies.http_error(
                 status_code=403,

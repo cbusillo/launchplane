@@ -1302,9 +1302,13 @@ def _local_operator_product_config_scope_refusal(
             context=context, product=product_config_request.product, owners=owners
         ):
             return "The context must belong to the named product only."
-    if product_config_request.instance and any(
-        (secret.scope or "").strip() not in {"", "context_instance"}
-        for secret in product_config_request.secrets
+    if (
+        product_config_request.mode == "apply"
+        and product_config_request.instance
+        and any(
+            (secret.scope or "").strip() not in {"", "context_instance"}
+            for secret in product_config_request.secrets
+        )
     ):
         return (
             "An instance request from the Director's agent can only write that instance's secrets."
@@ -3988,6 +3992,7 @@ class LaunchplaneAuthzPolicyRuntime:
         product: str,
         context: str,
         target: AuthorizationTarget | None = None,
+        inherit_agent_read_role: bool = True,
     ) -> bool:
         return self._policy.allows(
             identity=identity,
@@ -3995,6 +4000,7 @@ class LaunchplaneAuthzPolicyRuntime:
             product=product,
             context=context,
             target=target,
+            inherit_agent_read_role=inherit_agent_read_role,
         )
 
     def policy_record(self, *, updated_at: str) -> LaunchplaneAuthzPolicyRecord:
@@ -4941,46 +4947,17 @@ def create_launchplane_fastapi_app(
         response: Response,
         authorization: Annotated[str, Header(alias="Authorization")] = "",
         cookie: Annotated[str, Header(alias="Cookie")] = "",
-    ) -> GitHubActionsIdentity | GitHubHumanIdentity:
-        human_identity = read_human_session_identity(
-            cookie_header=cookie,
-            request=request,
-            response=response,
+    ) -> LaunchplaneIdentity:
+        return read_identity(
+            request=request, response=response, authorization=authorization, cookie=cookie
         )
-        if human_identity is not None:
-            return human_identity
-        header = authorization.strip()
-        if not header:
-            raise _authentication_required_error("Authorization header is required.")
-        scheme, _, token = header.partition(" ")
-        bearer_token = token.strip()
-        if scheme.lower() != "bearer" or not bearer_token:
-            raise _authentication_required_error("Bearer token is required.")
-        try:
-            owner_agent_identity = bearer_identity_from_token(
-                token=bearer_token,
-                config=bearer_identity_config or BearerIdentityConfig(),
-            )
-        except PermissionError as error:
-            raise _authentication_required_error(str(error)) from error
-        if owner_agent_identity is not None:
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=next_trace_id(),
-                code="authorization_denied",
-                message="Work graph rank requires GitHub Actions OIDC or a GitHub human session.",
-            )
-        try:
-            return verifier.verify(bearer_token)
-        except (InvalidTokenError, ValueError) as error:
-            raise _authentication_required_error(str(error)) from error
 
     def read_browser_work_graph_rank_identity(
         request: Request,
         response: Response,
         authorization: Annotated[str, Header(alias="Authorization")] = "",
         cookie: Annotated[str, Header(alias="Cookie")] = "",
-    ) -> GitHubActionsIdentity | GitHubHumanIdentity:
+    ) -> LaunchplaneIdentity:
         identity = read_work_graph_rank_identity(
             request=request,
             response=response,
@@ -5951,7 +5928,7 @@ def create_launchplane_fastapi_app(
     def rank_work_graph_snapshot(
         payload: WorkGraphRankEnvelope,
         identity: Annotated[
-            GitHubActionsIdentity | GitHubHumanIdentity,
+            LaunchplaneIdentity,
             Depends(read_browser_work_graph_rank_identity),
         ],
     ) -> WorkGraphRankResponse:
@@ -11569,17 +11546,30 @@ def create_launchplane_fastapi_app(
             product=intent_request.product,
             context=intent_request.context,
         )
-        if intent_request.secret_bindings:
-            secret_authz_action = agent_write_intent_secret_action(intent_request)
-            authorized = authorized and resolved_authz_policy_runtime.policy.allows(
+        planning_authorized = (
+            intent_request.mode == "dry_run"
+            and resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
-                action=secret_authz_action,
+                action="agent_write_intent.plan",
                 product=intent_request.product,
                 context=intent_request.context,
             )
+        )
+        authorized = authorized or planning_authorized
+        if intent_request.secret_bindings:
+            secret_authz_action = agent_write_intent_secret_action(intent_request)
+            authorized = authorized and (
+                planning_authorized
+                or resolved_authz_policy_runtime.policy.allows(
+                    identity=identity,
+                    action=secret_authz_action,
+                    product=intent_request.product,
+                    context=intent_request.context,
+                )
+            )
         intent_audit = agent_authz_audit(
             identity=identity,
-            action=intent_authz_action,
+            action="agent_write_intent.plan" if planning_authorized else intent_authz_action,
             product=intent_request.product,
             context=intent_request.context,
             decision="allowed" if authorized else "denied",
@@ -12658,6 +12648,14 @@ def create_launchplane_fastapi_app(
             action="product_profile.expected_config.apply",
             product=expected_config_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not (
+            expected_config_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="product_profile.expected_config.plan",
+                product=expected_config_request.product,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -12699,7 +12697,11 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message=str(error),
             ) from error
-        if isinstance(identity, LocalOperatorIdentity) and profile.production_use == "live":
+        if (
+            expected_config_request.mode == "apply"
+            and isinstance(identity, LocalOperatorIdentity)
+            and profile.production_use == "live"
+        ):
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -13238,6 +13240,14 @@ def create_launchplane_fastapi_app(
             action="product_profile.write",
             product=normalized_product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not (
+            owner_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="product_profile.plan",
+                product=normalized_product,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -13515,6 +13525,14 @@ def create_launchplane_fastapi_app(
             action="product_profile.write",
             product=normalized_product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not (
+            image_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="product_profile.plan",
+                product=normalized_product,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -13766,6 +13784,14 @@ def create_launchplane_fastapi_app(
             action="product_profile.write",
             product=normalized_product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not (
+            production_use_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="product_profile.plan",
+                product=normalized_product,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -14333,6 +14359,14 @@ def create_launchplane_fastapi_app(
             action="product_profile.preview_tls.apply",
             product=preview_tls_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not (
+            preview_tls_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="product_profile.preview_tls.plan",
+                product=preview_tls_request.product,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -14605,6 +14639,14 @@ def create_launchplane_fastapi_app(
             action="product_profile.write",
             product=identity_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not (
+            identity_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="product_profile.plan",
+                product=identity_request.product,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -14888,6 +14930,14 @@ def create_launchplane_fastapi_app(
             action="product_onboarding.apply",
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not (
+            repair_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="product_onboarding.plan",
+                product="launchplane",
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -15968,10 +16018,8 @@ def create_launchplane_fastapi_app(
             )
 
         def secret_copy_source_readable(*, context: str, instance: str) -> bool:
-            # A copy source is a record read: ``secret.read`` or the standing
-            # ``product_environment.read`` on the source's own product and lane
-            # (or context, for a context-scoped secret). The copy itself remains a
-            # write under the destination's ``product_config.apply``.
+            # Secret-value copies retain their existing explicit source grants.
+            # Standing metadata-read authority cannot authorize moving values.
             target = AuthorizationTarget(
                 scope="instance" if instance else "context",
                 instances=(instance,) if instance else (),
@@ -15982,12 +16030,14 @@ def create_launchplane_fastapi_app(
                 product="launchplane",
                 context=context,
                 target=target,
+                inherit_agent_read_role=False,
             ) or resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
                 action="product_environment.read",
                 product=product_config_request.product,
                 context=context,
                 target=target,
+                inherit_agent_read_role=False,
             )
 
         for reference in copy_references:
@@ -16563,6 +16613,7 @@ def create_launchplane_fastapi_app(
         environment: str,
         action: str,
         trace_id: str,
+        plan_action: str = "",
     ) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile]:
         try:
             profile, lane = resolve_product_promotion_target(
@@ -16583,6 +16634,15 @@ def create_launchplane_fastapi_app(
             product=profile.product,
             context=lane.context,
             target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
+        ) and not (
+            plan_action
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action=plan_action,
+                product=profile.product,
+                context=lane.context,
+                target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
+            )
         ):
             raise _launchplane_http_error(
                 status_code=404,
@@ -16660,6 +16720,7 @@ def create_launchplane_fastapi_app(
             product=product,
             environment=environment,
             action="generic_web_prod_promotion.execute",
+            plan_action="generic_web_prod_promotion.dry_run",
             trace_id=trace_id,
         )
         normalized_key = idempotency_key.strip()
@@ -16823,6 +16884,16 @@ def create_launchplane_fastapi_app(
             product=product,
             environment=environment,
             action="generic_web_prod_promotion.dispatch",
+            trace_id=trace_id,
+        )
+        # A pure-plan marker cannot replace the execution grant that the
+        # former direct dry-run prerequisite required.
+        resolve_authorized_product_promotion_target(
+            record_store=record_store,
+            identity=identity,
+            product=product,
+            environment=environment,
+            action="generic_web_prod_promotion.execute",
             trace_id=trace_id,
         )
         normalized_key = idempotency_key.strip()
@@ -17285,6 +17356,14 @@ def create_launchplane_fastapi_app(
             action="merge_train.policy_import",
             product=policy_import_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not (
+            policy_import_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="merge_train.policy_import.plan",
+                product=policy_import_request.product,
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -18938,7 +19017,7 @@ def create_launchplane_fastapi_app(
     ) -> LaunchplaneActiveAuthzPolicyResponse:
         trace_id = next_trace_id()
         if isinstance(
-            identity, LocalOperatorIdentity
+            identity, LocalOperatorIdentity | TerminalAgentIdentity
         ) and resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action=AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
@@ -19038,16 +19117,13 @@ def create_launchplane_fastapi_app(
         record_store: object,
         trace_id: str,
     ) -> tuple[PostgresRecordStore, LaunchplaneAuthzPolicyRecord]:
-        is_reader = isinstance(identity, LocalAdminIdentity | LocalOperatorIdentity) or (
-            isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
-        )
         preflight_authorized = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action=AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
-        if not is_reader or not preflight_authorized:
+        if not preflight_authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -19232,16 +19308,13 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> AuthzPolicyHealthResponse:
         trace_id = next_trace_id()
-        is_reader = isinstance(identity, LocalAdminIdentity | LocalOperatorIdentity) or (
-            isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
-        )
         preflight_authorized = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action=AUTHZ_POLICY_HEALTH_READ_ACTION,
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
-        if not is_reader or not preflight_authorized:
+        if not preflight_authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -19451,9 +19524,6 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> AuthzPolicyCandidatePreviewResponse:
         trace_id = next_trace_id()
-        is_administrator = isinstance(identity, LocalAdminIdentity) or (
-            isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
-        )
         preflight_authorized = (
             resolved_authz_policy_runtime.policy.evaluate(
                 identity=identity,
@@ -19464,7 +19534,7 @@ def create_launchplane_fastapi_app(
             ).decision
             == "allowed"
         )
-        if not is_administrator or not preflight_authorized:
+        if not preflight_authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -19522,16 +19592,13 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> EffectiveAccessEvaluateResponse:
         trace_id = next_trace_id()
-        is_reader = isinstance(identity, LocalAdminIdentity | LocalOperatorIdentity) or (
-            isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
-        )
         preflight_authorized = resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action=EFFECTIVE_ACCESS_READ_ACTION,
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
-        if not is_reader or not preflight_authorized:
+        if not preflight_authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -20530,6 +20597,14 @@ def create_launchplane_fastapi_app(
             action="edge_endpoint.apply",
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not (
+            endpoint_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="edge_endpoint.plan",
+                product="launchplane",
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -20608,6 +20683,14 @@ def create_launchplane_fastapi_app(
             action="private_health_endpoint.apply",
             product=endpoint_request.endpoint.product,
             context=endpoint_request.endpoint.context,
+        ) and not (
+            endpoint_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="private_health_endpoint.plan",
+                product=endpoint_request.endpoint.product,
+                context=endpoint_request.endpoint.context,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -20706,6 +20789,14 @@ def create_launchplane_fastapi_app(
             action="ingress_canary_route.apply",
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not (
+            canary_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="ingress_canary_route.plan",
+                product="launchplane",
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -21712,10 +21803,41 @@ def create_launchplane_fastapi_app(
                     + ("product/context/instance." if instance_name else "product/context.")
                 ),
             )
-        if instance_name:
+        role_only = not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=authz_action,
+            product=route_request.product,
+            context=route_request.context,
+            target=AuthorizationTarget(scope="instance", instances=(instance_name,))
+            if instance_name
+            else AuthorizationTarget(scope="context"),
+            inherit_agent_read_role=False,
+        )
+        if instance_name or role_only:
             try:
                 profile_store = require_product_profile_read_store(record_store)
                 profile = profile_store.read_product_profile_record(route_request.product)
+                if role_only and not instance_name:
+                    matching_lanes = tuple(
+                        lane for lane in profile.lanes if lane.context == route_request.context
+                    )
+                    if len(matching_lanes) != 1:
+                        raise control_plane_ingress_route_scope.IngressRouteInstanceScopeError(
+                            code="invalid_ingress_instance_scope",
+                            message="Planning requires one product lane in this context.",
+                        )
+                    instance_name = matching_lanes[0].instance
+                if (
+                    role_only
+                    and _lane_setup_context_owner(
+                        record_store=record_store, context=route_request.context
+                    )
+                    != profile.product
+                ):
+                    raise control_plane_ingress_route_scope.IngressRouteInstanceScopeError(
+                        code="invalid_ingress_instance_scope",
+                        message="Planning requires the named product's exclusive context.",
+                    )
                 control_plane_ingress_route_scope.validate_ingress_route_instance_scope(
                     profile=profile,
                     context=route_request.context,
@@ -21910,6 +22032,18 @@ def create_launchplane_fastapi_app(
             response_ingress_result = scope_instance_ingress_result(
                 result=ingress_result,
                 requested_domains=audit_ingress_request.route.domain_names,
+            )
+        if role_only and response_ingress_result.proxy_host is not None:
+            response_ingress_result = response_ingress_result.model_copy(
+                update={
+                    "proxy_host": response_ingress_result.proxy_host.model_copy(
+                        update={
+                            "advanced_config": "",
+                            "meta": {},
+                            "locations": (),
+                        }
+                    ),
+                }
             )
         ingress_audit_record = write_ingress_route_audit_record(
             ingress_store=ingress_store,
@@ -24630,6 +24764,14 @@ def create_launchplane_fastapi_app(
             action="public_ingress_notification_policy.apply",
             product=policy_request.policy.product or "launchplane",
             context=policy_request.policy.context or _LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not (
+            policy_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="public_ingress_notification_policy.plan",
+                product=policy_request.policy.product or "launchplane",
+                context=policy_request.policy.context or _LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -24700,6 +24842,14 @@ def create_launchplane_fastapi_app(
             action="every_code_notification_policy.apply",
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ) and not (
+            policy_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="every_code_notification_policy.plan",
+                product="launchplane",
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -24876,6 +25026,7 @@ def create_launchplane_fastapi_app(
                 action="dokploy_target.plan",
                 product=setup_request.product,
                 context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                inherit_agent_read_role=False,
             )
         )
         if setup_request.operation == "repair-domain-authority":
@@ -24889,11 +25040,24 @@ def create_launchplane_fastapi_app(
                         action="dokploy_target.repair_domain_authority.plan",
                         product=setup_request.product,
                         context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                        inherit_agent_read_role=False,
                     )
                 )
             )
         else:
             authorized = can_setup_target if setup_request.mode == "apply" else can_plan_target
+        if not authorized and setup_request.mode == "dry-run" and lane_owner:
+            authorized = resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action=(
+                    "dokploy_target.repair_domain_authority.plan"
+                    if setup_request.operation == "repair-domain-authority"
+                    else "dokploy_target.plan"
+                ),
+                product=lane_owner,
+                context=setup_request.context,
+                target=AuthorizationTarget(scope="instance", instances=(setup_request.instance,)),
+            )
         if not authorized:
             raise _launchplane_http_error(
                 status_code=403,
@@ -25024,6 +25188,14 @@ def create_launchplane_fastapi_app(
             action="preview_pr_feedback_notification_policy.apply",
             product=policy_request.policy.product,
             context=policy_request.policy.context,
+        ) and not (
+            policy_request.mode != "apply"
+            and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="preview_pr_feedback_notification_policy.plan",
+                product=policy_request.policy.product,
+                context=policy_request.policy.context,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -25283,7 +25455,19 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> ServiceGitHubDeliveryStatus:
         trace_id = next_trace_id()
-        require_service_delivery_admin(identity, action="product_config.plan", trace_id=trace_id)
+        if not resolved_authz_policy_runtime.allows(
+            identity=identity,
+            action="product_config.plan",
+            product=_LAUNCHPLANE_SERVICE_CONTEXT,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read service GitHub delivery metadata.",
+            )
         return await run_in_threadpool(
             read_service_github_delivery,
             store=service_delivery_store(record_store, trace_id),

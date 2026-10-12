@@ -1269,18 +1269,13 @@ def register_product_environment_read_routes(
         driver_id: Annotated[str, Query()] = "",
     ) -> ProductProfileListResponse:
         trace_id = common.next_trace_id()
-        if identity is not None and not common.authorization_allows(
+        service_reader = identity is None or common.authorization_allows(
             identity=identity,
             action="product_profile.read",
             product="launchplane",
             context=LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            raise common.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot list Launchplane product profiles.",
-            )
+            inherit_agent_read_role=False,
+        )
         normalized_driver_id = driver_id.strip()
         try:
             profile_store = require_product_profile_list_store(record_store)
@@ -1301,6 +1296,24 @@ def register_product_environment_read_routes(
         profiles = tuple(
             LaunchplaneProductProfileRecord.model_validate(profile) for profile in payload_profiles
         )
+        if not service_reader and identity is not None:
+            profiles = tuple(
+                profile
+                for profile in profiles
+                if common.authorization_allows(
+                    identity=identity,
+                    action="product_profile.read",
+                    product=profile.product,
+                    context=LAUNCHPLANE_SERVICE_CONTEXT,
+                )
+            )
+            if not profiles:
+                raise common.http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Identity cannot list the requested products.",
+                )
         return ProductProfileListResponse(
             trace_id=trace_id,
             driver_id=str(product_profile_payload["driver_id"]),

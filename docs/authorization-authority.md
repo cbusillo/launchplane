@@ -30,8 +30,8 @@ access to an invalid policy or silently starting with bootstrap authority.
 - People sign in with GitHub and hold the `admin` or `read_only` role. Clients
   hold the narrow `owner` role for their own site's decisions.
 - The [admin](#the-admin) may do anything.
-- Machine identities (workflows, agents, tokens, workers) hold only their
-  enumerated grants.
+- Machine identities hold DB policy grants. Token-bound agents can hold the
+  product-scoped standing read-and-plan permission described below.
 - Granting access is a stop boundary: an agent asks the Director before creating
   credentials, granting access, or changing who can merge (see
   [DIRECTION.md](../DIRECTION.md#stop-boundaries)). Do not create, edit,
@@ -79,6 +79,44 @@ repository-record evidence for the redacted repository-scope read model;
 retired records contribute no active inventory membership. When authorization
 rules are the only remaining active source, the read model reports stale
 authorization membership rather than complete coverage.
+
+## Standing Agent Read And Plan Permission
+
+`agent.read` is a DB rule action, not an identity shortcut or an installed
+default. A schema-2 or schema-3 local-operator or terminal-agent rule names exact
+subjects, token labels and products; wildcard agent or product selectors are
+rejected. Context and instance selectors retain their existing matching rules.
+Use separate context and instance rules when both scopes are needed. A new
+product is included through an explicitly reviewed policy change.
+
+[`action_effects.py`](../control_plane/action_effects.py) owns source declarations
+of `read`, `plan` and `write`. Only declared reads and qualified plans inherit
+`agent.read`, within the matching rule's product, context and instance scope.
+Unknown actions fail closed. Existing enumerated permissions are preserved;
+`launchplane_service.read` does not become a standing role. Policy refresh and
+revocation apply to the role on every request, as to other DB grants.
+
+Pure dry runs and inert evidence can use this role. Queuing execution, taking
+leases, creating operative plans, revealing credentials and copying secret
+values retain separate write or explicit source permissions. Existing terminal
+credential transport restrictions remain; the local-operator transport covers
+the Director's full planning surface. A Client's own agent can use the same
+product-scoped model later; no Client-agent access is installed by source code.
+
+Product reads authorize the returned product. Profile lists filter role access
+per returned profile; saved Client reviews resolve the repository's product.
+Dokploy dry runs use the recorded context owner, and ingress plans validate the
+product lane's domains and remove provider configuration fields that can contain
+credentials. Service metadata and global policy history require their own
+Launchplane product scope. The Delivery selector GET uses ordinary DB read
+authorization; its configuration and credential retirement keep their admin gates.
+
+Source delivery installs no grant. After the deployed source is qualified,
+prepare one managed-policy proposal bound to the current exact agent and explicit
+product set. Chris reviews and approves its exact diff in the signed-in Access
+policy UI; agents never apply it. Preserve existing enumerated rules for rollback,
+and remove the new role through the same reviewed path before reverting to an
+older service image that cannot validate its scoped marker.
 
 ## Current Transitional Model
 

@@ -65,6 +65,7 @@ class AuthorizationAllows(Protocol):
         product: str,
         context: str,
         target: AuthorizationTarget | None = None,
+        inherit_agent_read_role: bool = True,
     ) -> bool: ...
 
 
