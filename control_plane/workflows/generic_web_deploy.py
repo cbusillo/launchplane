@@ -737,7 +737,11 @@ def execute_generic_web_deploy(
     except click.ClickException as exc:
         if application_lifecycle is not None:
             try:
-                if image_effect_attempted or application_lifecycle.snapshot.resume_from_hold:
+                if (
+                    image_effect_attempted
+                    or application_lifecycle.snapshot.resume_from_hold
+                    or application_lifecycle.snapshot.mode == "rollback"
+                ):
                     application_lifecycle.hold()
                 else:
                     application_lifecycle.restore()
@@ -775,6 +779,7 @@ def execute_generic_web_deploy(
                 attempted=True,
                 status="fail",
                 detail=str(exc),
+                evidence=post_deploy_update.evidence,
             )
         runtime_identity = (
             _build_runtime_identity(

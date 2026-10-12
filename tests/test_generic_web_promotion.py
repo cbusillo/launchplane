@@ -1195,6 +1195,15 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
             )
 
     def test_failed_maintenance_rolls_back_without_running_new_commands_on_old_image(self) -> None:
+        self._check_maintenance_failure("command")
+
+    def test_maintenance_read_refusal_retains_receipt_for_first_rollback(self) -> None:
+        self._check_maintenance_failure("read")
+
+    def test_rollback_pre_image_refusal_keeps_jobs_paused_on_failed_image(self) -> None:
+        self._check_maintenance_failure("rollback_preflight")
+
+    def _check_maintenance_failure(self, failure: str) -> None:
         from control_plane.contracts.generic_web_extensions import (
             GenericWebLaneExtensions,
             GenericWebMaintenanceCommand,
@@ -1207,6 +1216,26 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         )
 
         class LifecycleProvider(_ProductionProvider, DokployGenericWebDeployProvider):
+            def execute_artifact_deploy(
+                self,
+                *,
+                runtime_identity: RuntimeIdentity,
+                before_provider_mutation: Callable[[str], None],
+                effect_started: Callable[[], None],
+                **kwargs: object,
+            ) -> None:
+                if (
+                    failure == "rollback_preflight"
+                    and runtime_identity.artifact_id == _PREVIOUS_ARTIFACT
+                ):
+                    raise click.ClickException("rollback preflight refused")
+                super().execute_artifact_deploy(
+                    runtime_identity=runtime_identity,
+                    before_provider_mutation=before_provider_mutation,
+                    effect_started=effect_started,
+                    **kwargs,
+                )
+
             def healthcheck(self, **kwargs: object) -> HealthcheckPass:
                 # Even a healthy new image must not hide failed maintenance.
                 assert self.running is not None
@@ -1241,13 +1270,19 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
             "app-123",
             enabled=True,
         )
-        schedules: dict[str, api.JsonObject] = {"billing": original}
+        schedules: dict[str, api.JsonObject] = {} if failure == "read" else {"billing": original}
         executed: list[tuple[str, str]] = []
 
         def upsert(**kwargs: object) -> api.JsonObject:
             payload = cast(api.JsonObject, kwargs["schedule_payload"])
             schedules[str(payload["name"])] = dict(payload)
             return {**payload, "scheduleId": payload["name"]}
+
+        def read(**kwargs: object) -> api.JsonObject | None:
+            name = str(kwargs["schedule_name"])
+            if failure == "read" and name == "migrate":
+                raise click.ClickException("maintenance schedule read failed")
+            return schedules.get(name)
 
         def run(**kwargs: object) -> None:
             payload = schedules[str(kwargs["schedule_id"])]
@@ -1266,23 +1301,38 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
             patch.object(
                 api,
                 "read_dokploy_application_schedule",
-                side_effect=lambda **kwargs: schedules.get(str(kwargs["schedule_name"])),
+                side_effect=read,
             ),
             patch.object(api, "upsert_dokploy_application_schedule", side_effect=upsert),
             patch.object(api, "run_dokploy_schedule", side_effect=run),
         ):
             result = self._promote(store, provider)
         self.assertEqual(result.promotion_status, "fail")
-        self.assertEqual(result.rollback_status, "pass")
-        self.assertEqual(provider.deployed_artifacts[-1], _PREVIOUS_ARTIFACT)
-        self.assertEqual([command for command, _ in executed], ["./new-migration", "./old-billing"])
-        self.assertEqual(executed[-1][1], _PREVIOUS_ARTIFACT)
-        self.assertEqual(schedules["billing"], original)
+        self.assertEqual(
+            result.rollback_status, "fail" if failure == "rollback_preflight" else "pass"
+        )
+        if failure == "rollback_preflight":
+            self.assertNotEqual(provider.deployed_artifacts[-1], _PREVIOUS_ARTIFACT)
+            self.assertFalse(schedules["billing"]["enabled"])
+            self.assertEqual([command for command, _ in executed], ["./new-migration"])
+        else:
+            self.assertEqual(provider.deployed_artifacts[-1], _PREVIOUS_ARTIFACT)
+            if failure == "read":
+                self.assertEqual(executed, [])
+                self.assertNotIn("billing", schedules)
+            else:
+                self.assertEqual(
+                    [command for command, _ in executed], ["./new-migration", "./old-billing"]
+                )
+                self.assertEqual(executed[-1][1], _PREVIOUS_ARTIFACT)
+                self.assertEqual(schedules["billing"], original)
         rollback_receipt = recorded_application_lifecycle(
             store.read_deployment_record("deployment-promotion-syo-prod-rollback")
         )
         assert rollback_receipt is not None
-        self.assertEqual(rollback_receipt.state, "qualified")
+        self.assertEqual(
+            rollback_receipt.state, "held" if failure == "rollback_preflight" else "qualified"
+        )
 
     def test_failed_health_check_returns_production_to_the_previous_deployment(self) -> None:
         store = _store_with_production()
