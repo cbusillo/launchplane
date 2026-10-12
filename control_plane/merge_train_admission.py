@@ -10,7 +10,10 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntr
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.merge_train_batch import MergeTrainHeldOutReason
-from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerLastResult,
+    MergeTrainControllerStateRecord,
+)
 from control_plane.contracts.merge_train_admission import MergeTrainAdmissionDecision
 from control_plane.contracts.merge_admission_record import MergeAdmissionRecord
 from control_plane.contracts.merge_admission_record import MergeLandingOutcomeRecord
@@ -194,6 +197,10 @@ class MergeTrainControllerStatusReadModel(BaseModel):
         default=None, description="Queue evidence from latest_run, when it was a Level 1 dry run."
     )
     controller_state: MergeTrainControllerStateRecord | None = None
+    last_controller_result: MergeTrainControllerLastResult | None = Field(
+        default=None, description="Last observed pass, not current readiness or landing authority."
+    )
+    last_controller_result_policy_status: MergeTrainControllerPolicyStatus = "unchecked"
     controller_diagnostics: MergeTrainControllerLeaseDiagnostics | None = None
     controller_records: tuple[MergeTrainControllerRecordSummary, ...]
     reconciliation_diagnostics: tuple[MergeTrainReconciliationDiagnostic, ...] = ()
@@ -393,6 +400,18 @@ def build_merge_train_controller_status_read_model(
         latest_run_age_seconds=latest_run_age_seconds,
         latest_dry_run=_summarize_latest_dry_run(latest_run),
         controller_state=controller_state,
+        last_controller_result=controller_state.last_result if controller_state else None,
+        last_controller_result_policy_status=(
+            "unchecked"
+            if controller_state is None
+            or controller_state.last_result is None
+            or not current_policy_key
+            or not current_policy_sha256
+            else "current"
+            if controller_state.last_result.policy_key == current_policy_key
+            and controller_state.last_result.policy_sha256 == current_policy_sha256
+            else "stale"
+        ),
         controller_diagnostics=_controller_lease_diagnostics(
             controller_state=controller_state,
             generated_at=generated_at,

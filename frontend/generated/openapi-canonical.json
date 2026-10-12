@@ -17253,6 +17253,181 @@
         "title": "MergeTrainAdmissionResponse",
         "type": "object"
       },
+      "MergeTrainControllerLastResult": {
+        "additionalProperties": false,
+        "description": "One pass's bounded evidence. It is never admission or landing authority.",
+        "properties": {
+          "action": {
+            "maxLength": 128,
+            "title": "Action",
+            "type": "string"
+          },
+          "base_branch": {
+            "maxLength": 256,
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "base_checks_status": {
+            "default": "not_observed",
+            "enum": [
+              "not_observed",
+              "unknown",
+              "pending",
+              "pass",
+              "fail"
+            ],
+            "title": "Base Checks Status",
+            "type": "string"
+          },
+          "base_sha": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "batch_body_retry_of": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Batch Body Retry Of",
+            "type": "string"
+          },
+          "candidate_batch_id": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Candidate Batch Id",
+            "type": "string"
+          },
+          "candidate_checks_status": {
+            "default": "not_observed",
+            "enum": [
+              "not_observed",
+              "unknown",
+              "pending",
+              "pass",
+              "fail"
+            ],
+            "title": "Candidate Checks Status",
+            "type": "string"
+          },
+          "candidate_sha": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Candidate Sha",
+            "type": "string"
+          },
+          "check_retry_of": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Check Retry Of",
+            "type": "string"
+          },
+          "infrastructure_retry_of": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Infrastructure Retry Of",
+            "type": "string"
+          },
+          "next_actor": {
+            "default": "controller",
+            "enum": [
+              "controller",
+              "provider",
+              "repository_agent"
+            ],
+            "title": "Next Actor",
+            "type": "string"
+          },
+          "next_observation": {
+            "maxLength": 256,
+            "title": "Next Observation",
+            "type": "string"
+          },
+          "observed_at": {
+            "maxLength": 64,
+            "title": "Observed At",
+            "type": "string"
+          },
+          "observed_candidate_sha": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Observed Candidate Sha",
+            "type": "string"
+          },
+          "pass_started_at": {
+            "maxLength": 64,
+            "title": "Pass Started At",
+            "type": "string"
+          },
+          "policy_key": {
+            "maxLength": 256,
+            "title": "Policy Key",
+            "type": "string"
+          },
+          "policy_sha256": {
+            "maxLength": 256,
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "reason_code": {
+            "maxLength": 128,
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "reconciliation_required": {
+            "default": false,
+            "title": "Reconciliation Required",
+            "type": "boolean"
+          },
+          "record_id": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Record Id",
+            "type": "string"
+          },
+          "recovery_kind": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Recovery Kind",
+            "type": "string"
+          },
+          "repository": {
+            "maxLength": 256,
+            "title": "Repository",
+            "type": "string"
+          },
+          "semantic_progress_at": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Semantic Progress At",
+            "type": "string"
+          },
+          "source_failed_record_id": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Source Failed Record Id",
+            "type": "string"
+          },
+          "trace_id": {
+            "maxLength": 256,
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "base_branch",
+          "policy_key",
+          "policy_sha256",
+          "pass_started_at",
+          "observed_at",
+          "trace_id",
+          "action",
+          "reason_code",
+          "next_observation"
+        ],
+        "title": "MergeTrainControllerLastResult",
+        "type": "object"
+      },
       "MergeTrainControllerLeaseDiagnostics": {
         "additionalProperties": false,
         "properties": {
@@ -17524,6 +17699,16 @@
             "title": "Last Record Id",
             "type": "string"
           },
+          "last_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeTrainControllerLastResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "last_transition_at": {
             "default": "",
             "title": "Last Transition At",
@@ -17586,6 +17771,11 @@
             "minimum": 1.0,
             "title": "Schema Version",
             "type": "integer"
+          },
+          "semantic_progress_key": {
+            "default": "",
+            "title": "Semantic Progress Key",
+            "type": "string"
           },
           "status": {
             "default": "idle",
@@ -17667,6 +17857,27 @@
           },
           "generated_at": {
             "title": "Generated At",
+            "type": "string"
+          },
+          "last_controller_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeTrainControllerLastResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Last observed pass, not current readiness or landing authority."
+          },
+          "last_controller_result_policy_status": {
+            "default": "unchecked",
+            "enum": [
+              "current",
+              "stale",
+              "unchecked"
+            ],
+            "title": "Last Controller Result Policy Status",
             "type": "string"
           },
           "latest_dry_run": {

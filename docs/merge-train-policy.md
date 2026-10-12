@@ -1631,6 +1631,26 @@ records before current-policy filtering produces the action hint.
 If an imported dry-run record has an unparseable timestamp, its age is null;
 the stored history and existing scheduling decision remain visible.
 
+`last_controller_result` projects one bounded pass result from the controller
+state payload, including the exact recovery guard reason, failed-source record,
+observed candidate/base check evidence, retry lineage, pass/trace binding,
+reconciliation requirement and next actor/observation. Lease release and restart
+preserve it. `not_observed` means that pass did not read those checks; `unknown`
+means an attempted observation could not establish their status. The observed
+candidate SHA is separate from a newly planned replacement's SHA.
+`last_controller_result_policy_status` qualifies its policy binding; even
+current-policy evidence is the last pass, not current readiness or landing
+authority. Old records without a saved result return null rather than a
+reconstructed explanation. Dry runs return their observation without replacing
+the persisted mutating pass. Worker summaries project this same result and its
+action/reason, independent of their execution status `ran`.
+
+The semantic progress time tracks distinct candidate, landing or collapse
+evidence. Repeating the same evidence, selecting phases, heartbeating and renewing
+or releasing a lease do not move it; initial candidate evidence uses its own
+stored update time. This is diagnostic metadata, not another monitor or recovery
+budget. The existing stall monitor keeps its own observation contract.
+
 The response also includes the
 controller lease holder, active action and phase, lease and heartbeat age, reconciliation
 state, and compact summaries for active batch candidates, landing plans, and

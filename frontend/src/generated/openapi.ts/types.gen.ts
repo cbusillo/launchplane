@@ -1338,6 +1338,34 @@ export type MergeTrainAdmissionDecision = {
     status: 'admitted' | 'deferred';
 };
 
+export type MergeTrainControllerLastResult = {
+    action: string;
+    base_branch: string;
+    base_checks_status: 'not_observed' | 'unknown' | 'pending' | 'pass' | 'fail';
+    base_sha: string;
+    batch_body_retry_of: string;
+    candidate_batch_id: string;
+    candidate_checks_status: 'not_observed' | 'unknown' | 'pending' | 'pass' | 'fail';
+    candidate_sha: string;
+    check_retry_of: string;
+    infrastructure_retry_of: string;
+    next_actor: 'controller' | 'provider' | 'repository_agent';
+    next_observation: string;
+    observed_at: string;
+    observed_candidate_sha: string;
+    pass_started_at: string;
+    policy_key: string;
+    policy_sha256: string;
+    reason_code: string;
+    reconciliation_required: boolean;
+    record_id: string;
+    recovery_kind: string;
+    repository: string;
+    semantic_progress_at: string;
+    source_failed_record_id: string;
+    trace_id: string;
+};
+
 export type MergeTrainControllerLeaseDiagnostics = {
     active_action: string;
     active_phase: string;
@@ -1387,6 +1415,7 @@ export type MergeTrainControllerStateRecord = {
     last_phase: string;
     last_pull_request_number: number | null;
     last_record_id: string;
+    last_result: MergeTrainControllerLastResult | null;
     last_transition_at: string;
     lease_acquired_at: string;
     lease_expires_at: string;
@@ -1398,6 +1427,7 @@ export type MergeTrainControllerStateRecord = {
     reconciliation_status: 'clean' | 'adopted' | 'required';
     repository: string;
     schema_version: number;
+    semantic_progress_key: string;
     status: 'idle' | 'running' | 'reconcile_required';
     step_payload: {
         [key: string]: unknown;
@@ -1414,6 +1444,8 @@ export type MergeTrainControllerStatusReadModel = {
     current_policy_key: string;
     current_policy_sha256: string;
     generated_at: string;
+    last_controller_result: MergeTrainControllerLastResult | null;
+    last_controller_result_policy_status: 'current' | 'stale' | 'unchecked';
     latest_dry_run: MergeTrainLatestDryRunSummary | null;
     latest_run: MergeTrainRunRecord | null;
     latest_run_age_seconds: number | null;
