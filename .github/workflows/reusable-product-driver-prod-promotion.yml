@@ -238,7 +238,7 @@ jobs:
       - name: Request Launchplane VeriReel prod promotion
         id: lp_verireel
         if: ${{ steps.request.outputs.driver == 'verireel' }}
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@b03966548631da91979592966cb562f9127c912c # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
@@ -287,7 +287,7 @@ jobs:
 
       - name: Read release approval before backup
         if: ${{ steps.request.outputs.driver == 'odoo' }}
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@b03966548631da91979592966cb562f9127c912c # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
@@ -316,7 +316,7 @@ jobs:
       - name: Capture and verify infrastructure backup for Odoo promotion
         id: infrastructure_backup
         if: ${{ steps.request.outputs.driver == 'odoo' }}
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@b03966548631da91979592966cb562f9127c912c # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
@@ -345,7 +345,7 @@ jobs:
       - name: Request Launchplane Odoo prod promotion
         id: lp_odoo
         if: ${{ steps.request.outputs.driver == 'odoo' }}
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@b03966548631da91979592966cb562f9127c912c # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}

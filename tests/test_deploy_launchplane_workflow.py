@@ -248,6 +248,35 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
                     (directory / "launchplane-self-deploy-rollback-payload.json").exists()
                 )
 
+    def test_dispatch_checker_failure_keeps_conservative_rollback(self) -> None:
+        with TemporaryDirectory() as name:
+            directory = Path(name)
+            uv = directory / "uv"
+            uv.write_text("#!/usr/bin/env bash\nexit 1\n")
+            uv.chmod(0o700)
+            previous_image = "registry.example/service@sha256:" + "a" * 64
+            result = self._run_step(
+                "deploy",
+                "Render Launchplane rollback request",
+                {
+                    "BOOTSTRAP_SECRET_OPERATION": "preserve",
+                    "ORDINARY_AGENT_WORKERS": "preserve",
+                    "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "absent",
+                    "DEPLOYED_IMAGE_REFERENCE": "registry.example/service@sha256:" + "b" * 64,
+                    "PREVIOUS_IMAGE_REFERENCE": previous_image,
+                    "FORWARD_DEPLOYMENT_MARKER": "forward",
+                    "ROLLBACK_DEPLOYMENT_MARKER": "rollback",
+                    "SELF_DEPLOY_IDEMPOTENCY_KEY": "deployment-key",
+                    "PATH": str(directory) + os.pathsep + os.environ["PATH"],
+                },
+                directory,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(
+                (directory / "launchplane-self-deploy-rollback-payload.json").read_text()
+            )
+            self.assertEqual(payload["deploy"]["image_reference"], previous_image)
+
     def test_rollback_requires_matching_marker_even_when_preserving_bootstrap(self) -> None:
         for marker_outcome in ("success", "failure"):
             with self.subTest(marker_outcome=marker_outcome), TemporaryDirectory() as name:

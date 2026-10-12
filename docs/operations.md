@@ -2027,6 +2027,9 @@ downgrade an already dispatched or uncertain attempt. These proof changes apply
 only to the opted-in self-deploy polling path. The alert and rollback share the same
 dispatch-proof decoder, including authentication refusals and a request that
 could not be prepared before any Launchplane attempt.
+A later authoritative `draining` response restores pre-effect proof because the
+server replays dispatched results. An unexpected decoder failure retains the
+existing conservative service-rollback attempt.
 After the forward marker is observed, a nearly expired window permits a bounded
 fifteen-second image confirmation and at least one health probe. Healthy results
 permit the same bounded allowance for each final identity check. Persistent

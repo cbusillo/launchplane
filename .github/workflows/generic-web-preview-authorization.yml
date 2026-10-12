@@ -223,7 +223,7 @@ jobs:
             > authz-plan-request.json
 
       - name: Plan preview authorization
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@b03966548631da91979592966cb562f9127c912c # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
