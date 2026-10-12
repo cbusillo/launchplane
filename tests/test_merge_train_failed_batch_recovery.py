@@ -290,6 +290,34 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             self.assertFalse(replacement.check_retry_of)
             self.assertEqual(replacement.entries, self.candidate.entries)
 
+    def test_new_failure_recovers_after_rerun_despite_earlier_queue_retry(self) -> None:
+        self.provider.checks_failed = False
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            first = self._reflow(store, self.candidate, observe_checks=True)
+            replacement = MergeTrainBatchCandidate.model_validate(first["candidate"])
+            later_failure = replacement.model_copy(
+                update={
+                    "candidate_sha": "later-failed-sha",
+                    "status": "failed",
+                    "required_checks_status": "fail",
+                }
+            )
+            self.provider.candidate = later_failure
+            self.provider.body = batch_pull_request_body(
+                client=self.client, candidate=later_failure
+            )
+            self.provider.batch_head_sha = later_failure.candidate_sha
+            recovered = self._reflow(store, later_failure, observe_checks=True)
+            next_candidate = MergeTrainBatchCandidate.model_validate(recovered["candidate"])
+            self.assertEqual(recovered["controller_action"], "plan_candidate")
+            self.assertEqual(next_candidate.entries, later_failure.entries)
+            self.assertNotEqual(next_candidate.candidate_ref, replacement.candidate_ref)
+            assert next_candidate.check_retry_evidence is not None
+            self.assertEqual(
+                next_candidate.check_retry_evidence.candidate_sha, later_failure.candidate_sha
+            )
+
     def test_rebuilt_candidate_real_failure_still_isolates_members(self) -> None:
         self.provider.checks_failed = False
         with TemporaryDirectory() as directory:
@@ -1327,11 +1355,9 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 side_effect=MergeTrainGitHubError("provider unavailable", status_code=503),
             ),
         ):
-            result = self._reflow(
-                FilesystemRecordStore(state_dir=Path(directory)),
-                self.candidate.model_copy(update={"check_retry_of": "earlier-failure"}),
-                observe_checks=True,
-            )
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            self._reflow(store, self.candidate, observe_checks=True)
+            result = self._reflow(store, self.candidate, observe_checks=True)
         self.assertEqual(result["reason_code"], "candidate_check_retry_used")
         self.assertFalse(
             MergeTrainBatchCandidate.model_validate(result["candidate"]).batch_body_retry_of

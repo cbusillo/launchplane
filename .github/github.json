@@ -152,6 +152,7 @@
     "Manage Launchplane Authorization",
     "Merge Train Policy Import",
     "Merge Train Runner",
+    "Merge Train Stall Alert",
     "Odoo Config Parameter Override",
     "Odoo Artifact Publish",
     "Odoo Driver Route Smoke",

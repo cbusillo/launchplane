@@ -47,6 +47,7 @@ POSTGRES_INTEGRATION_MODULES = (
     "tests.test_postgres_integration",
     "tests.test_solo_administration_confirmation_postgres",
     "tests.test_merge_train_historical_disposition_postgres",
+    "tests.test_merge_train_stall_monitor.StallMonitorPostgresTests",
     "tests.test_merge_train_historical_disposition_http",
     "tests.test_production_backup_gate.ProductionBackupGatePostgresTests",
     "tests.test_http_production_backup_gate.ProductionBackupGatePostgresHttpTests",
