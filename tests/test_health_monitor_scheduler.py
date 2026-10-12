@@ -12,6 +12,7 @@ from control_plane.health_monitor_scheduler import (
     HealthMonitorScheduler,
     MONITOR_COMPLETION_GRACE_SECONDS,
     MONITOR_INTERVAL_SECONDS,
+    MONITOR_POLL_SECONDS,
     MONITOR_LEASE_SECONDS,
     MONITOR_RECEIPT_FINGERPRINT,
     _SCOPE,
@@ -106,19 +107,32 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
                 }
             )
         )
-        production_interval = health_monitor_interval_seconds("prod")
         testing_interval = health_monitor_interval_seconds("testing")
-        self.now = monitor_slot(self.now, "testing") * testing_interval
         horizon = 2 * testing_interval
-        for offset in range(horizon):
-            for instance in ("prod", "testing"):
-                if offset % production_interval == 0:
-                    self.scheduler.run_once(instance)
-                    self.assertFalse(self.make_scheduler().run_once(instance))
-            self.now += 1
-        checked = [lane for call in self.probe.call_args_list for lane in call.args[0]]
-        self.assertEqual(sum(lane[2] == "prod" for lane in checked), horizon // production_interval)
-        self.assertEqual(sum(lane[2] == "testing" for lane in checked), horizon // testing_interval)
+        for production_interval in (health_monitor_interval_seconds("prod"), 45):
+            with (
+                self.subTest(production_interval=production_interval),
+                patch(
+                    "control_plane.contracts.public_ingress_monitoring.PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS",
+                    production_interval,
+                ),
+            ):
+                self.now = (monitor_slot(self.now, "testing") + 1) * testing_interval
+                start = self.now
+                self.probe.reset_mock()
+                poll_offsets = range(0, horizon, MONITOR_POLL_SECONDS)
+                for offset in poll_offsets:
+                    self.now = start + offset
+                    for instance in ("prod", "testing"):
+                        self.scheduler.run_once(instance)
+                        self.assertFalse(self.make_scheduler().run_once(instance))
+                checked = [lane for call in self.probe.call_args_list for lane in call.args[0]]
+                for instance in ("prod", "testing"):
+                    interval = health_monitor_interval_seconds(instance)
+                    visited_slots = {int((start + offset) // interval) for offset in poll_offsets}
+                    self.assertEqual(
+                        sum(lane[2] == instance for lane in checked), len(visited_slots)
+                    )
 
     def test_setting_change_checks_only_changed_lane_and_survives_restart(self) -> None:
         other = _profile().model_copy(
