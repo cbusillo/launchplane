@@ -162,7 +162,7 @@ jobs:
       - name: Read tracked target logs
         id: request
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@413d8d2188f0829a466785f407138cc0a8f29c34 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@c34f63a7293f4a5cbf2ba0bbdb96811ae546e83d # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_SERVICE_URL }}
           route-path: ${{ steps.route.outputs.route_path }}

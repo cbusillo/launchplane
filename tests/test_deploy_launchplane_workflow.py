@@ -194,32 +194,6 @@ fi
             self.assertEqual(evidence.read_text(), "")
             self.assertTrue((directory / "output").is_file())
 
-    def test_request_outage_deadline_caps_the_worker_stop_budget(self) -> None:
-        with TemporaryDirectory() as directory_name:
-            directory = Path(directory_name)
-            outage_deadline = int(time.time()) + 30
-            (directory / "launchplane-self-deploy-response.json").write_text(
-                json.dumps({"result": {"release_drain_complete": True}})
-            )
-            result = self._run_step(
-                "deploy",
-                "Resolve deploy_runtime_wait remaining wait",
-                {"OUTAGE_DEADLINE_EPOCH": str(outage_deadline)},
-                directory,
-                expression_values={
-                    "${{ steps.deploy_wait_timeout.outputs.deadline_epoch }}": str(
-                        int(time.time()) + 1000
-                    ),
-                    "${{ steps.deploy_wait_timeout.outputs.drained_timeout_seconds }}": "500",
-                },
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            values = dict(
-                line.split("=", 1) for line in (directory / "output").read_text().splitlines()
-            )
-            self.assertEqual(int(values["deadline_epoch"]), outage_deadline)
-            self.assertLessEqual(int(values["timeout_ms"]), 30000)
-
     def test_timed_out_drain_does_not_request_service_rollback(self) -> None:
         for payload in (
             {"result": {"deploy_state": "draining"}},

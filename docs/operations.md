@@ -2010,6 +2010,8 @@ runner rather than an internal-only provider hostname.
 
 After the self-deploy request leaves its legitimate release drain, the workflow
 allows the existing provider/worker stop budget while the old API still serves.
+Successful completion of the deploy request clears its outage window before
+replacement verification starts, preserving that worker/provider wait.
 The first API outage starts a two-minute observation window. When the forward
 deployment marker appears, image and health checks share its remaining deadline;
 if no outage was observed, that marker starts the window. This also handles a

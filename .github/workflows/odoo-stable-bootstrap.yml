@@ -155,7 +155,7 @@ jobs:
 
       - name: Create bootstrap operation
         id: create_bootstrap
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@413d8d2188f0829a466785f407138cc0a8f29c34 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@c34f63a7293f4a5cbf2ba0bbdb96811ae546e83d # launchplane-request
         with:
           launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
           audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
@@ -205,7 +205,7 @@ jobs:
 
       - name: Poll bootstrap operation
         id: poll_bootstrap
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@413d8d2188f0829a466785f407138cc0a8f29c34 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@c34f63a7293f4a5cbf2ba0bbdb96811ae546e83d # launchplane-request
         with:
           launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
           audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}

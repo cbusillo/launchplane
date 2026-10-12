@@ -160,7 +160,7 @@ jobs:
 
       - name: Request Launchplane preview PR feedback
         id: lp
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@413d8d2188f0829a466785f407138cc0a8f29c34 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@c34f63a7293f4a5cbf2ba0bbdb96811ae546e83d # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
