@@ -44,7 +44,7 @@ def controller_last_result(
         reason = observations.get("reason_code", "") or reason or action
     key = _semantic_key(result)
     previous = state.last_result
-    batch_id = _text(candidate.get("batch_id"))
+    batch_id = _text(candidate.get("batch_id") or observations.get("candidate_batch_id"))
     same_recovery = (
         previous is not None
         and bool(batch_id)

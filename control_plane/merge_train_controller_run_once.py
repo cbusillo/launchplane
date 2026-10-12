@@ -233,6 +233,7 @@ class MergeTrainControllerLeaseContext:
         candidate = record.candidate
         self.observations.update(
             source_failed_record_id=record.record_id,
+            candidate_batch_id=candidate.batch_id,
             candidate_sha=candidate.candidate_sha,
             base_sha=candidate.base_sha,
             check_retry_of=candidate.check_retry_of,
@@ -2611,6 +2612,11 @@ def _advance_active_candidate_record(
         )
     except ValueError as error:
         raise MergeTrainControllerRequestError(str(error)) from error
+    lease.observe(
+        candidate_batch_id=active_candidate_record.candidate.batch_id,
+        candidate_sha=active_candidate_record.candidate.candidate_sha,
+        base_sha=active_candidate_record.candidate.base_sha,
+    )
     if active_candidate_record.candidate.status == "failed":
         lease.observe_failed_candidate(active_candidate_record)
         if request.mutate:

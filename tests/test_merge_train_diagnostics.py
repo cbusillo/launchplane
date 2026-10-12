@@ -224,6 +224,22 @@ class RecoveryDiagnosticsTests(TestCase):
         self.assertEqual(diagnosis.source_failed_record_id, self.failed.record_id)
         self.assertEqual(diagnosis.observed_candidate_sha, candidate.candidate_sha)
         self.assertEqual(diagnosis.candidate_checks_status, "pending")
+        self.client.observe_batch_candidate_checks.side_effect = MergeTrainGitHubError(
+            "temporary read", status_code=503
+        )
+        with self.assertRaises(MergeTrainGitHubError):
+            self.run_pass()
+        interrupted = self.state().last_result
+        assert interrupted is not None
+        self.assertEqual(interrupted.source_failed_record_id, self.failed.record_id)
+        self.assertEqual(interrupted.recovery_kind, diagnosis.recovery_kind)
+        self.store = FilesystemRecordStore(self.path)
+        self.client.observe_batch_candidate_checks.side_effect = None
+        self.run_pass()
+        resumed = self.state().last_result
+        assert resumed is not None
+        self.assertEqual(resumed.reason_code, diagnosis.reason_code)
+        self.assertEqual(resumed.source_failed_record_id, diagnosis.source_failed_record_id)
         observed_at = (
             (
                 datetime.fromisoformat(self.state().updated_at.replace("Z", "+00:00"))
