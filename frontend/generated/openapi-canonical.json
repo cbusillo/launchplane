@@ -45037,6 +45037,67 @@
         "title": "SoloAdministrationConfirmationResponse",
         "type": "object"
       },
+      "StoredRecordSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "captured_at": {
+            "title": "Captured At",
+            "type": "string"
+          },
+          "database_schema_revision": {
+            "title": "Database Schema Revision",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "tables": {
+            "additionalProperties": {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "title": "Tables",
+            "type": "object"
+          }
+        },
+        "required": [
+          "captured_at",
+          "database_schema_revision",
+          "tables"
+        ],
+        "title": "StoredRecordSnapshot",
+        "type": "object"
+      },
+      "StoredRecordSnapshotResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "snapshot": {
+            "$ref": "#/components/schemas/StoredRecordSnapshot"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "snapshot"
+        ],
+        "title": "StoredRecordSnapshotResponse",
+        "type": "object"
+      },
       "StructuredHealthEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -92469,6 +92530,66 @@
           }
         },
         "summary": "Read Launchplane service runtime"
+      }
+    },
+    "/v1/service/stored-record-snapshot": {
+      "get": {
+        "operationId": "read_stored_record_snapshot",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoredRecordSnapshotResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Export a scrubbed snapshot for isolated candidate preflight"
       }
     },
     "/v1/service/verireel-workers/reconcile": {

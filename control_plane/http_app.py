@@ -39,6 +39,10 @@ from control_plane.owner_secret_inputs import (
     resolve_owner_secret_submission,
 )
 from fastapi.responses import JSONResponse, RedirectResponse
+from control_plane.contracts.stored_record_snapshot import (
+    STORED_RECORD_SNAPSHOT_ROUTE,
+    StoredRecordSnapshotResponse,
+)
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from requests.exceptions import RequestException
@@ -5334,6 +5338,30 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Workflow cannot reconcile Launchplane VeriReel workers.",
             )
+
+    def read_stored_record_snapshot(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> StoredRecordSnapshotResponse:
+        trace_id = next_trace_id()
+        require_launchplane_service_read_authorization(identity=identity, trace_id=trace_id)
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Stored-record snapshots require database-backed storage.",
+            )
+        try:
+            snapshot = record_store.export_stored_record_snapshot()
+        except (ValueError, SQLAlchemyError) as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="stored_record_snapshot_unavailable",
+                message="A complete scrubbed stored-record snapshot is unavailable.",
+            ) from error
+        return StoredRecordSnapshotResponse(trace_id=trace_id, snapshot=snapshot)
 
     def read_launchplane_runtime(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
@@ -25473,6 +25501,15 @@ def create_launchplane_fastapi_app(
             409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
+    )
+
+    app.add_api_route(
+        STORED_RECORD_SNAPSHOT_ROUTE,
+        read_stored_record_snapshot,
+        methods=["GET"],
+        response_model=StoredRecordSnapshotResponse,
+        operation_id="read_stored_record_snapshot",
+        summary="Export a scrubbed snapshot for isolated candidate preflight",
     )
 
     app.add_api_route(
