@@ -199,6 +199,22 @@ class ProductHealthMonitoringTests(unittest.TestCase):
                 request=_request(check_name="provider-health"),
             )
 
+    def test_plan_exposes_private_endpoint_change_for_review(self) -> None:
+        create = _request(
+            check_name="private-health",
+            check_kind="private_http",
+            monitoring_intent="private",
+            private_endpoint_key="original-private-key",
+        )
+        profile = updated_product_health_monitoring_profile(
+            profile=_profile(), request=create, updated_at="2026-07-22T01:00:00Z"
+        )
+        request = create.model_copy(update={"private_endpoint_key": "replacement-private-key"})
+        plan = build_product_health_monitoring_plan(profile=profile, request=request)
+        self.assertEqual(plan.current_private_endpoint_key, create.private_endpoint_key)
+        self.assertEqual(plan.private_endpoint_key, request.private_endpoint_key)
+        self.assertEqual(plan.resolved_url, "")
+
     def test_plan_rejects_missing_or_mismatched_lane(self) -> None:
         request = _request().model_copy(update={"instance": "prod"})
         with self.assertRaises(ProductHealthMonitoringTargetError):
