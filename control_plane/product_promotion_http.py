@@ -11,13 +11,14 @@ from typing import Literal, Protocol, cast
 import click
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from control_plane.contracts.data_provenance import FreshnessStatus
+from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
+    product_lane_monitoring_probe_effective,
 )
 from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
@@ -34,6 +35,7 @@ from control_plane.generic_web_promotion_http import (
 )
 from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.release_review import current_release_review
+from control_plane.lane_runtime_verification import read_lane_runtime_verification
 from control_plane.workflows.generic_web_deploy import (
     normalize_generic_web_artifact_id,
     product_profile_uses_generic_web_base,
@@ -93,6 +95,7 @@ class ProductPromotionEvidence(BaseModel):
     health_status: ReleaseStatus = "skipped"
     runtime_identity_status: RuntimeIdentityStatus = "unchecked"
     runtime_identity_detail: str = ""
+    health_provenance: DataProvenance | None = None
     trust_state: FreshnessStatus = "missing"
 
 
@@ -299,12 +302,14 @@ def build_product_promotion_status(
     destination_summary = _read_lane_summary(record_store, destination_lane)
     observed_at = now or datetime.now(UTC)
     source_evidence = _promotion_evidence(
+        record_store=record_store,
         profile=profile,
         lane=source_lane,
         summary=source_summary,
         now=observed_at,
     )
     destination_evidence = _promotion_evidence(
+        record_store=record_store,
         profile=profile,
         lane=destination_lane,
         summary=destination_summary,
@@ -651,6 +656,7 @@ def _read_lane_summary(
 
 def _promotion_evidence(
     *,
+    record_store: object,
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     summary: LaunchplaneLaneSummary | None,
@@ -697,7 +703,7 @@ def _promotion_evidence(
         and _health_identity_matches_inventory(profile=profile, lane=lane, inventory=inventory)
     ):
         trust_state = "verified" if now < stale_after else "stale"
-    return ProductPromotionEvidence(
+    evidence = ProductPromotionEvidence(
         environment=lane.instance,
         artifact_id=artifact_id,
         deploy_reference=deploy_reference,
@@ -713,6 +719,49 @@ def _promotion_evidence(
         runtime_identity_detail=inventory.destination_health.runtime_identity_detail,
         trust_state=trust_state,
     )
+    if summary is not None and any(
+        check.enabled
+        and product_lane_monitoring_probe_effective(
+            monitoring_intent=lane.health_monitoring.monitoring_intent,
+            check_kind=check.kind,
+        )
+        for check in lane.health_monitoring.checks
+    ):
+        verification = read_lane_runtime_verification(
+            record_store=record_store, profile=profile, lane=lane, summary=summary, now=now
+        )
+        target = verification.runtime_target
+        freshness = verification.provenance.freshness_status
+        health_status: ReleaseStatus = (
+            "pass"
+            if freshness == "verified"
+            else "fail"
+            if freshness == "recorded" and verification.observation is not None
+            else target.status
+            if target is not None
+            else "skipped"
+        )
+        if freshness == "verified" and (
+            inventory.deploy.status != "pass"
+            or not _runtime_identity_matches_inventory(
+                profile=profile, lane=lane, inventory=inventory
+            )
+        ):
+            freshness = "recorded"
+        evidence = evidence.model_copy(
+            update={
+                "health_status": health_status,
+                "runtime_identity_status": target.runtime_identity_status
+                if target
+                else "unchecked",
+                "runtime_identity_detail": (
+                    target.runtime_identity_detail if target else verification.provenance.detail
+                ),
+                "health_provenance": verification.provenance,
+                "trust_state": freshness,
+            }
+        )
+    return evidence
 
 
 def _runtime_artifact_id(
@@ -837,17 +886,21 @@ def _environment_evidence_blockers(
         blockers.append(f"{label} inventory timestamp is invalid.")
     if evidence.deployment_status != "pass":
         blockers.append(f"{label} deployment evidence is not passing.")
-    if not inventory.destination_health.verified:
+    if evidence.health_provenance is not None:
+        health_verified = evidence.health_provenance.freshness_status == "verified"
+        health_identity_matches = health_verified
+    else:
+        health_verified = inventory.destination_health.verified
+        health_identity_matches = _health_identity_matches_inventory(
+            profile=profile, lane=lane, inventory=inventory
+        )
+    if not health_verified:
         blockers.append(f"{label} health evidence is not verified.")
     if evidence.health_status != "pass":
         blockers.append(f"{label} health evidence is not passing.")
     if evidence.runtime_identity_status != "match":
         blockers.append(f"{label} health did not verify the generated runtime identity.")
-    if not _health_identity_matches_inventory(
-        profile=profile,
-        lane=lane,
-        inventory=inventory,
-    ):
+    if not health_identity_matches:
         blockers.append(f"{label} observed health identity does not match current inventory.")
     if evidence.trust_state == "stale":
         blockers.append(f"{label} inventory evidence is stale.")

@@ -3737,6 +3737,7 @@ export type ProductPromotionEvidence = {
     deployment_record_id: string;
     deployment_status: 'pending' | 'pass' | 'fail' | 'skipped';
     environment: string;
+    health_provenance: DataProvenance | null;
     health_status: 'pending' | 'pass' | 'fail' | 'skipped';
     inventory_stale_after: string;
     inventory_updated_at: string;

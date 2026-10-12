@@ -902,6 +902,7 @@ export function promotionStatusForFixture(
       inventory_stale_after: missingEvidence ? "" : STALE_AFTER,
       deployment_status: missingEvidence ? "skipped" : "pass",
       health_status: missingEvidence ? "skipped" : "pass",
+      health_provenance: null,
       runtime_identity_status: missingEvidence ? "missing" : "match",
       runtime_identity_detail: missingEvidence
         ? "Runtime identity is unavailable."
@@ -922,6 +923,7 @@ export function promotionStatusForFixture(
       inventory_stale_after: missingEvidence ? "" : STALE_AFTER,
       deployment_status: missingEvidence ? "skipped" : "pass",
       health_status: missingEvidence ? "skipped" : "pass",
+      health_provenance: null,
       runtime_identity_status: missingEvidence ? "missing" : "match",
       runtime_identity_detail: missingEvidence
         ? "Runtime identity is unavailable."
