@@ -378,15 +378,34 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_role_policy_diagnostics_match_runtime_product_resolution(self) -> None:
         from control_plane.contracts.authz_access_read import EffectiveAccessEvaluateRequest
 
-        policy = reader_policy()
+        base = reader_policy()
+        policy = base.model_copy(
+            update={
+                "local_operators": (
+                    *(
+                        rule.model_copy(update={"products": (*rule.products, "foreign-site")})
+                        for rule in base.local_operators
+                    ),
+                    *(
+                        rule.model_copy(
+                            update={
+                                "subjects": ("product-reader",),
+                                "token_labels": ("product-reader-label",),
+                            }
+                        )
+                        for rule in base.local_operators
+                    ),
+                )
+            }
+        )
         profiles = tuple(
             LaunchplaneProductProfileRecord.model_validate(product_profile_payload(name))
             for name in ("sample", "foreign-site")
         )
         principal = {
             "principal_type": "local_operator",
-            "subject": "record-reader",
-            "token_label": "record-reader-label",
+            "subject": "product-reader",
+            "token_label": "product-reader-label",
         }
         own, foreign = profiles
         lane = own.lanes[0]
@@ -425,6 +444,8 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
             update={
                 "local_operators": tuple(
                     rule.model_copy(update={"products": (*rule.products, foreign.product)})
+                    if rule.subjects == ("product-reader",)
+                    else rule
                     for rule in policy.local_operators
                 )
             }
@@ -445,7 +466,7 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(effective.json()["evaluation"]["decision"], decision)
                     typed_probe = EffectiveAccessEvaluateRequest.model_validate(probe)
                     actual = app.state.authz_policy_runtime.evaluate(
-                        identity=LocalOperatorIdentity("record-reader", "record-reader-label"),
+                        identity=LocalOperatorIdentity("product-reader", "product-reader-label"),
                         action=typed_probe.action,
                         product=typed_probe.product,
                         context=typed_probe.context,
@@ -531,6 +552,33 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(records.status_code, 200, records.text)
 
+    async def test_shared_web_transition_dry_run_uses_product_role_without_apply(self) -> None:
+        from tests.test_product_generic_web_transition import draft, profile
+
+        current = profile()
+        with _database_app(reader_policy(product=current.product)) as (store, _, app):
+            store.write_product_profile_record(current)
+            headers = {"Authorization": "Bearer reader-token"}
+            async with lifespan_client(app) as client:
+                planned = await client.post(
+                    f"/v1/product-profiles/{current.product}/generic-web-transition",
+                    headers=headers,
+                    json={**draft(current), "mode": "dry-run"},
+                )
+                self.assertEqual(planned.status_code, 202, planned.text)
+                for product, mode in ((current.product, "apply"), ("foreign-site", "dry-run")):
+                    response = await client.post(
+                        f"/v1/product-profiles/{product}/generic-web-transition",
+                        headers=headers,
+                        json={
+                            **draft(current),
+                            "mode": mode,
+                            **({"reviewed_plan_sha256": "a" * 64} if mode == "apply" else {}),
+                        },
+                    )
+                    self.assertEqual(response.status_code, 403, response.text)
+            self.assertEqual(store.read_product_profile_record(current.product), current)
+
     async def test_read_role_cannot_create_an_operative_retirement_plan(self) -> None:
         with _database_app(reader_policy()) as (store, _, app):
             with patch.object(
@@ -556,6 +604,39 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(response.status_code, 403, response.text)
                 write.assert_not_called()
+
+    async def test_partial_service_role_cannot_probe_foreign_product_grants(self) -> None:
+        foreign = LaunchplaneProductProfileRecord.model_validate(
+            product_profile_payload("foreign-site")
+        )
+        with _database_app(reader_policy()) as (store, _, app):
+            store.write_product_profile_record(foreign)
+            headers = {"Authorization": "Bearer reader-token"}
+            probe = {
+                "principal": {
+                    "principal_type": "local_operator",
+                    "subject": "record-reader",
+                    "token_label": "record-reader-label",
+                },
+                "action": "product_profile.read",
+                "product": foreign.product,
+                "context": "launchplane",
+                "target_scope": "context",
+            }
+            async with lifespan_client(app) as client:
+                for path, payload in (
+                    ("/v1/authz-diagnostics/effective-access/evaluate", probe),
+                    (
+                        "/v1/authz-diagnostics/candidate-policy/preview",
+                        {
+                            "candidate_policy": reader_policy().model_dump(mode="json"),
+                            "probes": [probe],
+                        },
+                    ),
+                ):
+                    result = await client.post(path, headers=headers, json=payload)
+                    self.assertEqual(result.status_code, 403, result.text)
+                    self.assertNotIn(foreign.product, result.text)
 
     async def test_repository_lookup_does_not_inherit_service_metadata_scope(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
@@ -727,6 +808,24 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
                 self.assertEqual(denied.status_code, 403, denied.text)
+
+    async def test_snapshot_includes_launchplane_inventory_under_its_own_scope(self) -> None:
+        from sqlalchemy import text
+        from tests.test_postgres_store import _inventory_record
+
+        with _database_app(reader_policy()) as (store, _, app):
+            store.write_environment_inventory(
+                _inventory_record().model_copy(update={"context": "launchplane"})
+            )
+            with store._engine.begin() as connection:
+                connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32))"))
+                connection.execute(text("INSERT INTO alembic_version VALUES ('test-revision')"))
+            async with lifespan_client(app) as client:
+                response = await client.get(
+                    "/v1/service/stored-record-snapshot",
+                    headers={"Authorization": "Bearer reader-token"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
 
     async def test_snapshot_checks_records_written_after_its_preflight(self) -> None:
         from sqlalchemy import text

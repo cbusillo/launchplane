@@ -1348,7 +1348,7 @@ class LaunchplaneAuthzPolicy(BaseModel):
             product=product,
             context="",
             target=AuthorizationTarget(scope="instance", instances=(instance,)),
-            inherit_agent_read_role=True,
+            inherit_agent_read_role=False,
         )
 
     def names_administrator(self, identity: GitHubHumanIdentity) -> bool:

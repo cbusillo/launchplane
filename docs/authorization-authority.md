@@ -127,8 +127,12 @@ transaction. The Delivery selector GET uses ordinary DB read
 authorization; its configuration and credential retirement keep their admin gates.
 
 Non-agent policy-diagnostic identity gates remain; the exact agent read role
-adds the supported agent path. Repository-scope lookups containing product
-records require those product scopes.
+adds the supported agent path. Repository-scope lookups require both the Launchplane metadata scope and
+coverage of recorded products; they include Root-owned repository inventory,
+classification, work-request and policy membership metadata. Global effective-access
+and candidate-policy diagnostics require the recorded product scopes they
+inspect. Snapshot inventory for Launchplane itself uses its own scope; ambiguous
+product context ownership fails closed.
 
 Source delivery installs no grant. After the deployed source is qualified,
 prepare one managed-policy proposal bound to the current exact agent and explicit

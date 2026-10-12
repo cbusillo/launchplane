@@ -5555,6 +5555,15 @@ def create_launchplane_fastapi_app(
                 return False
             owners = product_context_owner_map(profiles)
             for record in inventory:
+                if record.context == _LAUNCHPLANE_SERVICE_CONTEXT:
+                    if not policy.agent_read_role_allows(
+                        identity=identity,
+                        product=_LAUNCHPLANE_SERVICE_CONTEXT,
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                        target=AuthorizationTarget(scope="instance", instances=(record.instance,)),
+                    ):
+                        return False
+                    continue
                 matches = owners.get(record.context.casefold(), frozenset())
                 if (
                     len(matches) != 1
