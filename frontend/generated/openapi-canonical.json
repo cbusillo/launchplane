@@ -12104,9 +12104,31 @@
             "title": "Completion Grace Seconds",
             "type": "integer"
           },
+          "instance": {
+            "default": "prod",
+            "enum": [
+              "prod",
+              "testing"
+            ],
+            "title": "Instance",
+            "type": "string"
+          },
           "interval_seconds": {
             "title": "Interval Seconds",
             "type": "integer"
+          },
+          "lane_changes": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/MonitorLaneChange"
+            },
+            "title": "Lane Changes",
+            "type": "array"
+          },
+          "lane_changes_truncated": {
+            "default": false,
+            "title": "Lane Changes Truncated",
+            "type": "boolean"
           },
           "next_end_slot": {
             "anyOf": [
@@ -19231,6 +19253,33 @@
           "completed_at"
         ],
         "title": "MonitorCompletionReceipt",
+        "type": "object"
+      },
+      "MonitorLaneChange": {
+        "properties": {
+          "completion": {
+            "$ref": "#/components/schemas/MonitorCompletionReceipt"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "completion"
+        ],
+        "title": "MonitorLaneChange",
         "type": "object"
       },
       "MonitorSlotEvidence": {
@@ -91483,6 +91532,20 @@
                 }
               ],
               "title": "End Slot"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": false,
+            "schema": {
+              "default": "prod",
+              "enum": [
+                "prod",
+                "testing"
+              ],
+              "title": "Instance",
+              "type": "string"
             }
           },
           {

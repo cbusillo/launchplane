@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 import unittest
 
@@ -15,6 +15,7 @@ from control_plane.contracts.product_topology_read_model import (
     build_product_environment_topology,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    health_monitor_interval_seconds,
     PublicIngressFailureCode,
     PublicIngressIncidentRecord,
     PublicIngressIncidentReminderStateRecord,
@@ -283,12 +284,15 @@ def _http_observation(
     *,
     product: str = "example-site",
     domain_name: str = "example.test",
-    observed_at: str = "2026-07-14T11:30:00Z",
+    observed_at: str = "",
     runtime_identity_status: RuntimeIdentityStatus = "match",
     expected_runtime_identity: RuntimeIdentity | None = None,
     observed_deployed_at: str | None = None,
     monitoring_intent: ProductLaneMonitoringIntent | Literal["legacy"] = "legacy",
 ) -> PublicIngressObservationRecord:
+    observed_at = observed_at or (
+        _NOW - timedelta(seconds=health_monitor_interval_seconds("prod") / 2)
+    ).isoformat().replace("+00:00", "Z")
     expected_identity = expected_runtime_identity or _runtime_identity(product=product)
     observed_identity = (
         expected_identity.model_copy(update={"deployed_at": observed_deployed_at})

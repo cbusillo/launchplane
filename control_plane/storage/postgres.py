@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 import hashlib
+import json
 import logging
 import secrets
 from threading import local
@@ -42,6 +43,7 @@ from sqlalchemy import (
     create_engine,
     delete,
     desc,
+    event,
     false,
     func,
     inspect,
@@ -5925,6 +5927,118 @@ class PostgresRecordStore(HumanSessionStore):
         self._engine.dispose()
         if self._preview_lock_engine is not None:
             self._preview_lock_engine.dispose()
+
+    def subscribe_health_monitor_changes(self, wake: Callable[[], None]) -> Callable[[], None]:
+        """Wake after committed runtime authority writes, never after sensor/receipt writes."""
+        authority_rows = (
+            LaunchplaneProductProfileRow,
+            LaunchplaneInventoryRow,
+            LaunchplaneDeploymentRow,
+            LaunchplaneRuntimeEnvironmentRow,
+            LaunchplaneOdooInstanceOverrideRow,
+            LaunchplaneSecretBindingRow,
+            LaunchplaneSecretRow,
+            LaunchplanePrivateHealthEndpointRow,
+            LaunchplaneRouteBindingRow,
+            LaunchplaneProviderTargetRow,
+        )
+
+        def flushed(session: Session, _flush_context: object) -> None:
+            if any(
+                isinstance(row, authority_rows)
+                for row in session.new | session.dirty | session.deleted
+            ):
+                session.info["health_monitor_changed"] = True
+
+        def committed(session: Session) -> None:
+            if session.info.pop("health_monitor_changed", False):
+                wake()
+
+        def rolled_back(session: Session) -> None:
+            session.info.pop("health_monitor_changed", None)
+
+        event.listen(self._session_factory, "after_flush", flushed)
+        event.listen(self._session_factory, "after_commit", committed)
+        event.listen(self._session_factory, "after_rollback", rolled_back)
+
+        def unsubscribe() -> None:
+            event.remove(self._session_factory, "after_flush", flushed)
+            event.remove(self._session_factory, "after_commit", committed)
+            event.remove(self._session_factory, "after_rollback", rolled_back)
+
+        return unsubscribe
+
+    def health_monitor_authority_revisions(self) -> dict[tuple[str, str, str], str]:
+        """Bulk-read lane authority, with no provider calls or plaintext secret reads."""
+        profiles = tuple(
+            profile for profile in self.list_product_profile_records() if profile.is_active
+        )
+        lane_rows = (
+            LaunchplaneInventoryRow,
+            LaunchplaneRuntimeEnvironmentRow,
+            LaunchplaneOdooInstanceOverrideRow,
+            LaunchplaneSecretBindingRow,
+            LaunchplanePrivateHealthEndpointRow,
+            LaunchplaneRouteBindingRow,
+            LaunchplaneProviderTargetRow,
+        )
+        snapshots: dict[tuple[str, str], list[object]] = {}
+        contexts = {lane.context for profile in profiles for lane in profile.lanes}
+        if not contexts:
+            return {}
+        with self._session_factory() as session:
+            for row_type in lane_rows:
+                for context, instance, payload in session.execute(
+                    select(row_type.context, row_type.instance, row_type.payload).where(
+                        row_type.context.in_((*contexts, ""))
+                    )
+                ):
+                    snapshots.setdefault((context, instance), []).append(
+                        (row_type.__tablename__, payload)
+                    )
+            for context, instance, secret_id, version_id, status in session.execute(
+                select(
+                    LaunchplaneSecretRow.context,
+                    LaunchplaneSecretRow.instance,
+                    LaunchplaneSecretRow.secret_id,
+                    LaunchplaneSecretRow.current_version_id,
+                    LaunchplaneSecretRow.status,
+                ).where(LaunchplaneSecretRow.context.in_(contexts))
+            ):
+                snapshots.setdefault((context, instance), []).append(
+                    ("secret-version", secret_id, version_id, status)
+                )
+        from control_plane.workflows.generic_web_deploy_provider import (
+            decode_generic_web_provider_reconciliation_target,
+        )
+
+        for reservation in self.list_held_provider_target_reservations():
+            try:
+                target = decode_generic_web_provider_reconciliation_target(
+                    reservation.reconciliation_key
+                )
+            except ValueError:
+                continue
+            snapshots.setdefault((target.context, target.instance), []).append(
+                ("deploy-fence", reservation.record_id, reservation.state)
+            )
+        revisions = {}
+        for profile in profiles:
+            for lane in profile.lanes:
+                material = [
+                    profile.model_dump(mode="json"),
+                    *snapshots.get(("", ""), []),
+                    *snapshots.get((lane.context, ""), []),
+                    *snapshots.get((lane.context, lane.instance), []),
+                ]
+                # Sorting canonical fragments makes database row order irrelevant.
+                fragments = sorted(
+                    json.dumps(item, sort_keys=True, separators=(",", ":")) for item in material
+                )
+                revisions[(profile.product, lane.context, lane.instance)] = hashlib.sha256(
+                    "\n".join(fragments).encode()
+                ).hexdigest()
+        return revisions
 
     def __del__(self) -> None:
         with suppress(Exception):

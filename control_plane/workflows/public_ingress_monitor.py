@@ -647,6 +647,7 @@ def run_public_ingress_monitor_once(
     runtime_identity_confirmation_delay_seconds: float = 0,
     sleep: Callable[[float], None] = time.sleep,
     should_stop: Callable[[], bool] | None = None,
+    lane_keys: frozenset[tuple[str, str, str]] | None = None,
 ) -> PublicIngressMonitorResult:
     observed_at = checked_at.strip() or utc_now_timestamp()
     public_get = http_get or fetch_public_ingress_url
@@ -655,7 +656,11 @@ def run_public_ingress_monitor_once(
     profiles = tuple(
         profile for profile in record_store.list_product_profile_records() if profile.is_active
     )
-    targets = discover_public_ingress_monitor_targets(record_store, profiles=profiles)
+    targets = tuple(
+        target
+        for target in discover_public_ingress_monitor_targets(record_store, profiles=profiles)
+        if lane_keys is None or (target.product, target.context, target.instance) in lane_keys
+    )
     eligible_target_keys = {
         _monitor_target_key(target) for target in targets if target.incident_eligible
     }
@@ -722,6 +727,7 @@ def run_public_ingress_monitor_once(
         profiles=profiles,
         eligible_target_keys=eligible_target_keys,
         observed_at=observed_at,
+        lane_keys=lane_keys,
     ):
         _check_monitor_cancelled(should_stop)
         stored_transition = _store_monitor_observation(
@@ -771,10 +777,16 @@ def record_monitor_cadence(
     observed_at: str,
     notification_drivers: PublicIngressNotificationDrivers | None = None,
     should_stop: Callable[[], bool] | None = None,
+    lane_keys: frozenset[tuple[str, str, str]] | None = None,
 ) -> None:
     """Separate scheduler incidents, delivered only to each check's existing destinations."""
     for target in discover_public_ingress_monitor_targets(record_store):
         _check_monitor_cancelled(should_stop)
+        if (
+            lane_keys is not None
+            and (target.product, target.context, target.instance) not in lane_keys
+        ):
+            continue
         if not target.incident_eligible:
             continue
         check_name = f"{MONITOR_CADENCE_CHECK_PREFIX}{target.check_kind}:{target.check_name}"
@@ -969,10 +981,16 @@ def _monitoring_reconciliation_observations(
     profiles: tuple[LaunchplaneProductProfileRecord, ...],
     eligible_target_keys: set[tuple[str, str, str, str, str]],
     observed_at: str,
+    lane_keys: frozenset[tuple[str, str, str]] | None = None,
 ) -> tuple[tuple[PublicIngressObservationRecord, str], ...]:
     reconciliations: list[tuple[PublicIngressObservationRecord, str]] = []
     for profile in profiles:
         for lane in profile.lanes:
+            if (
+                lane_keys is not None
+                and (profile.product, lane.context, lane.instance) not in lane_keys
+            ):
+                continue
             open_incidents = record_store.list_public_ingress_incident_records(
                 product=profile.product,
                 context_name=lane.context,

@@ -699,7 +699,9 @@ class PublicIngressMonitorTests(unittest.TestCase):
                         notify=False,
                     )
                     self.assertEqual(result.fail_count, 0)
-                now = datetime(2026, 5, 29, 12, 45, tzinfo=timezone.utc)
+                now = datetime.fromisoformat(checked_at.replace("Z", "+00:00")) + timedelta(
+                    seconds=PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS / 2
+                )
                 verification = read_lane_runtime_verification(
                     record_store=store,
                     profile=profile,
@@ -851,7 +853,8 @@ class PublicIngressMonitorTests(unittest.TestCase):
             profile=profile,
             lane=profile.lanes[0],
             summary=summary,
-            now=datetime(2026, 5, 29, 12, 35, tzinfo=timezone.utc),
+            now=datetime.fromisoformat(checked_at.replace("Z", "+00:00"))
+            + timedelta(seconds=PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS / 2),
         )
         self.assertEqual(verification.provenance.freshness_status, "recorded")
         self.assertIsNotNone(verification.runtime_target)
