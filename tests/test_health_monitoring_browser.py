@@ -35,11 +35,11 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
                     "schema_version": 2,
                     "terminal_agents": [
                         {
-                            "subjects": ["*"],
-                            "token_labels": ["*"],
-                            "products": ["*"],
-                            "contexts": ["*"],
-                            "instances": ["*"],
+                            "subjects": ["fixture-reader"],
+                            "token_labels": ["fixture-read"],
+                            "products": ["odoo-product"],
+                            "contexts": ["cm"],
+                            "instances": ["testing"],
                         }
                     ],
                 }
