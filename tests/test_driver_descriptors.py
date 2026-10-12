@@ -59,7 +59,6 @@ from control_plane.odoo_prod_promotion_http import (
 )
 from control_plane.odoo_prod_rollback_http import ODOO_PROD_ROLLBACK_ROUTE
 from control_plane.odoo_stable_bootstrap_http import ODOO_STABLE_BOOTSTRAP_ROUTE
-from control_plane import verireel_nonprod_http, verireel_prod_http, verireel_read_http
 from control_plane.drivers.registry import (
     build_driver_context_view,
     effective_driver_actions,
@@ -301,10 +300,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     def test_registry_lists_product_drivers_without_provider_vocabulary(self) -> None:
         descriptors = list_driver_descriptors()
 
-        self.assertEqual(
-            [descriptor.driver_id for descriptor in descriptors],
-            ["generic-web", "ingress", "odoo", "verireel"],
-        )
         descriptor_json = json.dumps(
             [descriptor.model_dump(mode="json") for descriptor in descriptors], sort_keys=True
         )
@@ -398,28 +393,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
 
         self.assertEqual(view.drivers, ())
 
-    def test_verireel_context_view_is_derived_from_product_profile(self) -> None:
-        profile = _named_product_profile(
-            product="test-video-product",
-            display_name="Test Video Product",
-            driver_id="verireel",
-            context="test_video",
-        )
-
-        view = build_driver_context_view(
-            record_store=_ProfileStore(profile),
-            context_name="test_video",
-            instance_name="testing",
-        )
-
-        self.assertEqual(len(view.drivers), 1)
-        product_driver = view.drivers[0]
-        self.assertEqual(product_driver.driver_id, profile.product)
-        self.assertEqual(product_driver.descriptor.base_driver_id, "verireel")
-        action_ids = {action.action_id for action in product_driver.available_actions}
-        self.assertIn("preview_refresh", action_ids)
-        self.assertIn("prod_rollback", action_ids)
-
     def test_instance_driver_view_requires_profile_owned_lane(self) -> None:
         profile = _named_product_profile(
             product="test-odoo-primary",
@@ -504,16 +477,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             actions["prod_rollback_plan"].route_path,
             "/v1/drivers/generic-web/prod-rollback-plan",
         )
-
-    def test_verireel_descriptor_exposes_preview_and_stable_capabilities(self) -> None:
-        descriptor = read_driver_descriptor("verireel")
-        actions = {action.action_id: action for action in descriptor.actions}
-
-        self.assertEqual(descriptor.base_driver_id, "generic-web")
-        self.assertEqual(actions["preview_inventory"].safety, "read")
-        self.assertEqual(actions["preview_refresh"].scope, "preview")
-        self.assertEqual(actions["preview_destroy"].safety, "destructive")
-        self.assertEqual(actions["prod_rollback"].safety, "destructive")
 
     def test_generic_web_descriptor_is_provider_neutral_base_driver(self) -> None:
         descriptor = read_driver_descriptor("generic-web")
@@ -615,10 +578,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             all(route_metadata.authz_action for route_metadata in route_actions.values())
         )
         self.assertEqual(
-            route_actions["/v1/drivers/verireel/testing-verification"].authz_action,
-            "deployment.write",
-        )
-        self.assertEqual(
             route_actions[INGRESS_ROUTE_APPLY_ROUTE].alternate_authz_actions,
             ("ingress_route.plan",),
         )
@@ -630,16 +589,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(
             route_actions["/v1/drivers/generic-web/prod-promotion-workflow"].scope,
             "instance",
-        )
-        self.assertFalse(
-            route_actions["/v1/drivers/verireel/testing-verification"].operator_visible
-        )
-        self.assertEqual(
-            route_actions["/v1/drivers/verireel/preview-verification"].authz_action,
-            "preview_generation.write",
-        )
-        self.assertFalse(
-            route_actions["/v1/drivers/verireel/preview-verification"].operator_visible
         )
         self.assertEqual(
             route_actions["/v1/drivers/generic-web/preview-verification"].authz_action,
@@ -1177,87 +1126,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             route_paths_by_action={
                 "preview_apply": ODOO_PREVIEW_APPLY_ROUTE,
                 "preview_apply_inputs": ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
-            },
-        )
-
-    def test_verireel_prod_execution_metadata_matches_descriptors(self) -> None:
-        self.assert_route_metadata_matches_descriptor(
-            driver_id="verireel",
-            route_metadata_by_action={
-                "prod_deploy": (
-                    verireel_prod_http._VERIREEL_PROD_DEPLOY_ROUTE,
-                    verireel_prod_http.VeriReelProdDeployEnvelope,
-                    "prod deploy driver",
-                ),
-                "prod_promotion": (
-                    verireel_prod_http._VERIREEL_PROD_PROMOTION_ROUTE,
-                    verireel_prod_http.VeriReelProdPromotionEnvelope,
-                    "prod promotion driver",
-                ),
-                "prod_rollback": (
-                    verireel_prod_http._VERIREEL_PROD_ROLLBACK_ROUTE,
-                    verireel_prod_http.VeriReelProdRollbackEnvelope,
-                    "prod rollback driver",
-                ),
-            },
-        )
-
-    def test_verireel_stable_execution_metadata_matches_descriptors(self) -> None:
-        self.assert_route_metadata_matches_descriptor(
-            driver_id="verireel",
-            route_metadata_by_action={
-                "testing_deploy": (
-                    verireel_nonprod_http._VERIREEL_TESTING_DEPLOY_ROUTE,
-                    verireel_nonprod_http.VeriReelTestingDeployEnvelope,
-                    "testing deploy driver",
-                ),
-                "testing_verification": (
-                    verireel_read_http._VERIREEL_TESTING_VERIFICATION_ROUTE,
-                    verireel_read_http.VeriReelTestingVerificationEnvelope,
-                    "testing verification",
-                ),
-                "stable_environment": (
-                    verireel_read_http._VERIREEL_STABLE_ENVIRONMENT_ROUTE,
-                    verireel_read_http.VeriReelStableEnvironmentEnvelope,
-                    "stable environment",
-                ),
-                "runtime_verification": (
-                    verireel_read_http._VERIREEL_RUNTIME_VERIFICATION_ROUTE,
-                    verireel_read_http.VeriReelRuntimeVerificationEnvelope,
-                    "runtime verification driver",
-                ),
-                "app_maintenance": (
-                    verireel_nonprod_http._VERIREEL_APP_MAINTENANCE_ROUTE,
-                    verireel_nonprod_http.VeriReelAppMaintenanceEnvelope,
-                    "app maintenance driver",
-                ),
-            },
-        )
-
-    def test_verireel_preview_execution_metadata_matches_descriptors(self) -> None:
-        self.assert_route_metadata_matches_descriptor(
-            driver_id="verireel",
-            route_metadata_by_action={
-                "preview_refresh": (
-                    verireel_read_http._VERIREEL_PREVIEW_REFRESH_ROUTE,
-                    verireel_read_http.VeriReelPreviewRefreshEnvelope,
-                    "preview refresh driver",
-                ),
-                "preview_inventory": (
-                    verireel_read_http._VERIREEL_PREVIEW_INVENTORY_ROUTE,
-                    verireel_read_http.VeriReelPreviewInventoryEnvelope,
-                    "preview inventory",
-                ),
-                "preview_destroy": (
-                    verireel_read_http._VERIREEL_PREVIEW_DESTROY_ROUTE,
-                    verireel_read_http.VeriReelPreviewDestroyEnvelope,
-                    "preview destroy driver",
-                ),
-                "preview_verification": (
-                    verireel_read_http._VERIREEL_PREVIEW_VERIFICATION_ROUTE,
-                    verireel_read_http.VeriReelPreviewVerificationEnvelope,
-                    "preview verification",
-                ),
             },
         )
 

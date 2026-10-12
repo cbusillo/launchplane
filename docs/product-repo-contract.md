@@ -358,11 +358,54 @@ A product repo is approved when all of these are true:
 ## Odoo Ownership Regression Check
 
 Launchplane owns the Odoo ownership-boundary regression check. Run it from a
-workspace that contains `launchplane` and the Odoo sibling repos:
+workspace with explicit repository roots and family intent. Repeat `--repository`
+for every root in the caller's complete requested coverage:
 
 ```bash
-uv run launchplane odoo-ownership check --workspace-root ..
+uv run launchplane odoo-ownership check --workspace-root .. \
+  --repository odoo-tenant-example tenant \
+  --repository /path/to/image-checkout image
 ```
+
+There is no default repository catalog or name-based family discovery. Families
+are `tenant`, `image`, `shared_addons`, `devkit`, and `retired`; they select the
+existing generic rules. Relative roots resolve under `--workspace-root`
+(default: Launchplane's parent); absolute roots support independent worktrees.
+An existing checkout uses the same explicit input as a newly added tenant.
+Omitting all roots, repeating a root, or providing an unknown family is an
+input error. A pass applies only to the requested roots, never to all enrolled
+products; the caller supplies that complete list from its authoritative inventory.
+
+Text and JSON output report each requested root and family, whether coverage
+completed, and scanned and omitted file counts. Missing/non-directory roots,
+failed traversal, linked source directories, nonregular source files, and
+unreadable supported source files fail the check rather
+than silently passing. Root-level files use the same rules as nested files.
+Counts exclude unsupported file suffixes, ignored generated directories, and
+known local metadata (`.DS_Store`, `.coverage`, AppleDouble `._*` files), and
+private `.env`/`.env.*` inputs. Generated environments include `.venv`, `venv`,
+and `.tox`. Gitignored source scripts remain checked; a gitignore is not an
+ownership exemption;
+`omitted_file_count` counts supported files exempted by the existing path rules
+(docs, tests, addons, or explicit Python policy exceptions). An empty directory
+reports complete coverage with zero scanned files.
+
+Python callers supply `repo_policies` explicitly to
+`scan_odoo_ownership_boundaries`, using `OdooOwnershipRepoPolicy` for each root
+and family. The existing `allowed_path_globs` field supports scoped exceptions
+for a caller's reviewed transitional cleanup; it is never filled from a
+repository-name catalog. The CLI supplies the same explicit exceptions through
+repeatable `--allow-path ROOT GLOB`; ROOT must exactly match a requested ROOT.
+For example, `--repository odoo-devkit devkit --allow-path odoo-devkit
+odoo_devkit/workspace_surface.py` scopes an exception to that requested checkout.
+An exception is reported as omitted coverage, not checked source.
+
+This is a caller-scoped audit, not a whole-inventory CI lint gate. The caller's
+explicit request owns its coverage; build the complete ROOT/FAMILY inputs from
+the inventory being audited and retain them with the results. Launchplane does
+not infer local checkouts or auxiliary image/addon/devkit families from product
+names. The `.github/github.json` documentation route points here rather than
+publishing a second invocation or repository inventory.
 
 The check is intentionally narrow. It allows product-owned source, tests,
 artifact publishing, GHCR login, devkit local build/runtime behavior, and thin
@@ -771,21 +814,13 @@ non-prod deploy proof before deleting older local request-shaping scripts.
 
 ## Reusable Product-Driver Workflows
 
-Some products still need product-driver actions while their product-specific
-post-deploy, maintenance, backup, or rollback behavior is being generalized.
-Product repos should call Launchplane-owned product-driver reusable workflows
-instead of carrying local `request-launchplane-*` scripts. These workflows keep
-the driver route path, envelope JSON, output mapping, polling settings, and
-idempotency key in Launchplane while allowing the product repo to pass primitive
-facts such as product, context, instance, artifact id, source git ref, backup
-record id, and product-owned verification statuses. The route ids are
-Launchplane-owned driver routes; product repos should not derive them from
-product keys or keep local copies of route construction logic.
+Odoo retains the product-driver connectors below. VeriReel uses the
+[shared generic-web workflows](#reusable-generic-web-lifecycle-workflows) and declared
+[application extensions](driver-development.md). Its old stable/environment,
+verification, reset/readiness, promotion and rollback connectors are retired.
+The existing app-maintenance extension connector remains for testing and preview
+fixture repair; normal migrations and billing execute in the declared lifecycle.
 
-The product-driver workflow surface for stable deploy, stable environment, and
-app-maintenance defaults to the `testing` lane so a testing publish workflow can
-pass only the primitive facts it owns, such as immutable artifact identity,
-tested source git ref, and operation-level maintenance intent.
 The app-maintenance connector defaults to the VeriReel driver for compatibility,
 and callers can pass `driver: odoo` for the narrow Odoo post-deploy maintenance
 adapter backed by `/v1/drivers/odoo/app-maintenance`.
@@ -807,15 +842,9 @@ Launchplane-owned runtime verification.
 
 The product-driver reusable surface is:
 
-- `reusable-product-driver-stable-environment.yml@<launchplane-sha>`
-- `reusable-product-driver-runtime-verification.yml@<launchplane-sha>`
-- `reusable-product-driver-stable-deploy.yml@<launchplane-sha>`
 - `reusable-product-driver-app-maintenance.yml@<launchplane-sha>`
 - `reusable-product-driver-post-deploy.yml@<launchplane-sha>`
 - `reusable-product-driver-testing-deploy.yml@<launchplane-sha>`
-- `reusable-product-driver-testing-verification.yml@<launchplane-sha>`
-- `reusable-product-driver-testing-reset.yml@<launchplane-sha>`
-- `reusable-product-driver-prod-launch-readiness.yml@<launchplane-sha>`
 - `reusable-product-driver-prod-promotion.yml@<launchplane-sha>`
 - `reusable-product-driver-prod-rollback.yml@<launchplane-sha>`
 
@@ -836,8 +865,7 @@ operations; product repos should not use it as a generic phase-aware post-deploy
 substitute. The old Odoo-specific post-deploy reusable has been retired after
 tenant callers moved to the product-driver wrapper.
 
-`reusable-product-driver-prod-rollback.yml@<launchplane-sha>` keeps the existing VeriReel
-rollback surface as its compatibility default and also supports explicit
+`reusable-product-driver-prod-rollback.yml@<launchplane-sha>` supports explicit
 `driver: odoo` callers. Odoo rollback callers pass the same primitive rollback
 facts as the older Odoo-specific reusable: explicit `product`, explicit
 `context`, `artifact_id`, optional `promotion_record_id`, and `reason`. The
@@ -848,23 +876,13 @@ route, payload envelope, output mapping, fail-result paths, and legacy
 `opr:<context>:<run>` idempotency key shape so tenant repos do not keep Odoo
 rollback request construction locally.
 
-`reusable-product-driver-prod-promotion.yml@<launchplane-sha>` keeps the existing VeriReel
-promotion surface as its compatibility default and also supports explicit
+`reusable-product-driver-prod-promotion.yml@<launchplane-sha>` supports explicit
 `driver: odoo` callers. Odoo promotion callers pass the same primitive facts as
 the older Odoo-specific reusable: explicit `product` and explicit `context`.
 The wrapper owns the `/v1/drivers/odoo/prod-promotion-run` route, request ID,
 payload envelope, output mapping, fail-result paths, and legacy
 `opp:<context>:<run>` idempotency key shape so tenant repos do not keep Odoo
 promotion request construction locally.
-
-When a workflow operation has implied lane or maintenance semantics, prefer an
-operation-level reusable workflow over passing checked-in lane, action, or
-intent strings from the product repository. For example, a product repo should
-call `reusable-product-driver-testing-reset.yml@<launchplane-sha>` rather than wiring
-`instance: testing`, `action: reset-testing`, and `intent:
-stable-testing-reset` itself. Product-owned smoke checks may still consume
-Launchplane reusable outputs, such as a resolved `primary_base_url`, as
-pass-through evidence for product behavior checks.
 
 Generated-user smoke setup that must happen inside a product browser flow should
 use `setup-smoke-maintenance-client@<launchplane-sha>` instead of a workflow-level

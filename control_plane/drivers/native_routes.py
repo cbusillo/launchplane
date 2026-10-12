@@ -58,24 +58,6 @@ from control_plane.odoo_prod_rollback_http import ODOO_PROD_ROLLBACK_ROUTE
 from control_plane.odoo_stable_bootstrap_http import ODOO_STABLE_BOOTSTRAP_ROUTE
 from control_plane.odoo_target_replacement_apply_http import ODOO_TARGET_REPLACEMENT_APPLY_ROUTE
 from control_plane.odoo_target_replacement_plan_http import ODOO_TARGET_REPLACEMENT_PLAN_ROUTE
-from control_plane.verireel_nonprod_http import (
-    _VERIREEL_APP_MAINTENANCE_ROUTE,
-    _VERIREEL_TESTING_DEPLOY_ROUTE,
-)
-from control_plane.verireel_prod_http import (
-    _VERIREEL_PROD_DEPLOY_ROUTE,
-    _VERIREEL_PROD_PROMOTION_ROUTE,
-    _VERIREEL_PROD_ROLLBACK_ROUTE,
-)
-from control_plane.verireel_read_http import (
-    _VERIREEL_PREVIEW_DESTROY_ROUTE,
-    _VERIREEL_PREVIEW_INVENTORY_ROUTE,
-    _VERIREEL_PREVIEW_REFRESH_ROUTE,
-    _VERIREEL_PREVIEW_VERIFICATION_ROUTE,
-    _VERIREEL_RUNTIME_VERIFICATION_ROUTE,
-    _VERIREEL_STABLE_ENVIRONMENT_ROUTE,
-    _VERIREEL_TESTING_VERIFICATION_ROUTE,
-)
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 
 _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
@@ -93,18 +75,6 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
         _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
-        _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path,
-        _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
-        _VERIREEL_PREVIEW_REFRESH_ROUTE.route_path,
-        _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
-        _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
-        _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
-        _VERIREEL_TESTING_DEPLOY_ROUTE.route_path,
-        _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path,
-        _VERIREEL_APP_MAINTENANCE_ROUTE.route_path,
-        _VERIREEL_PROD_DEPLOY_ROUTE.route_path,
-        _VERIREEL_PROD_PROMOTION_ROUTE.route_path,
-        _VERIREEL_PROD_ROLLBACK_ROUTE.route_path,
         INGRESS_ROUTE_APPLY_ROUTE,
         ODOO_ARTIFACT_PUBLISH_ROUTE,
         ODOO_APP_MAINTENANCE_ROUTE,

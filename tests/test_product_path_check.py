@@ -647,18 +647,23 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
             self.assertEqual(_steps(self.check())["rollback_target"][0], "clear")
         read.assert_not_called()
 
-    def test_custom_rollback_driver_is_unknown_without_generic_grant_or_target_reads(self) -> None:
-        self.profile = self.profile.model_copy(update={"driver_id": "verireel"})
+    def test_unknown_rollback_driver_reads_no_grant_or_target(self) -> None:
+        self.profile = self.profile.model_copy(update={"driver_id": "unrecorded-driver"})
         with patch.object(
             self.store, "read_environment_inventory", side_effect=AssertionError("wrong driver")
         ) as read:
             check = self.check()
         self.assertEqual(getattr(check, "state"), "unknown")
         self.assertEqual(
-            _steps(check)["rollback_route"], ("unknown", "rollback_driver_unchecked", "code")
+            _steps(check)["rollback_route"], ("unknown", "rollback_driver_unread", "wait")
         )
         self.actions.assert_not_called()
         read.assert_not_called()
+
+    def test_retired_rollback_driver_has_a_supported_transition_next_step(self) -> None:
+        self.profile = self.profile.model_copy(update={"driver_id": "verireel"})
+        self.assertEqual(getattr(self.check(), "state"), "blocked")
+        self.actions.assert_not_called()
 
     def test_driver_without_rollback_route_is_blocked(self) -> None:
         self.profile = self.profile.model_copy(update={"driver_id": "ingress"})

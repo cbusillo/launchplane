@@ -11,7 +11,7 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     _generic_web_preview_anchor_pr_url,
     _generic_web_preview_anchor_repo,
 )
-from control_plane.verireel_read_http import (
+from control_plane.drivers.verireel_postgres_transport import (
     VeriReelPreviewDestroyEnvelope,
     VeriReelPreviewRefreshEnvelope,
     apply_verireel_preview_destroy_result,
@@ -222,9 +222,7 @@ def apply_generic_web_preview_driver_destroy(
 
 
 def _uses_verireel_transport(profile: LaunchplaneProductProfileRecord) -> bool:
-    # Existing profiles remain operational until the testing-first transition.
-    # Generic-web profiles select their genuine product extension explicitly.
     return (
         profile.driver_id == "generic-web"
         and profile.preview.transport_extension == "verireel-postgres"
-    ) or (profile.driver_id == "verireel" and not profile.preview.transport_extension)
+    )

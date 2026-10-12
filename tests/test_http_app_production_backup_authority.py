@@ -374,7 +374,7 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
                     "product": "example-product",
                     "context": "example-product",
                     "instance": "prod",
-                    "promotion_action": "verireel_prod_promotion.execute",
+                    "promotion_action": "generic_web_prod_promotion.execute",
                 }
             )
             missing = await http_get(
