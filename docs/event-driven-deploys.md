@@ -154,7 +154,7 @@ reservation. The webhook request never waits on a deploy.
     existing testing deploy surface after resolving the recorded failure; no grant
     is added for a retry. Interrupted effects retain the existing provider
     reservation and generic-web recovery path. After interruption, the recovery
-    operator can derive the reserved fixture email from the deployment ID using
+    admin can derive the reserved fixture email from the deployment ID using
     `fixture_email`; no cleanup mutation runs after its effect fence is lost.
     No new caller capability or
     product-repository call-in is involved. Production and rollback do not select

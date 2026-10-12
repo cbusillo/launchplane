@@ -248,7 +248,10 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
             },
         ):
             launch_testing_browser(chromium)
-        chromium.connect.assert_called_once_with(endpoint)
+        chromium.connect.assert_called_once()
+        self.assertEqual(chromium.connect.call_args.args, (endpoint,))
+        self.assertEqual(set(chromium.connect.call_args.kwargs), {"timeout"})
+        self.assertGreater(chromium.connect.call_args.kwargs["timeout"], 0)
         chromium.launch.assert_not_called()
 
     def test_linux_refuses_to_render_inside_the_credentialed_service(self) -> None:
