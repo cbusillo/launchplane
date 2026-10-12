@@ -8,6 +8,7 @@ unknown.
 """
 
 from collections.abc import Callable
+import json
 from pathlib import Path
 from typing import Literal, cast
 import unittest
@@ -543,8 +544,7 @@ class DokployProviderIdentityTests(unittest.TestCase):
 
         def before_write(**kwargs: object) -> None:
             pending = store.read_deployment_record(record_id)
-            evidence = pending.post_deploy_update.evidence["provider_dispatch"]
-            assert isinstance(evidence, dict)
+            evidence = json.loads(pending.post_deploy_update.evidence["provider_dispatch"])
             target = adapter._resolve_deploy_target()
             self.assertEqual(pending.resolved_target, target.resolved_target)
             self.assertEqual(pending.source_git_ref, target.ship_request.source_git_ref)

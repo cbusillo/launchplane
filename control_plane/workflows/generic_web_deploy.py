@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 from pathlib import Path
 from typing import Callable, Literal, Protocol, cast
 
@@ -605,7 +606,9 @@ def execute_generic_web_deploy(
                 update={
                     "evidence": {
                         **post_deploy_update.evidence,
-                        "provider_dispatch": prepared_deploy_target.provider_dispatch_evidence,
+                        "provider_dispatch": json.dumps(
+                            prepared_deploy_target.provider_dispatch_evidence, sort_keys=True
+                        ),
                     }
                 }
             )
