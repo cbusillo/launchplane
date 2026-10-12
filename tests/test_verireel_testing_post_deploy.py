@@ -108,7 +108,7 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
     def execute(self) -> PostDeployUpdateEvidence:
         return execute_verireel_testing_post_deploy(
             Path("."),
-            cast(GenericWebDeployStore, self.store),
+            cast(GenericWebDeployStore, cast(object, self.store)),
             self.context,
             GenericWebPostDeployGuard(),
         )

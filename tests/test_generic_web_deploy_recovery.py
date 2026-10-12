@@ -18,6 +18,7 @@ from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
 )
+from control_plane.provider_operations import ProviderOperationLease
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
@@ -430,7 +431,9 @@ class GenericWebQualificationRecoveryKeyTests(unittest.TestCase):
                     )
                     self.assertTrue(evidence.identity_matches)
                     self.assertEqual(adapter.reconciliation_key(), original_key)
-                    adapter.apply("operation-recovery-key", Mock())
+                    adapter.apply(
+                        "operation-recovery-key", cast(ProviderOperationLease, cast(object, Mock()))
+                    )
                     self.assertEqual(
                         execute.call_args.kwargs["post_deploy_authority_digest"],
                         reserved_digest or "current-authority",
