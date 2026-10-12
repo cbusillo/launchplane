@@ -185,6 +185,20 @@ def register_production_backup_credential_routes(
         try:
             plan, replacements = plan_credential_bindings(profile, records, bindings, body)
         except ValueError as error:
+            if body.mode == "apply":
+                replay = store.prepare_db_only_mutation(
+                    scope=scope,
+                    route_path=CREDENTIAL_APPLY_ROUTE,
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=fingerprint,
+                )
+                if replay.status == "replayed":
+                    assert replay.record is not None
+                    return replay_idempotent_response(
+                        trace_id=trace,
+                        stored_record=replay.record,
+                        route_path=CREDENTIAL_APPLY_ROUTE,
+                    )
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace,

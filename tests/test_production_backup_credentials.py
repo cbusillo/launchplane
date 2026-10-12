@@ -355,3 +355,25 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
                         for command in host.commands
                     )
                 )
+
+    async def test_completed_original_replays_after_source_invalidates_during_retry(self) -> None:
+        body = await self.reviewed()
+        applied = await self.post(body, "completed")
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.store.write_secret_record(self.originals[0].model_copy(update={"status": "disabled"}))
+        prepare = self.store.prepare_db_only_mutation
+        first = True
+
+        def earlier_preflight(**kwargs: Any) -> Any:
+            nonlocal first
+            result = prepare(**kwargs)
+            if first:
+                first = False
+                return result.model_copy(update={"status": "missing", "record": None})
+            return result
+
+        with patch.object(self.store, "prepare_db_only_mutation", side_effect=earlier_preflight):
+            replay = await self.post(body, "completed")
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        self.assertEqual(replay.json()["original_trace_id"], applied.json()["trace_id"])

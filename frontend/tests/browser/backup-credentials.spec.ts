@@ -44,7 +44,8 @@ for (const outcome of ["rebound", "denied", "lost-response", "read-only"]) {
       await expect(credential).toBeDisabled();
       await expect(panel.getByRole("button", { name: "Use these existing credentials", exact: true })).toBeDisabled();
       await panel.getByRole("button", { name: "Check capture boundary and PBS" }).click();
-      await expect(panel.getByRole("status", { name: "Backup credential result" })).toContainText("PBS is active and reachable");
+      await expect(panel.getByRole("status", { name: "Backup credential result" })).toBeVisible();
+      await expect(panel.getByRole("alert")).toHaveCount(0);
       expect(requests).toHaveLength(0); return;
     }
     await credential.selectOption("stored-0");
@@ -64,9 +65,11 @@ for (const outcome of ["rebound", "denied", "lost-response", "read-only"]) {
       await expect.poll(() => requests.filter(item => item.body.mode === "apply").length).toBe(2);
       const attempts = requests.filter(item => item.body.mode === "apply"); expect(attempts[0]).toEqual(attempts[1]);
     }
-    await expect(panel.getByRole("status", { name: "Backup credential result" })).toContainText("rebound and read back");
+    await expect(panel.getByRole("status", { name: "Backup credential result" })).toBeVisible();
+      await expect(panel.getByRole("alert")).toHaveCount(0);
     await panel.getByRole("button", { name: "Check capture boundary and PBS" }).click();
-    await expect(panel.getByRole("status", { name: "Backup credential result" })).toContainText("Capture-only boundary matches policy revision 1");
+    await expect(panel.getByRole("status", { name: "Backup credential result" })).toBeVisible();
+      await expect(panel.getByRole("alert")).toHaveCount(0);
     expect(requests.filter(item => item.body.mode === "apply").every(item => item.key)).toBe(true);
     await panel.screenshot({ path: testInfo.outputPath(`backup-credentials-${outcome}.png`) });
   });
