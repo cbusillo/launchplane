@@ -1,13 +1,14 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+from itertools import chain, repeat
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from pydantic import ValidationError
-from sqlalchemy import text, update
+from sqlalchemy import insert, select, text, update
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -187,6 +188,79 @@ class StoredRecordSnapshotTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.store.export_stored_record_snapshot()
 
+    def test_large_source_history_exports_every_row_within_scrubbed_bound(self) -> None:
+        with self.store._engine.begin() as connection:
+            payload = self.store.list_authz_policy_records()[0].model_dump(mode="json")
+            payload["audit"] = {"private_note": "plaintext-sentinel" * 1000}
+            connection.execute(update(LaunchplaneAuthzPolicyRow).values(payload=payload))
+            historical = dict(
+                payload, record_id="historical-policy", status="superseded", revision=2
+            )
+            connection.execute(
+                insert(LaunchplaneAuthzPolicyRow).values(
+                    record_id=historical["record_id"],
+                    status=historical["status"],
+                    source=historical["source"],
+                    revision=historical["revision"],
+                    updated_at=historical["updated_at"],
+                    policy_sha256=historical["policy_sha256"],
+                    payload=historical,
+                )
+            )
+        with self.store._engine.connect() as connection:
+            source_sizes = [
+                len(json.dumps(dict(row)).encode())
+                for row in connection.execute(
+                    select(LaunchplaneAuthzPolicyRow.__table__)
+                ).mappings()
+            ]
+        byte_bound = max(source_sizes) + 1024
+        self.assertGreater(sum(source_sizes), byte_bound)
+        # Each row fits, and the scrubbed export fits, but cumulative raw data does not.
+        with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", byte_bound):
+            snapshot = self.store.export_stored_record_snapshot()
+        rows = snapshot.tables[LaunchplaneAuthzPolicyRow.__tablename__]
+        self.assertEqual({row["status"] for row in rows}, {"active", "superseded"})
+        self.assertEqual(len(rows), 2)
+        self.assertLess(len(snapshot.model_dump_json().encode()), byte_bound)
+        self.assertNotIn("plaintext-sentinel", snapshot.model_dump_json())
+
+    def test_oversized_source_row_refuses_with_safe_family_and_budget_diagnostics(self) -> None:
+        from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
+
+        with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", 1):
+            with self.assertRaises(ValueError) as raised:
+                self.store.export_stored_record_snapshot()
+        diagnostics = snapshot_failure_diagnostics(raised.exception)
+        self.assertEqual(diagnostics["reason"], "snapshot_source_row_byte_limit")
+        self.assertEqual(diagnostics["record_family"], LaunchplaneAuthzPolicyRow.__tablename__)
+        self.assertGreater(diagnostics["source_row_bytes"], 1)
+        self.assertEqual(diagnostics["rows_exported"], 0)
+        self.assertNotIn("plaintext-sentinel", json.dumps(diagnostics))
+
+    def test_scrubbed_output_growth_refuses_before_accumulating_more_rows(self) -> None:
+        from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
+
+        with self.store._engine.begin() as connection:
+            payload = self.store.list_authz_policy_records()[0].model_dump(mode="json")
+            payload["audit"] = {"private_numbers": [1] * 500}
+            connection.execute(update(LaunchplaneAuthzPolicyRow).values(payload=payload))
+        # Use the same synthetic salt when measuring and exercising the bound;
+        # random numeric pseudonym widths must not change between these exports.
+        with patch(
+            "control_plane.stored_record_snapshot.secrets.token_bytes", return_value=b"test"
+        ):
+            snapshot = self.store.export_stored_record_snapshot()
+            row = snapshot.tables[LaunchplaneAuthzPolicyRow.__tablename__][0]
+            byte_bound = len(json.dumps(row, separators=(",", ":")).encode()) - 1
+            with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", byte_bound):
+                with self.assertRaises(ValueError) as raised:
+                    self.store.export_stored_record_snapshot()
+        diagnostics = snapshot_failure_diagnostics(raised.exception)
+        self.assertEqual(diagnostics["reason"], "snapshot_byte_limit")
+        self.assertLess(diagnostics["source_row_bytes"], byte_bound)
+        self.assertEqual(diagnostics["rows_exported"], 0)
+
     def test_legacy_dictionary_keys_and_policy_key_relationship_survive(self) -> None:
         from control_plane.stored_record_snapshot import _Scrubber
 
@@ -216,18 +290,83 @@ class StoredRecordSnapshotTests(unittest.TestCase):
     def test_failure_diagnostics_exclude_validation_inputs(self) -> None:
         from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
 
-        try:
+        with self.assertRaises(ValidationError) as raised:
             LaunchplaneAuthzPolicyRecord.model_validate(
                 {"unexpected-private-key": "plaintext-sentinel"}
             )
-        except ValidationError as error:
-            diagnostics = json.dumps(snapshot_failure_diagnostics(error))
+        diagnostics = json.dumps(snapshot_failure_diagnostics(raised.exception))
         self.assertNotIn("plaintext-sentinel", diagnostics)
         self.assertNotIn("unexpected-private-key", diagnostics)
 
+    def test_expired_export_budget_reports_time_without_record_inputs(self) -> None:
+        from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
+
+        with patch(
+            "control_plane.stored_record_snapshot.monotonic",
+            side_effect=chain([0], repeat(1_000_000)),
+        ):
+            with self.assertRaises(ValueError) as raised:
+                self.store.export_stored_record_snapshot()
+        diagnostics = snapshot_failure_diagnostics(raised.exception)
+        self.assertEqual(diagnostics["reason"], "snapshot_time_limit")
+        self.assertEqual(diagnostics["rows_exported"], 0)
+        self.assertNotIn("plaintext-sentinel", json.dumps(diagnostics))
+
+    def test_database_statement_timeout_reports_reason_without_sql_or_inputs(self) -> None:
+        from psycopg.errors import QueryCanceled
+        from sqlalchemy.exc import OperationalError
+        from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
+
+        error = OperationalError(
+            "private-sql", {"private-key": "plaintext-sentinel"}, QueryCanceled("private-value")
+        )
+        diagnostics = snapshot_failure_diagnostics(error)
+        self.assertEqual(diagnostics["reason"], "snapshot_statement_canceled")
+        self.assertNotIn("private", json.dumps(diagnostics))
+        self.assertNotIn("plaintext-sentinel", json.dumps(diagnostics))
+
+    def test_subsecond_statement_budget_is_preserved_and_never_disabled(self) -> None:
+        from control_plane.stored_record_snapshot import _statement_timeout_ms
+
+        for remaining in (1, 20, 999):
+            with self.subTest(remaining=remaining):
+                self.assertEqual(_statement_timeout_ms(remaining), remaining)
+        for remaining in (1000, 1999, 20_000):
+            with self.subTest(remaining=remaining):
+                self.assertGreater(_statement_timeout_ms(remaining), 0)
+                self.assertLessEqual(_statement_timeout_ms(remaining), remaining)
+
+    def test_numeric_identity_cache_does_not_retain_large_source_strings(self) -> None:
+        import gc
+        import tracemalloc
+        from control_plane.stored_record_snapshot import _Scrubber
+
+        gc.collect()
+        already_tracing = tracemalloc.is_tracing()
+        if not already_tracing:
+            tracemalloc.start()
+        try:
+            baseline = tracemalloc.get_traced_memory()[0]
+            scrubber = _Scrubber()
+            source_value_size = 64 * 1024
+            for index in range(64):
+                value = str(index) + "0" * source_value_size
+                self.assertEqual(scrubber.number(value), scrubber.number(value))
+            del value
+            retained = tracemalloc.get_traced_memory()[0] - baseline
+            self.assertLess(retained, source_value_size * 4)
+        finally:
+            if not already_tracing:
+                tracemalloc.stop()
+
     def test_train_run_history_samples_latest_without_deleting_source_records(self) -> None:
-        earlier = _merge_train_run_record(recorded_at="2026-05-09T02:05:00Z")
-        later = _merge_train_run_record(recorded_at="2026-05-10T02:05:00Z")
+        earlier = _merge_train_run_record()
+        later = _merge_train_run_record(
+            recorded_at=(
+                datetime.fromisoformat(earlier.recorded_at.replace("Z", "+00:00"))
+                + timedelta(days=1)
+            ).isoformat()
+        )
         later = later.model_copy(update={"run_id": "later"})
         self.store.write_merge_train_run_record(earlier)
         self.store.write_merge_train_run_record(later)
