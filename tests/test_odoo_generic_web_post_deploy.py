@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from control_plane.workflows.generic_web_post_deploy import (
+    generic_web_post_deploy_executor_for_driver_id,
+)
+
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
@@ -19,7 +23,6 @@ from control_plane.workflows.generic_web_deploy import (
 )
 from control_plane.workflows.odoo_generic_web_post_deploy import (
     execute_odoo_generic_web_post_deploy,
-    generic_web_post_deploy_executor_for_driver_id,
 )
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 

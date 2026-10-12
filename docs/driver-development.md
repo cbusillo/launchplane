@@ -88,7 +88,45 @@ the underlying image deploy as `pass` and the post-deploy evidence as `fail`.
 Launchplane wires this extension for Odoo profiles when they execute generic-web
 deploy or rollback apply, so Odoo can reuse common provider deployment while its
 post-deploy maintenance remains explicit driver behavior.
-VeriReel's generic-web extension is selected only for testing deploys. It runs
+
+Generic-web lanes can declare application maintenance commands and recurring
+schedules in `generic_web_extensions`; their typed contract is
+[`GenericWebLaneExtensions`](../control_plane/contracts/generic_web_extensions.py).
+These are product profile records, not Launchplane build inputs or checked-in
+product catalogs. The deploy provider must implement the application lifecycle
+protocol; the current implementation supports Dokploy applications and refuses
+other targets before any mutation. Generic deploy, promotion and rollback share
+this path. Empty declarations retain existing profile serialization and behavior.
+
+The lifecycle pauses existing declared schedules before deploying, runs the
+declared maintenance before product post-deploy verification, then runs each
+enabled schedule once as a canary before enabling its recurring invocation.
+Disabled schedules remain disabled. Provider readback must match the exact
+application and schedule. Failure before an image effect restores original
+schedules under the same effect fence; failure after an image effect holds jobs
+disabled until a qualified rollback. Both record failed post-deploy evidence. A lost fence
+cannot perform restoration, and runtime-image evidence alone cannot close out
+an operation whose application lifecycle remains unobserved. Managed cron
+expressions use the grammar in [`control_plane/cron.py`](../control_plane/cron.py).
+Testing retry authority includes the declaration, so repaired commands do not
+replay a previous failed attempt. Command text names an executable in the
+product artifact; runtime settings and managed bindings supply its secrets.
+
+Preview profiles using driver data transport can explicitly select the
+`verireel-postgres` transport extension through `transport_extension` while their
+driver is `generic-web`, declaring its isolated database namespace through
+`transport_database_prefix`. The template lane, application prefix, database
+namespace and runtime product identity come from the profile. This uses the existing isolated PostgreSQL preparation
+and cleanup rather than the plain preview path. Existing VeriReel profiles retain
+their current dispatch until their supported testing transition is qualified.
+This source capability does not change a live profile or production artifact.
+
+A generic-web testing lane selects `verification_extension="verireel-testing"`
+in `generic_web_extensions` to reuse VeriReel's migration and creator/admin
+qualification. The preset accepts only a recorded testing lane and exact
+reserved application target; other lanes and an absent executor are refused
+before deployment. Legacy VeriReel profiles retain their existing testing
+selection until the qualified profile transition. The extension runs
 the existing `stable-testing-migration` maintenance intent, then verifies a
 disposable creator's QR/public flow, creator denial of admin pages, and the admin
 pages after the existing smoke-maintenance intent elevates that fixture. Cleanup
@@ -389,3 +427,41 @@ reports only the product smoke result to
 `/v1/drivers/verireel/preview-verification`. Event-driven previews replace that:
 Launchplane's own health check of the expected build marks the preview ready
 (#2740).
+
+Lifecycle declarations are qualified with the deployed artifact, not merely the
+provider's image status. Before pausing recurring jobs, the shared deploy writes
+a target- and artifact-bound receipt containing their original definitions.
+An interrupted attempt resumes from that receipt under the same provider
+operation. A failed migration or canary keeps recurring jobs disabled on the
+unqualified image; promotion fails and restores the previous artifact. Rollback
+skips the new artifact's maintenance commands and canaries the recorded previous
+schedules before enabling them. Removing a declaration also removes its
+previously managed schedule after qualification, while unrelated jobs are left
+alone. Editing a profile cannot remove the qualification required by an existing
+deployment receipt.
+
+For declared preview transport, `preview.app_name_suffix` is part of the resource
+name used by creation, inventory and destruction. Existing VeriReel applications
+use `-app`; record that suffix explicitly when switching its profile. The named
+`verireel-postgres` transport retains VeriReel's Prisma, seed and environment
+interfaces while its template lane, product identity and resource prefixes come
+from the profile. It does not imply compatibility with other applications.
+
+A reservation keeps its original lifecycle declaration. Changing a declaration
+requires a new operation after exact recovery of the previous attempt; refusal
+does not erase that attempt's receipt. Held snapshots remain available even
+when the interrupted attempt never reached environment inventory.
+
+A refusal before an image change records whether schedule undo succeeded. A
+restored attempt does not make the still-running release unqualified. Standalone
+rollback keeps a separate snapshot of the current jobs so a pre-image refusal
+restores them; rollback after a failed promotion keeps jobs paused. Older rollback
+targets reuse the historical receipt that actually captured that artifact's
+baseline, rather than borrowing the current artifact's declarations. A profile
+declaration alone does not add lifecycle work to a pre-extension rollback.
+
+If provider deployment evidence is absent but the exact attempt's receipt proves
+that a pre-image refusal restored all schedules, recovery may retry the original
+operation. A different attempt or an unqualified/failed-restoration receipt does
+not supply that proof. Testing rollback selects the same declared qualification
+executor as a forward testing deploy.

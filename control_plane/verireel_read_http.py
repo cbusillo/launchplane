@@ -300,6 +300,7 @@ def resolve_verireel_driver_context(
     context: str = "",
     instance: str = "",
     require_profile: bool = False,
+    allow_declared_preview_transport: bool = False,
 ) -> VeriReelResolvedDriverContext:
     normalized_product = product.strip()
     if normalized_product == "verireel" and not require_profile:
@@ -315,7 +316,12 @@ def resolve_verireel_driver_context(
         raise VeriReelRouteDependencyError from error
     if not isinstance(profile, LaunchplaneProductProfileRecord):
         profile = LaunchplaneProductProfileRecord.model_validate(profile)
-    if profile.driver_id.strip() != "verireel":
+    declared_transport = (
+        allow_declared_preview_transport
+        and profile.driver_id.strip() == "generic-web"
+        and profile.preview.transport_extension == "verireel-postgres"
+    )
+    if profile.driver_id.strip() != "verireel" and not declared_transport:
         try:
             descriptor = read_driver_descriptor(profile.driver_id.strip())
         except FileNotFoundError as error:
@@ -386,6 +392,7 @@ def apply_verireel_preview_refresh_result(
     control_plane_root: Path,
     record_store: object,
     request: VeriReelPreviewRefreshEnvelope,
+    execution_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     preview_id = resolve_launchplane_preview_id(
         context=request.refresh.context,
@@ -409,7 +416,10 @@ def apply_verireel_preview_refresh_result(
             try:
                 try:
                     resolved = resolve_verireel_driver_context(
-                        record_store=record_store, product=request.product, require_profile=True
+                        record_store=record_store,
+                        product=request.product,
+                        require_profile=True,
+                        allow_declared_preview_transport=True,
                     )
                 except (VeriReelRouteDependencyError, VeriReelProductMismatchError) as error:
                     raise LaneMovementRefused("source_authority_unavailable") from error
@@ -459,6 +469,7 @@ def apply_verireel_preview_refresh_result(
                 request=request.refresh,
                 preview_id=generation_identity.preview_id,
                 preview_generation_id=generation_identity.generation_id,
+                **({"profile": execution_profile} if execution_profile is not None else {}),
             )
         except VeriReelPreviewRefreshConfigError as error:
             now = utc_now_timestamp()
@@ -489,10 +500,12 @@ def apply_verireel_preview_destroy_result(
     control_plane_root: Path,
     record_store: object,
     request: VeriReelPreviewDestroyEnvelope,
+    execution_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     driver_result = execute_verireel_preview_destroy(
         control_plane_root=control_plane_root,
         request=request.destroy,
+        **({"profile": execution_profile} if execution_profile is not None else {}),
     )
     records = apply_verireel_preview_destroy_records(
         record_store=record_store,

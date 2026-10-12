@@ -661,6 +661,26 @@ export type ExistingDeliveryKey = {
     secret_id: string;
 };
 
+export type GenericWebApplicationSchedule = {
+    command: string;
+    cron_expression: string;
+    enabled: boolean;
+    name: string;
+    timeout_seconds: number;
+};
+
+export type GenericWebLaneExtensions = {
+    maintenance: Array<GenericWebMaintenanceCommand>;
+    schedules: Array<GenericWebApplicationSchedule>;
+    verification_extension?: '' | 'verireel-testing';
+};
+
+export type GenericWebMaintenanceCommand = {
+    command: string;
+    name: string;
+    timeout_seconds: number;
+};
+
 export type GenericWebProdPromotionRecords = {
     backup_record_id: string;
     backup_status: string;
@@ -3154,6 +3174,7 @@ export type ProductLaneHealthMonitoringPolicy = {
 export type ProductLaneProfile = {
     base_url: string;
     context: string;
+    generic_web_extensions?: GenericWebLaneExtensions;
     health_monitoring: ProductLaneHealthMonitoringPolicy;
     health_url: string;
     instance: string;
@@ -3380,6 +3401,7 @@ export type ProductOwnerSecretInput = {
 
 export type ProductPreviewProfile = {
     app_name_prefix: string;
+    app_name_suffix?: string;
     context: string;
     copied_env_keys: Array<string>;
     data_transport_mode: 'none' | 'driver';
@@ -3398,6 +3420,8 @@ export type ProductPreviewProfile = {
     required_template_env_keys: Array<string>;
     slug_template: string;
     template_instance: string;
+    transport_database_prefix?: string;
+    transport_extension?: '' | 'verireel-postgres';
 };
 
 export type ProductPreviewReference = {
@@ -4815,6 +4839,7 @@ export type OwnerSecretInputEnvelopeWritable = {
 
 export type ProductPreviewProfileWritable = {
     app_name_prefix: string;
+    app_name_suffix?: string;
     context: string;
     copied_env_keys: Array<string>;
     data_transport_mode: 'none' | 'driver';
@@ -4830,6 +4855,8 @@ export type ProductPreviewProfileWritable = {
     required_template_env_keys: Array<string>;
     slug_template: string;
     template_instance: string;
+    transport_database_prefix?: string;
+    transport_extension?: '' | 'verireel-postgres';
 };
 
 export type ProductProfileListResponseWritable = {

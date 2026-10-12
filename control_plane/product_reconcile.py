@@ -10,6 +10,8 @@ the plan on its request.
 
 from __future__ import annotations
 
+from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
+
 from control_plane.event_testing_deploy import event_testing_deploy_request
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.lane_movement import (
@@ -485,7 +487,10 @@ def reconcile_testing_target(
     )
     if (
         isinstance(desired, VerifiedGenericWebBuild)
-        and profile.driver_id == "verireel"
+        and (
+            profile.driver_id == "verireel"
+            or declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE)
+        )
         and plan.get("reason") == "already_deployed"
     ):
         from control_plane.workflows.verireel_testing_post_deploy import (
@@ -928,6 +933,11 @@ def _generic_web_testing_authority(
                 "target": target_authority,
                 "provider_target": provider_authority,
                 "target_id": target_id_authority,
+                **(
+                    {"application_lifecycle": lane.generic_web_extensions.model_dump(mode="json")}
+                    if lane.generic_web_extensions.configured
+                    else {}
+                ),
                 "settings": sorted(settings, key=lambda record: json.dumps(record, sort_keys=True)),
                 "secrets": {
                     key: {

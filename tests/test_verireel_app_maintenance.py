@@ -11,6 +11,7 @@ import click
 
 from control_plane.workflows.verireel_app_maintenance import (
     VeriReelAppMaintenanceRequest,
+    RecordedTestingMaintenanceTarget,
     _request_internal_smoke_maintenance_api,
     _command_for_request,
     _resolve_stable_testing_smoke_maintenance_secret,
@@ -43,6 +44,65 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
             command,
             "./node_modules/.bin/prisma migrate deploy --config prisma.config.ts",
         )
+
+    def test_reserved_target_uses_its_lane_for_maintenance_and_opaque_secret_resolution(
+        self,
+    ) -> None:
+        target = RecordedTestingMaintenanceTarget("sample-testing", "sample-app")
+        request = VeriReelAppMaintenanceRequest(
+            action="grant-sponsored",
+            intent="stable-testing-remote-e2e-grant-sponsored",
+            email="fixture@example.com",
+        )
+        prefix = "control_plane.workflows.verireel_app_maintenance."
+        with (
+            patch(
+                prefix + "_resolve_stable_testing_application",
+                return_value=("sample-app", target.application_id),
+            ) as resolve,
+            patch(
+                prefix + "_resolve_stable_testing_base_url", return_value="https://testing.example"
+            ) as url,
+            patch(
+                prefix + "_resolve_stable_testing_smoke_maintenance_secret",
+                return_value="opaque-test-fixture",
+            ) as secret,
+            patch(prefix + "_request_internal_smoke_maintenance_api") as execute,
+        ):
+            result = execute_verireel_app_maintenance(
+                control_plane_root=Path("."), request=request, testing_target=target
+            )
+        self.assertEqual(result.maintenance_status, "pass")
+        self.assertEqual(result.context, target.context)
+        self.assertEqual(result.application_id, target.application_id)
+        for reader in (resolve, url, secret):
+            reader.assert_called_once_with(
+                control_plane_root=Path("."), context_name=target.context
+            )
+        execute.assert_called_once()
+
+    def test_reserved_target_repoint_stops_before_secret_or_application_mutation(self) -> None:
+        prefix = "control_plane.workflows.verireel_app_maintenance."
+        request = VeriReelAppMaintenanceRequest(
+            action="delete-user",
+            intent="owner-route-delete-user",
+            email="fixture@example.com",
+        )
+        with (
+            patch(
+                prefix + "_resolve_stable_testing_application", return_value=("other", "other-app")
+            ),
+            patch(prefix + "_resolve_stable_testing_smoke_maintenance_secret") as secret,
+            patch(prefix + "_request_internal_smoke_maintenance_api") as execute,
+        ):
+            result = execute_verireel_app_maintenance(
+                control_plane_root=Path("."),
+                request=request,
+                testing_target=RecordedTestingMaintenanceTarget("sample-testing", "expected-app"),
+            )
+        self.assertEqual(result.maintenance_status, "fail")
+        secret.assert_not_called()
+        execute.assert_not_called()
 
     def test_owner_admin_actions_no_longer_build_product_image_script_command(self) -> None:
         request = VeriReelAppMaintenanceRequest(
