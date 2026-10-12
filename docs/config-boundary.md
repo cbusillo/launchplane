@@ -78,15 +78,15 @@ See [Client review](owner-acceptance.md) and
 The Launchplane self-deploy workflow no longer reads Actions secrets or variables
 for retired Every Code credentials. It does not install or synchronize those
 credentials. Existing service-host values are preserved by the self-deploy
-request's normal merge behavior; full runtime retirement remains in
-[#1313](https://github.com/cbusillo/launchplane/issues/1313). The Actions inventory
-and Chris's manual settings cleanup are tracked in
-[#3452](https://github.com/cbusillo/launchplane/issues/3452).
+request's normal merge behavior. The historical worker token still protects
+engineering-review worker routes; removing the Actions reader does not revoke
+that service-host credential. Full runtime retirement remains in
+[#1313](https://github.com/cbusillo/launchplane/issues/1313).
 An explicit credential update still uses the existing
 `POST /v1/drivers/launchplane/self-deploy` contract (`deploy.oauth_env`) under
 `launchplane_service_deploy.execute` authority; omitted values are preserved.
 Any real credential creation or access change retains the Director boundary.
-This PR neither rotates credentials nor establishes a live caller's grant.
+The API contract does not establish a live caller's grant.
 
 The manual `omit_terminal_agent_env` compatibility input omits terminal-agent
 read credentials. Director-agent write credentials use the separate
