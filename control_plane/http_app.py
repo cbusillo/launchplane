@@ -12823,11 +12823,24 @@ def create_launchplane_fastapi_app(
 
     async def apply_product_health_monitoring(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
+    ) -> AcceptedEvidenceResponse | JSONResponse:
         trace_id = next_trace_id()
+
+        def monitoring_response(
+            response: AcceptedEvidenceResponse,
+        ) -> AcceptedEvidenceResponse | JSONResponse:
+            if isinstance(identity, GitHubHumanIdentity):
+                return response
+            # Keep legacy nullable result fields on the wire for existing callers.
+            # Browser responses alone use the additional typed review projection.
+            payload = response.model_dump(mode="json", exclude_none=True)
+            if isinstance(payload.get("result"), dict):
+                payload["result"].pop("current_private_endpoint_key", None)
+            return JSONResponse(status_code=202, content=payload)
+
         try:
             raw_payload = await request.json()
         except ValueError as error:
@@ -12951,7 +12964,7 @@ def create_launchplane_fastapi_app(
             )
             replay_response = prepare_product_health_monitoring_mutation()
             if replay_response is not None:
-                return replay_response
+                return monitoring_response(replay_response)
         try:
             profile = database_store.read_product_profile_record(health_monitoring_request.product)
         except FileNotFoundError as error:
@@ -13005,13 +13018,17 @@ def create_launchplane_fastapi_app(
                 code="invalid_product_profile",
                 message="Updated product profile failed validation.",
             ) from error
+        # Existing terminal/workflow consumers reject unknown result fields.
+        # The extra endpoint comparison belongs to the signed-in editor only.
+        if not isinstance(identity, GitHubHumanIdentity):
+            plan = plan.model_copy(update={"current_private_endpoint_key": None})
         if (
             health_monitoring_request.mode == "apply"
             and health_monitoring_request.reviewed_plan_sha256 != plan.plan_sha256
         ):
             replay_response = prepare_product_health_monitoring_mutation()
             if replay_response is not None:
-                return replay_response
+                return monitoring_response(replay_response)
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -13073,10 +13090,12 @@ def create_launchplane_fastapi_app(
             if write_result.status == "replayed":
                 if write_result.idempotency_record is None:
                     raise RuntimeError("Replayed product profile write requires evidence.")
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=write_result.idempotency_record,
-                    route_path=_PRODUCT_HEALTH_MONITORING_APPLY_ROUTE,
+                return monitoring_response(
+                    replay_idempotent_response(
+                        trace_id=trace_id,
+                        stored_record=write_result.idempotency_record,
+                        route_path=_PRODUCT_HEALTH_MONITORING_APPLY_ROUTE,
+                    )
                 )
             if write_result.status == "idempotency_conflict":
                 raise _launchplane_http_error(
@@ -13128,16 +13147,18 @@ def create_launchplane_fastapi_app(
                         "before retry."
                     ),
                 )
-            return response
-        return accepted_evidence_response(
-            trace_id=trace_id,
-            records={
-                "product_profile": health_monitoring_request.product,
-                "context": health_monitoring_request.context,
-                "instance": health_monitoring_request.instance,
-                "health_check": plan.check_name,
-            },
-            result=plan.model_dump(mode="json"),
+            return monitoring_response(response)
+        return monitoring_response(
+            accepted_evidence_response(
+                trace_id=trace_id,
+                records={
+                    "product_profile": health_monitoring_request.product,
+                    "context": health_monitoring_request.context,
+                    "instance": health_monitoring_request.instance,
+                    "health_check": plan.check_name,
+                },
+                result=plan.model_dump(mode="json"),
+            )
         )
 
     async def apply_product_owner(
@@ -27966,7 +27987,7 @@ def create_launchplane_fastapi_app(
         apply_product_health_monitoring,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
+        response_model=control_plane_product_health_monitoring.ProductHealthMonitoringResponse,
         response_model_exclude_none=True,
         openapi_extra={
             "requestBody": {

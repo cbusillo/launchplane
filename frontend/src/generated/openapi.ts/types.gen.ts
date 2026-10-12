@@ -3204,6 +3204,46 @@ export type ProductHealthMonitoringCheckSummary = {
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
 };
 
+export type ProductHealthMonitoringPlan = {
+    applied: boolean;
+    changed: boolean;
+    check_name: string;
+    context: string;
+    current_check_kind: 'public_http' | 'private_http' | 'provider' | null;
+    current_enabled: boolean | null;
+    current_monitoring_intent: 'public' | 'private' | 'prelaunch';
+    current_private_endpoint_key: string | null;
+    current_require_runtime_identity: boolean | null;
+    instance: string;
+    mode: 'dry-run' | 'apply';
+    operation: 'create' | 'update' | 'unchanged';
+    plan_sha256: string;
+    private_endpoint_key: string;
+    product: string;
+    profile_sha256_before: string;
+    profile_updated_at_after: string;
+    profile_updated_at_before: string;
+    reason: string;
+    requested_check_kind: 'public_http' | 'private_http';
+    requested_enabled: boolean;
+    requested_monitoring_intent: 'public' | 'private' | 'prelaunch';
+    requested_require_runtime_identity: boolean;
+    resolved_url: string;
+    source_label: 'service:product-health-monitoring';
+    status: 'ok';
+};
+
+export type ProductHealthMonitoringResponse = {
+    original_trace_id: string | null;
+    records: {
+        [key: string]: unknown;
+    };
+    replayed: boolean | null;
+    result: ProductHealthMonitoringPlan | null;
+    status: 'accepted';
+    trace_id: string;
+};
+
 export type ProductHealthMonitoringSummary = {
     checks: Array<ProductHealthMonitoringCheckSummary>;
     monitoring_intent: 'public' | 'private' | 'prelaunch';
@@ -6529,6 +6569,49 @@ export type RevokeHumanPrivilegedOperationResponses = {
 };
 
 export type RevokeHumanPrivilegedOperationResponse = RevokeHumanPrivilegedOperationResponses[keyof RevokeHumanPrivilegedOperationResponses];
+
+export type ApplyProductHealthMonitoringData = {
+    body: {
+        check_kind?: 'public_http' | 'private_http';
+        check_name: string;
+        context: string;
+        enabled?: boolean;
+        instance: string;
+        mode?: 'dry-run' | 'apply';
+        monitoring_intent: 'public' | 'private' | 'prelaunch';
+        private_endpoint_key?: string;
+        product: string;
+        reason: string;
+        require_runtime_identity?: boolean;
+        reviewed_plan_sha256?: string;
+        schema_version?: 1;
+    };
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/product-profiles/health-monitoring/apply';
+};
+
+export type ApplyProductHealthMonitoringErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ApplyProductHealthMonitoringError = ApplyProductHealthMonitoringErrors[keyof ApplyProductHealthMonitoringErrors];
+
+export type ApplyProductHealthMonitoringResponses = {
+    202: ProductHealthMonitoringResponse;
+};
+
+export type ApplyProductHealthMonitoringResponse = ApplyProductHealthMonitoringResponses[keyof ApplyProductHealthMonitoringResponses];
 
 export type ApplyProductDisplayNameData = {
     body: ProductDisplayNameRequest;
