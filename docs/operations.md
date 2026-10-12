@@ -4173,7 +4173,6 @@ Current selector/token metadata alone never settles the uncertain Apply.
 Concurrent identical Applies recover the same completed receipt after a stale
 plan or atomic-write conflict; they do not write a second change.
 
-
 The operation requests only its needed permissions:
 
 | Operation | Token permissions beyond Metadata read |
