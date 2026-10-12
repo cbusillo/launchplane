@@ -48,6 +48,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebResolvedDeployTarget,
     GenericWebRuntimeCloseOutEvidence,
     build_generic_web_provider_reconciliation_key,
+    decode_generic_web_provider_reconciliation_target,
     build_generic_web_provider_target_key,
     default_generic_web_deploy_provider,
     evaluate_generic_web_runtime_close_out,
@@ -55,6 +56,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
     resolve_generic_web_provider_reconciliation_target,
 )
 from control_plane.workflows.generic_web_post_deploy import (
+    generic_web_post_deploy_authority_digest,
     generic_web_post_deploy_executor_for_profile,
 )
 
@@ -99,6 +101,7 @@ class GenericWebDeployProviderMutationAdapter:
         deploy_provider: GenericWebDeployProvider | None = None,
         recorded_artifact: bool = False,
         retain_event_request: bool = False,
+        post_deploy_authority_digest: str = "",
     ) -> None:
         # Recovery replays a deploy Launchplane reserved; its artifact is a record.
         self._recorded_artifact = recorded_artifact
@@ -113,6 +116,8 @@ class GenericWebDeployProviderMutationAdapter:
             deploy_provider or default_generic_web_deploy_provider()
         )
         self._resolved_deploy_target: GenericWebResolvedDeployTarget | None = None
+        self._qualification_authority_digest = post_deploy_authority_digest
+        self._reconciliation_qualification_digest: str | None = None
         self._proved_pre_image_operation = ""
         self.execution_check: Callable[[], None] = lambda: None
 
@@ -126,6 +131,12 @@ class GenericWebDeployProviderMutationAdapter:
 
     def _resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
         if self._resolved_deploy_target is None:
+            if not self._qualification_authority_digest:
+                self._qualification_authority_digest = generic_web_post_deploy_authority_digest(
+                    self._record_store, self._profile, self._lane
+                )
+            if self._reconciliation_qualification_digest is None:
+                self._reconciliation_qualification_digest = self._qualification_authority_digest
             deploy = self._deploy_request.deploy
             self._resolved_deploy_target = self._deploy_provider.resolve_deploy_target(
                 control_plane_root=self._control_plane_root,
@@ -153,6 +164,7 @@ class GenericWebDeployProviderMutationAdapter:
             original_event_deploy=self._deploy_request.model_dump(mode="json")
             if self._retain_event_request
             else None,
+            qualification_authority_digest=self._reconciliation_qualification_digest or "",
         )
 
     def target_key(self) -> str:
@@ -466,6 +478,16 @@ class GenericWebDeployProviderMutationAdapter:
         expected_provider_target_key: str = "",
     ) -> _GenericWebDeployProviderInspection:
         try:
+            snapshot = decode_generic_web_provider_reconciliation_target(reconciliation_key)
+            # Older reservations omit this field. Their key must remain unchanged
+            # even when execution needs a current qualification authority fallback.
+            self._reconciliation_qualification_digest = snapshot.qualification_authority_digest
+            self._qualification_authority_digest = (
+                snapshot.qualification_authority_digest
+                or generic_web_post_deploy_authority_digest(
+                    self._record_store, self._profile, self._lane
+                )
+            )
             deploy = self._deploy_request.deploy
             resolved_target = resolve_generic_web_provider_reconciliation_target(
                 reconciliation_key=reconciliation_key,
@@ -599,6 +621,7 @@ class GenericWebDeployProviderMutationAdapter:
         proved_pre_image_retry = self._proved_pre_image_operation == provider_operation_key
         self._proved_pre_image_operation = ""
         try:
+            resolved_target = self._resolve_deploy_target()
             records, result = execute_generic_web_deploy_result(
                 control_plane_root=self._control_plane_root,
                 record_store=self._record_store,
@@ -608,7 +631,8 @@ class GenericWebDeployProviderMutationAdapter:
                 provider_operation_title=provider_operation_title(provider_operation_key),
                 deployment_record_id=self._deployment_record_id(provider_operation_key),
                 deploy_provider=self._deploy_provider,
-                resolved_deploy_target=self._resolve_deploy_target(),
+                post_deploy_authority_digest=self._qualification_authority_digest,
+                resolved_deploy_target=resolved_target,
                 provider_effect_checkpoint=checkpoint,
                 before_records_commit=lambda: checkpoint("records_commit"),
                 recorded_artifact=self._recorded_artifact,

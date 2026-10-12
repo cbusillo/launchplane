@@ -22,6 +22,10 @@ changing preview or provider state. The plan digest binds the caller, exact
 product and preview, reason, current profile/record/generation/target authority,
 and provider observation. Historical generations are retained, including
 missing deployment references; those missing records never establish absence.
+Historical runtime identities may identify the preview by its record ID or by
+the slug written by the generic-web runtime producer. Either form still has to
+match this preview's product, context and resolved instance; another preview's
+identity blocks reconciliation.
 
 Review binds this preview's authority and provider classification. Changes to
 unrelated products or provider applications do not invalidate an otherwise

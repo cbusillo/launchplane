@@ -928,6 +928,9 @@ from control_plane.workflows.launchplane_self_deploy import (
     execute_launchplane_self_deploy,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.http_routes.product_generic_web_transition import (
+    register_product_generic_web_transition_routes,
+)
 from control_plane.http_routes.product_display_name import register_product_display_name_routes
 from control_plane.http_routes.product_website_cleanup import (
     register_product_website_cleanup_routes,
@@ -28802,6 +28805,11 @@ def create_launchplane_fastapi_app(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
 
+    register_product_generic_web_transition_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+    )
     register_product_display_name_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )

@@ -1320,6 +1320,7 @@
 
 .product-config-field input[type="text"],
 .product-config-field input[type="password"],
+.product-config-field textarea,
 .product-config-reason textarea {
   width: 100%;
   border: 1px solid var(--border);
@@ -1335,6 +1336,7 @@
 }
 
 .product-config-field input:focus,
+.product-config-field textarea:focus,
 .product-config-reason textarea:focus {
   border-color: var(--accent);
   outline: 2px solid color-mix(in srgb, var(--accent) 22%, transparent);
@@ -3305,5 +3307,15 @@
 }
 
 .backup-authority-digest code {
+  overflow-wrap: anywhere;
+}
+
+.product-generic-web-panel textarea {
+  min-width: 0;
+  resize: vertical;
+  font-family: monospace;
+}
+
+.product-generic-web-panel code {
   overflow-wrap: anywhere;
 }

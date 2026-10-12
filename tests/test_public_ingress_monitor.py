@@ -3535,7 +3535,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(write_result.status, "authority_changed")
         self.assertEqual(stored_incidents, ())
 
-    def test_postgres_mixed_notification_policy_keeps_direct_email_and_discord(self) -> None:
+    def test_postgres_mixed_notification_policy_queues_all_destinations(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
                 Path(temporary_directory_name) / "launchplane.sqlite3"
@@ -3603,14 +3603,15 @@ class PublicIngressMonitorTests(unittest.TestCase):
             attempts = store.list_public_ingress_notification_attempt_records()
             store.close()
 
-        self.assertEqual(result.delivery_attempt_count, 2)
-        self.assertEqual(len(outbox_rows), 1)
+        self.assertEqual(result.delivery_attempt_count, 0)
+        self.assertEqual(len(outbox_rows), 3)
         self.assertEqual(
-            {attempt.destination_kind for attempt in attempts},
-            {"email", "discord"},
+            {cast(dict[str, object], row.payload["destination"])["kind"] for row in outbox_rows},
+            {"email", "discord", "github_issue"},
         )
-        self.assertEqual(email_subjects, ["[Launchplane] Public ingress opened: example-site/prod"])
-        self.assertEqual(len(discord_posts), 1)
+        self.assertEqual(attempts, ())
+        self.assertEqual(email_subjects, [])
+        self.assertEqual(discord_posts, [])
 
     def test_close_reconciliation_ensures_issue_is_closed_after_marker_comment(self) -> None:
         marker = "attempt-public-ingress-resolved"
