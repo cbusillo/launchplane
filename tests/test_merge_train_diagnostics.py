@@ -10,6 +10,7 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_candidate_record,
 )
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.merge_train_admission import build_merge_train_controller_status_read_model
 from control_plane.merge_train_candidate_failures import CandidateCheckFailures
 from control_plane.merge_train_controller_run_once import (
@@ -347,3 +348,31 @@ class RecoveryDiagnosticsTests(TestCase):
         self.assertEqual(state.last_result.record_id, state.active_record_id)
         self.assertEqual(state.last_result.action, "land_batch")
         self.assertNotIn("private token", state.last_result.model_dump_json())
+
+    def test_changed_policy_dry_run_binds_new_observation_and_preserves_stored_result(self) -> None:
+        self.run_pass()
+        prior = self.state()
+        self.store = FilesystemRecordStore(self.path / "new-policy")
+        self.store.write_merge_train_controller_state_record(prior)
+        target = self.policy.policy.policies[0]
+        changed = self.policy.policy.model_copy(
+            update={
+                "policies": (
+                    target.model_copy(
+                        update={"scheduler": target.scheduler.model_copy(update={"enabled": True})}
+                    ),
+                )
+            }
+        )
+        self.policy = MergeTrainPolicyRecord(
+            record_id="changed-policy", source="test", updated_at=prior.updated_at, policy=changed
+        )
+        self.client.read_merge_train_snapshot.return_value = self.train.snapshot.model_copy(
+            update={"pull_requests": ()}
+        )
+        result = self.run_pass(mutate=False)
+        diagnosis = cast(dict[str, object], result["last_controller_result"])
+        self.assertNotEqual(self.policy.policy_sha256, prior.policy_sha256)
+        self.assertEqual(diagnosis["policy_sha256"], self.policy.policy_sha256)
+        self.assertEqual(diagnosis["policy_key"], target.policy_key)
+        self.assertEqual(self.state(), prior)

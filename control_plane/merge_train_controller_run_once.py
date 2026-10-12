@@ -248,6 +248,8 @@ class MergeTrainControllerLeaseContext:
         pass_started_at: str,
         trace_id: str,
         reconciliation_required: bool,
+        policy_key: str = "",
+        policy_sha256: str = "",
     ) -> None:
         diagnosis, progress_key = controller_last_result(
             result=result,
@@ -256,6 +258,8 @@ class MergeTrainControllerLeaseContext:
             pass_started_at=pass_started_at,
             observed_at=utc_now_timestamp(),
             trace_id=trace_id,
+            policy_key=policy_key or self.record.policy_key,
+            policy_sha256=policy_sha256 or self.record.policy_sha256,
             reconciliation_required=reconciliation_required,
             persisted=self.record_store is not None,
         )
@@ -667,6 +671,8 @@ def _execute_merge_train_controller_with_client(
             pass_started_at=recorded_at,
             trace_id=trace_id,
             reconciliation_required=_controller_result_requires_reconciliation(result),
+            policy_key=repository_policy.policy_key,
+            policy_sha256=policy_sha256,
         )
     except MergeTrainControllerLeaseLostError:
         raise
@@ -680,6 +686,8 @@ def _execute_merge_train_controller_with_client(
                 pass_started_at=recorded_at,
                 trace_id=trace_id,
                 reconciliation_required=True,
+                policy_key=repository_policy.policy_key,
+                policy_sha256=policy_sha256,
             )
             lease.release(
                 reconciliation_status="required",
@@ -718,6 +726,8 @@ def _execute_merge_train_controller_with_client(
                         pass_started_at=recorded_at,
                         trace_id=trace_id,
                         reconciliation_required=True,
+                        policy_key=repository_policy.policy_key,
+                        policy_sha256=policy_sha256,
                     )
                     lease.release(
                         reconciliation_status="required",

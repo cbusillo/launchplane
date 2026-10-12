@@ -33,6 +33,8 @@ def controller_last_result(
     pass_started_at: str,
     observed_at: str,
     trace_id: str,
+    policy_key: str,
+    policy_sha256: str,
     reconciliation_required: bool,
     persisted: bool,
 ) -> tuple[MergeTrainControllerLastResult, str]:
@@ -49,8 +51,8 @@ def controller_last_result(
         previous is not None
         and bool(batch_id)
         and previous.candidate_batch_id == batch_id
-        and previous.policy_sha256 == state.policy_sha256
-        and previous.policy_key == state.policy_key
+        and previous.policy_sha256 == policy_sha256
+        and previous.policy_key == policy_key
     )
     recovery_kind = (
         reason
@@ -99,8 +101,8 @@ def controller_last_result(
         MergeTrainControllerLastResult(
             repository=state.repository,
             base_branch=state.base_branch,
-            policy_key=state.policy_key,
-            policy_sha256=state.policy_sha256,
+            policy_key=policy_key,
+            policy_sha256=policy_sha256,
             pass_started_at=pass_started_at,
             observed_at=observed_at,
             trace_id=_text(trace_id),
