@@ -85,6 +85,9 @@ def send_failure_alert() -> bool:
         return False
     sender = validate_sender()
     image = os.environ["DEPLOYED_IMAGE_REFERENCE"]
+    previous_image = os.environ.get("PREVIOUS_IMAGE_REFERENCE", "")
+    if len(previous_image) > 500 or any(ord(char) < 32 for char in previous_image):
+        previous_image = ""
     server = os.environ["GITHUB_SERVER_URL"].rstrip("/")
     repository = os.environ["GITHUB_REPOSITORY"]
     run_id = os.environ["GITHUB_RUN_ID"]
@@ -139,6 +142,11 @@ def send_failure_alert() -> bool:
                     "description": "Manual break-glass may be needed. Dispatch recovery, then approve the protected job.",
                     "fields": [
                         {"name": "Image", "value": image},
+                        *(
+                            [{"name": "Previous image", "value": previous_image}]
+                            if previous_image
+                            else []
+                        ),
                         {"name": "Health result", "value": health[:1000]},
                         {"name": "Deploy run", "value": run_url},
                         {"name": "Manual break-glass", "value": break_glass_url},

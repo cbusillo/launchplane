@@ -67,6 +67,7 @@ class DeployFailureAlertTests(unittest.TestCase):
             environment = {
                 "SELF_DEPLOY_RESPONSE_FILE": str(Path(directory) / "missing.json"),
                 "DEPLOYED_IMAGE_REFERENCE": "registry.example/service@sha256:" + "a" * 64,
+                "PREVIOUS_IMAGE_REFERENCE": "registry.example/service@sha256:" + "b" * 64,
                 "DISCORD_LAUNCHPLANE_WEBHOOK": "https://discord.com/api/webhooks/example/sender",
                 "GITHUB_SERVER_URL": "https://forge.example",
                 "GITHUB_REPOSITORY": "example/service",
@@ -88,6 +89,7 @@ class DeployFailureAlertTests(unittest.TestCase):
             self.assertEqual(sender_url, environment["DISCORD_LAUNCHPLANE_WEBHOOK"])
             values = [field["value"] for field in payload["embeds"][0]["fields"]]
             self.assertIn(environment["DEPLOYED_IMAGE_REFERENCE"], values)
+            self.assertIn(environment["PREVIOUS_IMAGE_REFERENCE"], values)
             evidence = next(json.loads(value) for value in values if value.startswith("{"))
             self.assertEqual(evidence["health"], observations)
             self.assertEqual(evidence["failed_health_result"]["http_status"], "503")

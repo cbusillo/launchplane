@@ -2027,9 +2027,12 @@ downgrade an already dispatched or uncertain attempt. These proof changes apply
 only to the opted-in self-deploy polling path. The alert and rollback share the same
 dispatch-proof decoder, including authentication refusals and a request that
 could not be prepared before any Launchplane attempt.
-When health succeeds at the end of the observation window, each final identity
-check gets a bounded fifteen-second allowance to finish its OIDC and API proof.
-An unhealthy replacement still fails at the two-minute health deadline.
+After the forward marker is observed, a nearly expired window permits a bounded
+fifteen-second image confirmation and at least one health probe. Healthy results
+permit the same bounded allowance for each final identity check. Persistent
+unhealthiness does not restart the observation window. The Q197 window applies
+during startup migrations as well as ordinary startup; Compose's healthcheck
+schedule does not extend it.
 
 Before replacement, the workflow validates the already-approved existing
 Launchplane Discord sender supplied as `DISCORD_LAUNCHPLANE_WEBHOOK`. An absent
@@ -2041,6 +2044,7 @@ and manual break-glass workflow link before attempting its existing service
 rollback. Explicit pre-effect refusals and an unfinished drain do not page for
 break-glass. The alert does not include response bodies, endpoint URLs or
 startup logs. Sending failures fail visibly without printing the webhook.
+When available, the previous image is included for the manual recovery input.
 The break-glass link opens manual dispatch; a pending protected approval exists
 only after an admin dispatches that recovery. No recovery is dispatched by the
 reporter, and manual break-glass credentials remain behind their approval gate.

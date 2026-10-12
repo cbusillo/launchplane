@@ -871,12 +871,13 @@ jobs:
         id: deploy_marker_wait
         shell: bash
         env:
+          MINIMUM_TIMEOUT_MS: ${{ steps.deploy_wait_timeout.outputs.final_verification_timeout_ms }}
           WAIT_DEADLINE_EPOCH: ${{ steps.replacement_runtime.outputs.observation-deadline-epoch }}
         run: |
           set -euo pipefail
           remaining_timeout_ms=$(( (${WAIT_DEADLINE_EPOCH:?} - $(date +%s)) * 1000 ))
-          if [ "$remaining_timeout_ms" -lt 1 ]; then
-            remaining_timeout_ms=1
+          if [ "$remaining_timeout_ms" -lt "${MINIMUM_TIMEOUT_MS:?}" ]; then
+            remaining_timeout_ms="$MINIMUM_TIMEOUT_MS"
           fi
           echo "timeout_ms=$remaining_timeout_ms" >>"$GITHUB_OUTPUT"
 
@@ -915,7 +916,9 @@ jobs:
           deadline_epoch="${WAIT_DEADLINE_EPOCH:?}"
           : > "$RUNNER_TEMP/launchplane-deployed-health-result.json"
           last_report_seconds=0
-          while [ "$(date +%s)" -lt "$deadline_epoch" ]; do
+          first_probe=1
+          while [ "$first_probe" -eq 1 ] || [ "$(date +%s)" -lt "$deadline_epoch" ]; do
+            first_probe=0
             all_healthy=1
             health_report=""
             while IFS= read -r raw_url; do
@@ -958,6 +961,9 @@ jobs:
             if [ "$((SECONDS - last_report_seconds))" -ge 30 ]; then
               echo "Waiting for Launchplane health URLs. health=${health_report:-none}"
               last_report_seconds=$SECONDS
+            fi
+            if [ "$(date +%s)" -ge "$deadline_epoch" ]; then
+              break
             fi
             sleep 5
           done
@@ -1031,6 +1037,7 @@ jobs:
         env:
           DISCORD_LAUNCHPLANE_WEBHOOK: ${{ secrets.DISCORD_LAUNCHPLANE_WEBHOOK }}
           DEPLOYED_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
+          PREVIOUS_IMAGE_REFERENCE: ${{ steps.self_deploy.outputs.previous_image_reference }}
           SELF_DEPLOY_RESPONSE_FILE: ${{ runner.temp }}/launchplane-self-deploy-response.json
           FAILING_RUNTIME_STATUS: ${{ steps.final_marker.outcome == 'failure' && steps.final_marker.outputs.status-code || steps.final_image.outcome == 'failure' && steps.final_image.outputs.status-code || steps.deployed_image.outcome == 'failure' && steps.deployed_image.outputs.status-code || steps.replacement_runtime.outcome == 'failure' && steps.replacement_runtime.outputs.status-code || steps.self_deploy_request.outcome == 'failure' && steps.self_deploy_request.outputs.status-code || 'unavailable' }}
           FAILING_HEALTH_RESULT_FILE: ${{ runner.temp }}/launchplane-deployed-health-result.json

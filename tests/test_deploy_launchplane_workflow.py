@@ -124,7 +124,11 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                         self.assertEqual(
                             actual,
                             FINAL_VERIFICATION_TIMEOUT_SECONDS * 1000
-                            if step == "Resolve final runtime marker remaining wait"
+                            if step
+                            in (
+                                "Resolve final runtime marker remaining wait",
+                                "Resolve deploy_marker_wait remaining wait",
+                            )
                             else 1,
                         )
 
@@ -168,48 +172,57 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
             self.assertLessEqual(int(later["timeout_ms"]), int(values["timeout_ms"]))
 
     def test_recovered_health_clears_previous_failed_probe(self) -> None:
-        with TemporaryDirectory() as directory_name:
-            directory = Path(directory_name)
-            curl = directory / "curl"
-            curl.write_text("""#!/usr/bin/env bash
-while [ "$1" != "-o" ]; do shift; done
-if [ -f "$RUNNER_TEMP/probed" ]; then
-  printf '{"status":"ok"}' > "$2"
-  printf 200
-else
-  touch "$RUNNER_TEMP/probed"
-  printf '{"status":"unhealthy"}' > "$2"
-  printf 503
-fi
-""")
-            curl.chmod(0o700)
-            sleep = directory / "sleep"
-            sleep.write_text("#!/usr/bin/env bash\nexit 0\n")
-            sleep.chmod(0o700)
-            date = directory / "date"
-            date.write_text("#!/usr/bin/env bash\nprintf '%s' \"$TEST_NOW_EPOCH\"\n")
-            date.chmod(0o700)
-            evidence = directory / "launchplane-deployed-health-result.json"
-            result = self._run_step(
-                "deploy",
-                "Wait for deployed Launchplane health URLs",
-                {
-                    "WAIT_DEADLINE_EPOCH": "10001",
-                    "TEST_NOW_EPOCH": "10000",
-                    "LAUNCHPLANE_DEPLOY_HEALTH_URLS": "https://health.example.invalid",
-                    "PATH": str(directory) + os.pathsep + os.environ["PATH"],
-                },
-                directory,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(evidence.read_text(), "")
-            self.assertTrue((directory / "output").is_file())
-            values = dict(
-                line.split("=", 1) for line in (directory / "output").read_text().splitlines()
-            )
-            self.assertEqual(
-                int(values["remaining_timeout_ms"]), FINAL_VERIFICATION_TIMEOUT_SECONDS * 1000
-            )
+        for mode in ("recovering", "healthy_at_deadline", "unhealthy_at_deadline"):
+            with TemporaryDirectory() as directory_name:
+                directory = Path(directory_name)
+                curl = directory / "curl"
+                curl.write_text("""#!/usr/bin/env bash
+    while [ "$1" != "-o" ]; do shift; done
+    touch "$RUNNER_TEMP/health-probed"
+if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
+      printf '{"status":"ok"}' > "$2"
+      printf 200
+    else
+      touch "$RUNNER_TEMP/probed"
+      printf '{"status":"unhealthy"}' > "$2"
+      printf 503
+    fi
+    """)
+                curl.chmod(0o700)
+                sleep = directory / "sleep"
+                sleep.write_text("#!/usr/bin/env bash\nexit 0\n")
+                sleep.chmod(0o700)
+                date = directory / "date"
+                date.write_text("#!/usr/bin/env bash\nprintf '%s' \"$TEST_NOW_EPOCH\"\n")
+                date.chmod(0o700)
+                evidence = directory / "launchplane-deployed-health-result.json"
+                result = self._run_step(
+                    "deploy",
+                    "Wait for deployed Launchplane health URLs",
+                    {
+                        "WAIT_DEADLINE_EPOCH": "10001" if mode == "recovering" else "10000",
+                        "HEALTH_RECOVERED": "true" if mode == "healthy_at_deadline" else "false",
+                        "TEST_NOW_EPOCH": "10000",
+                        "LAUNCHPLANE_DEPLOY_HEALTH_URLS": "https://health.example.invalid",
+                        "PATH": str(directory) + os.pathsep + os.environ["PATH"],
+                    },
+                    directory,
+                )
+                self.assertTrue((directory / "health-probed").is_file())
+                if mode == "unhealthy_at_deadline":
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertTrue(evidence.read_text())
+                    self.assertFalse((directory / "output").exists())
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(evidence.read_text(), "")
+                self.assertTrue((directory / "output").is_file())
+                values = dict(
+                    line.split("=", 1) for line in (directory / "output").read_text().splitlines()
+                )
+                self.assertEqual(
+                    int(values["remaining_timeout_ms"]), FINAL_VERIFICATION_TIMEOUT_SECONDS * 1000
+                )
 
     def test_timed_out_drain_does_not_request_service_rollback(self) -> None:
         for payload in (
