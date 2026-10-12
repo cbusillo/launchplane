@@ -1561,6 +1561,8 @@ def execute_approved_privileged_operations_once(
                 record_store=record_store,
             )
             registration = read_privileged_operation_descriptor(claimed.descriptor_id)
+            if registration.planner is None:
+                raise ValueError("privileged_operation_retired")
             fresh_evidence = registration.planner(record_store, claimed.request)
             if (
                 fresh_evidence.plan_digest != approval.plan_digest

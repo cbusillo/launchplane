@@ -1125,6 +1125,9 @@ def create_typed_privileged_operation_plan(
     )
     if source_kind != expected_source_kind:
         raise ValueError("Privileged-operation plan source does not match requester identity.")
+    registration = read_privileged_operation_descriptor(descriptor_id)
+    if registration.planner is None:
+        raise ValueError("This privileged-operation planner is retired.")
     store = require_privileged_operation_store(record_store)
     operation_id = build_privileged_operation_id_for_actor(
         descriptor_id=descriptor_id,
@@ -1142,7 +1145,6 @@ def create_typed_privileged_operation_plan(
     )
     if replay is not None:
         return replay
-    registration = read_privileged_operation_descriptor(descriptor_id)
     evidence = registration.planner(record_store, request)
     created_at = now().astimezone(timezone.utc)
     record = PrivilegedOperationRecord(
