@@ -3794,6 +3794,13 @@ export type ProductSecretConfigRequirement = {
     owner_input: ProductOwnerSecretInput | null;
 };
 
+export type ProductSecretConfigRequirementRemoval = {
+    binding_key: string;
+    context?: string;
+    instance?: string;
+    integration?: string;
+};
+
 export type ProductSecretCopyFrom = {
     context: string;
     instance: string;
@@ -6035,6 +6042,45 @@ export type RevokeHumanPrivilegedOperationResponses = {
 
 export type RevokeHumanPrivilegedOperationResponse = RevokeHumanPrivilegedOperationResponses[keyof RevokeHumanPrivilegedOperationResponses];
 
+export type ApplyProductExpectedConfigData = {
+    body: {
+        managed_secret_bindings?: Array<ProductSecretConfigRequirement>;
+        mode?: 'dry-run' | 'apply';
+        product: string;
+        reason: string;
+        remove_managed_secret_bindings?: Array<ProductSecretConfigRequirementRemoval>;
+        remove_runtime_environment_keys?: Array<ProductRuntimeConfigRequirement>;
+        runtime_environment_keys?: Array<ProductRuntimeConfigRequirement>;
+        schema_version?: number;
+        source_label?: string;
+    };
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/product-profiles/expected-config/apply';
+};
+
+export type ApplyProductExpectedConfigErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ApplyProductExpectedConfigError = ApplyProductExpectedConfigErrors[keyof ApplyProductExpectedConfigErrors];
+
+export type ApplyProductExpectedConfigResponses = {
+    202: AcceptedEvidenceResponse;
+};
+
+export type ApplyProductExpectedConfigResponse = ApplyProductExpectedConfigResponses[keyof ApplyProductExpectedConfigResponses];
+
 export type ApplyProductHealthMonitoringData = {
     body: {
         check_kind?: 'public_http' | 'private_http';
@@ -6077,6 +6123,44 @@ export type ApplyProductHealthMonitoringResponses = {
 };
 
 export type ApplyProductHealthMonitoringResponse = ApplyProductHealthMonitoringResponses[keyof ApplyProductHealthMonitoringResponses];
+
+export type ApplyProductStableLaneRepairData = {
+    body: {
+        base_url?: string;
+        context: string;
+        instance: string;
+        mode?: 'dry-run' | 'apply';
+        product: string;
+        reason: string;
+        reviewed_plan_sha256?: string;
+        schema_version?: 1;
+    };
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/product-profiles/stable-lane-repair/apply';
+};
+
+export type ApplyProductStableLaneRepairErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ApplyProductStableLaneRepairError = ApplyProductStableLaneRepairErrors[keyof ApplyProductStableLaneRepairErrors];
+
+export type ApplyProductStableLaneRepairResponses = {
+    202: AcceptedEvidenceResponse;
+};
+
+export type ApplyProductStableLaneRepairResponse = ApplyProductStableLaneRepairResponses[keyof ApplyProductStableLaneRepairResponses];
 
 export type ApplyProductDisplayNameData = {
     body: ProductDisplayNameRequest;
