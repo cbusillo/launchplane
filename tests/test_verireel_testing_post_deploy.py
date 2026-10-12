@@ -47,6 +47,20 @@ def context(instance: str = "testing") -> GenericWebPostDeployContext:
     )
 
 
+class CapturedTestingAuthorityTests(unittest.TestCase):
+    def test_qualification_uses_captured_authority_without_rereading_changed_records(self) -> None:
+        from control_plane.workflows.verireel_testing_post_deploy import (
+            testing_qualification_authority,
+        )
+
+        captured = context().model_copy(update={"authority_digest": "captured-before-deploy"})
+        store = Mock()
+        self.assertEqual(
+            testing_qualification_authority(store, captured), captured.authority_digest
+        )
+        store.read_product_profile_record.assert_not_called()
+
+
 class VeriReelTestingPostDeployTests(unittest.TestCase):
     def test_public_probe_accepts_the_rendered_absolute_link_and_refuses_other_origins(
         self,

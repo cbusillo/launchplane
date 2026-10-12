@@ -87,6 +87,7 @@ def execute_generic_web_deploy_result(
     before_records_commit: Callable[[], None] | None = None,
     recorded_artifact: bool = False,
     proved_pre_image_retry: bool = False,
+    post_deploy_authority_digest: str = "",
 ) -> tuple[dict[str, object], dict[str, object]]:
     driver_result = execute_generic_web_deploy(
         control_plane_root=control_plane_root,
@@ -97,6 +98,7 @@ def execute_generic_web_deploy_result(
         post_deploy_executor=_generic_web_post_deploy_executor_for_profile(
             profile, instance=lane.instance
         ),
+        post_deploy_authority_digest=post_deploy_authority_digest,
         deploy_provider=deploy_provider,
         resolved_deploy_target=resolved_deploy_target,
         provider_operation_title=provider_operation_title,

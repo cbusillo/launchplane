@@ -121,9 +121,15 @@ def build_generic_web_transition_plan(
             for field in GenericWebPreviewDeclaration.model_fields
         }
     )
+    lane_declarations = tuple(
+        GenericWebLaneDeclaration(
+            context=lane.context, instance=lane.instance, extensions=lane.generic_web_extensions
+        )
+        for lane in replacement.lanes
+    )
     fingerprint = {
         "profile": profile.model_dump(mode="json"),
-        "lanes": [item.model_dump(mode="json") for item in request.lanes],
+        "lanes": [item.model_dump(mode="json") for item in lane_declarations],
         "preview": preview_declaration.model_dump(mode="json"),
         "reason": request.reason,
     }
@@ -134,7 +140,7 @@ def build_generic_web_transition_plan(
         ProductGenericWebTransitionPlan(
             product=profile.product,
             driver_before=profile.driver_id,
-            lanes=request.lanes,
+            lanes=lane_declarations,
             preview=preview_declaration,
             changed=profile != replacement,
             reason=request.reason,

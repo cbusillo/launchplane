@@ -153,8 +153,11 @@ export function ProductGenericWebTransitionPanel({ product, fixtureMode, onSaved
       const matchesOriginal = review && profile.driver_id === "generic-web" && stable(declarations(profile)) === stable({ lanes: review.request.lanes, preview: review.request.preview });
       if (apply.reconcile(identity, { trace_id: receipt.trace_id, original_trace_id: receipt.original_trace_id, replayed: true })) {
         setReview(null); try { sessionStorage.removeItem(storageKey); } catch { /* Receipt settled the operation. */ }
-        if (!matchesOriginal) setError("The original transition completed, but current declarations differ from its review. Review the current profile before another change.");
-        setNotice("Original profile transition completed. Current profile read again; testing qualification remains separate."); onSaved();
+        if (!matchesOriginal) {
+          setError("The original transition completed, but current declarations differ from its review. Review the current profile before another change.");
+          setNotice("");
+        } else setNotice("Original profile transition completed. Current profile read again; testing qualification remains separate.");
+        onSaved();
       }
     } catch (failure) { if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Original operation could not be checked."); }
     finally { if (!controller.signal.aborted) setChecking(false); }

@@ -168,6 +168,8 @@ def recorded_verireel_testing_qualification(
 def testing_qualification_authority(
     store: GenericWebDeployStore, context: GenericWebPostDeployContext
 ) -> str:
+    if context.authority_digest:
+        return context.authority_digest
     from control_plane.product_reconcile import (
         ProductReconcileStore,
         _generic_web_testing_authority,

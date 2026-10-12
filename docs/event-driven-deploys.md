@@ -145,7 +145,11 @@ reservation. The webhook request never waits on a deploy.
     For VeriReel testing, a matching image without deployment-bound migration and
     creator/admin qualification gets one normal deploy of that same verified
     artifact to run the testing-only post-deploy extension. Passing qualification
-    is reused only when its authority digest matches the current lane. Declaring
+    is reused only when its authority digest matches the current lane. The
+    deployment captures this digest before target preparation and provider
+    effects, and carries it into qualification; a concurrent profile or runtime
+    input edit cannot be credited to the older deployment. Changing consumed
+    runtime settings or secret versions also requires fresh qualification. Declaring
     a new shared-web lifecycle therefore requalifies a previously passing legacy
     deployment even when the artifact is unchanged; a matching qualification then
     stops at `already_deployed`. A failed qualification with unchanged

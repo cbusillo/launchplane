@@ -172,6 +172,20 @@ class GenericWebTransitionTests(unittest.TestCase):
         self.assertEqual(after.preview.app_name_suffix, before.preview.app_name_suffix)
         self.assertEqual(plan.preview.app_name_suffix, before.preview.app_name_suffix)
 
+    def test_reordered_lane_input_has_one_normalized_plan_and_review(self) -> None:
+        before = profile()
+        request = ProductGenericWebTransitionRequest.model_validate(draft(before))
+        original, _ = build_generic_web_transition_plan(before, request)
+        reordered, after = build_generic_web_transition_plan(
+            before, request.model_copy(update={"lanes": tuple(reversed(request.lanes))})
+        )
+        self.assertEqual(original.plan_sha256, reordered.plan_sha256)
+        self.assertEqual(original.lanes, reordered.lanes)
+        self.assertEqual(
+            [(item.context, item.instance) for item in reordered.lanes],
+            [(item.context, item.instance) for item in after.lanes],
+        )
+
 
 class GenericWebTransitionHttpTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:

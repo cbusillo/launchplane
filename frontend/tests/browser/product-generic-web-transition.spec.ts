@@ -38,7 +38,7 @@ async function arrange(page: import("@playwright/test").Page, failure: "none" | 
   await page.goto("/ui/products/atlas-commerce");
   const panel = page.getByRole("region", { name: "Shared web driver", exact: true });
   await expect(panel.getByRole("button", { name: "Review shared-web transition" })).toBeDisabled();
-  await expect(panel.getByText("Current driver: verireel", { exact: true })).toBeVisible();
+  await expect(panel.locator("output")).toHaveText("verireel");
   const definition = { lanes: [
     { context: "atlas", instance: "testing", extensions: { verification_extension: "verireel-testing", maintenance: [], schedules: [] } },
     { context: "atlas", instance: "prod", extensions: { maintenance: [{ name: "migrate", command: "node /app/migrate.js", timeout_seconds: 300 }], schedules: [{ name: "recover", command: "node /app/recover.js", timeout_seconds: 300, cron_expression: "*/10 * * * *", enabled: true }] } },
@@ -53,7 +53,7 @@ test("shared-web review, draft invalidation, apply and exact readback", { tag: "
   await panel.getByRole("button", { name: "Review shared-web transition" }).click();
   const apply = panel.getByRole("button", { name: "Apply shared-web profile" });
   await expect(apply).toBeEnabled();
-  await expect(panel.getByText("Verification: verireel-testing")).toBeVisible();
+  await expect(panel.locator(".product-owner-plan")).toContainText("verireel-testing");
   await panel.getByLabel("Change reason").fill("Revised review.");
   await expect(apply).toBeDisabled();
   await panel.getByRole("button", { name: "Review shared-web transition" }).click();
@@ -92,7 +92,7 @@ test("a stale transition refreshes the profile and requires another review", asy
   const { panel, requests } = await arrange(page, "stale");
   await panel.getByRole("button", { name: "Review shared-web transition" }).click();
   await panel.getByRole("button", { name: "Apply shared-web profile" }).click();
-  await expect(panel.getByText("Current driver: generic-web", { exact: true })).toBeVisible();
+  await expect(panel.locator("output")).toHaveText("generic-web");
   await expect(panel.getByRole("button", { name: "Apply shared-web profile" })).toBeDisabled();
   await expect(panel.getByRole("button", { name: "Review shared-web transition" })).toBeEnabled();
   expect(requests).toHaveLength(1);

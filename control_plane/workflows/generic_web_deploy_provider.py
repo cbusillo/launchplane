@@ -60,6 +60,7 @@ class GenericWebProviderReconciliationTarget(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     original_event_deploy: dict[str, object] | None = None
+    qualification_authority_digest: str = Field(default="", exclude_if=lambda value: not value)
     product: str = ""
     context: str
     instance: str
@@ -105,11 +106,13 @@ def build_generic_web_provider_reconciliation_key(
     *,
     product: str = "",
     original_event_deploy: dict[str, object] | None = None,
+    qualification_authority_digest: str = "",
 ) -> str:
     ship_request = resolved_deploy_target.ship_request
     snapshot = GenericWebProviderReconciliationTarget(
         product=product.strip(),
         original_event_deploy=original_event_deploy,
+        qualification_authority_digest=qualification_authority_digest,
         context=ship_request.context,
         instance=ship_request.instance,
         provider_id=ship_request.provider_id,

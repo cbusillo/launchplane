@@ -1705,6 +1705,87 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual(repeated["reason"], "already_deployed")
         self.assertEqual(qualify.call_count, 2)
 
+    def test_a_profile_transition_during_qualification_cannot_credit_the_new_lifecycle(
+        self,
+    ) -> None:
+        from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+
+        self.prepare_unqualified_verireel_testing()
+        transitioned = False
+
+        def qualify_then_transition(*args: object) -> object:
+            nonlocal transitioned
+            if not transitioned:
+                transitioned = True
+                profile = self.store.read_product_profile_record("site")
+                self.store.write_product_profile_record(
+                    profile.model_copy(
+                        update={
+                            "driver_id": "generic-web",
+                            "lanes": tuple(
+                                lane.model_copy(
+                                    update={
+                                        "generic_web_extensions": GenericWebLaneExtensions(
+                                            verification_extension="verireel-testing"
+                                        )
+                                    }
+                                )
+                                if lane.instance == "testing"
+                                else lane
+                                for lane in profile.lanes
+                            ),
+                        }
+                    )
+                )
+            return self._testing_qualification_evidence(*args)
+
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=qualify_then_transition,
+        ) as qualify:
+            self.request()
+            before_transition = self.reconcile()
+            self.request()
+            after_transition = self.reconcile()
+            self.request()
+            repeated = self.reconcile()
+        self.assertEqual(after_transition["action"], "deploy")
+        self.assertNotEqual(
+            before_transition["deployment_record_id"], after_transition["deployment_record_id"]
+        )
+        self.assertEqual(after_transition["post_deploy_status"], "pass")
+        self.assertEqual(repeated["reason"], "already_deployed")
+        self.assertEqual(qualify.call_count, 2)
+
+    def test_a_changed_runtime_input_requalifies_previously_passing_testing(self) -> None:
+        self.prepare_unqualified_verireel_testing()
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=self._testing_qualification_evidence,
+        ) as qualify:
+            self.request()
+            previous = self.reconcile()
+            profile = self.store.read_product_profile_record("site")
+            lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+            self.store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context=lane.context,
+                    instance=lane.instance,
+                    env={"SYNC_INTERVAL_SECONDS": 1800},
+                    updated_at=profile.updated_at,
+                )
+            )
+            self.request()
+            changed = self.reconcile()
+            self.request()
+            repeated = self.reconcile()
+        self.assertEqual(changed["action"], "deploy")
+        self.assertNotEqual(previous["deployment_record_id"], changed["deployment_record_id"])
+        self.assertEqual(changed["post_deploy_status"], "pass")
+        self.assertEqual(repeated["reason"], "already_deployed")
+        self.assertEqual(qualify.call_count, 2)
+
     def setUp(self) -> None:
         super().setUp()
         encryption_key = patch.dict(
