@@ -2017,6 +2017,11 @@ same-image redeploy. A continuously unavailable API during the request has that
 shorter limit, while successful draining responses reset it and preserve the
 full release-drain budget. In-flight requests are bounded; this is health-based
 failure detection, not evidence of container restarts or a startup cause.
+OIDC failures before sending a request and ingress replies after a known
+pre-effect drain preserve that drain proof and its full wait. An uncertain
+POST still clears earlier proof. The alert and rollback share the same
+dispatch-proof decoder, including authentication refusals and a request that
+could not be prepared before any Launchplane attempt.
 
 Before replacement, the workflow validates the already-approved existing
 Launchplane Discord sender supplied as `DISCORD_LAUNCHPLANE_WEBHOOK`. An absent

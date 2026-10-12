@@ -1,16 +1,29 @@
 """Validate the existing sender or send a health-only deploy-failure alert."""
 
 import argparse
+import os
+from pathlib import Path
 
-from control_plane.deploy_failure_alert import send_failure_alert, validate_sender
+from control_plane.deploy_failure_alert import (
+    replacement_may_have_dispatched,
+    send_failure_alert,
+    validate_sender,
+)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--validate-sender", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--validate-sender", action="store_true")
+    mode.add_argument("--check-dispatch", action="store_true")
     args = parser.parse_args()
     try:
-        if args.validate_sender:
+        if args.check_dispatch:
+            may_have_dispatched = replacement_may_have_dispatched(
+                Path(os.environ["SELF_DEPLOY_RESPONSE_FILE"])
+            )
+            print("true" if may_have_dispatched else "false")
+        elif args.validate_sender:
             validate_sender()
             print("Existing Launchplane Discord sender is configured.")
         else:

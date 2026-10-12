@@ -163,7 +163,7 @@ jobs:
 
       - name: Create durable retained-volume plan operation
         id: create_plan
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@0860765d66350bc4b1b006bcb334667f886b8cb2 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@413d8d2188f0829a466785f407138cc0a8f29c34 # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
@@ -180,7 +180,7 @@ jobs:
 
       - name: Poll retained-volume plan operation
         id: poll_plan
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@0860765d66350bc4b1b006bcb334667f886b8cb2 # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@413d8d2188f0829a466785f407138cc0a8f29c34 # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}

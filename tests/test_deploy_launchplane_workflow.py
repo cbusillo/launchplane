@@ -225,6 +225,7 @@ fi
             {"result": {"deploy_state": "draining"}},
             {"error": {"code": "invalid_request"}},
             {"error": {"code": "authorization_denied"}},
+            {"error": {"code": "authentication_required"}},
             {"error": {"code": "self_deploy_fence_conflict"}},
         ):
             with self.subTest(payload=payload), TemporaryDirectory() as directory_name:

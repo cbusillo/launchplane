@@ -43,6 +43,8 @@ def replacement_may_have_dispatched(response_file: Path) -> bool:
             "self_deploy_fence_conflict",
             "invalid_request",
             "authorization_denied",
+            "authentication_required",
+            "request_not_sent",
         }
     )
 
