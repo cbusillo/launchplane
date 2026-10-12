@@ -2,6 +2,8 @@ import { expect, test } from "@playwright/test";
 
 for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "declaration-uncertain", "declaration-uncertain-stale", "private", "uncertain-profile"] as const) {
   test(`signed-in setup: ${outcome}, exact diff, declaration apply and secret navigation`, async ({ page }, testInfo) => {
+    const consoleErrors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
     await page.goto("/ui/products/atlas-commerce?fixture=products");
     const data = await page.evaluate(async () => {
       const f = await import("/ui/src/dev-fixtures.ts");
@@ -136,6 +138,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
     await panel.getByRole("link", { name: "Open testing managed secrets" }).click();
     await expect(page).toHaveURL(/environments\/testing\/managed-secrets$/);
     await expect(page.getByRole("heading", { name: "Plan managed-secret changes", exact: true })).toBeVisible();
+    if (["success", "private"].includes(outcome)) expect(consoleErrors).toEqual([]);
   });
 }
 

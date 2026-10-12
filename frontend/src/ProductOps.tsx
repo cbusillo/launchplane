@@ -563,7 +563,7 @@ function ProductWorkspace({
       <ProductDisplayNamePanel key={`name:${product.product}`} fixtureMode={fixtureMode} product={product.product} onSaved={onSaved} />
       <ProductOwnerPanel fixtureMode={fixtureMode} product={product.product} />
       <ProductWebsiteCleanupPanel key={`website:${product.product}`} fixtureMode={fixtureMode} product={product.product} onSaved={onSaved} />
-      {admin && !fixtureMode ? <ProductSetupPanel key={product.product} product={product.product} onApplied={onSaved} /> : null}
+      {admin && !fixtureMode ? <ProductSetupPanel key={`setup:${product.product}`} product={product.product} onApplied={onSaved} /> : null}
 
       <ProductDiagnostics product={product} />
     </article>
