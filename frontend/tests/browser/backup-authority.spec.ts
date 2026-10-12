@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-for (const outcome of ["approved", "denied", "different-lane", "wrong-action", "credential", "changed", "uncertain", "uncertain-stale", "uncertain-denied", "stale", "readback-delayed", "read-only"]) {
+for (const outcome of ["approved", "unchanged", "denied", "different-lane", "wrong-action", "credential", "changed", "uncertain", "uncertain-stale", "uncertain-denied", "stale", "readback-delayed", "read-only"]) {
   test(`production backup proposal handles ${outcome}`, { tag: "@layout" }, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -40,7 +40,7 @@ for (const outcome of ["approved", "denied", "different-lane", "wrong-action", "
         if (["stale", "uncertain-stale"].includes(outcome)) return r.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "production_backup_authority_conflict", message: "Authority changed after review." } } });
         ready = true;
       }
-      return r.fulfill({ json: { status: "ok", trace_id: "backup-review", result: { mode: body.mode, status: body.mode === "apply" ? "applied" : "would_apply", authority_digest: digest, policy: { ...policy, record_id: "fixture-policy-r1" }, targets: [] } } });
+      return r.fulfill({ json: { status: "ok", trace_id: "backup-review", result: { mode: body.mode, status: body.mode === "apply" ? "applied" : outcome === "unchanged" ? "replayed" : "would_apply", authority_digest: digest, policy: { ...policy, record_id: "fixture-policy-r1" }, targets: [] } } });
     });
     await page.goto("/ui/products/atlas-commerce/environments/prod/actions");
     let panel = page.getByRole("region", { name: "Production backup authority", exact: true });
@@ -57,6 +57,7 @@ for (const outcome of ["approved", "denied", "different-lane", "wrong-action", "
     await expect(panel.getByText("missing", { exact: true })).toBeVisible();
     await panel.getByRole("button", { name: "Run backup authority dry run" }).click();
     if (outcome === "denied") { await expect(panel.locator('.operation-notice[data-phase="failed"]')).toBeVisible(); await expect(approve).toBeDisabled(); expect(requests.every(x => x.body.mode === "dry_run")).toBe(true); return; }
+    if (outcome === "unchanged") { await expect(panel.getByRole("status", { name: "Backup authority result", exact: true })).toBeVisible(); await expect(approve).toBeDisabled(); expect(requests.every(x => x.body.mode === "dry_run")).toBe(true); return; }
     await expect(approve).toBeEnabled(); await expect(panel.getByText(digest, { exact: true })).toBeVisible(); await expect(panel.getByText(new RegExp(`${policy.fast_snapshot.retention_count} snapshots`))).toBeVisible();
     if (outcome === "changed") { await file.setInputFiles({ name: "changed.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ ...proposal, policy: { ...policy, reason: "New reason" } })) }); await expect(approve).toBeDisabled(); expect(requests.every(x => x.body.mode === "dry_run")).toBe(true); return; }
     if (outcome === "approved") { await panel.scrollIntoViewIfNeeded(); await panel.screenshot({ path: testInfo.outputPath("backup-authority-reviewed.png") }); await page.screenshot({ path: testInfo.outputPath("backup-authority-viewport.png") }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); }

@@ -184,6 +184,20 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
+            unlocked = await http_request(
+                wide_app,
+                "POST",
+                "/v1/production-backup-authority/apply",
+                headers=_browser_mutation_headers(sessions, session)
+                | {"Idempotency-Key": "locked-shared-target"},
+                payload=draft.model_dump(mode="json")
+                | {
+                    "mode": "apply",
+                    "reviewed_authority_digest": allowed.json()["result"]["authority_digest"],
+                },
+            )
+            self.assertEqual(unlocked.status_code, 200, unlocked.text)
+
     async def test_browser_approval_preserves_csrf_scope_digest_and_replay(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
@@ -295,7 +309,8 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
                     )
                 return preflight
 
-            for replayed in (True, True):
+            # First replay races the original commit; the second is already durable.
+            for _ in range(2):
                 with patch.object(
                     store,
                     "prepare_db_only_mutation",
@@ -310,7 +325,7 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
                         payload=request,
                     )
                 self.assertEqual(result.status_code, 200, result.text)
-                self.assertEqual(bool(result.json().get("replayed")), replayed)
+                self.assertTrue(result.json().get("replayed"))
             self.assertEqual(len(store.list_production_backup_policy_records()), 1)
             self.assertEqual(
                 len(store.list_production_backup_target_records()), len(draft["targets"])

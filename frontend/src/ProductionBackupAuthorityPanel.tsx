@@ -110,10 +110,14 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
     const version = generation.current;
     const response = await plan.run(proposal);
     if (!response || version !== generation.current) return;
-    if (response.result.mode !== "dry_run" || response.result.status !== "would_apply" ||
+    if (response.result.mode !== "dry_run" || !["would_apply", "replayed"].includes(response.result.status) ||
         response.result.policy.promotion_action !== proposal.policy.promotion_action ||
         !/^[a-f0-9]{64}$/.test(response.result.authority_digest)) {
       setError("The dry run did not return a reviewable authority digest."); return;
+    }
+    if (response.result.status === "replayed") {
+      setMessage("Stored backup authority already matches this proposal; no policy change is needed.");
+      onRefresh(); return;
     }
     setReview({ request: proposal, digest: response.result.authority_digest });
   }
