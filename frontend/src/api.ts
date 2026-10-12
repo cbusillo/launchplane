@@ -12,6 +12,8 @@ import type {
   ApplyProductHealthMonitoringData,
   ApplyProductHealthMonitoringResponse,
   ApplyProductEnvironmentConfigData,
+  ApplyProductGenericWebTransitionData,
+  ApplyProductGenericWebTransitionResponse,
   ApplyProductDisplayNameData,
   ApplyProductDisplayNameResponse,
   ApplyProductWebsiteCleanupData,
@@ -70,6 +72,7 @@ import type {
   ReadProductOperationalReadinessData,
   ReadProductProfileData,
   ReadProductProfileResponse,
+  ReadProductProfileMutationReceiptData,
   ReadProductProfileMutationReceiptResponse,
   ReadTenantAdmissionEvaluationData,
   RevokeHumanPrivilegedOperationData,
@@ -610,7 +613,7 @@ export function readProductProfile(
 
 export function readProductProfileMutationReceipt(
   product: string,
-  field: "owner" | "image-repository" | "production-use" | "website-cleanup" | "display-name",
+  field: ReadProductProfileMutationReceiptData["path"]["field"],
   operationKey: string,
   signal?: AbortSignal,
 ): Promise<ReadProductProfileMutationReceiptResponse> {
@@ -638,6 +641,17 @@ export function applyProductOwner(
     options.signal,
     generatedIdempotencyKey(request.headers),
     options.onDispatch,
+  );
+}
+
+export function applyProductGenericWebTransition(
+  product: string,
+  payload: ApplyProductGenericWebTransitionData["body"],
+  options: BrowserOperationOptions,
+): Promise<ApplyProductGenericWebTransitionResponse> {
+  return requestJson<ApplyProductGenericWebTransitionResponse>(
+    BROWSER_WRITE_ROUTES.productGenericWebTransition.replace("{product}", encodeURIComponent(product)),
+    "POST", payload, options.signal, options.idempotencyKey, options.onDispatch,
   );
 }
 

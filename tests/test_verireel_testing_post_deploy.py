@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from control_plane.workflows.generic_web_post_deploy import (
+    generic_web_post_deploy_executor_for_driver_id,
+    generic_web_post_deploy_executor_for_profile,
+)
+
 import json
 from http.client import RemoteDisconnected
 from pathlib import Path
@@ -14,9 +19,6 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebPostDeployContext,
     GenericWebPostDeployGuard,
-)
-from control_plane.workflows.odoo_generic_web_post_deploy import (
-    generic_web_post_deploy_executor_for_driver_id,
 )
 from control_plane.workflows.verireel_testing_post_deploy import (
     assert_verireel_testing_identity,
@@ -43,6 +45,23 @@ def context(instance: str = "testing") -> GenericWebPostDeployContext:
         artifact_id=f"ghcr.io/example/video@sha256:{'a' * 64}",
         source_git_ref="b" * 40,
     )
+
+
+class CapturedTestingAuthorityTests(unittest.TestCase):
+    def test_qualification_uses_captured_authority_without_rereading_changed_records(self) -> None:
+        from control_plane.workflows.verireel_testing_post_deploy import (
+            testing_qualification_authority,
+        )
+
+        captured = context().model_copy(update={"authority_digest": "captured-before-deploy"})
+        store = Mock()
+        self.assertEqual(
+            testing_qualification_authority(
+                cast(GenericWebDeployStore, cast(object, store)), captured
+            ),
+            captured.authority_digest,
+        )
+        store.read_product_profile_record.assert_not_called()
 
 
 class VeriReelTestingPostDeployTests(unittest.TestCase):
@@ -89,7 +108,7 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
     def execute(self) -> PostDeployUpdateEvidence:
         return execute_verireel_testing_post_deploy(
             Path("."),
-            cast(GenericWebDeployStore, self.store),
+            cast(GenericWebDeployStore, cast(object, self.store)),
             self.context,
             GenericWebPostDeployGuard(),
         )
@@ -105,6 +124,66 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
             )
 
     def test_migration_runs_before_product_verification_and_binds_evidence(self) -> None:
+        self._check_migration_and_verification()
+
+    def test_declared_generic_web_testing_uses_the_same_qualification_on_its_recorded_lane(
+        self,
+    ) -> None:
+        from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+
+        profile = self.store.read_product_profile_record.return_value
+        self.context = self.context.model_copy(update={"context": "sample-testing"})
+        profile = type(profile).model_validate(
+            profile.model_copy(
+                update={
+                    "driver_id": "generic-web",
+                    "lanes": (
+                        profile.lanes[0].model_copy(
+                            update={
+                                "context": self.context.context,
+                                "generic_web_extensions": GenericWebLaneExtensions(
+                                    verification_extension="verireel-testing"
+                                ),
+                            }
+                        ),
+                    ),
+                }
+            ).model_dump(mode="json")
+        )
+        self.store.read_product_profile_record.return_value = profile
+        self.assertIs(
+            generic_web_post_deploy_executor_for_profile(profile, instance="testing"),
+            execute_verireel_testing_post_deploy,
+        )
+        self.assertIsNone(generic_web_post_deploy_executor_for_profile(profile, instance="prod"))
+        self._check_migration_and_verification()
+
+    def test_maintenance_passes_the_reserved_lane_and_target_to_the_internal_executor(self) -> None:
+        from control_plane.workflows.verireel_testing_post_deploy import _maintenance
+
+        bound = self.context.model_copy(update={"context": "sample-testing"})
+        with (
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy._resolve_stable_testing_application",
+                return_value=("sample-app", bound.target_id),
+            ) as resolve,
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_app_maintenance",
+                return_value=Mock(maintenance_status="pass"),
+            ) as execute,
+        ):
+            _maintenance(
+                Path("."),
+                bound,
+                GenericWebPostDeployGuard(),
+                action="migrate",
+                intent="stable-testing-migration",
+            )
+        resolve.assert_called_once_with(control_plane_root=Path("."), context_name=bound.context)
+        target = execute.call_args.kwargs["testing_target"]
+        self.assertEqual((target.context, target.application_id), (bound.context, bound.target_id))
+
+    def _check_migration_and_verification(self) -> None:
         events: list[str] = []
 
         def migrate(*_args: object, **_kwargs: object) -> None:

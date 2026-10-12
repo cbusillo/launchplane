@@ -1,9 +1,11 @@
 from collections.abc import Iterable
 import hashlib
 import json
+import re
 from typing import Literal, get_args
 
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
+from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
@@ -136,9 +138,24 @@ class ProductOdooLaneDataPolicy(BaseModel):
     data_authority: OdooDataAuthority = "unknown"
     allowed_rebuild_sources: tuple[OdooRebuildSourceMode, ...] = ()
     upstream_source: str = ""
-    requires_backup_before_destroy: bool = True
-    requires_restore_proof: bool = True
     requires_runtime_identity: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_legacy_safeguards(cls, value: object) -> object:
+        # Stored settings never enforced these claims. Read old records without
+        # carrying them forward as configurable protection or exemptions.
+        if isinstance(value, dict):
+            return {
+                key: item
+                for key, item in value.items()
+                if key not in {"requires_backup_before_destroy", "requires_restore_proof"}
+            }
+        return value
+
+    @property
+    def destructive_replacement_proof_required(self) -> bool:
+        return self.data_authority in {"unknown", "authoritative"}
 
     @model_validator(mode="after")
     def _validate_policy(self) -> "ProductOdooLaneDataPolicy":
@@ -152,10 +169,6 @@ class ProductOdooLaneDataPolicy(BaseModel):
             raise ValueError("unknown Odoo data authority cannot allow rebuild sources")
         if "upstream_restore" in self.allowed_rebuild_sources and not self.upstream_source:
             raise ValueError("Odoo data policy allowing upstream_restore requires upstream_source")
-        if self.data_authority == "authoritative" and not self.requires_backup_before_destroy:
-            raise ValueError("authoritative Odoo data policy requires backup before destroy")
-        if self.data_authority == "authoritative" and not self.requires_restore_proof:
-            raise ValueError("authoritative Odoo data policy requires restore proof")
         return self
 
     def allows_rebuild_source(self, source: str) -> bool:
@@ -270,6 +283,11 @@ class ProductLaneProfile(BaseModel):
     instance: str
     context: str
     base_url: str = ""
+    generic_web_extensions: GenericWebLaneExtensions = Field(
+        default_factory=GenericWebLaneExtensions,
+        exclude_if=lambda value: not value.configured,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     odoo_cutover: OdooCutoverLane | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -303,6 +321,13 @@ class ProductPreviewProfile(BaseModel):
     context: str = ""
     slug_template: str = "pr-{number}"
     app_name_prefix: str = ""
+    app_name_suffix: str = Field(
+        default="",
+        max_length=40,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+        pattern=r"^(-[a-z0-9-]+)?$",
+    )
     template_instance: str = "testing"
     required_template_env_keys: tuple[str, ...] = ()
     copied_env_keys: tuple[str, ...] = ()
@@ -313,6 +338,17 @@ class ProductPreviewProfile(BaseModel):
     domain_certificate_type: Literal["none", "letsencrypt"] = "none"
     required_provider_fields: tuple[str, ...] = ()
     data_transport_mode: Literal["none", "driver"] = "none"
+    transport_extension: Literal["", "verireel-postgres"] = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    transport_database_prefix: str = Field(
+        default="",
+        max_length=40,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     historical_transport: dict[str, str] = Field(
         default_factory=dict,
         exclude_if=lambda value: not value,
@@ -390,6 +426,18 @@ class ProductPreviewProfile(BaseModel):
                 raise ValueError("product preview profile override_env keys must be non-empty")
             if raw_value is None:
                 raise ValueError("product preview profile override_env values must not be null")
+        if self.transport_extension and self.data_transport_mode != "driver":
+            raise ValueError("preview transport extension requires driver data transport")
+        if self.transport_extension and (
+            not self.app_name_prefix.strip()
+            or not re.fullmatch(r"[a-z][a-z0-9_]*", self.transport_database_prefix)
+        ):
+            raise ValueError(
+                "declared PostgreSQL transport requires application and safe database prefixes"
+            )
+        if self.transport_database_prefix and not self.transport_extension:
+            raise ValueError("preview transport database prefix requires a transport extension")
+
         return self
 
 
@@ -653,6 +701,8 @@ class LaunchplaneProductProfileRecord(BaseModel):
             raise ValueError("product profile default_branch cannot contain whitespace")
         if not self.driver_id.strip():
             raise ValueError("product profile requires driver_id")
+        if self.preview.transport_extension and self.driver_id != "generic-web":
+            raise ValueError("declared preview transport requires the generic-web driver")
         self.health_path = self.health_path.strip()
         if self.health_path and not self.health_path.startswith("/"):
             raise ValueError("product profile health_path must start with /")
@@ -669,6 +719,13 @@ class LaunchplaneProductProfileRecord(BaseModel):
                 raise ValueError("enabled product preview requires health_path")
         if self.lifecycle_state != "active" and self.preview.enabled:
             raise ValueError("non-active product profiles cannot retain enabled previews")
+        for lane in self.lanes:
+            if lane.generic_web_extensions.verification_extension and (
+                self.driver_id.strip() != "generic-web" or lane.instance != "testing"
+            ):
+                raise ValueError(
+                    "declared VeriReel testing verification requires a generic-web testing lane"
+                )
         lane_instances = [lane.instance.strip().lower() for lane in self.lanes]
         if len(lane_instances) != len(set(lane_instances)):
             raise ValueError("product profile lane instances must be unique")
@@ -689,6 +746,11 @@ class LaunchplaneProductProfileRecord(BaseModel):
     @property
     def is_active(self) -> bool:
         return self.lifecycle_state == "active"
+
+    def odoo_replacement_proof_required(self, lane: ProductLaneProfile) -> bool:
+        return lane.odoo_data_policy.destructive_replacement_proof_required or (
+            self.production_use == "live" and lane.instance == "prod"
+        )
 
     def validate_write_contract(self) -> "LaunchplaneProductProfileRecord":
         for lane in self.lanes:

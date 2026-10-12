@@ -40,11 +40,13 @@ from control_plane.workflows.verireel_app_maintenance import (
     VeriReelAppMaintenanceAction,
     VeriReelAppMaintenanceIntent,
     VeriReelAppMaintenanceRequest,
+    RecordedTestingMaintenanceTarget,
     _resolve_stable_testing_application,
     _resolve_stable_testing_base_url,
     execute_verireel_app_maintenance,
 )
 from control_plane.workflows.verireel_rollout import fetch_url_text
+from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
 from control_plane.provider_operations import ProviderMutationUnknownError
 
 _LOGGER = logging.getLogger(__name__)
@@ -130,7 +132,10 @@ def recorded_verireel_testing_qualification(
         or evidence.get("deployment_record_id") != deployment_id
         or evidence.get("artifact_id") != artifact_id
         or evidence.get("source_git_ref") != source_git_ref
-        or evidence.get("driver_id") != "verireel"
+        or (
+            evidence.get("extension_id") != "verireel-testing"
+            and evidence.get("driver_id") != "verireel"
+        )
     ):
         return "missing"
     if record.post_deploy_update.status == "fail" and (
@@ -143,13 +148,17 @@ def recorded_verireel_testing_qualification(
         ):
             return "missing"
         return "fail"
-    if record.post_deploy_update.status == "pass" and all(
-        evidence.get(key) == "pass"
-        for key in (
-            "migration_status",
-            "creator_verification_status",
-            "admin_verification_status",
-            "cleanup_status",
+    if (
+        record.post_deploy_update.status == "pass"
+        and evidence.get("authority_digest") == authority_digest
+        and all(
+            evidence.get(key) == "pass"
+            for key in (
+                "migration_status",
+                "creator_verification_status",
+                "admin_verification_status",
+                "cleanup_status",
+            )
         )
     ):
         return "pass"
@@ -159,6 +168,8 @@ def recorded_verireel_testing_qualification(
 def testing_qualification_authority(
     store: GenericWebDeployStore, context: GenericWebPostDeployContext
 ) -> str:
+    if context.authority_digest:
+        return context.authority_digest
     from control_plane.product_reconcile import (
         ProductReconcileStore,
         _generic_web_testing_authority,
@@ -232,7 +243,9 @@ def _maintenance(
     email: str = "",
 ) -> None:
     # Maintenance resolves its target from records too. Never act after a repoint.
-    _, application_id = _resolve_stable_testing_application(control_plane_root=root)
+    _, application_id = _resolve_stable_testing_application(
+        control_plane_root=root, context_name=context.context
+    )
     if application_id != context.target_id:
         raise click.ClickException("Testing maintenance target changed during deployment.")
     checkpoint_testing_effect(guard, f"post_deploy_{action}")
@@ -240,13 +253,12 @@ def _maintenance(
         control_plane_root=root,
         request=VeriReelAppMaintenanceRequest.model_validate(
             {
-                "context": context.context,
-                "instance": context.instance,
                 "action": action,
                 "intent": intent,
                 "email": email,
             }
         ),
+        testing_target=RecordedTestingMaintenanceTarget(context.context, context.target_id),
     )
     if result.maintenance_status != "pass":
         raise click.ClickException(f"Testing {action} did not complete successfully.")
@@ -418,7 +430,7 @@ def execute_verireel_testing_post_deploy(
     guard: GenericWebPostDeployGuard,
 ) -> PostDeployUpdateEvidence:
     evidence = {
-        "driver_id": "verireel",
+        "extension_id": "verireel-testing",
         "deployment_record_id": context.deployment_record_id,
         "source_git_ref": context.source_git_ref,
         "artifact_id": context.artifact_id,
@@ -433,7 +445,10 @@ def execute_verireel_testing_post_deploy(
     try:
         profile = record_store.read_product_profile_record(context.product)
         if (
-            profile.driver_id != "verireel"
+            (
+                profile.driver_id != "verireel"
+                and not declares_verireel_testing_extension(profile, instance=context.instance)
+            )
             or context.instance != "testing"
             or not any(
                 lane.context == context.context and lane.instance == context.instance
@@ -441,9 +456,12 @@ def execute_verireel_testing_post_deploy(
             )
         ):
             raise click.ClickException("VeriReel qualification requires its recorded testing lane.")
+        evidence["driver_id"] = profile.driver_id
         evidence["authority_digest"] = testing_qualification_authority(record_store, context)
         evidence["fixture_email"] = fixture_email(context.deployment_record_id)
-        base_url = _resolve_stable_testing_base_url(control_plane_root=control_plane_root)
+        base_url = _resolve_stable_testing_base_url(
+            control_plane_root=control_plane_root, context_name=context.context
+        )
         phase = "runtime_identity"
         wait_for_verireel_testing_identity(base_url, context)
         phase = "browser_availability"

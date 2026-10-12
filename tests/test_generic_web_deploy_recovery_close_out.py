@@ -398,7 +398,7 @@ class GenericWebDeployRecoveryCloseOutTests(unittest.TestCase):
             provider = _RuntimeCloseOutProvider(())
             with patch(
                 "control_plane.generic_web_deploy_provider_adapter."
-                "generic_web_post_deploy_executor_for_driver_id",
+                "generic_web_post_deploy_executor_for_profile",
                 return_value=object(),
             ):
                 dry_status, dry_payload = harness.dry_run(
