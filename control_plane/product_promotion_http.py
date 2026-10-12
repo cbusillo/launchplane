@@ -736,8 +736,15 @@ def _promotion_evidence(
             "pass"
             if freshness == "verified"
             else "fail"
-            if target is not None
-            and (target.status == "fail" or target.runtime_identity_status != "match")
+            if (
+                verification.observation_applicable
+                and verification.observation is not None
+                and verification.observation.status == "fail"
+            )
+            or (
+                target is not None
+                and (target.status == "fail" or target.runtime_identity_status != "match")
+            )
             else "skipped"
         )
         if freshness == "verified" and (

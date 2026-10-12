@@ -627,6 +627,51 @@ class ProductPromotionStatusTests(unittest.TestCase):
         assert stale_status.source.health_provenance is not None
         self.assertEqual(stale_status.source.health_provenance.detail, failed.summary)
 
+    def test_current_public_failure_is_visible_with_or_without_a_health_target(self) -> None:
+        for has_health_target in (False, True):
+            with self.subTest(has_health_target=has_health_target):
+                store = _MonitoredPromotionStore()
+                lane = store.profile.lanes[0]
+                passed = store.observations[0]
+                base_failure = PublicIngressTargetObservation(
+                    target="base_url",
+                    url=lane.base_url,
+                    status="fail",
+                    failure_code="http_error",
+                    http_status=500,
+                    summary="Public page returned HTTP 500.",
+                )
+                failure = passed.model_copy(
+                    update={
+                        "status": "fail",
+                        "failure_code": "http_error",
+                        "summary": base_failure.summary,
+                        "targets": (base_failure, *passed.targets)
+                        if has_health_target
+                        else (base_failure,),
+                    }
+                )
+                store.observations[0] = failure
+                _, _, status = _status(store)
+                self.assertEqual(status.source.health_status, "fail")
+                assert status.source.health_provenance is not None
+                self.assertEqual(status.source.health_provenance.detail, failure.summary)
+                self.assertFalse(status.workflow_live.enabled)
+
+                key = (lane.context, lane.instance)
+                summary = store.summaries[key]
+                assert summary.inventory is not None
+                store.summaries[key] = summary.model_copy(
+                    update={
+                        "inventory": summary.inventory.model_copy(
+                            update={"updated_at": NOW.isoformat()}
+                        )
+                    }
+                )
+                _, _, redeployed = _status(store)
+                self.assertEqual(redeployed.source.health_status, "skipped")
+                self.assertFalse(redeployed.workflow_live.enabled)
+
     def test_equivalent_monitor_refresh_preserves_the_reviewed_promotion_fingerprint(self) -> None:
         store = _MonitoredPromotionStore(old_inventory=True)
         _, _, before = _status(store)

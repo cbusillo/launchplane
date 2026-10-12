@@ -24,6 +24,7 @@ class LaneRuntimeVerification:
     provenance: DataProvenance
     observation: PublicIngressObservationRecord | None = None
     runtime_target: PublicIngressTargetObservation | None = None
+    observation_applicable: bool = False
 
 
 def lane_expected_runtime_identity(summary: LaunchplaneLaneSummary) -> RuntimeIdentity | None:
@@ -216,7 +217,7 @@ def read_lane_runtime_verification(
             )
             else None
         )
-        results.append(LaneRuntimeVerification(provenance, observation, placement_target))
+        results.append(LaneRuntimeVerification(provenance, observation, placement_target, current))
     # Every effective check must pass; never pick an older success over a failure.
     provenance = min(
         results,
@@ -255,7 +256,7 @@ def read_lane_runtime_verification(
             for result in results
             if result.observation is not None
             and result.observation.status == "fail"
-            and result.runtime_target is not None
+            and result.observation_applicable
         ),
         None,
     )
@@ -269,6 +270,7 @@ def read_lane_runtime_verification(
         provenance,
         evidence.observation if evidence else None,
         evidence.runtime_target if evidence else None,
+        evidence.observation_applicable if evidence else False,
     )
 
 
