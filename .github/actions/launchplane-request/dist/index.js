@@ -606,9 +606,12 @@ async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options)
       lastKnownDraining = false;
     }
     const isDraining = response.ok && responseBody?.result?.deploy_state === "draining";
+    // The server replays dispatched results; a fenced draining state proves
+    // this same request has not dispatched, even after an earlier lost reply.
+    if (isDraining) mayHaveDispatched = false;
     requestOutcomeRecorded = true;
     let responseFileBody = responseBody;
-    if (preserveDispatchProof && mayHaveDispatched && (!response.ok || isDraining)) {
+    if (preserveDispatchProof && mayHaveDispatched && !response.ok) {
       responseFileBody = null;
       options.onPollResponse?.(null, String(response.status));
     } else if (!(responseIsIngress && response.status === 404 && lastKnownDraining)) {

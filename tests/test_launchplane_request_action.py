@@ -401,6 +401,43 @@ process.on('beforeExit', () => {{
                     10,
                 )
 
+    def test_authoritative_drain_restores_no_dispatch_after_lost_reply(self) -> None:
+        for failure in ("network", "gateway"):
+            with self.subTest(failure=failure), TemporaryDirectory() as name:
+                response = Path(name) / "response.json"
+                result = self.run_action(
+                    inputs={
+                        "launchplane-url": "https://launchplane.example",
+                        "route-path": "/v1/launchplane/self-deploy",
+                        "poll-result-path": "result.deploy_state",
+                        "poll-result-statuses": "draining,dispatch_in_progress",
+                        "poll-retry-on-request-error": "true",
+                        "poll-unavailable-timeout-ms": "2000",
+                        "poll-timeout-ms": "10000",
+                        "poll-interval-ms": "1",
+                        "ingress-retry-delay-ms": "0",
+                        "retry-attempts": "1",
+                        "response-output-file": str(response),
+                    },
+                    environment={
+                        "TEST_CLOCK_STEP_MS": "1000",
+                        "TEST_RESULT_FIELD": "deploy_state",
+                        "TEST_REFRESH_STATUS": "draining",
+                        "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "2"
+                        if failure == "network"
+                        else "",
+                        "TEST_INGRESS_404_ATTEMPTS": "2" if failure == "gateway" else "",
+                        "TEST_INGRESS_STATUS": "502",
+                    },
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(replacement_may_have_dispatched(response))
+                calls = json.loads(result.stderr.strip().splitlines()[-1])
+                self.assertGreaterEqual(
+                    sum(urlsplit(call["url"]).hostname == "launchplane.example" for call in calls),
+                    10,
+                )
+
     def test_posts_oidc_authenticated_json_with_idempotency_key(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             output_path = Path(temporary_directory) / "github-output.txt"
