@@ -97,6 +97,7 @@ def application_snapshot_for_deploy(
     deployment_record_id: str,
     extensions: GenericWebLaneExtensions,
     rollback: bool,
+    proved_pre_image_retry: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
 ) -> ApplicationLifecycleSnapshot | None:
@@ -273,6 +274,13 @@ def application_snapshot_for_deploy(
         )
 
     held = prior is not None and prior.state in {"prepared", "held"}
+    if (
+        proved_pre_image_retry
+        and same_attempt is not None
+        and prior is same_attempt
+        and prior.state == "prepared"
+    ):
+        held = False
     carry_baseline = prior is not None and prior.state in {"prepared", "held", "restore_failed"}
     previous_names = (
         prior.managed_names

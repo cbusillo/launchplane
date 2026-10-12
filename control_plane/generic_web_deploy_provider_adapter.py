@@ -113,6 +113,7 @@ class GenericWebDeployProviderMutationAdapter:
             deploy_provider or default_generic_web_deploy_provider()
         )
         self._resolved_deploy_target: GenericWebResolvedDeployTarget | None = None
+        self._proved_pre_image_operation = ""
         self.execution_check: Callable[[], None] = lambda: None
 
     @property
@@ -234,6 +235,7 @@ class GenericWebDeployProviderMutationAdapter:
         expected_provider_target_key: str = "",
         legacy_provider_effect_started_at: str = "",
     ) -> _GenericWebDeployProviderInspection:
+        self._proved_pre_image_operation = ""
         evidence = self.inspect_evidence(
             provider_operation_key=provider_operation_key,
             provider_effect_phase=provider_effect_phase,
@@ -541,14 +543,15 @@ class GenericWebDeployProviderMutationAdapter:
         except FileNotFoundError:
             return False
         receipt = recorded_application_lifecycle(record)
-        return (
+        matched = (
             receipt is not None
             and (
                 (receipt.state == "restored" and record.deploy.status == "fail")
                 or (
                     receipt.state == "prepared"
                     and record.deploy.status == "pending"
-                    and phase in {"application_lifecycle_prepared", "application_schedule_quiesce"}
+                    and phase
+                    in {"", "application_lifecycle_prepared", "application_schedule_quiesce"}
                 )
             )
             and (
@@ -570,6 +573,9 @@ class GenericWebDeployProviderMutationAdapter:
                 target.ship_request.source_git_ref,
             )
         )
+        if matched:
+            self._proved_pre_image_operation = provider_operation_key
+        return matched
 
     def _deployment_record_id(self, provider_operation_key: str) -> str:
         return generic_web_provider_deployment_record_id(
@@ -590,6 +596,8 @@ class GenericWebDeployProviderMutationAdapter:
                 raise ProviderMutationRejectedError(error) from error
             lease.checkpoint_effect(phase)
 
+        proved_pre_image_retry = self._proved_pre_image_operation == provider_operation_key
+        self._proved_pre_image_operation = ""
         try:
             records, result = execute_generic_web_deploy_result(
                 control_plane_root=self._control_plane_root,
@@ -603,6 +611,7 @@ class GenericWebDeployProviderMutationAdapter:
                 resolved_deploy_target=self._resolve_deploy_target(),
                 provider_effect_checkpoint=checkpoint,
                 recorded_artifact=self._recorded_artifact,
+                proved_pre_image_retry=proved_pre_image_retry,
             )
         except (FileNotFoundError, ValueError) as error:
             raise ProviderMutationRejectedError(error)

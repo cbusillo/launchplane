@@ -472,6 +472,7 @@ def execute_generic_web_deploy(
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     recorded_artifact: bool = False,
     rollback: bool = False,
+    proved_pre_image_retry: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
 ) -> GenericWebDeployResult:
@@ -627,6 +628,7 @@ def execute_generic_web_deploy(
             deployment_record_id=record_id,
             extensions=resolved_lane.generic_web_extensions,
             rollback=rollback,
+            proved_pre_image_retry=proved_pre_image_retry,
             rollback_source_deployment_record_id=rollback_source_deployment_record_id,
             rollback_target_deployment_record_id=rollback_target_deployment_record_id,
         )
@@ -641,8 +643,6 @@ def execute_generic_web_deploy(
         )
         if application_lifecycle is not None:
             application_lifecycle.capture()
-            if provider_effect_checkpoint is not None:
-                provider_effect_checkpoint("application_lifecycle_prepared")
             post_deploy_update = PostDeployUpdateEvidence(
                 evidence=application_lifecycle.snapshot.evidence(),
             )
@@ -661,6 +661,8 @@ def execute_generic_web_deploy(
                     runtime_source=verified_build_evidence,
                 )
             )
+            if provider_effect_checkpoint is not None:
+                provider_effect_checkpoint("application_lifecycle_prepared")
             application_lifecycle.prepare()
         untitled_deployment_observation = resolved_deploy_provider.execute_artifact_deploy(
             control_plane_root=control_plane_root,

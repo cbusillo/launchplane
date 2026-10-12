@@ -617,6 +617,12 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         )
 
     def test_adapter_resumes_an_interruption_after_quiescence_before_any_image_effect(self) -> None:
+        self._check_quiesce_resume(refuse=False)
+
+    def test_adapter_restores_jobs_when_a_proved_pre_image_resume_is_refused(self) -> None:
+        self._check_quiesce_resume(refuse=True)
+
+    def _check_quiesce_resume(self, *, refuse: bool) -> None:
         from control_plane.provider_operations import ProviderOperationLease
 
         self._api_context()
@@ -657,6 +663,32 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                 reconciliation_key=adapter.reconciliation_key(),
             ).retry_safe
         )
+        if refuse:
+            self.assertTrue(
+                adapter.inspect(
+                    provider_operation_key=operation,
+                    provider_effect_phase="application_schedule_quiesce",
+                    reconciliation_key=adapter.reconciliation_key(),
+                ).retry_safe
+            )
+            from control_plane.provider_operations import ProviderMutationUnknownError
+
+            with patch.object(
+                provider,
+                "execute_artifact_deploy",
+                side_effect=click.ClickException("preflight refused"),
+            ):
+                with self.assertRaises(ProviderMutationUnknownError):
+                    adapter.apply(operation, Mock(spec=ProviderOperationLease))
+            self.assertEqual(self.schedules["billing-recovery"], self.original)
+            self.assertTrue(
+                adapter.inspect(
+                    provider_operation_key=operation,
+                    provider_effect_phase="application_schedule_restore",
+                    reconciliation_key=adapter.reconciliation_key(),
+                ).retry_safe
+            )
+            return
         provider.observation = GenericWebProviderDeploymentObservation(
             outcome="present",
             deployment_status="success",
@@ -666,6 +698,44 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         )
         self.assertTrue(adapter.apply(operation, Mock(spec=ProviderOperationLease)).durable)
         self.assertTrue(self.schedules["billing-recovery"]["enabled"])
+
+    def test_receipt_storage_failure_does_not_mark_a_provider_effect_or_pause_jobs(self) -> None:
+        from control_plane.provider_operations import ProviderOperationLease
+        from sqlalchemy.exc import SQLAlchemyError
+
+        self._api_context()
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        store = _GenericWebDeployStore(profile)
+        provider = _LifecycleDeployProvider(
+            target_id="app-123",
+            observation=GenericWebProviderDeploymentObservation(outcome="absent"),
+        )
+        adapter = GenericWebDeployProviderMutationAdapter(
+            control_plane_root=Path("."),
+            record_store=store,
+            deploy_request=GenericWebDeployEnvelope(product=profile.product, deploy=_request()),
+            profile=profile,
+            lane=lane,
+            trace_id="receipt-write-failed",
+            deploy_provider=provider,
+        )
+        lease = Mock(spec=ProviderOperationLease)
+        with patch.object(
+            store, "write_deployment_record", side_effect=SQLAlchemyError("unavailable")
+        ):
+            with self.assertRaises(SQLAlchemyError):
+                adapter.apply("receipt-write-failed", lease)
+        lease.checkpoint_effect.assert_not_called()
+        self.assertEqual(self.schedules["billing-recovery"], self.original)
+        self.assertTrue(
+            adapter.inspect(
+                provider_operation_key="receipt-write-failed",
+                provider_effect_phase="",
+                reconciliation_key=adapter.reconciliation_key(),
+            ).retry_safe
+        )
 
     def test_unsupported_lifecycle_provider_refuses_before_deploy(self) -> None:
         profile = _profile()
