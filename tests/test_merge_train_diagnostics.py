@@ -19,13 +19,59 @@ from control_plane.merge_train_controller_run_once import (
     execute_merge_train_controller_with_client,
 )
 from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
+from control_plane.merge_train_diagnostics import controller_last_result
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_merge_train_culprit_isolation import _TrainSimulation, TEST_FAILURE
 from tests.test_merge_train_policy_recovery import _NoAdmissionEvaluator
+from tests.test_merge_admission_records import _guard_records
 
 
 class RecoveryDiagnosticsTests(TestCase):
+    def test_unchanged_landing_evidence_in_a_narrower_projection_is_not_progress(self) -> None:
+        candidate, landing, state, _ = _guard_records()
+        planned, key = controller_last_result(
+            result={
+                "controller_action": "plan_landing",
+                "candidate": candidate.candidate.model_dump(mode="json"),
+                "landing_plan": landing.landing_plan.model_dump(mode="json"),
+            },
+            state=state,
+            observed_at=state.updated_at,
+            observations={},
+            pass_started_at=state.updated_at,
+            trace_id="projection",
+            policy_key=state.policy_key,
+            policy_sha256=state.policy_sha256,
+            reconciliation_required=False,
+            persisted=True,
+        )
+        later = (
+            (
+                datetime.fromisoformat(state.updated_at.replace("Z", "+00:00"))
+                + timedelta(seconds=30)
+            )
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        blocked, following = controller_last_result(
+            result={
+                "controller_action": "block",
+                "landing_plan": landing.landing_plan.model_dump(mode="json"),
+            },
+            state=state.model_copy(update={"last_result": planned, "semantic_progress_key": key}),
+            observed_at=later,
+            observations={},
+            pass_started_at=state.updated_at,
+            trace_id="projection",
+            policy_key=state.policy_key,
+            policy_sha256=state.policy_sha256,
+            reconciliation_required=False,
+            persisted=True,
+        )
+        self.assertEqual(blocked.semantic_progress_at, planned.semantic_progress_at)
+        self.assertEqual(following, key)
+
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

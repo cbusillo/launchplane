@@ -44,7 +44,7 @@ def controller_last_result(
     reason = _text(result.get("reason_code"), 128)
     if reason == "failed_candidate_recovery_unavailable" or not reason:
         reason = observations.get("reason_code", "") or reason or action
-    key = _semantic_key(result)
+    key, changed, initialized = _semantic_key(result, state.semantic_progress_key)
     previous = state.last_result
     batch_id = _text(candidate.get("batch_id") or observations.get("candidate_batch_id"))
     same_recovery = (
@@ -77,10 +77,10 @@ def controller_last_result(
     ):
         reason = "failure_isolation_checks_pending"
     progress_at = previous.semantic_progress_at if previous is not None else ""
-    if persisted and key and key != state.semantic_progress_key:
+    if persisted and changed:
         progress_at = (
             observed_at
-            if state.semantic_progress_key
+            if initialized
             else _text(candidate.get("updated_at"), 64) or state.updated_at
         )
     actor: Literal["controller", "provider", "repository_agent"] = "controller"
@@ -145,9 +145,19 @@ def controller_last_result(
     )
 
 
-def _semantic_key(result: dict[str, object]) -> str:
+def _semantic_key(result: dict[str, object], previous_key: str) -> tuple[str, bool, bool]:
     # Exclude pass times, provider bodies, record IDs and phase/heartbeat churn.
-    evidence: dict[str, object] = {}
+    try:
+        previous = _object(json.loads(previous_key)) if previous_key else {}
+    except json.JSONDecodeError:
+        previous = {}
+    fingerprints = {
+        name: value
+        for name, value in previous.items()
+        if name in {"candidate", "landing_plan", "stack_collapse_plan"} and isinstance(value, str)
+    }
+    initialized = bool(fingerprints)
+    changed = False
     for name, fields in (
         (
             "candidate",
@@ -165,7 +175,9 @@ def _semantic_key(result: dict[str, object]) -> str:
     ):
         value = _object(result.get(name))
         if value:
-            evidence[name] = {field: value[field] for field in fields if field in value}
-    if not evidence:
-        return ""
-    return hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
+            evidence = {field: value[field] for field in fields if field in value}
+            fingerprint = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
+            changed = changed or fingerprint != fingerprints.get(name)
+            fingerprints[name] = fingerprint
+    # Missing components in a narrower projection are not evidence of a change.
+    return json.dumps(fingerprints, sort_keys=True) if fingerprints else "", changed, initialized
