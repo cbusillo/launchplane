@@ -375,6 +375,64 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(denied.status_code, 403, denied.text)
 
+    async def test_role_policy_diagnostics_evaluate_inherited_effects_without_policy_writes(
+        self,
+    ) -> None:
+        policy = reader_policy()
+        probe = {
+            "principal": {
+                "principal_type": "local_operator",
+                "subject": "record-reader",
+                "token_label": "record-reader-label",
+            },
+            "action": "product_config.plan",
+            "product": "sample",
+            "context": "sample",
+            "target_scope": "context",
+        }
+        with _database_app(policy) as (store, record, app):
+            headers = {"Authorization": "Bearer reader-token"}
+            async with lifespan_client(app) as client:
+                effective = await client.post(
+                    "/v1/authz-diagnostics/effective-access/evaluate", headers=headers, json=probe
+                )
+                self.assertEqual(effective.status_code, 200, effective.text)
+                self.assertEqual(effective.json()["evaluation"]["decision"], "allowed")
+                preview = await client.post(
+                    "/v1/authz-diagnostics/candidate-policy/preview",
+                    headers=headers,
+                    json={"candidate_policy": policy.model_dump(mode="json"), "probes": [probe]},
+                )
+                self.assertEqual(preview.status_code, 200, preview.text)
+                result = preview.json()["probes"][0]
+                self.assertEqual(result["active_evaluation"]["decision"], "allowed")
+                self.assertEqual(result["candidate_evaluation"]["decision"], "allowed")
+            self.assertEqual(tuple(store.list_authz_policy_records()), (record,))
+
+    async def test_denied_intent_cannot_introduce_an_aggregate_product_scope(self) -> None:
+        with _database_app(reader_policy()) as (store, _, app):
+            headers = {"Authorization": "Bearer reader-token"}
+            async with lifespan_client(app) as client:
+                result = await client.post(
+                    "/v1/agent/write-intents/evaluate",
+                    headers=headers,
+                    json={
+                        "intent": "product_config_apply",
+                        "product": "unknown-product",
+                        "context": "unknown-context",
+                        "source_url": "https://github.com/example/sample/issues/1",
+                        "reason": "Evaluate unsupported input",
+                    },
+                )
+                self.assertEqual(result.status_code, 202, result.text)
+                self.assertEqual(result.json()["result"]["intent"]["status"], "denied")
+                self.assertNotIn("unknown-product", store.list_recorded_product_scopes())
+                records = await client.get(
+                    "/v1/privileged-operations/plans?descriptor_id=managed-authz-policy-set",
+                    headers=headers,
+                )
+                self.assertEqual(records.status_code, 200, records.text)
+
     async def test_service_product_scope_does_not_authorize_other_product_aggregates(self) -> None:
         profiles = tuple(
             LaunchplaneProductProfileRecord.model_validate(product_profile_payload(product))

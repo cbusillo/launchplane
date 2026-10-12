@@ -86,7 +86,10 @@ authorization membership rather than complete coverage.
 default. A schema-2 or schema-3 `local_operator` or `terminal_agent` rule names exact
 subjects, token labels and products; wildcard agent or product selectors are
 rejected. Context and instance selectors retain their existing matching rules.
-Use separate context and instance rules when both scopes are needed. A new
+Product-level reads use the `launchplane` metadata context, so the context
+rule must include it alongside the selected product lane contexts (or use the
+existing all-context selector). Use separate context and instance rules when
+both scopes are needed. A new
 product is included through an explicitly reviewed policy change.
 
 [`action_effects.py`](../control_plane/action_effects.py) owns source declarations
@@ -115,7 +118,8 @@ credentials. Service metadata and global policy history require their own
 Launchplane product scope. That scope never stands for another product.
 Declarations distinguish service-owned metadata from aggregates containing
 product records; aggregate reads require each recorded product scope, including
-historical product projections without a current profile. Snapshot authorization
+historical product projections without a current profile. Caller-supplied intent
+evaluations, including denied requests, do not establish product scopes. Snapshot authorization
 checks the actual exported profiles and inventory inside the same read-only
 transaction. The Delivery selector GET uses ordinary DB read
 authorization; its configuration and credential retirement keep their admin gates.

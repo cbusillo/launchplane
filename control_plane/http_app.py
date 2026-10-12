@@ -4051,7 +4051,7 @@ class LaunchplaneAuthzPolicyRuntime:
                 return False
             try:
                 owner = self._context_product_resolver(context)
-            except (TypeError, RuntimeError, SQLAlchemyError):
+            except (TypeError, ValueError, RuntimeError, SQLAlchemyError):
                 return False
             if not owner or (product != _LAUNCHPLANE_SERVICE_CONTEXT and product != owner):
                 return False
@@ -4469,7 +4469,7 @@ def create_launchplane_fastapi_app(
                 )
                 for product in reader()
             )
-        except (TypeError, RuntimeError, SQLAlchemyError):
+        except (TypeError, ValueError, RuntimeError, SQLAlchemyError):
             return False
 
     resolved_authz_policy_runtime.configure_context_product_resolver(
@@ -19599,13 +19599,17 @@ def create_launchplane_fastapi_app(
         trace_id = next_trace_id()
         eligible_reader = isinstance(
             identity,
-            GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity,
+            GitHubHumanIdentity
+            | LocalOperatorIdentity
+            | LocalAdminIdentity
+            | TerminalAgentIdentity,
         )
         preflight = resolved_authz_policy_runtime.policy.evaluate(
             identity=identity,
             action=AUTHZ_REPOSITORY_SCOPE_READ_ACTION,
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            inherit_agent_read_role=True,
         )
         if not eligible_reader or preflight.decision != "allowed":
             raise _launchplane_http_error(
@@ -19651,6 +19655,7 @@ def create_launchplane_fastapi_app(
             action=AUTHZ_REPOSITORY_SCOPE_READ_ACTION,
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            inherit_agent_read_role=True,
         )
         if active_policy_evaluation.decision != "allowed":
             raise _launchplane_http_error(
@@ -19711,6 +19716,7 @@ def create_launchplane_fastapi_app(
                 action=AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
                 product="launchplane",
                 context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                inherit_agent_read_role=True,
                 record_context=False,
             ).decision
             == "allowed"
@@ -19737,6 +19743,7 @@ def create_launchplane_fastapi_app(
                 action=AUTHZ_POLICY_CANDIDATE_PREVIEW_READ_ACTION,
                 product="launchplane",
                 context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                inherit_agent_read_role=True,
                 record_context=False,
             ).decision
             == "allowed"
@@ -19822,6 +19829,7 @@ def create_launchplane_fastapi_app(
             context=evaluation_request.context,
             target=target,
             record_context=False,
+            inherit_agent_read_role=True,
         )
         return EffectiveAccessEvaluateResponse(
             trace_id=trace_id,

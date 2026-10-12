@@ -4776,6 +4776,8 @@ class LaunchplaneAgentWriteIntentRow(Base):
             "status",
             desc("recorded_at"),
         ),
+        # Evaluations retain denied caller inputs; they do not establish products.
+        {"info": {"product_scope_authority": False}},
     )
 
     record_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -5850,10 +5852,12 @@ class PostgresRecordStore(HumanSessionStore):
     def list_recorded_product_scopes(self) -> tuple[str, ...]:
         """Product projections include historical records without an active profile."""
         product_columns = tuple(
-            table.c.product for table in Base.metadata.tables.values() if "product" in table.c
+            table.c.product
+            for table in Base.metadata.tables.values()
+            if "product" in table.c and table.info.get("product_scope_authority", True)
         )
         scopes = union_all(
-            *(select(column.label("product")) for column in product_columns)
+            *(select(column.label("product")).distinct() for column in product_columns)
         ).subquery()
         with self._engine.connect() as connection:
             return tuple(

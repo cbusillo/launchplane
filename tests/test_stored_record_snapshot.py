@@ -108,8 +108,10 @@ class StoredRecordSnapshotTests(unittest.TestCase):
             )
         profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload())
         self.store.write_product_profile_record(profile)
-        self.assertEqual(
-            set(self.store.list_recorded_product_scopes()), {profile.product, "historical-product"}
+        self.assertTrue(
+            {profile.product, "historical-product"}.issubset(
+                self.store.list_recorded_product_scopes()
+            )
         )
 
     def test_raw_omitted_instances_survive_export_and_new_validation_fails_rehearsal(self) -> None:

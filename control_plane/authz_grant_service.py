@@ -1273,6 +1273,7 @@ def preview_authz_candidate_policy(
             context=probe.context,
             target=target,
             record_context=False,
+            inherit_agent_read_role=True,
         )
         candidate_evaluation = candidate_policy.evaluate(
             identity=probe.identity(),
@@ -1281,6 +1282,7 @@ def preview_authz_candidate_policy(
             context=probe.context,
             target=target,
             record_context=False,
+            inherit_agent_read_role=True,
         )
         delta: AuthzPolicyCandidateProbeDelta
         if active_evaluation.decision == candidate_evaluation.decision:
