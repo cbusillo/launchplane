@@ -3233,7 +3233,7 @@ def deliver_public_ingress_notification_outbox_delivery(
     record: OutboxDeliveryRecord,
     drivers: PublicIngressNotificationDriverSet,
     mark_provider_started: Callable[[str, str], None],
-    record_store: PublicIngressMonitorStore | None = None,
+    record_store: PublicIngressNotificationOutboxStore | None = None,
 ) -> OutboxDeliveryRecord:
     delivery_record = record
     try:
@@ -3365,11 +3365,21 @@ def deliver_public_ingress_notification_outbox_delivery(
         )
 
 
+class PublicIngressNotificationOutboxStore(PublicIngressMonitorStore, Protocol):
+    def read_public_ingress_incident_record(
+        self, incident_id: str
+    ) -> PublicIngressIncidentRecord: ...
+
+    def read_public_ingress_observation_record(
+        self, record_id: str
+    ) -> PublicIngressObservationRecord: ...
+
+
 def _deliver_direct_notification_outbox(
     *,
     record: OutboxDeliveryRecord,
     drivers: PublicIngressNotificationDriverSet,
-    record_store: PublicIngressMonitorStore | None,
+    record_store: PublicIngressNotificationOutboxStore | None,
     mark_provider_started: Callable[[str, str], None],
 ) -> OutboxDeliveryRecord:
     payload = record.payload
@@ -3387,21 +3397,9 @@ def _deliver_direct_notification_outbox(
         )
     if record_store is None:
         raise ValueError("direct notification outbox requires record store")
-    incident = next(
-        incident
-        for incident in record_store.list_public_ingress_incident_records()
-        if incident.incident_id == record.aggregate_id
-    )
-    observation = next(
-        observation
-        for observation in record_store.list_public_ingress_observation_records(
-            product=incident.product,
-            context_name=incident.context,
-            instance_name=incident.instance,
-            check_name=incident.check_name,
-            check_kind=incident.check_kind,
-        )
-        if observation.record_id == attempt_payload.get("observation_id")
+    incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
+    observation = record_store.read_public_ingress_observation_record(
+        str(attempt_payload["observation_id"])
     )
     destination = next(
         (
