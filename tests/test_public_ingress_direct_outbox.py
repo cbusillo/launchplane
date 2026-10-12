@@ -64,7 +64,9 @@ class DirectNotificationOutboxTests(unittest.TestCase):
                     "incident_event_id"
                 ]
                 self.assertNotIn("mock-credential", str(queued[0].payload))
-                self.assertNotIn("discord_webhook_secret", str(queued[0].payload))
+                for field, reference in destination.model_dump().items():
+                    if "secret" in field and reference:
+                        self.assertNotIn(reference, str(queued[0].payload))
                 fail = True
                 self.assertEqual(
                     self._work(store, drivers, "2026-05-29T12:01:01Z").status, "pending"
