@@ -83361,6 +83361,16 @@
               "title": "Authorization",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -83459,6 +83469,16 @@
             "schema": {
               "default": "",
               "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
               "type": "string"
             }
           }
@@ -92559,6 +92579,7 @@
     "/v1/product-profiles/{product}/mutation-receipts/{field}": "read_product_profile_mutation_receipt",
     "/v1/product-profiles/{product}/reconcile-requests": "read_product_reconcile_requests",
     "/v1/product-review": "read_product_review",
+    "/v1/production-backup-authority": "read_production_backup_authority",
     "/v1/production-backup-gates/operations/{operation_id}": "read_production_backup_gate_operation",
     "/v1/products": "list_products",
     "/v1/products/{product}": "read_product",
@@ -92596,6 +92617,7 @@
     "/v1/product-profiles/{product}/website-cleanup": "apply_product_website_cleanup",
     "/v1/product-review/decisions": "write_product_review_decision",
     "/v1/product-review/feedback/retry": "retry_product_review_feedback",
+    "/v1/production-backup-authority/apply": "apply_production_backup_authority",
     "/v1/production-backup-gates": "enqueue_production_backup_gate",
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": "dry_run_product_promotion",
