@@ -205,8 +205,7 @@ class RecoveryDiagnosticsTests(TestCase):
             ),
             source="consumed-check-retry",
             updated_at=candidate.updated_at,
-            status="superseded",
-        )
+        ).model_copy(update={"status": "superseded"})
         self.store.write_merge_train_batch_candidate_record(consumed)
         self.client.observe_batch_candidate_checks.return_value = candidate.model_copy(
             update={"required_checks_status": "pass", "status": "passed"}
