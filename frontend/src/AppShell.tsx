@@ -1,11 +1,16 @@
 import {
   Boxes,
+  CircleCheck,
+  CircleHelp,
+  CircleMinus,
+  CircleX,
   ChevronRight,
   CircleUserRound,
   LogOut,
   Moon,
   RefreshCw,
   Sun,
+  TriangleAlert,
   Wrench,
 } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
@@ -16,7 +21,8 @@ import type {
 } from "./generated/openapi.ts";
 import type { ResourceState } from "./resource";
 import { useEvidenceExpiry } from "./ProductOps";
-import { environmentOperationalTone, expireProductEvidence } from "./product-environment-signal";
+import { expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { sidebarStatus } from "./sidebar-status";
 import {
   environmentLabel,
   environmentViewLabel,
@@ -316,14 +322,8 @@ function ProductTrustDots({ product }: { product: ProductSiteOverview }) {
   const production = product.environments.find(
     (environment) => environment.environment === "prod",
   );
-  const testingTone = environmentOperationalTone(testing ?? null);
-  const productionTone = environmentOperationalTone(production ?? null);
-  const testingDescription = testing
-    ? `Testing operational status: ${testingTone}`
-    : "Testing lane: absent (not recorded)";
-  const productionDescription = production
-    ? `Production operational status: ${productionTone}`
-    : "Production lane: absent (not recorded)";
+  const { tone: testingTone, description: testingDescription } = sidebarStatus(testing ?? null, "Testing");
+  const { tone: productionTone, description: productionDescription } = sidebarStatus(production ?? null, "Production");
   return (
     <span
       aria-label={`${testingDescription}; ${productionDescription}`}
@@ -335,13 +335,22 @@ function ProductTrustDots({ product }: { product: ProductSiteOverview }) {
         data-lane="testing"
         data-tone={testingTone}
         title={testingDescription}
-      />
+      ><StatusIcon tone={testingTone} absent={!testing} /></span>
       <span
         aria-hidden="true"
         data-lane="prod"
         data-tone={productionTone}
         title={productionDescription}
-      />
+      ><StatusIcon tone={productionTone} absent={!production} /></span>
     </span>
   );
+}
+
+function StatusIcon({ tone, absent }: { tone: SignalTone; absent: boolean }) {
+  const Icon = absent || tone === "unsupported" ? CircleMinus
+    : tone === "verified" ? CircleCheck
+    : tone === "danger" ? CircleX
+    : tone === "warning" || tone === "stale" ? TriangleAlert
+    : CircleHelp;
+  return <Icon size={18} strokeWidth={2.5} aria-hidden="true" />;
 }

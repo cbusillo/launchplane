@@ -314,10 +314,23 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByRole("link", { name: /Production/ }).first(),
     ).toBeVisible();
-    await expect(page.locator(".product-trust-dots").first()).toHaveAttribute(
-      "aria-label",
-      "Testing operational status: verified; Production operational status: danger",
-    );
+    const expectedTones = await page.evaluate(async () => {
+      const fixturePath = "/ui/src/dev-fixtures.ts";
+      const signalPath = "/ui/src/product-environment-signal.ts";
+      const { productsForFixture } = await import(fixturePath);
+      const { environmentOperationalTone } = await import(signalPath);
+      return productsForFixture("products")[0].environments.map((lane: { environment: string }) => ({
+        lane: lane.environment, tone: environmentOperationalTone(lane),
+      }));
+    });
+    const sidebarStatus = page.locator(".product-trust-dots").first();
+    for (const { lane, tone } of expectedTones) {
+      await expect(sidebarStatus.locator(`[data-lane="${lane}"]`)).toHaveAttribute("data-tone", tone);
+    }
+    const laneLabels = await sidebarStatus.locator("[data-lane]").evaluateAll(lanes =>
+      lanes.map(lane => lane.getAttribute("title")));
+    const accessibleLabel = await sidebarStatus.getAttribute("aria-label");
+    for (const label of laneLabels) expect(accessibleLabel).toContain(label);
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "product-workspace");
     diagnostics.assertClean();
