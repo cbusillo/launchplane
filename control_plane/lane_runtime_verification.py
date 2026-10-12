@@ -249,8 +249,19 @@ def read_lane_runtime_verification(
         ),
         None,
     )
+    health_failure = next(
+        (
+            result
+            for result in results
+            if result.observation is not None
+            and result.observation.status == "fail"
+            and result.runtime_target is not None
+        ),
+        None,
+    )
     evidence = (
         identity_failure
+        or health_failure
         or failed_evidence
         or next((result for result in results if result.runtime_target is not None), None)
     )

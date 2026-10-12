@@ -749,7 +749,9 @@ def _promotion_evidence(
         ):
             freshness = "recorded"
         health_provenance = verification.provenance
-        if verification.observation is not None and freshness == "recorded":
+        if verification.observation is not None and (
+            freshness == "recorded" or verification.observation.status == "fail"
+        ):
             health_provenance = health_provenance.model_copy(
                 update={"detail": verification.observation.summary}
             )

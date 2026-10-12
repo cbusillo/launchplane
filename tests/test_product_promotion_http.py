@@ -616,6 +616,15 @@ class ProductPromotionStatusTests(unittest.TestCase):
         self.assertEqual(status.source.health_provenance.detail, failed.summary)
         self.assertFalse(status.workflow_live.enabled)
 
+        store.observations[0] = store.observations[0].model_copy(
+            update={"observed_at": (NOW - timedelta(hours=1)).isoformat()}
+        )
+        _, _, stale_status = _status(store)
+        self.assertEqual(stale_status.source.trust_state, "stale")
+        self.assertEqual(stale_status.source.health_status, "fail")
+        assert stale_status.source.health_provenance is not None
+        self.assertEqual(stale_status.source.health_provenance.detail, failed.summary)
+
     def test_equivalent_monitor_refresh_preserves_the_reviewed_promotion_fingerprint(self) -> None:
         store = _MonitoredPromotionStore(old_inventory=True)
         _, _, before = _status(store)
