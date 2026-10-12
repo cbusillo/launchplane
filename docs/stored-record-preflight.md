@@ -64,21 +64,31 @@ covered. Scrubbed values cannot prove every original value constraint; a field
 format change must account for its scrubbed representation. Failures expose
 error types, bounded code-owned validation paths, record-family metadata and
 export limit reasons, never record inputs. Exit cleanup removes only the
-rehearsal's containers, anonymous volumes and network.
+rehearsal's containers, anonymous volumes and network. The workflow also runs
+always-cleanup using the exact current job's resource label, covering forced
+termination without sweeping other jobs' resources. Qualification uses its own
+temporary registry config and removes it; persistent runner credentials stay
+untouched. The job summary retains the safe result, never the snapshot.
 
-Snapshots expire after five minutes. Bound the complete shell run with
-`timeout --kill-after=15s 240s bash scripts/deploy/stored-record-preflight.sh ...`.
-Including the 30-second export request and forced cleanup, the added maximum
-is 4 minutes 45 seconds. Missing/stale/oversize snapshots, unavailable Docker,
+Snapshots expire after five minutes. The shared workflow wrapper bounds image
+pulls and the complete rehearsal to 240 seconds, then allows 15 seconds before
+forced termination. Export is capped at one minute and current-job cleanup at
+one minute: those three operations have a combined budget of 6 minutes
+15 seconds, excluding job preparation. Missing/stale/oversize snapshots, unavailable Docker,
 unsupported revisions or candidates without the module refuse. There is no
 production-database, empty-fixture or coverage fallback.
 
 ## Activation order and recovery
 
 The exporter and candidate module must land and deploy first through the
-existing path. The Supervisor then reads the supported scrubbed export and
-checks its per-family counts and bounds before routing the mandatory deploy
-gate PR. Landing both in one batch would require a route the old service lacks.
+existing path. The Supervisor then dispatches this same deploy workflow on the
+default branch with `stored_record_preflight_only=true` and an immutable
+`image_reference`, using the installed protected-workflow helper. This read-only
+job authenticates the existing image read, fetches the supported scrubbed export
+and runs the rehearsal on the actual deploy runner. Both deployment jobs are
+excluded in this mode. Verify its per-family counts, bounds and successful
+runner result before routing the mandatory deploy gate PR. A refused read is
+reported as missing standing authority; this mode creates no new grant. Landing both in one batch would require a route the old service lacks.
 This ordered capability rollout supplies a supported way to keep deploying.
 
 The gate change on #3413 runs after immutable image resolution and before

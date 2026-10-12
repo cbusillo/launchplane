@@ -66,7 +66,13 @@ class StoredRecordSnapshotTests(unittest.TestCase):
 
     def test_export_preserves_historical_shape_scrubs_values_and_does_not_write(self) -> None:
         payload = product_profile_payload()
-        payload["preview"]["override_env"] = {"TOKEN": "plaintext-sentinel"}  # type: ignore[index]
+        preview = payload["preview"]
+        assert isinstance(preview, dict)
+        preview["override_env"] = {
+            "TOKEN": "plaintext-sentinel",
+            "actions": "plaintext-sentinel",
+            "driver_id": "plaintext-sentinel",
+        }
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(payload)
         )
