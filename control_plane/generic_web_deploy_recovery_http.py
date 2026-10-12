@@ -863,6 +863,7 @@ async def _inspect_generic_web_deploy_recovery(
                 and provider_inspection.resolved_deploy_target is not None
             ):
                 runtime_close_out_evidence = adapter.inspect_runtime_close_out(
+                    provider_operation_key=provider_operation_key,
                     resolved_deploy_target=provider_inspection.resolved_deploy_target,
                 )
                 if runtime_close_out_evidence is not None:
