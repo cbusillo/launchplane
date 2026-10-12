@@ -331,6 +331,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         provider_request.start()
         self.addCleanup(provider_request.stop)
         profile = SimpleNamespace(
+            release_on_acceptance="held",
             is_active=True,
             repository=self.provider.repository_name,
             owner=SimpleNamespace(review_label="client-check", is_set=True),
@@ -446,6 +447,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             for entry in provider.candidate.entries
         }
         profile = SimpleNamespace(
+            release_on_acceptance="held",
             is_active=True,
             repository=provider.repository_name,
             owner=SimpleNamespace(is_set=True, review_label="owner-review"),

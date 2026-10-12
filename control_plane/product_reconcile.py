@@ -1526,6 +1526,7 @@ def _plan_preview_target(
         labels=_labels(pull_request),
         review_label=profile.owner.review_label,
         pure_dependency_update=pure_dependabot_update(pull_request, read=transport.get_json),
+        director_standing=profile.release_on_acceptance == "director_standing",
     )
     if not intent.explicit_override and recorded_train_candidate(
         store=record_store,
