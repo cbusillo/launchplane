@@ -36010,6 +36010,87 @@
         "title": "ProductionBackupAuthorityWriteResult",
         "type": "object"
       },
+      "ProductionBackupGateOperationLeaseSummaryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "backup_record_id": {
+            "title": "Backup Record Id",
+            "type": "string"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "heartbeat_age_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Heartbeat Age Seconds"
+          },
+          "heartbeat_at": {
+            "title": "Heartbeat At",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "lease_expired": {
+            "title": "Lease Expired",
+            "type": "boolean"
+          },
+          "lease_expires_at": {
+            "title": "Lease Expires At",
+            "type": "string"
+          },
+          "lease_owner": {
+            "title": "Lease Owner",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "product",
+          "context",
+          "instance",
+          "backup_record_id",
+          "status",
+          "phase",
+          "attempt",
+          "lease_owner",
+          "lease_expires_at",
+          "heartbeat_at",
+          "heartbeat_age_seconds",
+          "lease_expired"
+        ],
+        "title": "ProductionBackupGateOperationLeaseSummaryResponse",
+        "type": "object"
+      },
       "ProductionBackupGateRequest": {
         "additionalProperties": false,
         "properties": {
@@ -46239,111 +46320,6 @@
         "title": "VeriReelPreviewVerificationRequest",
         "type": "object"
       },
-      "VeriReelProdBackupGateEnvelope": {
-        "additionalProperties": false,
-        "properties": {
-          "backup_gate": {
-            "$ref": "#/components/schemas/VeriReelProdBackupGateRequest"
-          },
-          "product": {
-            "title": "Product",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "product",
-          "backup_gate"
-        ],
-        "title": "VeriReelProdBackupGateEnvelope",
-        "type": "object"
-      },
-      "VeriReelProdBackupGateOperationLeaseSummaryResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "attempt": {
-            "title": "Attempt",
-            "type": "integer"
-          },
-          "backup_record_id": {
-            "title": "Backup Record Id",
-            "type": "string"
-          },
-          "context": {
-            "title": "Context",
-            "type": "string"
-          },
-          "heartbeat_age_seconds": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Heartbeat Age Seconds"
-          },
-          "heartbeat_at": {
-            "title": "Heartbeat At",
-            "type": "string"
-          },
-          "instance": {
-            "title": "Instance",
-            "type": "string"
-          },
-          "lease_expired": {
-            "title": "Lease Expired",
-            "type": "boolean"
-          },
-          "lease_expires_at": {
-            "title": "Lease Expires At",
-            "type": "string"
-          },
-          "lease_owner": {
-            "title": "Lease Owner",
-            "type": "string"
-          },
-          "operation_id": {
-            "title": "Operation Id",
-            "type": "string"
-          },
-          "phase": {
-            "title": "Phase",
-            "type": "string"
-          },
-          "product": {
-            "title": "Product",
-            "type": "string"
-          },
-          "status": {
-            "title": "Status",
-            "type": "string"
-          }
-        },
-        "required": [
-          "operation_id",
-          "product",
-          "context",
-          "instance",
-          "backup_record_id",
-          "status",
-          "phase",
-          "attempt",
-          "lease_owner",
-          "lease_expires_at",
-          "heartbeat_at",
-          "heartbeat_age_seconds",
-          "lease_expired"
-        ],
-        "title": "VeriReelProdBackupGateOperationLeaseSummaryResponse",
-        "type": "object"
-      },
       "VeriReelProdBackupGateOperationWorkerReconcileResponse": {
         "additionalProperties": false,
         "properties": {
@@ -46426,7 +46402,7 @@
           },
           "operations": {
             "items": {
-              "$ref": "#/components/schemas/VeriReelProdBackupGateOperationLeaseSummaryResponse"
+              "$ref": "#/components/schemas/ProductionBackupGateOperationLeaseSummaryResponse"
             },
             "title": "Operations",
             "type": "array"
@@ -46467,42 +46443,6 @@
           "operations"
         ],
         "title": "VeriReelProdBackupGateOperationWorkerStatusResponseModel",
-        "type": "object"
-      },
-      "VeriReelProdBackupGateRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "backup_record_id": {
-            "title": "Backup Record Id",
-            "type": "string"
-          },
-          "context": {
-            "default": "verireel",
-            "title": "Context",
-            "type": "string"
-          },
-          "instance": {
-            "default": "prod",
-            "title": "Instance",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "timeout_seconds": {
-            "default": 1800,
-            "minimum": 1.0,
-            "title": "Timeout Seconds",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "backup_record_id"
-        ],
-        "title": "VeriReelProdBackupGateRequest",
         "type": "object"
       },
       "VeriReelProdDeployEnvelope": {
@@ -65287,176 +65227,6 @@
           }
         },
         "summary": "Write VeriReel preview verification"
-      }
-    },
-    "/v1/drivers/verireel/prod-backup-gate": {
-      "post": {
-        "operationId": "apply_verireel_prod_backup_gate",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Idempotency-Key",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$defs": {
-                  "VeriReelProdBackupGateRequest": {
-                    "additionalProperties": false,
-                    "properties": {
-                      "backup_record_id": {
-                        "title": "Backup Record Id",
-                        "type": "string"
-                      },
-                      "context": {
-                        "default": "verireel",
-                        "title": "Context",
-                        "type": "string"
-                      },
-                      "instance": {
-                        "default": "prod",
-                        "title": "Instance",
-                        "type": "string"
-                      },
-                      "schema_version": {
-                        "default": 1,
-                        "minimum": 1,
-                        "title": "Schema Version",
-                        "type": "integer"
-                      },
-                      "timeout_seconds": {
-                        "default": 1800,
-                        "minimum": 1,
-                        "title": "Timeout Seconds",
-                        "type": "integer"
-                      }
-                    },
-                    "required": [
-                      "backup_record_id"
-                    ],
-                    "title": "VeriReelProdBackupGateRequest",
-                    "type": "object"
-                  }
-                },
-                "$ref": "#/components/schemas/VeriReelProdBackupGateEnvelope",
-                "additionalProperties": false,
-                "properties": {
-                  "backup_gate": {
-                    "$ref": "#/$defs/VeriReelProdBackupGateRequest"
-                  },
-                  "product": {
-                    "title": "Product",
-                    "type": "string"
-                  },
-                  "schema_version": {
-                    "default": 1,
-                    "minimum": 1,
-                    "title": "Schema Version",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "product",
-                  "backup_gate"
-                ],
-                "title": "VeriReelProdBackupGateEnvelope",
-                "type": "object"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Not Found"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Execute VeriReel prod backup gate"
       }
     },
     "/v1/drivers/verireel/prod-backup-gate/operations/{operation_id}/cancel": {

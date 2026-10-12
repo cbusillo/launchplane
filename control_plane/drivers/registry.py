@@ -524,7 +524,7 @@ ODOO_DRIVER = DriverDescriptor(
         DriverCapabilityDescriptor(
             capability_id="stable_promotion",
             label="Stable promotion",
-            description="Capture backup evidence, promote testing to prod, and roll back prod to stored artifacts.",
+            description="Promote testing to prod and roll back prod to stored artifacts after shared backup capture.",
             actions=(
                 "target_replacement_apply",
                 "prod_promotion_inputs",
@@ -882,8 +882,8 @@ VERIREEL_DRIVER = DriverDescriptor(
         DriverCapabilityDescriptor(
             capability_id="stable_promotion",
             label="Stable promotion",
-            description="Capture backup evidence, promote testing to prod, and roll back prod to stored artifacts.",
-            actions=("prod_backup_gate", "prod_promotion", "prod_rollback"),
+            description="Promote testing to prod and roll back prod to stored artifacts after shared backup capture.",
+            actions=("prod_promotion", "prod_rollback"),
             panels=("promotion_evidence", "backup_evidence"),
         ),
         DriverCapabilityDescriptor(
@@ -952,16 +952,6 @@ VERIREEL_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/verireel/prod-deploy",
             authz_action="verireel_prod_deploy.execute",
             writes_records=("deployment", "inventory", "release_tuple"),
-        ),
-        _action(
-            "prod_backup_gate",
-            "Capture prod backup gate",
-            "Capture backup evidence before a prod-changing action.",
-            safety="safe_write",
-            scope="instance",
-            route_path="/v1/drivers/verireel/prod-backup-gate",
-            authz_action="verireel_prod_backup_gate.execute",
-            writes_records=("backup_gate",),
         ),
         _action(
             "prod_promotion",
