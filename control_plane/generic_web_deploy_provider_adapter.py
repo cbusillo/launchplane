@@ -616,7 +616,10 @@ class GenericWebDeployProviderMutationAdapter:
                 # The runner releases only when no earlier effect checkpoint
                 # exists; after an effect it preserves the reconciliation fence.
                 raise ProviderMutationRejectedError(error) from error
-            lease.checkpoint_effect(phase)
+            if phase == "provider_dispatch_prepared":
+                lease.assert_current()
+            else:
+                lease.checkpoint_effect(phase)
 
         proved_pre_image_retry = self._proved_pre_image_operation == provider_operation_key
         self._proved_pre_image_operation = ""

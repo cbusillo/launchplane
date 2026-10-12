@@ -244,6 +244,7 @@ def execute_dokploy_artifact_deploy(
                     token=token,
                     target_type=resolved_target.target_type,
                     target_id=resolved_target.target_id,
+                    require_complete=True,
                 )
             )
             if key

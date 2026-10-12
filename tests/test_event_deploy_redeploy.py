@@ -97,3 +97,20 @@ class EventDeployRedeployTests(unittest.TestCase):
         with self.assertRaises(ServiceDeployDraining):
             self.store.retry_reconciled_mutation(reservation=held, lease_owner="new-worker")
         self.assertEqual(self.reserve().record, held)
+        with self.assertRaises(ServiceDeployDraining):
+            self.store.supersede_expired_reconciled_mutation_and_reserve(
+                reservation=held,
+                response_status_code=502,
+                response_trace_id="terminal-proof",
+                response_payload={"result": {"deploy_status": "fail"}},
+                scope=held.scope,
+                route_path=held.route_path,
+                idempotency_key="fresh-effect",
+                request_fingerprint="fresh-effect",
+                lease_owner="new-worker",
+                lease_seconds=300,
+                minimum_expired_seconds=0,
+                reconciliation_key=held.reconciliation_key,
+                provider_target_key=held.provider_target_key,
+            )
+        self.assertEqual(self.reserve().record, held)

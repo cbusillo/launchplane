@@ -89,6 +89,21 @@ def _wait(
 
 
 class TitledOrSoleNewDeploymentWaitTests(unittest.TestCase):
+    def test_failure_proof_refuses_filtered_or_missing_history(self) -> None:
+        for payload in ({}, {"deployments": [_deployment("failed", status="error"), None]}):
+            with (
+                self.subTest(payload=payload),
+                patch.object(dokploy_api, "dokploy_request", return_value=payload),
+                self.assertRaises(click.ClickException),
+            ):
+                dokploy_api.list_deployments_for_target(
+                    host="host",
+                    token="synthetic",
+                    target_type="compose",
+                    target_id="compose-1",
+                    require_complete=True,
+                )
+
     def test_untitled_sole_new_deployment_is_accepted_once_it_succeeds(self) -> None:
         old = [_deployment("old-1"), _deployment("old-2")]
 
@@ -541,6 +556,11 @@ class DokployProviderIdentityTests(unittest.TestCase):
         record_id = adapter._deployment_record_id(operation)
         old = _deployment("old")
         checked: list[object] = []
+        phases: list[str] = []
+
+        class Lease(_NoopLease):
+            def checkpoint_effect(self, phase: str) -> None:
+                phases.append(phase)
 
         def before_write(**kwargs: object) -> None:
             pending = store.read_deployment_record(record_id)
@@ -549,6 +569,7 @@ class DokployProviderIdentityTests(unittest.TestCase):
             self.assertEqual(pending.resolved_target, target.resolved_target)
             self.assertEqual(pending.source_git_ref, target.ship_request.source_git_ref)
             self.assertEqual(pending.deploy.status, "pending")
+            self.assertFalse(phases, "Preparing references must not claim a provider effect.")
             self.assertEqual(evidence["known_deployment_ids"], [old["deploymentId"]])
             self.assertEqual(evidence["target_id"], target.resolved_target.target_id)
             self.assertEqual(evidence["deployment_title"], provider_operation_title(operation))
@@ -585,7 +606,7 @@ class DokployProviderIdentityTests(unittest.TestCase):
                 ),
             ),
         ):
-            outcome = adapter.apply(operation, _NoopLease())
+            outcome = adapter.apply(operation, Lease())
         self.assertTrue(checked)
         self.assertTrue(outcome.durable)
         terminal = store.read_deployment_record(record_id)

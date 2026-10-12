@@ -205,7 +205,7 @@ def deployment_history_for_target(
 
 
 def list_deployments_for_target(
-    *, host: str, token: str, target_type: str, target_id: str
+    *, host: str, token: str, target_type: str, target_id: str, require_complete: bool = False
 ) -> list[JsonObject]:
     if target_type == "compose":
         compose_payload = dokploy_request(
@@ -216,8 +216,19 @@ def list_deployments_for_target(
         )
         compose_payload_as_object = as_json_object(compose_payload)
         if compose_payload_as_object is None:
+            if require_complete:
+                raise click.ClickException("Dokploy deployment history is incomplete.")
             return []
         deployments_payload = compose_payload_as_object.get("deployments")
+        if require_complete:
+            if parse_deployment_history(deployments_payload).state == "unknown":
+                raise click.ClickException("Dokploy deployment history is incomplete.")
+            assert isinstance(deployments_payload, list)
+            deployments = _collect_object_items(deployments_payload)
+            ids = [deployment_key(item) for item in deployments]
+            if not all(ids) or len(set(ids)) != len(ids):
+                raise click.ClickException("Dokploy deployment history is ambiguous.")
+            return deployments
         if not isinstance(deployments_payload, list):
             return []
         return _collect_object_items(deployments_payload)
@@ -986,6 +997,7 @@ def wait_for_titled_or_sole_new_target_deployment(
             token=token,
             target_type=target_type,
             target_id=target_id,
+            require_complete=True,
         )
         titled = [
             deployment
