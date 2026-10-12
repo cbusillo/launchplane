@@ -28,6 +28,10 @@ if [[ "$1" == login ]]; then
   printf '%s' "$DOCKER_CONFIG" > "$PREFLIGHT_TEST_CONFIG_USED"
   echo '{}' > "$DOCKER_CONFIG/config.json"
 fi
+if [[ "$1" == ps ]]; then
+  printf '%s' "$DOCKER_CONFIG" > "$PREFLIGHT_TEST_CLEANUP_CONFIG"
+  if [[ "${PREFLIGHT_TEST_FAILURE:-}" == true ]]; then exit 9; fi
+fi
 """)
             docker.chmod(0o755)
             env = {
@@ -40,6 +44,7 @@ fi
                 "RUNNER_TEMP": str(root),
                 "LAUNCHPLANE_PREFLIGHT_OWNER": "fixture:login",
                 "PREFLIGHT_TEST_CONFIG_USED": str(config_used),
+                "PREFLIGHT_TEST_CLEANUP_CONFIG": str(root / "cleanup-config"),
             }
             result = subprocess.run(
                 ["bash", str(ROOT / "scripts/deploy/authenticate-preflight-registry.sh")],
@@ -61,6 +66,24 @@ fi
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(temporary_config.exists())
+            self.assertEqual((root / "cleanup-config").read_text(), str(temporary_config))
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts/deploy/authenticate-preflight-registry.sh")],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts/deploy/cleanup-stored-record-preflight.sh")],
+                env={**env, "PREFLIGHT_TEST_FAILURE": "true"},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 9, result.stderr)
+            self.assertFalse((temporary_config / "config.json").exists())
             self.assertEqual((persistent / "config.json").read_text(), "persistent sentinel")
 
     def test_supplied_image_requires_its_configured_repository_and_digest(self) -> None:
