@@ -31,7 +31,8 @@ for (const theme of ["dark", "light"] as const) {
       return { products, identity: module.fixtureIdentity, now };
     });
     await page.clock.install({ time: new Date(fixtures.now) });
-    await page.clock.pauseAt(new Date(fixtures.now + 1));
+    // Pause within the test's own time budget; a 1ms RPC race can target the past.
+    await page.clock.pauseAt(new Date(fixtures.now + testInfo.timeout));
     let mode: "fresh" | "warning" | "alert" | "fail" | "delay" = "fresh";
     let reads = 0;
     let release: (() => void) | undefined;
@@ -99,8 +100,11 @@ for (const theme of ["dark", "light"] as const) {
     await page.goto(`/ui/products/${fixtures.products[0].product}/activity`);
     await expect(testing).toHaveAttribute("data-tone", "verified");
     const activityReads = reads;
+    mode = "warning";
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS + 10);
     await expect.poll(() => reads).toBe(activityReads + 1);
+    // Observe the response's new state before testing the next focus refresh.
+    await expect(testing).toHaveAttribute("data-tone", "warning");
     release = undefined;
     mode = "delay";
     // Simulate sleep on browsers whose monotonic clock pauses: focus must

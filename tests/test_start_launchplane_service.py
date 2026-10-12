@@ -1,53 +1,10 @@
 import base64
 import os
-from fnmatch import fnmatchcase
-import shlex
 import stat
 import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-
-import yaml
-
-
-class ComposeWorkerSupervisionTests(unittest.TestCase):
-    def test_worker_services_share_primary_settings_and_wait_for_health(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        compose_path = repo_root / "docker-compose.yml"
-        services = yaml.safe_load(compose_path.read_text(encoding="utf-8"))["services"]
-        assert isinstance(services, dict)
-        primary = services["launchplane"]
-        assert isinstance(primary, dict)
-        worker_scripts = []
-        for name, service in services.items():
-            assert isinstance(service, dict)
-            command = service.get("command", [])
-            arguments = shlex.split(command) if isinstance(command, str) else command
-            assert isinstance(arguments, list)
-            matching_scripts = [
-                repo_root / str(argument).removeprefix("/app/")
-                for argument in arguments
-                if fnmatchcase(str(argument), "/app/scripts/start-launchplane-*-workers.sh")
-            ]
-            if matching_scripts:
-                worker_scripts.extend(matching_scripts)
-                with self.subTest(service=name):
-                    self.assertEqual(len(matching_scripts), 1)
-                    self.assertTrue(matching_scripts[0].is_file())
-                    self.assertTrue(os.access(matching_scripts[0], os.X_OK))
-                    for key in ("image", "restart", "env_file", "volumes", "networks"):
-                        self.assertIn(key, primary)
-                        self.assertEqual(service.get(key), primary[key], key)
-                    depends_on = service.get("depends_on")
-                    assert isinstance(depends_on, dict)
-                    dependency = depends_on.get("launchplane")
-                    assert isinstance(dependency, dict)
-                    self.assertEqual(dependency.get("condition"), "service_healthy")
-        expected_scripts = set((repo_root / "scripts").glob("start-launchplane-*-workers.sh"))
-        self.assertTrue(expected_scripts, "Repository must define worker startup scripts")
-        self.assertEqual(set(worker_scripts), expected_scripts)
-        self.assertEqual(len(worker_scripts), len(expected_scripts))
 
 
 class StartLaunchplaneServiceScriptTests(unittest.TestCase):

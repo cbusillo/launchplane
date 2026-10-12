@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Literal, Protocol, cast
 
 import click
+from control_plane.provider_operations import ProviderMutationUnknownError
 from control_plane.lane_movement import (
     LaneBuild,
     LaneMovementRefused,
@@ -1006,6 +1007,8 @@ def _run_post_deploy_extension(
         return _terminal_post_deploy_update(
             post_deploy_executor(control_plane_root, record_store, context, guard)
         )
+    except ProviderMutationUnknownError:
+        raise
     except click.ClickException:
         raise
     except Exception as exc:

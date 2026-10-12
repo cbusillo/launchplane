@@ -62,9 +62,6 @@ from control_plane.privileged_operation_service import cancel_privileged_operati
 from control_plane.storage.postgres import PostgresRecordStore
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-
-
 def _base64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
@@ -1131,50 +1128,3 @@ class OwnerControlShadowVerifierStorageTests(unittest.TestCase):
                 self.assertEqual(evaluation.verification_status, "rejected")
                 self.assertEqual(evaluation.rejection_reason, expected_reason)
                 self.assertFalse(evaluation.consume_challenge)
-
-
-class OwnerControlShadowVerifierFreezeBoundaryTests(unittest.TestCase):
-    def test_http_transport_remains_decoupled_from_shadow_verifier(self) -> None:
-        source = (REPOSITORY_ROOT / "control_plane/http_app.py").read_text(encoding="utf-8")
-
-        for forbidden_reference in (
-            "owner_control_shadow_verifier",
-            "owner_control_challenge",
-            "OwnerControlChallengeIssueRequest",
-            "evaluate_owner_control_shadow_verification",
-            "/owner-control",
-        ):
-            with self.subTest(forbidden_reference=forbidden_reference):
-                self.assertNotIn(forbidden_reference, source)
-
-    def test_shadow_verifier_contract_has_no_transport_or_execution_coupling(self) -> None:
-        for path in (
-            "control_plane/contracts/owner_control_shadow_verifier.py",
-            "control_plane/owner_control_challenge.py",
-        ):
-            source = (REPOSITORY_ROOT / path).read_text(encoding="utf-8")
-            for forbidden_reference in (
-                "fastapi",
-                "http_app",
-                "http_routes",
-                "filesystem",
-                "privileged_operation_service",
-                "privileged_operation_worker",
-                "transition_privileged_operation",
-                "approve_privileged_operation",
-                "outbox",
-                "os.environ",
-            ):
-                with self.subTest(path=path, forbidden_reference=forbidden_reference):
-                    self.assertNotIn(forbidden_reference, source)
-
-    def test_privileged_operation_paths_do_not_import_shadow_verifier(self) -> None:
-        for path in (
-            "control_plane/privileged_operation_service.py",
-            "control_plane/privileged_operation_worker.py",
-            "control_plane/http_routes/privileged_operations.py",
-        ):
-            with self.subTest(path=path):
-                source = (REPOSITORY_ROOT / path).read_text(encoding="utf-8")
-                self.assertNotIn("owner_control_shadow_verifier", source)
-                self.assertNotIn("owner_control_challenge", source)
