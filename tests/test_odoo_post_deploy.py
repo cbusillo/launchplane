@@ -100,14 +100,37 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                 side_effect=runner,
             ),
         ):
+            store = FilesystemRecordStore(state_dir=Path(directory) / "state")
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="opw",
+                    instance="testing",
+                    config_parameters=(
+                        OdooConfigParameterOverride(
+                            key="web.base.url",
+                            value=OdooOverrideValue(
+                                source="literal", value="https://fixture.example.test"
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-10-12T00:00:00Z",
+                    source_label="test",
+                )
+            )
             with self.assertRaises(OdooTargetReplacementStageError) as caught:
                 execute_odoo_post_deploy(
                     control_plane_root=Path(directory),
-                    record_store=FilesystemRecordStore(state_dir=Path(directory) / "state"),
+                    record_store=store,
                     request=OdooPostDeployRequest(context="opw", instance="testing"),
                     provider_effect_checkpoint=checkpoint,
                     hold_uncertain_effects=True,
                 )
+            self.assertEqual(
+                store.read_odoo_instance_override_record(
+                    context_name="opw", instance_name="testing"
+                ).last_apply.status,
+                "fail",
+            )
         self.assertIs(caught.exception, refusal)
 
     def test_execute_applies_deploy_phase_overrides_through_post_deploy_runner(self) -> None:

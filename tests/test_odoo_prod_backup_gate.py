@@ -151,6 +151,48 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
         record_store.read_dokploy_target_id_record.return_value = _target_id_record()
         return record_store
 
+    def test_backup_checkpoint_denial_preserves_authorization_reason(self) -> None:
+        from control_plane.durable_operation_authorization import (
+            DurableOperationAuthorizationDeniedError,
+        )
+
+        refusal = DurableOperationAuthorizationDeniedError(
+            code="operation_authorization_revoked", message="fixture denial"
+        )
+        store = self._record_store()
+
+        def checkpoint(_phase: str) -> None:
+            raise refusal
+
+        def provider(**kwargs: object) -> dict[str, object]:
+            callback = kwargs["before_provider_mutation"]
+            assert callable(callback)
+            callback("backup_schedule_upsert")
+            self.fail("The denied backup effect must not start")
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_source.read_dokploy_config",
+                return_value=("fixture", "fixture"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_gate",
+                side_effect=provider,
+            ),
+        ):
+            with self.assertRaises(DurableOperationAuthorizationDeniedError) as caught:
+                execute_odoo_prod_backup_gate(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=OdooProdBackupGateRequest(
+                        context="cm", backup_record_id="backup-denied"
+                    ),
+                    runtime_values=_runtime_values(),
+                    provider_effect_checkpoint=checkpoint,
+                )
+        self.assertIs(caught.exception, refusal)
+        self.assertEqual(store.write_backup_gate_record.call_args.args[0].status, "fail")
+
     def test_backup_gate_captures_backup_and_writes_pass_record(self) -> None:
         record_store = self._record_store()
 

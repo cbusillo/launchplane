@@ -2206,7 +2206,7 @@ def _execute_target_replacement_with_checkpoint(
         )
     except DurableOperationAuthorizationDeniedError as error:
         logging.warning(
-            "Odoo stable target replacement operation %s was denied before provider mutation: %s",
+            "Odoo stable target replacement operation %s was denied at a provider boundary: %s",
             operation.operation_id,
             error,
         )
