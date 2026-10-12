@@ -5,6 +5,9 @@ import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from urllib.parse import urlsplit
+
+from control_plane.deploy_failure_alert import replacement_may_have_dispatched
 
 
 ACTION_ENTRYPOINT = Path(".github/actions/launchplane-request/dist/index.js")
@@ -39,13 +42,22 @@ class LaunchplaneRequestActionTests(unittest.TestCase):
 const calls = [];
 let launchplaneRequestCount = 0;
 let oidcTokenCount = 0;
+let testClock = 0;
+const clockStep = Number(process.env.TEST_CLOCK_STEP_MS || '0');
+if (clockStep) Date.now = () => testClock;
 global.fetch = async (url, init) => {{
   calls.push({{url, init}});
   if (url.startsWith('https://oidc.example/token')) {{
     oidcTokenCount += 1;
+    const oidcFailures = String(process.env.TEST_OIDC_FAILURE_ATTEMPTS || '').split(',').map(Number);
+    if (oidcFailures.includes(oidcTokenCount)) {{
+      testClock += clockStep;
+      return new Response(JSON.stringify({{error: 'temporarily unavailable'}}), {{status: 500}});
+    }}
     return new Response(JSON.stringify({{value: `oidc-token-${{oidcTokenCount}}`}}), {{status: 200}});
   }}
   launchplaneRequestCount += 1;
+  testClock += clockStep;
   const failureAttempts = String(process.env.TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS || '')
     .split(',')
     .filter(Boolean)
@@ -59,17 +71,21 @@ global.fetch = async (url, init) => {{
     .map((value) => Number(value));
   if (ingressAttempts.includes(launchplaneRequestCount)) {{
     return new Response('404 page not found', {{
-      status: 404,
+      status: Number(process.env.TEST_INGRESS_STATUS || '404'),
       headers: {{'content-type': 'text/plain; charset=utf-8'}}
     }});
   }}
   const configuredStatusCodes = String(process.env.TEST_STATUS_SEQUENCE || '').split(',').filter(Boolean);
   const statusCode = Number(configuredStatusCodes[launchplaneRequestCount - 1] || process.env.TEST_STATUS || '200');
   const configuredRuntimeImages = String(process.env.TEST_RUNTIME_IMAGES || '').split(',').filter(Boolean);
+  const configuredRuntimeMarkers = String(process.env.TEST_RUNTIME_MARKERS || '').split(',').filter(Boolean);
   if (configuredRuntimeImages.length > 0) {{
     const imageReference = configuredRuntimeImages[launchplaneRequestCount - 1] || configuredRuntimeImages.at(-1);
     return new Response(JSON.stringify({{
-      runtime: {{ docker_image_reference: imageReference }}
+      runtime: {{
+        docker_image_reference: imageReference,
+        deployment_marker: configuredRuntimeMarkers[launchplaneRequestCount - 1] || configuredRuntimeMarkers.at(-1)
+      }}
     }}), {{status: statusCode}});
   }}
   const configuredStatuses = String(process.env.TEST_REFRESH_STATUSES || '').split(',').filter(Boolean);
@@ -80,12 +96,13 @@ global.fetch = async (url, init) => {{
       trace_id: process.env.TEST_TRACE_ID || ''
     }}), {{status: statusCode}});
   }}
-  if (process.env.TEST_ERROR_CODE) {{
+  const errorCode = String(process.env.TEST_ERROR_CODES || '').split(',')[launchplaneRequestCount - 1] || process.env.TEST_ERROR_CODE;
+  if (errorCode) {{
     return new Response(JSON.stringify({{
       status: 'rejected',
       trace_id: process.env.TEST_TRACE_ID || '',
       error: {{
-        code: process.env.TEST_ERROR_CODE,
+        code: errorCode,
         message: process.env.TEST_ERROR_MESSAGE || 'request rejected'
       }}
     }}), {{status: statusCode}});
@@ -116,6 +133,310 @@ process.on('beforeExit', () => {{
             env=env,
             text=True,
         )
+
+    def test_unavailable_budget_preserves_healthy_drain_and_resets_after_recovery(self) -> None:
+        for failures in ("", "2,4"):
+            with self.subTest(failures=failures):
+                result = self.run_action(
+                    inputs={
+                        "launchplane-url": "https://launchplane.example",
+                        "route-path": "/v1/drivers/launchplane/self-deploy",
+                        "poll-result-path": "result.deploy_state",
+                        "poll-result-statuses": "draining",
+                        "poll-retry-on-request-error": "true",
+                        "poll-unavailable-timeout-ms": "25",
+                        "poll-timeout-ms": "1000",
+                        "poll-interval-ms": "1",
+                        "retry-attempts": "1",
+                    },
+                    environment={
+                        "TEST_CLOCK_STEP_MS": "10",
+                        "TEST_RESULT_FIELD": "deploy_state",
+                        "TEST_REFRESH_STATUSES": "draining,draining,draining,draining,draining,requested",
+                        "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": failures,
+                    },
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unavailable_budget_bounds_network_and_ingress_outages_with_long_drain_budget(
+        self,
+    ) -> None:
+        for kind in ("TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS", "TEST_INGRESS_404_ATTEMPTS"):
+            with self.subTest(kind=kind), TemporaryDirectory() as directory:
+                response = Path(directory) / "response.json"
+                result = self.run_action(
+                    inputs={
+                        "launchplane-url": "https://launchplane.example",
+                        "route-path": "/v1/drivers/launchplane/self-deploy",
+                        "response-output-file": str(response),
+                        "poll-result-path": "result.deploy_state",
+                        "poll-result-statuses": "draining,dispatch_in_progress",
+                        "poll-retry-on-request-error": "true",
+                        "poll-unavailable-timeout-ms": "25",
+                        "poll-timeout-ms": "1000",
+                        "poll-interval-ms": "1",
+                        "ingress-retry-delay-ms": "0",
+                        "retry-attempts": "1",
+                    },
+                    environment={
+                        "TEST_CLOCK_STEP_MS": "10",
+                        "TEST_RESULT_FIELD": "deploy_state",
+                        "TEST_REFRESH_STATUSES": "dispatch_in_progress"
+                        if kind == "TEST_INGRESS_404_ATTEMPTS"
+                        else "draining",
+                        kind: ",".join(str(index) for index in range(2, 100)),
+                    },
+                )
+                self.assertNotEqual(result.returncode, 0)
+                calls = json.loads(result.stderr.strip().splitlines()[-1])
+                mutations = [
+                    call
+                    for call in calls
+                    if urlsplit(call["url"]).hostname == "launchplane.example"
+                ]
+                self.assertLess(len(mutations), 10)
+                if kind == "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS":
+                    self.assertIsNone(json.loads(response.read_text()))
+                else:
+                    self.assertNotEqual(
+                        (json.loads(response.read_text()) or {})
+                        .get("result", {})
+                        .get("deploy_state"),
+                        "draining",
+                    )
+
+    def test_replacement_deadline_starts_at_marker_and_carries_elapsed_outage(self) -> None:
+        for failures, markers, start_step in (
+            ("", ["old"] * 6 + ["forward"], 7),
+            ("2", ["old", "old", "forward"], 1),
+            ("1", ["old"] * 4 + ["forward"], 5),
+        ):
+            with self.subTest(failures=failures), TemporaryDirectory() as directory:
+                clock_step = 1000
+                short_budget = 4000
+                output = Path(directory) / "output"
+                result = self.run_action(
+                    output_path=output,
+                    inputs={
+                        "launchplane-url": "https://launchplane.example",
+                        "route-path": "/v1/service/runtime",
+                        "method": "GET",
+                        "poll-until-path": "runtime.deployment_marker",
+                        "poll-until-value": markers[-1],
+                        "poll-retry-on-request-error": "true",
+                        "poll-unavailable-timeout-ms": str(short_budget),
+                        "poll-timeout-ms": "30000",
+                        "poll-interval-ms": "1",
+                        "retry-attempts": "1",
+                    },
+                    environment={
+                        "TEST_CLOCK_STEP_MS": str(clock_step),
+                        "TEST_RUNTIME_IMAGES": "registry.example/service@sha256:same-image",
+                        "TEST_RUNTIME_MARKERS": ",".join(markers),
+                        "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": failures,
+                    },
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                deadline = int(
+                    output.read_text().split("observation-deadline-epoch<<")[1].splitlines()[1]
+                )
+                window_start = start_step * clock_step
+                self.assertEqual(deadline, (window_start + short_budget) // 1000)
+
+    def test_pre_request_auth_and_ingress_outages_preserve_known_drain(self) -> None:
+        for failure in ("auth", "ingress"):
+            for recovers in (True, False):
+                with self.subTest(failure=failure, recovers=recovers), TemporaryDirectory() as name:
+                    response = Path(name) / "response.json"
+                    result = self.run_action(
+                        inputs={
+                            "launchplane-url": "https://launchplane.example",
+                            "route-path": "/v1/launchplane/self-deploy",
+                            "poll-until-path": "result.deploy_state",
+                            "poll-until-value": "requested",
+                            "poll-retry-on-request-error": "true",
+                            "poll-retry-on-unexpected-status": "true",
+                            "poll-unavailable-timeout-ms": "2000",
+                            "poll-timeout-ms": "10000",
+                            "poll-interval-ms": "1",
+                            "retry-attempts": "1",
+                            "ingress-retry-delay-ms": "0",
+                            "response-output-file": str(response),
+                        },
+                        environment={
+                            "TEST_CLOCK_STEP_MS": "1000",
+                            "TEST_RESULT_FIELD": "deploy_state",
+                            "TEST_REFRESH_STATUSES": "draining,requested"
+                            if failure == "auth"
+                            else "draining,draining,draining,draining,requested",
+                            "TEST_OIDC_FAILURE_ATTEMPTS": ",".join(
+                                str(i) for i in range(2, 5 if recovers else 20)
+                            )
+                            if failure == "auth"
+                            else "",
+                            "TEST_INGRESS_404_ATTEMPTS": ",".join(
+                                str(i) for i in range(2, 5 if recovers else 20)
+                            )
+                            if failure == "ingress"
+                            else "",
+                        },
+                    )
+                    if recovers:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(
+                            json.loads(response.read_text())["result"]["deploy_state"], "requested"
+                        )
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(
+                            json.loads(response.read_text())["result"]["deploy_state"], "draining"
+                        )
+
+    def test_auth_outage_never_overwrites_dispatch_proof(self) -> None:
+        for unavailable_budget in ("0", "2000"):
+            for uncertain in (False, True):
+                with TemporaryDirectory() as name:
+                    response = Path(name) / "response.json"
+                    result = self.run_action(
+                        inputs={
+                            "launchplane-url": "https://launchplane.example",
+                            "route-path": "/v1/launchplane/self-deploy",
+                            "poll-until-path": "result.deploy_state",
+                            "poll-until-value": "requested",
+                            "poll-retry-on-request-error": "true",
+                            "poll-unavailable-timeout-ms": unavailable_budget,
+                            "poll-timeout-ms": "8000",
+                            "poll-interval-ms": "1",
+                            "retry-attempts": "1",
+                            "response-output-file": str(response),
+                        },
+                        environment={
+                            "TEST_CLOCK_STEP_MS": "1000",
+                            "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "1" if uncertain else "",
+                            "TEST_OIDC_FAILURE_ATTEMPTS": ",".join(
+                                str(i) for i in range(2 if uncertain else 1, 20)
+                            ),
+                        },
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(
+                        replacement_may_have_dispatched(response),
+                        uncertain or unavailable_budget == "0",
+                    )
+                    calls = json.loads(result.stderr.strip().splitlines()[-1])
+                    self.assertEqual(
+                        any(
+                            urlsplit(call["url"]).hostname == "launchplane.example"
+                            for call in calls
+                        ),
+                        uncertain,
+                    )
+
+    def test_later_auth_refusal_cannot_erase_dispatch_uncertainty(self) -> None:
+        for prior in ("none", "busy", "unknown"):
+            for code, status in (
+                ("authentication_required", "401"),
+                ("authorization_denied", "403"),
+            ):
+                with self.subTest(prior=prior, code=code), TemporaryDirectory() as name:
+                    response = Path(name) / "response.json"
+                    result = self.run_action(
+                        inputs={
+                            "launchplane-url": "https://launchplane.example",
+                            "route-path": "/v1/launchplane/self-deploy",
+                            "poll-result-path": "result.deploy_state",
+                            "poll-result-statuses": "draining,dispatch_in_progress",
+                            "poll-retry-on-request-error": "true",
+                            "poll-unavailable-timeout-ms": "4000",
+                            "poll-timeout-ms": "10000",
+                            "poll-interval-ms": "1",
+                            "retry-attempts": "1",
+                            "response-output-file": str(response),
+                        },
+                        environment={
+                            "TEST_CLOCK_STEP_MS": "1000",
+                            "TEST_RESULT_FIELD": "deploy_state",
+                            "TEST_REFRESH_STATUSES": "dispatch_in_progress",
+                            "TEST_STATUS_SEQUENCE": status if prior == "none" else "200," + status,
+                            "TEST_ERROR_CODES": code if prior == "none" else "," + code,
+                            "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "1"
+                            if prior == "unknown"
+                            else "",
+                        },
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(replacement_may_have_dispatched(response), prior != "none")
+
+    def test_gateway_lost_reply_after_drain_starts_failure_window(self) -> None:
+        for status in ("502", "503", "504"):
+            with self.subTest(status=status), TemporaryDirectory() as name:
+                response = Path(name) / "response.json"
+                result = self.run_action(
+                    inputs={
+                        "launchplane-url": "https://launchplane.example",
+                        "route-path": "/v1/launchplane/self-deploy",
+                        "poll-result-path": "result.deploy_state",
+                        "poll-result-statuses": "draining,dispatch_in_progress",
+                        "poll-retry-on-request-error": "true",
+                        "poll-unavailable-timeout-ms": "2000",
+                        "poll-timeout-ms": "10000",
+                        "poll-interval-ms": "1",
+                        "ingress-retry-delay-ms": "0",
+                        "retry-attempts": "1",
+                        "response-output-file": str(response),
+                    },
+                    environment={
+                        "TEST_CLOCK_STEP_MS": "1000",
+                        "TEST_RESULT_FIELD": "deploy_state",
+                        "TEST_REFRESH_STATUSES": "draining",
+                        "TEST_INGRESS_STATUS": status,
+                        "TEST_INGRESS_404_ATTEMPTS": ",".join(str(i) for i in range(2, 20)),
+                    },
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(replacement_may_have_dispatched(response))
+                calls = json.loads(result.stderr.strip().splitlines()[-1])
+                self.assertLess(
+                    sum(urlsplit(call["url"]).hostname == "launchplane.example" for call in calls),
+                    10,
+                )
+
+    def test_authoritative_drain_restores_no_dispatch_after_lost_reply(self) -> None:
+        for failure in ("network", "gateway"):
+            with self.subTest(failure=failure), TemporaryDirectory() as name:
+                response = Path(name) / "response.json"
+                result = self.run_action(
+                    inputs={
+                        "launchplane-url": "https://launchplane.example",
+                        "route-path": "/v1/launchplane/self-deploy",
+                        "poll-result-path": "result.deploy_state",
+                        "poll-result-statuses": "draining,dispatch_in_progress",
+                        "poll-retry-on-request-error": "true",
+                        "poll-unavailable-timeout-ms": "2000",
+                        "poll-timeout-ms": "10000",
+                        "poll-interval-ms": "1",
+                        "ingress-retry-delay-ms": "0",
+                        "retry-attempts": "1",
+                        "response-output-file": str(response),
+                    },
+                    environment={
+                        "TEST_CLOCK_STEP_MS": "1000",
+                        "TEST_RESULT_FIELD": "deploy_state",
+                        "TEST_REFRESH_STATUS": "draining",
+                        "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "2"
+                        if failure == "network"
+                        else "",
+                        "TEST_INGRESS_404_ATTEMPTS": "2" if failure == "gateway" else "",
+                        "TEST_INGRESS_STATUS": "502",
+                    },
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(replacement_may_have_dispatched(response))
+                calls = json.loads(result.stderr.strip().splitlines()[-1])
+                self.assertGreaterEqual(
+                    sum(urlsplit(call["url"]).hostname == "launchplane.example" for call in calls),
+                    10,
+                )
 
     def test_posts_oidc_authenticated_json_with_idempotency_key(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -662,7 +983,7 @@ process.on('beforeExit', () => {{
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = json.loads(result.stderr.strip().splitlines()[-1])
         launchplane_calls = [
-            call for call in calls if call["url"].startswith("https://launchplane.example/")
+            call for call in calls if urlsplit(call["url"]).hostname == "launchplane.example"
         ]
         self.assertEqual(len(launchplane_calls), 3)
         self.assertEqual(
@@ -683,7 +1004,7 @@ process.on('beforeExit', () => {{
         self.assertNotEqual(result.returncode, 0)
         calls = json.loads(result.stderr.strip().splitlines()[-1])
         launchplane_calls = [
-            call for call in calls if call["url"].startswith("https://launchplane.example/")
+            call for call in calls if urlsplit(call["url"]).hostname == "launchplane.example"
         ]
         self.assertEqual(len(launchplane_calls), 1)
 
