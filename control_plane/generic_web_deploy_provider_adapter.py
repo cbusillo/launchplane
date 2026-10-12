@@ -1,9 +1,11 @@
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
 import click
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.generic_web_deploy_recovery import (
     GenericWebDeployProviderEvidenceClassification,
@@ -106,6 +108,7 @@ class GenericWebDeployProviderMutationAdapter:
             deploy_provider or default_generic_web_deploy_provider()
         )
         self._resolved_deploy_target: GenericWebResolvedDeployTarget | None = None
+        self.execution_check: Callable[[], None] = lambda: None
 
     @property
     def profile(self) -> LaunchplaneProductProfileRecord:
@@ -482,6 +485,15 @@ class GenericWebDeployProviderMutationAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        def checkpoint(phase: str) -> None:
+            try:
+                self.execution_check()
+            except (RuntimeError, SQLAlchemyError) as error:
+                # The runner releases only when no earlier effect checkpoint
+                # exists; after an effect it preserves the reconciliation fence.
+                raise ProviderMutationRejectedError(error) from error
+            lease.checkpoint_effect(phase)
+
         try:
             records, result = execute_generic_web_deploy_result(
                 control_plane_root=self._control_plane_root,
@@ -493,7 +505,7 @@ class GenericWebDeployProviderMutationAdapter:
                 deployment_record_id=self._deployment_record_id(provider_operation_key),
                 deploy_provider=self._deploy_provider,
                 resolved_deploy_target=self._resolve_deploy_target(),
-                provider_effect_checkpoint=lease.checkpoint_effect,
+                provider_effect_checkpoint=checkpoint,
                 recorded_artifact=self._recorded_artifact,
             )
         except (FileNotFoundError, ValueError) as error:
