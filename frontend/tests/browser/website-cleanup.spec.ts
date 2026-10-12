@@ -123,7 +123,7 @@ for (const outcome of ["applied", "lost-response", "lost-response-stale", "stale
       await expect(panel).toContainText("Original cleanup completed.");
       await panel.getByLabel("Change reason").fill("A fresh reviewed request after receipt recovery.");
       await expect(panel.getByRole("button", { name: "Preview no-website cleanup", exact: true })).toBeEnabled();
-      expect(sent).toHaveLength(outcome === "lost-response-stale" ? 2 : 1);
+      expect(sent).toHaveLength(1);
     } else {
       await expect(panel).toContainText("Applied and read back: no public website.");
       await expect(apply).toBeDisabled();
