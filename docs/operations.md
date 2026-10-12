@@ -590,21 +590,32 @@ reservations whose original reconcile inputs were overwritten by a newer build.
 Keep the reservation held. The explicit recovery path requires independently
 proven original coordinates; a current build or a key hash cannot replace them.
 The service's normal testing reconciler can retire this unavailable-original
-attempt as a terminal failed reservation when it proves there is no live effect.
+attempt as a terminal failed reservation when it proves absent dispatch or
+quiescent provider effects safe to retry.
 It excludes other testing reconcilers with the provider-target execution lock,
 requires an expired lease, unchanged product/target bindings and the exact
 service-originated testing reservation, and refuses post-deploy/data-work effects.
-The Dokploy inspector currently qualifies only a testing compose whose held
+Before publishing deployment or inventory records, the worker rechecks execution
+exclusion and checkpoints its live reservation as `records_commit`. Recovery
+refuses that interrupted-publication phase; a worker whose connection or lease
+was lost cannot publish a stale successful deployment after retirement.
+The Dokploy inspector qualifies a testing compose whose held
 attempt never reached the deploy-trigger checkpoint, with empty deployment
 history, no schedules and no queued or running compose work. It reads the
 provider's deployment queue; empty history or an idle compose alone cannot rule
 out a queued trigger. Dokploy's container readers swallow failures and omit
 containers with certain names, so they cannot prove that a failed or triggered
-deployment left no effect. Those attempts remain held. A positive host read and
+deployment left no effect. A triggered attempt instead requires exactly one
+deployment with the held reservation's operation title, a complete terminal
+history on the original compose, valid ordered start/finish times, no schedules,
+and no queued or running compose work. Untitled, duplicate, partial, unreadable
+or uncorrelated histories remain held. This classifies a terminal dispatch as
+`quiescent_safe_to_retry`, never as absent or successful. It uses no filtered
+container inventory to claim absence. A positive host read and
 successful container inspections provide additional safeguards; they are not a
 complete inventory proof. An empty host or a Dokploy-named compose is unproven.
-Missing lists, unreadable provider state, a successful
-deployment, target drift or an available original request keep the fence held.
+Missing lists, unreadable provider state,
+target drift or an available original request keep the fence held.
 The failed reservation retains a value-free recovery audit; the normal verified
 build path then reserves and deploys the fresh request. This performs no provider
 mutation during inspection, adopts no runtime identity and suppresses no incident.

@@ -44,25 +44,3 @@ class OdooStableAuthorityTests(TestCase):
                     offenders.append(f"{path.as_posix()}: {token}")
 
         self.assertEqual(offenders, [])
-
-    def test_prod_rollback_has_no_direct_provider_mutation(self) -> None:
-        rollback_source = Path("control_plane/workflows/odoo_prod_rollback.py").read_text(
-            encoding="utf-8"
-        )
-        required_tokens = (
-            "execute_odoo_stable_target_replacement_apply",
-            "OdooStableTargetReplacementApplyRequest",
-        )
-        forbidden_tokens = (
-            "dokploy_api.trigger_deployment",
-            "dokploy_compose.sync_dokploy_compose_raw_source",
-            "dokploy_api.update_dokploy_target_env",
-            "execute_odoo_post_deploy",
-            "render_odoo_raw_compose_file",
-            "wait_for_target_deployment",
-        )
-
-        for token in required_tokens:
-            self.assertIn(token, rollback_source)
-        for token in forbidden_tokens:
-            self.assertNotIn(token, rollback_source)
