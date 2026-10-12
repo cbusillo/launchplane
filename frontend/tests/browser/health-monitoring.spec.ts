@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "private", "stale", "denied", "readback-failed", "read-only"]) {
+for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "private", "removed-check", "stale", "denied", "readback-failed", "read-only"]) {
   test(`monitoring editor reviews stored policy and handles ${outcome}`, { tag: "@layout" }, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -55,6 +55,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
       return route.fulfill({ status: 202, json: { status: "accepted", trace_id: "monitoring", records: {},
         result: { status: "ok", mode: body.mode, product: body.product, context: body.context, instance: body.instance,
           check_name: body.check_name, requested_check_kind: body.check_kind, private_endpoint_key: body.private_endpoint_key,
+          operation: outcome === "removed-check" ? "create" : "update", current_check_kind: outcome === "removed-check" ? null : body.check_kind,
           current_monitoring_intent: "prelaunch", requested_monitoring_intent: body.monitoring_intent,
           current_enabled: false, requested_enabled: body.enabled,
           current_require_runtime_identity: false, requested_require_runtime_identity: body.require_runtime_identity,
@@ -70,6 +71,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
     }, { context: lane.context });
     await page.goto("/ui/products/atlas-commerce/environments/testing/actions");
     let panel = page.getByRole("region", { name: "Health monitoring", exact: true });
+    const initialLaneStatus = await page.getByRole("status", { name: "Lane status" }).innerText();
     await expect(panel.getByLabel("Stored check")).toHaveValue("public-ingress");
     const review = panel.getByRole("button", { name: "Review monitoring change" });
     if (outcome === "read-only") {
@@ -84,6 +86,12 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
     await review.click();
     if (outcome === "denied") {
       await expect(panel.getByRole("alert")).toContainText("Exact lane monitoring plan denied");
+      await expect(panel.getByRole("button", { name: "Apply reviewed monitoring" })).toHaveCount(0);
+      expect(applies).toHaveLength(0);
+      return;
+    }
+    if (outcome === "removed-check") {
+      await expect(panel.getByRole("status")).toContainText("stored check changed or was removed");
       await expect(panel.getByRole("button", { name: "Apply reviewed monitoring" })).toHaveCount(0);
       expect(applies).toHaveLength(0);
       return;
@@ -122,8 +130,8 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
       await expect(panel.getByRole("button", { name: "Apply reviewed monitoring" })).toHaveCount(0);
       return;
     }
-    await expect(panel.getByRole("status")).toContainText(outcome === "readback-failed" ? "readback unavailable" : "saved and read back");
-    if (outcome !== "readback-failed") await expect(panel.getByRole("status")).toContainText("remain unverified");
+    await expect(panel.getByRole("status")).toContainText(outcome === "readback-failed" ? "readback not confirmed" : "saved and read back");
+    await expect(page.getByRole("status", { name: "Lane status" })).toHaveText(initialLaneStatus);
     expect(applies[0].key).toBeTruthy();
     expect(applies[0].body).toEqual({ ...plans.at(-1), mode: "apply", reviewed_plan_sha256: "a".repeat(64) });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

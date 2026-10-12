@@ -82,7 +82,13 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh }: {
       monitoring_intent: intent, enabled, require_runtime_identity: identityRequired,
       private_endpoint_key: check.private_endpoint_key, reason: reason.trim(), mode: "dry-run",
     });
-    if (response?.result) setReview(response.result);
+    if (response?.result) {
+      if (response.result.operation === "create" || response.result.current_check_kind !== response.result.requested_check_kind) {
+        setMessage("The stored check changed or was removed. Refresh this environment before editing monitoring.");
+        return;
+      }
+      setReview(response.result);
+    }
   }
 
   async function apply() {
@@ -122,7 +128,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh }: {
       setIdentityRequired(request.require_runtime_identity ?? false);
       setMessage("Monitoring policy saved and read back. Health and runtime identity remain unverified until the monitor records fresh evidence.");
     } catch (error) {
-      setMessage(`Monitoring policy saved; readback unavailable. ${error instanceof Error ? error.message : "Refresh to inspect the recorded policy."}`);
+      setMessage(`Monitoring policy saved; readback not confirmed. ${error instanceof Error ? error.message : "Refresh to inspect the recorded policy."}`);
     }
     onRefresh();
   }
