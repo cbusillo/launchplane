@@ -20,7 +20,7 @@ network="$project"
 database="$project-db"
 candidate="$project-candidate"
 cleanup() {
-  docker rm -f "$candidate" "$database" >/dev/null 2>&1 || true
+  docker rm -fv "$candidate" "$database" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -38,7 +38,7 @@ docker run -d --name "$database" --network "$network" --network-alias snapshot-d
   "$postgres_image" >/dev/null
 ready=false
 for ((attempt=0; attempt<30; attempt++)); do
-  if docker exec "$database" pg_isready -U snapshot -d snapshot >/dev/null 2>&1; then
+  if docker exec "$database" pg_isready -h 127.0.0.1 -U snapshot -d snapshot >/dev/null 2>&1; then
     ready=true
     break
   fi

@@ -24,9 +24,10 @@ from control_plane.contracts.stored_record_snapshot import (
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
 from control_plane.service_bootstrap import create_launchplane_service_application
+from control_plane.drivers import native_routes
 from control_plane.storage.postgres import PostgresRecordStore, _build_engine
 from control_plane.storage.schema_migration import alembic_config, migrate_schema
-from control_plane.stored_record_snapshot import SNAPSHOT_RECORD_TYPES
+from control_plane.stored_record_snapshot import SNAPSHOT_RECORD_TYPES, snapshot_failure_diagnostics
 
 
 class _ClosedVerifier:
@@ -54,14 +55,26 @@ def validate_snapshot(snapshot: StoredRecordSnapshot, *, now: datetime) -> None:
 def check_restored_records(store: PostgresRecordStore, *, state_dir: Path) -> int:
     # Real storage readers apply their supported historical transformations.
     # Do not validate with only new defaults, or allow db-invalid startup fallback.
-    policies = store.list_authz_policy_records()
+    try:
+        policies = store.list_authz_policy_records()
+    except Exception as error:
+        setattr(error, "snapshot_record_family", "launchplane_authz_policies")
+        raise
     count = len(policies)
-    count += len(store.list_product_profile_records())
-    count += len(store.list_environment_inventory())
-    count += len(store.list_merge_train_policy_records())
-    count += len(store.list_merge_train_run_records())
+    for family, reader in (
+        ("launchplane_product_profiles", store.list_product_profile_records),
+        ("launchplane_inventory", store.list_environment_inventory),
+        ("launchplane_merge_train_policies", store.list_merge_train_policy_records),
+        ("launchplane_merge_train_runs", store.list_merge_train_run_records),
+    ):
+        try:
+            count += len(reader())
+        except Exception as error:
+            setattr(error, "snapshot_record_family", family)
+            raise
     if sum(record.status == "active" for record in policies) != 1:
         raise ValueError("Restored active policy is missing or ambiguous.")
+    native_routes._validate_native_descriptor_driver_routes()
     application = create_launchplane_service_application(
         state_dir=state_dir,
         bootstrap_authz_policy=LaunchplaneAuthzPolicy(),
@@ -70,6 +83,13 @@ def check_restored_records(store: PostgresRecordStore, *, state_dir: Path) -> in
     )
     if application is None:
         raise ValueError("Candidate application construction failed.")
+    native_routes._validate_native_fastapi_driver_routes(application)
+    runtime = application.state.authz_policy_runtime
+    active = next(record for record in policies if record.status == "active")
+    if runtime.source != "db" or runtime.policy_sha256 != active.policy_sha256:
+        raise ValueError(
+            "Candidate startup authorization did not resolve the restored active policy."
+        )
     return count
 
 
@@ -131,7 +151,9 @@ def main() -> int:
         return 0
     except Exception as error:
         # Pydantic, SQLAlchemy and migration messages can contain record values.
-        print(json.dumps({"status": "failed", "error_type": type(error).__name__}), file=sys.stderr)
+        print(
+            json.dumps({"status": "failed", **snapshot_failure_diagnostics(error)}), file=sys.stderr
+        )
         return 1
 
 

@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.merge_train import MergeTrainDryRunResult
 from control_plane.merge_train import MergeTrainDryRunSnapshot
-from control_plane.workflows.merge_train_worker import MergeTrainWorkerStepResult
+from control_plane.merge_train import (
+    MergeTrainDryRunAction,
+    MergeTrainMergeableState,
+    MergeTrainCheckStatus,
+)
+from control_plane.workflows.merge_train_worker import (
+    MergeTrainWorkerStepResult,
+    MergeTrainWorkerStepStatus,
+)
 
 
 MergeTrainRunMode = Literal["dry_run", "mutate"]
@@ -24,12 +32,32 @@ class MergeTrainRunRecord(BaseModel):
     repository: str
     base_branch: str
     mode: MergeTrainRunMode
-    status: str
-    intended_next_action: str
+    status: str = Field(
+        json_schema_extra={
+            "x-launchplane-snapshot-protocol": list(
+                get_args(MergeTrainWorkerStepStatus) + get_args(MergeTrainDryRunAction)
+            )
+        }
+    )
+    intended_next_action: str = Field(
+        json_schema_extra={
+            "x-launchplane-snapshot-protocol": list(get_args(MergeTrainDryRunAction))
+        }
+    )
     selected_pr_number: int | None = None
     selected_head_sha: str = ""
-    selected_mergeable: str = ""
-    selected_required_checks_status: str = ""
+    selected_mergeable: str = Field(
+        default="",
+        json_schema_extra={
+            "x-launchplane-snapshot-protocol": list(get_args(MergeTrainMergeableState))
+        },
+    )
+    selected_required_checks_status: str = Field(
+        default="",
+        json_schema_extra={
+            "x-launchplane-snapshot-protocol": list(get_args(MergeTrainCheckStatus))
+        },
+    )
     reread_required: bool = False
     poll_required: bool = False
     policy_key: str

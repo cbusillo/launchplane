@@ -12,7 +12,7 @@ import secrets
 import time
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 
@@ -30,6 +30,8 @@ from control_plane.contracts.stored_record_snapshot import (
     StoredRecordSnapshot,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.merge_train import MergeTrainDryRunResult, MergeTrainDryRunSnapshot
+from control_plane.workflows.merge_train_worker import MergeTrainWorkerStepResult
 from control_plane.storage.postgres import (
     LaunchplaneAuthzPolicyRow,
     LaunchplaneInventoryRow,
@@ -53,6 +55,35 @@ class SnapshotUnavailable(ValueError):
     pass
 
 
+def snapshot_failure_diagnostics(error: Exception) -> dict[str, Any]:
+    """Emit code-owned field paths and classifications without record inputs."""
+    result: dict[str, Any] = {"error_type": type(error).__name__}
+    if isinstance(error, SnapshotUnavailable):
+        result["reason"] = str(error)
+    family = getattr(error, "snapshot_record_family", "")
+    if family in {row_type.__tablename__ for row_type, _ in SNAPSHOT_RECORD_TYPES}:
+        result["record_family"] = family
+    if isinstance(error, ValidationError):
+        field_names: set[str] = set()
+        for _, model in SNAPSHOT_RECORD_TYPES:
+            schema = model.model_json_schema()
+            for definition in (schema, *schema.get("$defs", {}).values()):
+                field_names.update(definition.get("properties", {}))
+        result["validation"] = [
+            {
+                "type": item["type"],
+                "loc": [
+                    part if isinstance(part, int) or part in field_names else "dynamic_field"
+                    for part in item["loc"]
+                ],
+            }
+            for item in error.errors(include_input=False, include_context=False, include_url=False)[
+                :10
+            ]
+        ]
+    return result
+
+
 class _Scrubber:
     def __init__(self) -> None:
         self._salt = secrets.token_bytes(32)
@@ -69,8 +100,6 @@ class _Scrubber:
             and name in {"actions", "driver_id"}
             and re.fullmatch(r"[a-z_][a-z_.-]*", value)
         ):
-            return value
-        if protocol and name == "default_bump" and value in {"patch", "minor", "major"}:
             return value
         digest = self._digest(value)
         if name.endswith("_at") or name in {"started_at", "finished_at"}:
@@ -117,11 +146,15 @@ class _Scrubber:
                 (item for item in candidates if item.get("type") == kind or "$ref" in item), {}
             )
             return self.scrub(value, schema, root, name)
+        if isinstance(value, str) and value.strip() in schema.get(
+            "x-launchplane-snapshot-protocol", []
+        ):
+            return value
         if isinstance(value, dict):
             properties = schema.get("properties", {})
             additional = schema.get("additionalProperties", {})
-            return {
-                key if properties else self.string(key, "map_key"): self.scrub(
+            scrubbed = {
+                key: self.scrub(
                     item,
                     properties.get(key, additional if isinstance(additional, dict) else {}),
                     root,
@@ -129,12 +162,24 @@ class _Scrubber:
                 )
                 for key, item in value.items()
             }
+            if value.get("policy_key") == f"{value.get('repository')}:{value.get('base_branch')}":
+                scrubbed["policy_key"] = f"{scrubbed['repository']}:{scrubbed['base_branch']}"
+            return scrubbed
         if isinstance(value, list):
             return [self.scrub(item, schema.get("items", {}), root, name) for item in value]
         if isinstance(value, str):
             if value in schema.get("enum", []) or ("const" in schema and value == schema["const"]):
                 return value
             return self.string(value, name, protocol=bool(schema))
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if (
+                not schema
+                or name.endswith("_id")
+                or name.endswith("_ids")
+                or name in {"number", "selected_pr_number"}
+            ):
+                pseudonym = int(self._digest(str(value))[:12], 16)
+                return float(pseudonym) if isinstance(value, float) else pseudonym
         return value
 
 
@@ -165,7 +210,25 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
                 connection.execute(
                     text(f"SET LOCAL statement_timeout = '{min(remaining, 15000)}ms'")
                 )
-            for raw in connection.execute(select(table).limit(SNAPSHOT_MAX_ROWS + 1)).mappings():
+            statement = select(table)
+            if row_type is LaunchplaneMergeTrainRunRow:
+                # Run history grows forever. Rehearse current per-lane state;
+                # never delete or retain production history as a deploy operation.
+                from sqlalchemy import func
+
+                ranked = select(
+                    table.c.run_id,
+                    func.row_number()
+                    .over(
+                        partition_by=(table.c.repository, table.c.base_branch),
+                        order_by=(table.c.recorded_at.desc(), table.c.run_id.desc()),
+                    )
+                    .label("snapshot_rank"),
+                ).subquery()
+                statement = statement.join(ranked, table.c.run_id == ranked.c.run_id).where(
+                    ranked.c.snapshot_rank == 1
+                )
+            for raw in connection.execute(statement.limit(SNAPSHOT_MAX_ROWS + 1)).mappings():
                 row_count += 1
                 if row_count > SNAPSHOT_MAX_ROWS:
                     raise SnapshotUnavailable("snapshot_row_limit")
@@ -173,6 +236,17 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
                 if byte_count > SNAPSHOT_MAX_BYTES or time.monotonic() > deadline:
                     raise SnapshotUnavailable("snapshot_export_limit")
                 payload = scrubber.scrub(raw["payload"], schema, schema)
+                if model_type is MergeTrainRunRecord:
+                    for key, nested_type in (
+                        ("dry_run_result", MergeTrainDryRunResult),
+                        ("snapshot", MergeTrainDryRunSnapshot),
+                        ("worker_step_result", MergeTrainWorkerStepResult),
+                    ):
+                        nested_schema = nested_type.model_json_schema()
+                        if key in raw["payload"]:
+                            payload[key] = scrubber.scrub(
+                                raw["payload"][key], nested_schema, nested_schema
+                            )
                 # Check the source digest first. A scrubbed digest is evidence
                 # about the scrubbed policy; it cannot attest production authority.
                 if model_type is LaunchplaneAuthzPolicyRecord:

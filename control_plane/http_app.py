@@ -4259,6 +4259,7 @@ def create_launchplane_fastapi_app(
                 shared_record_store.close()
 
     app = _LaunchplaneFastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
+    app.state.authz_policy_runtime = resolved_authz_policy_runtime
     app.add_middleware(BoundedRequestBodyMiddleware)
     enforce_human_policy_revalidation = False
 
@@ -5355,11 +5356,15 @@ def create_launchplane_fastapi_app(
         try:
             snapshot = record_store.export_stored_record_snapshot()
         except (ValueError, SQLAlchemyError) as error:
+            from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
+
+            diagnostics = snapshot_failure_diagnostics(error)
             raise _launchplane_http_error(
                 status_code=503,
                 trace_id=trace_id,
                 code="stored_record_snapshot_unavailable",
                 message="A complete scrubbed stored-record snapshot is unavailable.",
+                records={"snapshot_failure": json.dumps(diagnostics, sort_keys=True)},
             ) from error
         return StoredRecordSnapshotResponse(trace_id=trace_id, snapshot=snapshot)
 
