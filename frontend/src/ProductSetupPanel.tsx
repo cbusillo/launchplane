@@ -46,13 +46,15 @@ export function ProductSetupPanel({ product, onApplied }: { product: string; onA
   }
   const lanes = profile?.lanes.filter(lane => !["prod", "production"].includes(lane.instance.toLowerCase())) ?? [];
   const lane = lanes.find(item => item.instance === selectedLane);
+  const pendingSetup = ["environment", "declarations"].some(kind => recoverBrowserOperationState(`${product}:setup:${kind}:apply`).requiresIdempotencyContinuity);
   const privateProduct = profile?.public_website === "none";
   const contexts = [...new Set(profile?.lanes.map(item => item.context) ?? [])];
   return <section className="product-setup-panel" aria-labelledby="product-setup-title">
     <p className="eyebrow">Administrator · Environment setup</p>
     <h2 id="product-setup-title">Set up a non-production environment</h2>
     <p>Add a prepared target to this product, then declare the managed-secret fields it needs. These operations update metadata without releasing or activating the product.</p>
-    {error ? <InlineFormError message={error} /> : null}
+    {error ? <><InlineFormError message={error} /><button className="button" type="button" onClick={() => setRefresh(value => value + 1)}>Retry setup read</button></> : null}
+    {!profile && pendingSetup ? <p role="status" aria-label="Pending setup operation">An earlier setup apply is still unresolved. Keep its original operation key and request; recovery returns after a valid profile read.</p> : null}
     {!profile && !error ? <p role="status">Loading product setup…</p> : null}
     {profile ? <>
       <details open={environmentOpen} onToggle={event => setEnvironmentOpen(event.currentTarget.open)}>

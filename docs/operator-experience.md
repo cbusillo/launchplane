@@ -877,7 +877,10 @@ These endpoints use the existing authenticated browser mutation boundary,
 including same-origin and single-use CSRF checks and current action authority.
 Read-only users and Clients do not receive these setup controls. An incomplete
 profile response disables setup with a scoped error, while existing product
-controls remain available; no setup write uses that incomplete metadata. Existing agent
+controls remain available; no setup write uses that incomplete metadata.
+**Retry setup read** fetches fresh metadata. A pending uncertain apply stays
+visible and retains its request/key; its original retry returns after a valid
+profile read. Existing agent
 policy checks and the Live-product `LocalOperatorIdentity` expected-config
 refusal remain in force; this UI adds no grant or credential authority.
 Database-backed declaration apply also refuses a concurrent product-profile

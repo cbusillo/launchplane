@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "declaration-uncertain", "declaration-uncertain-stale", "private"] as const) {
+for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "declaration-uncertain", "declaration-uncertain-stale", "private", "uncertain-profile"] as const) {
   test(`signed-in setup: ${outcome}, exact diff, declaration apply and secret navigation`, async ({ page }, testInfo) => {
     await page.goto("/ui/products/atlas-commerce?fixture=products");
     const data = await page.evaluate(async () => {
@@ -13,6 +13,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
       lanes: [{ context: "atlas-commerce", instance: "prod", base_url: "https://example.com" }],
       expected_config: { runtime_environment_keys: [], managed_secret_bindings: [] as unknown[] } };
     let refuseReadback = false;
+    let incompleteProfile = false;
     const applies: Array<{ body: Record<string, unknown>; key: string }> = [];
     await page.route("**/v1/**", async route => {
       const path = new URL(route.request().url()).pathname;
@@ -29,7 +30,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
           if (environment && !profile.lanes.some(lane => lane.instance === "testing")) profile.lanes.push({ context: body.context, instance: body.instance, base_url: body.base_url });
           if (!environment) profile.expected_config.managed_secret_bindings = body.managed_secret_bindings;
           if (!environment && outcome === "declaration-uncertain" && applies.length === 2) { await route.abort("failed"); return; }
-          if (outcome === "uncertain" && applies.length === 1) { await route.abort("failed"); return; }
+          if (["uncertain", "uncertain-profile"].includes(outcome) && applies.length === 1) { await route.abort("failed"); return; }
         }
         await route.fulfill({ status: 202, json: { status: "accepted", trace_id: "setup", records: {}, result: { status: "ok", mode: body.mode, changed: true, product: body.product,
           ...(environment ? { context: body.context, instance: body.instance, base_url: body.base_url, plan_sha256: "a".repeat(64), preserved_lane_instances: ["prod"], applied: body.mode === "apply" }
@@ -37,7 +38,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
       }
       if (path.endsWith("/product-profiles/atlas-commerce") && refuseReadback) { refuseReadback = false; await route.fulfill({ status: 401, json: { trace_id: "readback", error: { code: "authentication_required", message: "Read-back session expired." } } }); return; }
       const response = path.endsWith("/auth/session") ? { csrf_token: "csrf", identity: data.identity }
-        : path.endsWith("/product-profiles/atlas-commerce") ? { profile }
+        : path.endsWith("/product-profiles/atlas-commerce") ? { profile: incompleteProfile ? { ...profile, lanes: undefined } : profile }
         : path.endsWith("/config-status") ? { config_status: data.config }
         : path.endsWith("/environments/testing") ? { environment: data.environment }
         : path.endsWith("/owner-secret-inputs") ? { fields: [] }
@@ -58,10 +59,17 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
     await panel.getByRole("button", { name: "Run dry-run", exact: true }).click();
     await panel.getByRole("checkbox").check();
     await panel.getByRole("button", { name: "Apply reviewed change" }).click();
-    if (["uncertain", "readback", "uncertain-stale"].includes(outcome)) {
+    if (["uncertain", "uncertain-profile", "readback", "uncertain-stale"].includes(outcome)) {
       await expect(panel.getByRole("button", { name: "Retry original apply" })).toBeVisible();
+      if (outcome === "uncertain-profile") incompleteProfile = true;
       await page.reload();
       panel = page.getByRole("region", { name: "Set up a non-production environment" });
+      if (outcome === "uncertain-profile") {
+        await expect(panel.getByRole("status", { name: "Pending setup operation" })).toBeVisible();
+        await expect(panel.getByRole("button", { name: "Retry original apply" })).toHaveCount(0);
+        incompleteProfile = false;
+        await panel.getByRole("button", { name: "Retry setup read" }).click();
+      }
       // Recovery must be visible after reload, without expanding a disclosure.
       await expect(panel.getByRole("button", { name: "Retry original apply" })).toBeVisible();
       await panel.getByRole("button", { name: "Retry original apply" }).click();
@@ -162,6 +170,7 @@ test("incomplete setup metadata leaves existing product controls available and s
   });
   const writes: string[] = [];
   const errors: string[] = [];
+  let complete = false;
   page.on("request", request => { if (request.method() === "POST") writes.push(request.url()); });
   page.on("pageerror", error => errors.push(error.message));
   await page.route("**/v1/**", async route => {
@@ -169,6 +178,8 @@ test("incomplete setup metadata leaves existing product controls available and s
     const response = path.endsWith("/auth/session") ? { csrf_token: "csrf", identity: data.identity }
       : path.endsWith("/products") ? { products: data.products }
       : path.endsWith("/product-profiles/atlas-commerce") ? { profile: {
+        product: "atlas-commerce", expected_config: { managed_secret_bindings: [] },
+        ...(complete ? { lanes: [{ context: "atlas-commerce", instance: "prod" }] } : {}),
         repository: "example/atlas-commerce", owner: { github_login: "example-owner", github_id: "9001" },
         image: { repository: "ghcr.io/example/atlas-commerce" }, production_use: "unknown",
       } }
@@ -180,6 +191,10 @@ test("incomplete setup metadata leaves existing product controls available and s
   await expect(setup.getByRole("alert")).toBeVisible();
   await expect(setup.getByRole("button", { name: "Run dry-run", exact: true })).toHaveCount(0);
   await page.getByRole("region", { name: "example-owner (id 9001)", exact: true }).getByLabel("GitHub login").fill("another-client");
+  complete = true;
+  await setup.getByRole("button", { name: "Retry setup read" }).click();
+  await expect(setup.getByText("Add environment", { exact: true })).toBeVisible();
+  await expect(setup.getByRole("alert")).toHaveCount(0);
   expect(writes).toEqual([]);
   expect(errors).toEqual([]);
 });
