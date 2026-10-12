@@ -8,6 +8,11 @@ on:
       - completed
   workflow_dispatch:
     inputs:
+      stored_record_preflight_only:
+        description: Qualify the scrubbed-record rehearsal on this runner without requesting any deployment.
+        required: false
+        default: false
+        type: boolean
       image_reference:
         description: Exact immutable Launchplane image digest to deploy instead of building a new one.
         required: false
@@ -95,6 +100,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' &&
        github.ref_type == 'branch' &&
        github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+       !inputs.stored_record_preflight_only &&
        inputs.break_glass_confirm == '')
     runs-on:
       - self-hosted
@@ -165,23 +171,6 @@ jobs:
             fi
           }
 
-          validate_immutable_image_reference() {
-            local image_reference="$1"
-            local image_repository="$2"
-            local expected_image_prefix="${image_repository}@sha256:"
-            local image_digest=""
-
-            if [[ "$image_reference" != "$expected_image_prefix"* ]]; then
-              echo "image_reference must use the configured Launchplane image repository and an immutable sha256 digest." >&2
-              exit 1
-            fi
-            image_digest="${image_reference#"$expected_image_prefix"}"
-            if [[ ! "$image_digest" =~ ^[0-9a-f]{64}$ ]]; then
-              echo "image_reference must end with a lowercase sha256 digest." >&2
-              exit 1
-            fi
-          }
-
           if [ "$EVENT_NAME" = "workflow_run" ]; then
             checkout_ref="$WORKFLOW_RUN_HEAD_SHA"
           else
@@ -201,7 +190,7 @@ jobs:
 
           deploy_image_reference="$DISPATCH_IMAGE_REFERENCE"
           if [ -n "$deploy_image_reference" ]; then
-            validate_immutable_image_reference "$deploy_image_reference" "$image_repository"
+            validate_single_line_value "image_reference" "$deploy_image_reference"
             should_build="false"
           else
             should_build="true"
@@ -315,28 +304,6 @@ jobs:
             : "${LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK:?Missing LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK variable}"
           fi
 
-      - name: Resolve Launchplane service endpoint
-        id: service
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          raw_urls = [value.strip() for value in os.environ["LAUNCHPLANE_DEPLOY_HEALTH_URLS"].split(",") if value.strip()]
-          if not raw_urls:
-              raise SystemExit("Missing Launchplane deploy health URL.")
-          parsed = urlsplit(raw_urls[0])
-          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
-              raise SystemExit(f"Could not derive Launchplane service endpoint from {raw_urls[0]!r}.")
-          service_url = f"{parsed.scheme}://{parsed.netloc}"
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-              handle.write(f"service_url={service_url}\n")
-              handle.write(f"service_audience={parsed.hostname}\n")
-          PY
-
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -347,6 +314,17 @@ jobs:
 
       - name: Install Python
         run: uv python install 3.13
+
+      - name: Validate supplied candidate image
+        if: steps.prep.outputs.should_build == 'false'
+        env:
+          CANDIDATE_IMAGE: ${{ steps.prep.outputs.deploy_image_reference }}
+          LAUNCHPLANE_IMAGE_REPOSITORY: ${{ steps.prep.outputs.image_repository }}
+        run: uv run python scripts/deploy/validate-image-reference.py
+
+      - name: Resolve Launchplane service endpoint
+        id: service
+        run: uv run python scripts/deploy/resolve-service-endpoint.py
 
       - name: Set up Docker Buildx
         if: steps.prep.outputs.should_build == 'true'
@@ -1723,11 +1701,80 @@ jobs:
             "$RUNNER_TEMP/launchplane-self-deploy-payload.json" \
             "$RUNNER_TEMP/launchplane-self-deploy-rollback-payload.json"
 
+  qualify-stored-record-preflight:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      inputs.stored_record_preflight_only && inputs.break_glass_confirm == ''
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Install qualification Python
+        run: uv python install 3.13
+      - name: Validate qualification candidate image
+        env:
+          CANDIDATE_IMAGE: ${{ inputs.image_reference }}
+          LAUNCHPLANE_IMAGE_REPOSITORY: ${{ vars.LAUNCHPLANE_IMAGE_REPOSITORY }}
+        run: uv run python scripts/deploy/validate-image-reference.py
+      - name: Resolve qualification endpoint
+        id: service
+        env:
+          LAUNCHPLANE_PUBLIC_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+          LAUNCHPLANE_DEPLOY_HEALTH_URLS: ${{ vars.LAUNCHPLANE_DEPLOY_HEALTH_URLS }}
+        run: uv run python scripts/deploy/resolve-service-endpoint.py
+      - name: Authenticate the existing image read
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LAUNCHPLANE_PREFLIGHT_OWNER: github-actions:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.job }}
+        run: bash scripts/deploy/authenticate-preflight-registry.sh
+      - name: Read scrubbed Launchplane stored records
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
+        timeout-minutes: 1
+        with:
+          launchplane-url: ${{ steps.service.outputs.service_url }}
+          audience: ${{ steps.service.outputs.service_audience }}
+          route-path: /v1/service/stored-record-snapshot
+          method: GET
+          expected-status: "200"
+          timeout-ms: "30000"
+          response-output-file: ${{ runner.temp }}/launchplane-stored-record-snapshot.json
+          log-response-body: "false"
+      - name: Qualify isolated candidate on deploy runner
+        id: preflight
+        timeout-minutes: 5
+        env:
+          CANDIDATE_IMAGE: ${{ inputs.image_reference }}
+          LAUNCHPLANE_PREFLIGHT_OWNER: github-actions:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.job }}
+        run: bash scripts/deploy/run-stored-record-preflight.sh
+      - name: Clean qualification resources and snapshot
+        if: always()
+        timeout-minutes: 1
+        env:
+          LAUNCHPLANE_PREFLIGHT_OWNER: github-actions:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.job }}
+        run: bash scripts/deploy/cleanup-stored-record-preflight.sh
+      - name: Retain safe qualification result
+        if: always()
+        env:
+          PREFLIGHT_OUTCOME: ${{ steps.preflight.outcome }}
+        run: |
+          printf 'Stored-record rehearsal: %s\n' "$PREFLIGHT_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f "$RUNNER_TEMP/launchplane-stored-record-preflight-result.json" ]]; then
+            cat "$RUNNER_TEMP/launchplane-stored-record-preflight-result.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   emergency-dokploy-rollback:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.ref_type == 'branch' &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      !inputs.stored_record_preflight_only &&
       inputs.break_glass_confirm == 'ROLL BACK LAUNCHPLANE THROUGH DIRECT DOKPLOY'
     environment: launchplane-break-glass
     permissions:

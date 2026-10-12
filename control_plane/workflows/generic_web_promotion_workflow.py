@@ -11,6 +11,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import BumpLevel as BumpLevel
 from control_plane.contracts.outbox_delivery import (
     OutboxDeliveryRecord,
     retry_outbox_delivery,
@@ -21,8 +22,6 @@ from control_plane.workflows.launchplane import (
     resolve_launchplane_github_token,
     launchplane_github_token,
 )
-
-BumpLevel = Literal["patch", "minor", "major"]
 
 
 class GenericWebPromotionWorkflowRequest(BaseModel):

@@ -560,6 +560,35 @@ class _LegacyFakeGenericWebDeployProvider(_FakeGenericWebDeployProvider):
 
 
 class GenericWebDeployTests(unittest.TestCase):
+    def test_lost_publication_authority_writes_no_deployment_or_inventory(self) -> None:
+        for provider_error in (None, click.ClickException("provider wait failed")):
+            with self.subTest(provider_error=provider_error):
+                store = _GenericWebDeployStore(_profile())
+                provider = _FakeGenericWebDeployProvider(
+                    deploy_error=provider_error,
+                    observation=GenericWebProviderDeploymentObservation(
+                        outcome="present",
+                        deployment_status="done",
+                        deployment_id="deploy",
+                        started_at="2026-07-13T12:00:00Z",
+                        finished_at="2026-07-13T12:01:00Z",
+                    ),
+                )
+
+                def lost() -> None:
+                    raise RuntimeError("publication authority lost")
+
+                with self.assertRaises(RuntimeError):
+                    execute_generic_web_deploy(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=_request(),
+                        deploy_provider=provider,
+                        before_records_commit=lost,
+                    )
+                self.assertFalse(store.deployments)
+                self.assertFalse(store.inventories)
+
     def test_release_after_rollback_uses_saved_build_proof_when_uploads_expire(self) -> None:
         from tests.support.lane_builds import LaneBuildGitHub
 
