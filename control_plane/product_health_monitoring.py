@@ -109,6 +109,7 @@ class ProductHealthMonitoringPlan(BaseModel):
     requested_enabled: bool
     current_require_runtime_identity: bool | None = None
     requested_require_runtime_identity: bool
+    current_private_endpoint_key: str | None = None
     private_endpoint_key: str = ""
     resolved_url: str
     changed: bool
@@ -119,6 +120,17 @@ class ProductHealthMonitoringPlan(BaseModel):
     profile_updated_at_after: str = ""
     profile_sha256_before: str
     plan_sha256: str
+
+
+class ProductHealthMonitoringResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["accepted"] = "accepted"
+    trace_id: str
+    records: dict[str, object]
+    result: ProductHealthMonitoringPlan | None = None
+    replayed: bool | None = None
+    original_trace_id: str | None = None
 
 
 def product_health_monitoring_authority(
@@ -230,6 +242,9 @@ def build_product_health_monitoring_plan(
             existing_check.require_runtime_identity if existing_check is not None else None
         ),
         requested_require_runtime_identity=request.require_runtime_identity,
+        current_private_endpoint_key=(
+            existing_check.private_endpoint_key if existing_check else ""
+        ),
         private_endpoint_key=candidate_check.private_endpoint_key,
         resolved_url=resolved_url,
         changed=changed,
