@@ -490,6 +490,9 @@ still owns the artifact and source revision, but its age and historical health
 do not override current monitor verification. Missing, expired or mismatched
 monitor evidence cannot fall back to a passing deploy check. Lanes without
 effective monitoring retain the bounded deploy-health evidence path.
+After deployment, wait for the next scheduled monitor verification or use the
+supported `POST /v1/products/public-ingress-monitor/run-once` service operation
+under existing authorization to obtain current evidence before promoting.
 `health_provenance` identifies the monitor evidence and its freshness deadline;
 inventory timestamps continue to describe the deploy record. Equivalent passing
 monitor renewals preserve the reviewed candidate/target fingerprint; current

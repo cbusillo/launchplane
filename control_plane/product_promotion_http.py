@@ -899,22 +899,21 @@ def _environment_evidence_blockers(
         blockers.append(f"{label} deployment evidence is not passing.")
     if evidence.health_provenance is not None:
         health_verified = evidence.health_provenance.freshness_status == "verified"
-        health_identity_matches = evidence.runtime_identity_status == "match"
     else:
         health_verified = inventory.destination_health.verified
-        health_identity_matches = _health_identity_matches_inventory(
-            profile=profile, lane=lane, inventory=inventory
-        )
     if not health_verified:
         blockers.append(f"{label} health evidence is not verified.")
     if evidence.health_status != "pass":
         blockers.append(f"{label} health evidence is not passing.")
     if evidence.runtime_identity_status != "match":
         blockers.append(f"{label} health did not verify the generated runtime identity.")
-    if not health_identity_matches:
+    if evidence.health_provenance is None and not _health_identity_matches_inventory(
+        profile=profile, lane=lane, inventory=inventory
+    ):
         blockers.append(f"{label} observed health identity does not match current inventory.")
     if evidence.trust_state == "stale":
-        blockers.append(f"{label} inventory evidence is stale.")
+        evidence_kind = "monitoring" if evidence.health_provenance is not None else "inventory"
+        blockers.append(f"{label} {evidence_kind} evidence is stale.")
     return blockers
 
 

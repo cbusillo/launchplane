@@ -42,6 +42,7 @@ from control_plane.contracts.promotion_record import (
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.public_ingress_monitoring import (
+    PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
 )
@@ -86,6 +87,7 @@ from tests.support.stores import _sqlite_database_url
 
 
 NOW = datetime(2026, 7, 15, 9, 0, tzinfo=UTC)
+EXPIRED_MONITOR_AT = NOW - timedelta(seconds=PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS + 1)
 TESTING_ARTIFACT = f"ghcr.io/example/atlas-commerce@sha256:{'a' * 64}"
 PROD_ARTIFACT = f"ghcr.io/example/atlas-commerce@sha256:{'b' * 64}"
 NEW_TESTING_ARTIFACT = f"ghcr.io/example/atlas-commerce@sha256:{'c' * 64}"
@@ -501,9 +503,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
                     store.observations.pop(0)
                 elif change in {"expired", "future"}:
                     checked_at = (
-                        NOW - timedelta(hours=1)
-                        if change == "expired"
-                        else NOW + timedelta(minutes=1)
+                        EXPIRED_MONITOR_AT if change == "expired" else NOW + timedelta(minutes=1)
                     )
                     store.observations[0] = observation.model_copy(
                         update={"observed_at": checked_at.isoformat()}
@@ -619,7 +619,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
         self.assertFalse(status.workflow_live.enabled)
 
         store.observations[0] = store.observations[0].model_copy(
-            update={"observed_at": (NOW - timedelta(hours=1)).isoformat()}
+            update={"observed_at": EXPIRED_MONITOR_AT.isoformat()}
         )
         _, _, stale_status = _status(store)
         self.assertEqual(stale_status.source.trust_state, "stale")
@@ -707,7 +707,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
         self.assertEqual(status.source.runtime_identity_status, "match")
 
         store.observations[-1] = passed.model_copy(
-            update={"observed_at": (NOW - timedelta(hours=1)).isoformat()}
+            update={"observed_at": EXPIRED_MONITOR_AT.isoformat()}
         )
         _, _, stale = _status(store)
         self.assertFalse(stale.workflow_live.enabled)
