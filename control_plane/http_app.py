@@ -12461,6 +12461,16 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Workflow cannot write the requested product profile.",
             )
+        if profile.preview.historical_transport:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="unsupported_preview_transport_history",
+                message=(
+                    "Replace preview settings with supported none/driver configuration and omit "
+                    "preview.historical_transport; archived transport intent is read-only."
+                ),
+            )
         try:
             profile.validate_write_contract()
         except ValueError as error:

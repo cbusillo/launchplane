@@ -5152,8 +5152,6 @@ class GenericWebHttpTests(unittest.TestCase):
                         override_env_keys=(),
                         preview_url_env_keys=(),
                         preview_domain_env_keys=(),
-                        migration_command_configured=False,
-                        seed_command_configured=False,
                     ),
                     checks=(
                         GenericWebPreviewReadinessCheck(

@@ -4743,7 +4743,9 @@ class FilesystemRecordStore:
                 migrate_product_profile_health_monitoring_payload(payload)
             )
         )
-        record = LaunchplaneProductProfileRecord.model_validate(migrated_payload)
+        record = LaunchplaneProductProfileRecord.model_validate(
+            migrated_payload, context={"stored_product_profile": True}
+        )
         if migrated_payload != payload:
             record_path.write_text(
                 json.dumps(
@@ -5335,10 +5337,8 @@ class FilesystemRecordStore:
 
                 route = _context_instance_record_id(current_record.context, current_record.instance)
                 bindings = [
-                    self._read_model_locked(
-                        LaunchplaneProductProfileRecord,
-                        "launchplane_product_profiles",
-                        current_record.product,
+                    self._read_product_profile_record_path(
+                        self._record_path("launchplane_product_profiles", current_record.product)
                     ),
                     self._read_model_locked(DokployTargetRecord, "dokploy_targets", route),
                     self._read_model_locked(DokployTargetIdRecord, "dokploy_target_ids", route),

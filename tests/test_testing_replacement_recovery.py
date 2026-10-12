@@ -2,6 +2,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -20,7 +21,7 @@ from control_plane.launchplane_reconcile_authorization import (
     build_launchplane_reconcile_authorization,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import LaunchplaneProductProfileRow, PostgresRecordStore
 from control_plane.testing_replacement_recovery import (
     TestingRecoveryStore,
     guard_testing_replacement,
@@ -61,6 +62,56 @@ class _FilesystemServiceStore(FilesystemRecordStore):
 
 
 class TestingReplacementRecoveryTests(unittest.TestCase):
+    def test_recovery_preserves_stored_preview_transport_compatibility(self) -> None:
+        for mode, command in (("none", ""), ("bootstrap", "/app/seed")):
+            for store, root in self.stores():
+                with self.subTest(mode=mode, backend=type(store).__name__):
+                    profile = store.read_product_profile_record("site")
+                    payload = profile.model_dump(mode="json")
+                    payload["preview"].update(
+                        data_transport_mode=mode, migration_command="", seed_command=command
+                    )
+                    if isinstance(store, FilesystemRecordStore):
+                        path = store.write_product_profile_record(profile)
+                        path.write_text(json.dumps(payload))
+                    else:
+                        assert isinstance(store, PostgresRecordStore)
+                        with store._session_factory() as session:
+                            row = session.get(LaunchplaneProductProfileRow, profile.product)
+                            assert row is not None
+                            row.payload = payload
+                            session.commit()
+                    operation = self.running(store)
+                    with guard_testing_replacement(store, operation, "worker", lambda _: None):
+                        with patch.object(api, "_dokploy_request", return_value={}):
+                            api.dokploy_request(
+                                host="https://provider.test",
+                                token="fixture-token",
+                                path="/api/compose.update",
+                                method="POST",
+                                payload={"composeId": "compose-123", "env": "FIXTURE=value"},
+                            )
+                        self.fence(store)
+                    with self.provider():
+                        self.assertEqual(
+                            recover_stranded_testing_replacements(store, root),
+                            (operation.operation_id,),
+                        )
+                    self.assertEqual(
+                        store.read_odoo_stable_target_replacement_operation_record(
+                            operation.operation_id
+                        ).status,
+                        "cancelled",
+                    )
+                    historical = store.read_product_profile_record(
+                        "site"
+                    ).preview.historical_transport
+                    if command:
+                        self.assertEqual(historical["seed_command"], command)
+                        self.assertEqual(historical["data_transport_mode"], mode)
+                    else:
+                        self.assertFalse(historical)
+
     def stores(self) -> Iterator[tuple[TestingRecoveryStore, Path]]:
         with TemporaryDirectory() as directory:
             root = Path(directory)
