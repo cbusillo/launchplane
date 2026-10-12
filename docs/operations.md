@@ -3043,7 +3043,10 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   substitute for that capture. The shared restore validator checks lane, source,
   backup binding, normalized paths, nonce, hashes, integrity and staging space.
   Replacement re-reads the exact proof before target writes and each restore
-  schedule effect, and records the consumed IDs and hashes. Backup capture and
+  schedule effect, and records the consumed IDs and hashes. Authorization is
+  re-read at the first target write after backup and at destructive restore
+  triggering; subsequent non-destructive website setup completes without a
+  redundant proof check. Backup capture and
   verification support both stable `prod` and `testing` lanes and preserve the
   operation's authorization/lease checkpoints. Missing backup runtime settings
   block the plan; capture or verification failure stops before target mutation.

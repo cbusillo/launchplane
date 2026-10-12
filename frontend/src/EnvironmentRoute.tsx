@@ -903,7 +903,7 @@ function OdooDataSafety({ detail }: { detail: ProductEnvironmentDetail }) {
       <p className="eyebrow">Driver data safety</p>
       <h2>{humanize(policy.data_authority)} data authority</h2>
       <dl className="evidence-fact-list evidence-fact-list-compact">
-        <EvidenceFact label="Destructive replacement" value={policy.destructive_replacement_proof_required ? "Blocked without verified backup and restore proof" : "Requires approved prelaunch rebuild policy"} />
+        <EvidenceFact label="Destructive replacement" value={policy.data_authority === "unknown" ? "Blocked until data authority is recorded" : policy.destructive_replacement_proof_required ? "Blocked without verified backup and restore proof" : "Requires approved prelaunch rebuild policy"} />
         <EvidenceFact label="Runtime identity" value={policy.requires_runtime_identity ? "Required" : "Not required"} />
         <EvidenceFact label="Upstream source" value={policy.upstream_source || "Not recorded"} />
       </dl>

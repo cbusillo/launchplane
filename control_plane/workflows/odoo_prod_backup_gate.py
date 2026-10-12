@@ -12,6 +12,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane import runtime_platform_credentials
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.odoo_online_backup import OdooProdBackupCaptureEvidence
@@ -548,6 +549,8 @@ def execute_odoo_prod_backup_gate(
                 "error_message": str(error),
             },
         )
+        if isinstance(error, DurableOperationAuthorizationDeniedError):
+            raise
         return OdooProdBackupGateResult(
             context=request.context,
             instance=request.instance,
@@ -642,7 +645,9 @@ def execute_odoo_prod_backup_verification(
                 "Dokploy Odoo backup verification result did not match the exact request."
             )
         verification_evidence = OdooProdBackupVerificationEvidence.model_validate(raw_evidence)
-    except (click.ClickException, OSError, ValidationError):
+    except (click.ClickException, OSError, ValidationError) as error:
+        if isinstance(error, DurableOperationAuthorizationDeniedError):
+            raise
         verification_evidence = OdooProdBackupVerificationEvidence(
             verification_status="fail",
             failure_code="provider_verification_failed",

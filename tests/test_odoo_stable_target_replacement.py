@@ -3078,6 +3078,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         *,
         override_record: OdooInstanceOverrideRecord | None,
         post_deploy_results: tuple[OdooPostDeployResult, ...],
+        after_restore: Callable[[_Store], None] | None = None,
         protected: bool = False,
         live: bool = False,
         test_instance: str = "prod",
@@ -3160,6 +3161,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 if mutate_before_write is not None:
                     mutate_before_write(store)
 
+        post_deploy_iterator = iter(post_deploy_results)
+
+        def post_deploy_provider(**kwargs: object) -> OdooPostDeployResult:
+            result = next(post_deploy_iterator)
+            if kwargs["run_destructive_restore"] and after_restore is not None:
+                after_restore(store)
+            return result
+
         persisted_env = ""
         resolved_env = dict(_UPSTREAM_RESTORE_ENV)
 
@@ -3239,7 +3248,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
-                side_effect=post_deploy_results,
+                side_effect=post_deploy_provider,
             ) as post_deploy,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
@@ -3430,6 +3439,27 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "deploy_blocked.backup_restore_proof_required")
         self.assertEqual(observed[0].deployment_records[-1].deploy.status, "fail")
         self.assertEqual(observed[0].environment_inventories, [])
+
+    def test_restored_site_finishes_website_setup_after_proof_changes(self) -> None:
+        def invalidate(store: _Store) -> None:
+            next(
+                record
+                for record in store.backup_records.values()
+                if record.source == BACKUP_VERIFICATION_SOURCE
+            ).status = "fail"
+
+        passed = OdooPostDeployResult(
+            context="opw", instance="prod", phase="restore", post_deploy_status="pass"
+        )
+        result, post_deploy, verify, _store = self._apply_upstream_restore(
+            override_record=_opw_website_override_record(),
+            post_deploy_results=(passed, passed),
+            protected=True,
+            after_restore=invalidate,
+        )
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertFalse(post_deploy.call_args.kwargs["run_destructive_restore"])
+        verify.assert_called_once()
 
     def test_restore_applies_website_bootstrap_before_verification(self) -> None:
         passed = OdooPostDeployResult(

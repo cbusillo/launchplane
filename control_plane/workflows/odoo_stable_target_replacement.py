@@ -21,6 +21,7 @@ from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
     artifact_manifest_matches_image_repository,
 )
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.runtime_platform_credentials import PlatformCredentialRefusedError
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
@@ -111,6 +112,7 @@ from control_plane.dokploy.api import JsonObject, JsonValue
 
 # The checkpoint immediately before a replacement first writes to the provider.
 TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE = "target_replacement_raw_source"
+TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE = "target_replacement_destructive_restore"
 
 
 class OdooTargetReplacementStageError(OdooProviderSafetyRefusedError):
@@ -1162,6 +1164,10 @@ def _deploy_step_failure(error: BaseException) -> RecordFailure:
     """
     code = ""
     keys: tuple[str, ...] = ()
+    if isinstance(error, DurableOperationAuthorizationDeniedError):
+        return RecordFailure(
+            code=error.code, description="Authorization refused the provider effect."
+        )
     if isinstance(error, LaneMovementRefused):
         return error.record_failure()
     if isinstance(error, OdooTargetReplacementStageError):
@@ -1904,6 +1910,11 @@ def execute_odoo_stable_target_replacement_apply(
 
     def restore_effect_checkpoint(phase: str) -> None:
         if provider_effect_checkpoint is not None:
+            if (
+                phase == "post_deploy_schedule_trigger"
+                and plan.data_source_mode == "upstream_restore"
+            ):
+                provider_effect_checkpoint(TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE)
             provider_effect_checkpoint(phase)
         check_backup_proof()
 
@@ -2556,7 +2567,8 @@ def execute_odoo_stable_target_replacement_apply(
         "restore" if plan.data_source_mode == "upstream_restore" else "deploy"
     )
     try:
-        check_backup_proof()
+        if post_deploy_phase == "restore":
+            check_backup_proof()
         with _failure_stage("post_deploy_setup_failed"):
             post_deploy_result = execute_odoo_post_deploy(
                 control_plane_root=control_plane_root,
@@ -2567,7 +2579,11 @@ def execute_odoo_stable_target_replacement_apply(
                     phase=post_deploy_phase,
                 ),
                 run_destructive_restore=plan.data_source_mode == "upstream_restore",
-                provider_effect_checkpoint=restore_effect_checkpoint,
+                provider_effect_checkpoint=(
+                    restore_effect_checkpoint
+                    if post_deploy_phase == "restore"
+                    else provider_effect_checkpoint
+                ),
                 hold_uncertain_effects=hold_uncertain_effects,
                 allow_historical_sender_contract=allow_historical_sender_contract,
                 schedule_execution_timeout_seconds=(
@@ -2590,7 +2606,7 @@ def execute_odoo_stable_target_replacement_apply(
             destination_health=HealthcheckEvidence(status="skipped"),
         )
         raise
-    except OdooTargetReplacementStageError as error:
+    except (OdooTargetReplacementStageError, DurableOperationAuthorizationDeniedError) as error:
         _write_failed_deployment(
             record_store=record_store,
             ship_request=ship_request,
@@ -2600,7 +2616,10 @@ def execute_odoo_stable_target_replacement_apply(
             runtime_source=runtime_source,
             runtime_identity=runtime_identity,
             post_deploy_update=PostDeployUpdateEvidence(
-                attempted=True, status="fail", detail="Post-deploy safety validation failed."
+                attempted=True,
+                status="fail",
+                detail=deploy_failure_description(getattr(error, "code", ""))
+                or "Post-deploy setup failed.",
             ),
             destination_health=HealthcheckEvidence(status="skipped"),
             failure=_deploy_step_failure(error),
@@ -2651,7 +2670,7 @@ def execute_odoo_stable_target_replacement_apply(
                 ),
                 run_destructive_restore=False,
                 allow_historical_sender_contract=allow_historical_sender_contract,
-                provider_effect_checkpoint=restore_effect_checkpoint,
+                provider_effect_checkpoint=provider_effect_checkpoint,
             )
         post_deploy_evidence = PostDeployUpdateEvidence(
             attempted=True,

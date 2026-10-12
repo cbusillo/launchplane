@@ -7,6 +7,7 @@ from typing import Literal, Protocol, cast
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane.contracts.odoo_instance_override_record import (
     OdooInstanceOverrideRecord,
@@ -301,12 +302,12 @@ def execute_odoo_post_deploy(
                 allow_historical_contract=allow_historical_sender_contract,
             )
     except (click.ClickException, OSError) as error:
-        if isinstance(error, OdooProviderSafetyRefusedError):
-            raise
         determinate_failure = isinstance(
             error,
             (
                 dokploy_api.DokployDeploymentFailed,
+                OdooProviderSafetyRefusedError,
+                DurableOperationAuthorizationDeniedError,
                 dokploy_post_deploy.OdooPostDeployReadbackFailure,
             ),
         ) or (
@@ -325,6 +326,10 @@ def execute_odoo_post_deploy(
                 status="fail",
                 detail=str(error),
             )
+        if isinstance(
+            error, (OdooProviderSafetyRefusedError, DurableOperationAuthorizationDeniedError)
+        ):
+            raise
         if uncertain:
             raise OdooProviderEffectUncertainError(
                 "Odoo post-deploy provider effect requires reconciliation."
