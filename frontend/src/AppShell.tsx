@@ -352,5 +352,5 @@ function StatusIcon({ tone, absent }: { tone: SignalTone; absent: boolean }) {
     : tone === "danger" ? CircleX
     : tone === "warning" || tone === "stale" ? TriangleAlert
     : CircleHelp;
-  return <Icon size={18} strokeWidth={2.5} aria-hidden="true" />;
+  return <Icon size="100%" strokeWidth={2.5} aria-hidden="true" />;
 }
