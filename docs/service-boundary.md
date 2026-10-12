@@ -342,6 +342,7 @@ governed expectation, custody and currentness contract.
   - `POST /v1/product-profiles/prelaunch-rebuild/apply` (native FastAPI for
     exact-lane reviewed Odoo prelaunch-rebuild policy planning, profile
     compare-and-write, and apply-only atomic idempotency enforcement)
+  - `POST /v1/product-profiles/{product}/display-name` (signed-in admin reviewed display-name changes)
   - `POST /v1/product-profiles/{product}/owner` (native FastAPI for bearer-token
     and signed-in admin callers, server-side GitHub login resolution, profile
     compare-and-write, and apply-only atomic idempotency enforcement)
@@ -2007,6 +2008,7 @@ refresh/destroy flow.
 - `POST /v1/product-profiles/health-monitoring/apply`
 - `POST /v1/product-profiles/prelaunch-rebuild/apply`
 - `POST /v1/product-profiles/preview-tls/apply`
+- `POST /v1/product-profiles/{product}/display-name`
 - `POST /v1/product-profiles/{product}/owner`
 - `POST /v1/product-profiles/{product}/image-repository`
 - `POST /v1/product-profiles/{product}/production-use`

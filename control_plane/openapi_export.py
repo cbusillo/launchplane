@@ -233,6 +233,7 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/product-profiles/{product}/owner": "apply_product_owner",
     "/v1/product-profiles/{product}/image-repository": "apply_product_image_repository",
     "/v1/product-profiles/{product}/production-use": "apply_product_production_use",
+    "/v1/product-profiles/{product}/display-name": "apply_product_display_name",
     "/v1/product-profiles/{product}/website-cleanup": "apply_product_website_cleanup",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": (
         "dry_run_product_promotion"

@@ -1,4 +1,5 @@
 import type {
+  ApplyProductDisplayNameData,
   ApplyProductWebsiteCleanupData,
   RestartLaneServiceData,
   ReadServiceDeliveryApplyReceiptData,
@@ -32,6 +33,7 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  productDisplayName: "/v1/product-profiles/{product}/display-name" satisfies ApplyProductDisplayNameData["url"],
   productWebsiteCleanup: "/v1/product-profiles/{product}/website-cleanup" satisfies ApplyProductWebsiteCleanupData["url"],
   laneServiceRestart: "/v1/drivers/odoo/service-restart" satisfies RestartLaneServiceData["url"],
   serviceDeliveryReceiptRead: "/v1/service/delivery/apply-receipt" satisfies ReadServiceDeliveryApplyReceiptData["url"],
