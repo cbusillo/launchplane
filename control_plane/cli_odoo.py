@@ -589,6 +589,14 @@ def odoo_ownership() -> None:
     help="Explicit coverage: repeat for every requested repository. Absolute roots are supported.",
 )
 @click.option(
+    "--allow-path",
+    "allowed_paths",
+    type=(str, str),
+    multiple=True,
+    metavar="ROOT GLOB",
+    help="Scoped path exception for an explicitly requested ROOT; repeat as needed.",
+)
+@click.option(
     "--format",
     "output_format",
     type=click.Choice(["text", "json"]),
@@ -598,14 +606,27 @@ def odoo_ownership() -> None:
 def odoo_ownership_check(
     workspace_root: Path | None,
     repositories: tuple[tuple[str, str], ...],
+    allowed_paths: tuple[tuple[str, str], ...],
     output_format: str,
 ) -> None:
     resolved_workspace_root = workspace_root or _control_plane_root().parent
     try:
+        requested_roots = {root for root, _family in repositories}
+        for root, path_glob in allowed_paths:
+            if root not in requested_roots or not path_glob.strip():
+                raise ValueError("Each --allow-path needs a requested ROOT and a nonempty GLOB.")
         result = scan_odoo_ownership_boundaries(
             workspace_root=resolved_workspace_root,
             repo_policies=tuple(
-                OdooOwnershipRepoPolicy(root, cast(OdooRepoFamily, family))
+                OdooOwnershipRepoPolicy(
+                    root,
+                    cast(OdooRepoFamily, family),
+                    allowed_path_globs=tuple(
+                        path_glob
+                        for allowed_root, path_glob in allowed_paths
+                        if allowed_root == root
+                    ),
+                )
                 for root, family in repositories
             ),
         )

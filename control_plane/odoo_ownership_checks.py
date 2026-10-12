@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 from typing import Literal, get_args
 
 
@@ -113,6 +114,8 @@ _TEXT_FILE_SUFFIXES = {
 
 _IGNORED_PARTS = {
     ".git",
+    ".DS_Store",
+    ".coverage",
     ".code",
     ".idea",
     ".mypy_cache",
@@ -352,9 +355,14 @@ def _iter_scannable_files(repo_root: Path) -> Iterable[Path]:
 
     for directory, subdirectories, files in os.walk(repo_root, onerror=raise_walk_error):
         subdirectories[:] = sorted(name for name in subdirectories if name not in _IGNORED_PARTS)
+        for name in subdirectories:
+            if (Path(directory) / name).is_symlink():
+                raise OSError(f"Linked source directory is outside traversed coverage: {name}")
         for name in sorted(files):
             path = Path(directory) / name
             if name not in _IGNORED_PARTS and path.suffix in _TEXT_FILE_SUFFIXES:
+                if not stat.S_ISREG(path.stat().st_mode):
+                    raise OSError(f"Source path is not a regular file: {path}")
                 yield path
 
 

@@ -378,9 +378,11 @@ products; the caller supplies that complete list from its authoritative inventor
 
 Text and JSON output report each requested root and family, whether coverage
 completed, and scanned and omitted file counts. Missing/non-directory roots,
-failed traversal, and unreadable supported source files fail the check rather
+failed traversal, linked source directories, nonregular source files, and
+unreadable supported source files fail the check rather
 than silently passing. Root-level files use the same rules as nested files.
-Counts exclude unsupported file suffixes and ignored generated directories;
+Counts exclude unsupported file suffixes, ignored generated directories, and
+known local metadata (`.DS_Store`, `.coverage`);
 `omitted_file_count` counts supported files exempted by the existing path rules
 (docs, tests, addons, or explicit Python policy exceptions). An empty directory
 reports complete coverage with zero scanned files.
@@ -389,8 +391,18 @@ Python callers supply `repo_policies` explicitly to
 `scan_odoo_ownership_boundaries`, using `OdooOwnershipRepoPolicy` for each root
 and family. The existing `allowed_path_globs` field supports scoped exceptions
 for a caller's reviewed transitional cleanup; it is never filled from a
-repository-name catalog. The CLI applies the generic family rules without
-repository-specific exceptions.
+repository-name catalog. The CLI supplies the same explicit exceptions through
+repeatable `--allow-path ROOT GLOB`; ROOT must exactly match a requested ROOT.
+For example, `--repository odoo-devkit devkit --allow-path odoo-devkit
+odoo_devkit/workspace_surface.py` scopes an exception to that requested checkout.
+An exception is reported as omitted coverage, not checked source.
+
+This is a caller-scoped audit, not a whole-inventory CI lint gate. The caller's
+explicit request owns its coverage; build the complete ROOT/FAMILY inputs from
+the inventory being audited and retain them with the results. Launchplane does
+not infer local checkouts or auxiliary image/addon/devkit families from product
+names. The `.github/github.json` documentation route points here rather than
+publishing a second invocation or repository inventory.
 
 The check is intentionally narrow. It allows product-owned source, tests,
 artifact publishing, GHCR login, devkit local build/runtime behavior, and thin

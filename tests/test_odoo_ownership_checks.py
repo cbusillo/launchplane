@@ -1,8 +1,8 @@
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
-from unittest.mock import patch
 
 from click.testing import CliRunner
 
@@ -240,7 +240,7 @@ jobs:
             )
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn('"status": "fail"', result.output)
+        self.assertEqual(json.JSONDecoder().raw_decode(result.output)[0]["status"], "fail")
         self.assertIn("repo-local-oidc-client", result.output)
 
     def test_root_and_nested_source_files_are_checked(self) -> None:
@@ -316,21 +316,60 @@ jobs:
     def test_failed_traversal_cannot_pass(self) -> None:
         with TemporaryDirectory() as workspace:
             root = Path(workspace)
-            (root / "repo").mkdir()
-            with patch("control_plane.odoo_ownership_checks.os.walk") as walk:
-
-                def denied_walk(*args: object, **kwargs: object) -> None:
-                    onerror = kwargs["onerror"]
-                    assert callable(onerror)
-                    onerror(PermissionError("source directory is unreadable"))
-
-                walk.side_effect = denied_walk
+            source = root / "repo" / "source"
+            source.mkdir(parents=True)
+            source.chmod(0)
+            try:
+                if os.access(source, os.R_OK):
+                    self.skipTest("This process can read a directory without permission bits.")
                 result = scan_odoo_ownership_boundaries(
                     workspace_root=root, repo_policies=(OdooOwnershipRepoPolicy("repo", "tenant"),)
                 )
+            finally:
+                source.chmod(0o700)
         self.assertEqual(result.status, "fail")
         self.assertEqual(result.coverage[0].status, "unavailable")
         self.assertEqual(result.findings[0].rule_id, "repository-unavailable")
+
+    def test_linked_source_directory_cannot_report_complete_coverage(self) -> None:
+        with TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            repo = root / "repo"
+            repo.mkdir()
+            source = root / "source"
+            source.mkdir()
+            (source / "ops.py").write_text("ACTIONS_ID_TOKEN_REQUEST_TOKEN\n", encoding="utf-8")
+            (repo / "source").symlink_to(source, target_is_directory=True)
+            result = scan_odoo_ownership_boundaries(
+                workspace_root=root, repo_policies=(OdooOwnershipRepoPolicy("repo", "tenant"),)
+            )
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(result.coverage[0].status, "unavailable")
+
+    def test_nonregular_source_file_cannot_hang_the_scan(self) -> None:
+        with TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            (root / "repo").mkdir()
+            os.mkfifo(root / "repo" / "ops.py")
+            result = scan_odoo_ownership_boundaries(
+                workspace_root=root, repo_policies=(OdooOwnershipRepoPolicy("repo", "tenant"),)
+            )
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(result.coverage[0].status, "unavailable")
+
+    def test_local_binary_metadata_does_not_block_source_scan(self) -> None:
+        with TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            repo = root / "repo"
+            repo.mkdir()
+            for name in (".DS_Store", ".coverage"):
+                (repo / name).write_bytes(b"\xff\x00")
+            (repo / "build.py").write_text("print('build')\n", encoding="utf-8")
+            result = scan_odoo_ownership_boundaries(
+                workspace_root=root, repo_policies=(OdooOwnershipRepoPolicy("repo", "tenant"),)
+            )
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.scanned_file_count, 1)
 
     def test_explicit_exceptions_report_omitted_files(self) -> None:
         with TemporaryDirectory() as workspace:
@@ -396,7 +435,7 @@ jobs:
         for selection in ([], ["--repository", "repo", "unknown"]):
             with self.subTest(selection=selection):
                 result = CliRunner().invoke(main, ["odoo-ownership", "check", *selection])
-            self.assertNotEqual(result.exit_code, 0)
+            self.assertEqual(result.exit_code, 2)
 
     def test_cli_pass_names_only_requested_coverage(self) -> None:
         with TemporaryDirectory() as workspace:
@@ -419,3 +458,29 @@ jobs:
         payload = json.loads(result.output)
         self.assertEqual(payload["status"], "pass")
         self.assertEqual([entry["root"] for entry in payload["coverage"]], [str(repo.resolve())])
+
+    def test_cli_supplies_only_explicit_scoped_path_exceptions(self) -> None:
+        with TemporaryDirectory() as workspace:
+            repo = Path(workspace) / "tool"
+            source = repo / "local.py"
+            repo.mkdir()
+            source.write_text("print('shared production restore')\n", encoding="utf-8")
+            runner = CliRunner()
+            command = [
+                "odoo-ownership",
+                "check",
+                "--repository",
+                str(repo),
+                "devkit",
+                "--format",
+                "json",
+            ]
+            unexcepted = runner.invoke(main, command)
+            result = runner.invoke(main, [*command, "--allow-path", str(repo), "local.py"])
+            unknown = runner.invoke(main, [*command, "--allow-path", "other-root", "local.py"])
+        self.assertNotEqual(unexcepted.exit_code, 0)
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["coverage"][0]["omitted_file_count"], 1)
+        self.assertEqual(payload["coverage"][0]["scanned_file_count"], 0)
+        self.assertNotEqual(unknown.exit_code, 0)
