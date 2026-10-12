@@ -33,11 +33,12 @@ chmod 0755 "${staged_binary}"
 "${staged_binary}" docker-cli-plugin-metadata |
   jq --exit-status --arg version "${version}" '.Version == $version' >/dev/null
 if [ -n "${RUNNER_TOOL_CACHE:-}" ]; then
-  mkdir -p "$(dirname "${cached_binary}")"
-  cache_staging="$(mktemp "$(dirname "${cached_binary}")/compose-cache.XXXXXXXX")"
-  trap 'rm -f "${staged_binary}" "${cache_staging}"' EXIT
-  cp "${staged_binary}" "${cache_staging}"
-  mv "${cache_staging}" "${cached_binary}"
+  (
+    mkdir -p "$(dirname "${cached_binary}")" || exit 1
+    cache_staging="$(mktemp "$(dirname "${cached_binary}")/compose-cache.XXXXXXXX")" || exit 1
+    trap 'rm -f "${cache_staging}"' EXIT
+    cp "${staged_binary}" "${cache_staging}" && mv "${cache_staging}" "${cached_binary}"
+  ) || echo "Compose cache refill unavailable; using the validated job plugin" >&2
 fi
 mv "${staged_binary}" "${plugin_directory}/docker-compose"
 docker compose version

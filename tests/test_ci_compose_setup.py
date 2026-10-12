@@ -142,6 +142,14 @@ class ComposeSetupTests(unittest.TestCase):
         self.assertFalse((self.config / "cli-plugins/docker-compose").exists())
         self.assertEqual(list((self.config / "cli-plugins").glob("compose-install.*")), [])
 
+    def test_unwritable_tool_cache_does_not_block_plugin_installation(self) -> None:
+        unavailable = self.scratch / "unavailable-cache"
+        unavailable.write_bytes(b"not a directory")
+        self.environment["RUNNER_TOOL_CACHE"] = str(unavailable)
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Fixture Compose works", result.stdout)
+
     def test_failed_download_preserves_the_installed_plugin_and_cleans_staging(self) -> None:
         result = self.run_setup()
         self.assertEqual(result.returncode, 0, result.stderr)
