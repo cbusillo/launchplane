@@ -31,13 +31,6 @@ GitHub through Launchplane's own names for things (a change, a comment, a
 check result, a merge); old code moves over only when other work touches it.
 Adding another host is its own milestone, when the Director chooses it.
 
-Launchplane needs no caller grant for the work it starts from source-control
-events (verifying a build and deploying it to that site's previews and testing
-lane) or from a Client's recorded release acceptance (the gated promotion).
-Requests from people or other agents still need grants. This does not replace
-the Director's approval at a stop boundary, a Client's release acceptance, or
-a backup gate.
-
 Code and tests are upkeep. A change that deletes code or tests without losing
 a behavior needs no other reason. A test earns its place by catching a real
 regression, not by restating the code or its wording.
