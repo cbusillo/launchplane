@@ -124,7 +124,11 @@ _IGNORED_PARTS = {
     ".venv",
     "__pycache__",
     "node_modules",
+    "venv",
+    ".tox",
 }
+
+_IGNORED_FILE_GLOBS = (".env", ".env.*", "._*")
 
 _GLOBALLY_ALLOWED_PATH_GLOBS = (
     "addons/**",
@@ -360,7 +364,11 @@ def _iter_scannable_files(repo_root: Path) -> Iterable[Path]:
                 raise OSError(f"Linked source directory is outside traversed coverage: {name}")
         for name in sorted(files):
             path = Path(directory) / name
-            if name not in _IGNORED_PARTS and path.suffix in _TEXT_FILE_SUFFIXES:
+            if (
+                name not in _IGNORED_PARTS
+                and not _matches_any(name, _IGNORED_FILE_GLOBS)
+                and path.suffix in _TEXT_FILE_SUFFIXES
+            ):
                 if not stat.S_ISREG(path.stat().st_mode):
                     raise OSError(f"Source path is not a regular file: {path}")
                 yield path

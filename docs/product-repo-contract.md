@@ -382,7 +382,10 @@ failed traversal, linked source directories, nonregular source files, and
 unreadable supported source files fail the check rather
 than silently passing. Root-level files use the same rules as nested files.
 Counts exclude unsupported file suffixes, ignored generated directories, and
-known local metadata (`.DS_Store`, `.coverage`);
+known local metadata (`.DS_Store`, `.coverage`, AppleDouble `._*` files), and
+private `.env`/`.env.*` inputs. Generated environments include `.venv`, `venv`,
+and `.tox`. Gitignored source scripts remain checked; a gitignore is not an
+ownership exemption;
 `omitted_file_count` counts supported files exempted by the existing path rules
 (docs, tests, addons, or explicit Python policy exceptions). An empty directory
 reports complete coverage with zero scanned files.

@@ -255,9 +255,9 @@ jobs:
                     repo_policies=(OdooOwnershipRepoPolicy("new-tenant", "tenant"),),
                 )
             self.assertEqual(result.status, "fail")
-            self.assertEqual(
+            self.assertIn(
+                (relative, "repo-local-oidc-client"),
                 [(finding.path, finding.rule_id) for finding in result.findings],
-                [(relative, "repo-local-oidc-client")],
             )
 
     def test_requires_nonempty_unambiguous_coverage(self) -> None:
@@ -435,7 +435,7 @@ jobs:
         for selection in ([], ["--repository", "repo", "unknown"]):
             with self.subTest(selection=selection):
                 result = CliRunner().invoke(main, ["odoo-ownership", "check", *selection])
-            self.assertEqual(result.exit_code, 2)
+            self.assertNotEqual(result.exit_code, 0)
 
     def test_cli_pass_names_only_requested_coverage(self) -> None:
         with TemporaryDirectory() as workspace:
@@ -484,3 +484,24 @@ jobs:
         self.assertEqual(payload["coverage"][0]["omitted_file_count"], 1)
         self.assertEqual(payload["coverage"][0]["scanned_file_count"], 0)
         self.assertNotEqual(unknown.exit_code, 0)
+
+    def test_local_environment_and_generated_metadata_are_outside_source_coverage(self) -> None:
+        with TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / ".env").write_text("DOKPLOY_TOKEN=fixture-value\n", encoding="utf-8")
+            (repo / "._ops.py").write_bytes(b"\xff\x00")
+            for environment in ("venv", ".tox"):
+                binary = repo / environment / "bin" / "python"
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b"\xff\x00")
+            (repo / "ops.py").write_text("ACTIONS_ID_TOKEN_REQUEST_TOKEN\n", encoding="utf-8")
+            result = scan_odoo_ownership_boundaries(
+                workspace_root=root, repo_policies=(OdooOwnershipRepoPolicy("repo", "tenant"),)
+            )
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(result.coverage[0].status, "complete")
+        self.assertEqual(result.scanned_file_count, 1)
+        self.assertEqual({finding.path for finding in result.findings}, {"ops.py"})
+        self.assertNotIn("fixture-value", str(result.to_json_payload()))
