@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from urllib.parse import urlsplit
 
 
 ACTION_ENTRYPOINT = Path(".github/actions/launchplane-request/dist/index.js")
@@ -179,7 +180,7 @@ process.on('beforeExit', () => {{
                 self.assertNotEqual(result.returncode, 0)
                 calls = json.loads(result.stderr.strip().splitlines()[-1])
                 mutations = [
-                    call for call in calls if call["url"].startswith("https://launchplane.example")
+                    call for call in calls if urlsplit(call["url"]).hostname == "launchplane.example"
                 ]
                 self.assertLess(len(mutations), 10)
                 self.assertIsNone(json.loads(response.read_text()))
@@ -771,7 +772,7 @@ process.on('beforeExit', () => {{
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = json.loads(result.stderr.strip().splitlines()[-1])
         launchplane_calls = [
-            call for call in calls if call["url"].startswith("https://launchplane.example/")
+            call for call in calls if urlsplit(call["url"]).hostname == "launchplane.example"
         ]
         self.assertEqual(len(launchplane_calls), 3)
         self.assertEqual(
@@ -792,7 +793,7 @@ process.on('beforeExit', () => {{
         self.assertNotEqual(result.returncode, 0)
         calls = json.loads(result.stderr.strip().splitlines()[-1])
         launchplane_calls = [
-            call for call in calls if call["url"].startswith("https://launchplane.example/")
+            call for call in calls if urlsplit(call["url"]).hostname == "launchplane.example"
         ]
         self.assertEqual(len(launchplane_calls), 1)
 
