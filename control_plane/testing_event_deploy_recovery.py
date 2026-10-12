@@ -1,4 +1,4 @@
-"""Retire a service testing attempt only after original inputs and live effects are absent."""
+"""Retire a service testing attempt only after its provider effects are proved safe."""
 
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -149,7 +149,11 @@ def retire_unavailable_testing_event_deploy(
             response_payload={
                 "status": "failed",
                 "trace_id": trace_id,
-                "error": {"code": "testing_deploy_retired_without_live_effect"},
+                "error": {
+                    "code": "testing_deploy_retired_without_live_effect"
+                    if evidence.get("state") == "no_live_effect"
+                    else "testing_deploy_retired_after_terminal_dispatch"
+                },
                 "recovery": audit,
             },
             expected_binding_evidence=bindings,
