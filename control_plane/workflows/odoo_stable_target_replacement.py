@@ -1611,6 +1611,7 @@ def execute_odoo_stable_target_replacement_apply(
     request: OdooStableTargetReplacementApplyRequest,
     dokploy_request: DokployRequest = dokploy_api.dokploy_request,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    before_records_commit: Callable[[], None] | None = None,
     hold_uncertain_effects: bool = False,
     rollback: bool = False,
 ) -> OdooStableTargetReplacementApplyResult:
@@ -2599,6 +2600,8 @@ def execute_odoo_stable_target_replacement_apply(
             else None,
             status=health_status,
         )
+    if before_records_commit is not None:
+        before_records_commit()
     deployment_record = build_deployment_record(
         request=ship_request,
         record_id=deployment_record_id,

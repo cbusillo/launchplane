@@ -9719,12 +9719,23 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def cancel_pending_odoo_stable_target_replacement_operation_record(
-        self, record: OdooStableTargetReplacementOperationRecord
+        self,
+        record: OdooStableTargetReplacementOperationRecord,
+        *,
+        expected_record: OdooStableTargetReplacementOperationRecord | None = None,
     ) -> bool:
         if record.status != "cancelled" or record.phase != "cancelled":
             raise ValueError("Odoo target replacement cancellation requires a cancelled record.")
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            if expected_record is None:
+                self._begin_serialized_write(session)
+            if expected_record is not None:
+                self._lock_odoo_stable_lane(
+                    session,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                )
             statement = (
                 select(LaunchplaneOdooStableTargetReplacementOperationRow)
                 .where(
@@ -9742,6 +9753,55 @@ class PostgresRecordStore(HumanSessionStore):
                 model_type=OdooStableTargetReplacementOperationRecord,
                 payload=row.payload,
             )
+            if expected_record is not None:
+                from control_plane.testing_replacement_recovery import (
+                    recovery_binding_fingerprint,
+                    service_testing_operation,
+                )
+
+                bindings = []
+                for model, filters in (
+                    (
+                        LaunchplaneProductProfileRow,
+                        (LaunchplaneProductProfileRow.product == current_record.product,),
+                    ),
+                    (
+                        LaunchplaneDokployTargetRow,
+                        (
+                            LaunchplaneDokployTargetRow.context == current_record.context,
+                            LaunchplaneDokployTargetRow.instance == current_record.instance,
+                        ),
+                    ),
+                    (
+                        LaunchplaneDokployTargetIdRow,
+                        (
+                            LaunchplaneDokployTargetIdRow.context == current_record.context,
+                            LaunchplaneDokployTargetIdRow.instance == current_record.instance,
+                        ),
+                    ),
+                ):
+                    binding_statement = select(model).where(*filters)
+                    if self.database_dialect_name == "postgresql":
+                        binding_statement = binding_statement.with_for_update()
+                    binding_row = session.scalar(binding_statement)
+                    if binding_row is None:
+                        return False
+                    bindings.append(
+                        cast(
+                            LaunchplaneProductProfileRow
+                            | LaunchplaneDokployTargetRow
+                            | LaunchplaneDokployTargetIdRow,
+                            binding_row,
+                        ).payload
+                    )
+                if (
+                    not service_testing_operation(current_record)
+                    or current_record != expected_record
+                    or current_record.recovery_journal is None
+                    or recovery_binding_fingerprint(bindings)
+                    != current_record.recovery_journal.target_fingerprint
+                ):
+                    return False
             if not odoo_stable_lane_cancellation_is_allowed(
                 current_status=current_record.status,
                 reconciliation_required_at=current_record.updated_at,
@@ -9904,9 +9964,49 @@ class PostgresRecordStore(HumanSessionStore):
                 or current_record.lease_expires_at <= completed_at
             ):
                 return False
+            if record.status == "running" and record.recovery_journal is not None:
+                record = current_record.model_copy(
+                    update={"recovery_journal": record.recovery_journal}
+                )
+            elif current_record.recovery_journal is not None:
+                record = record.model_copy(
+                    update={"recovery_journal": current_record.recovery_journal}
+                )
             self._sync_odoo_stable_target_replacement_operation_row(row, record)
             session.commit()
             return True
+
+    @contextmanager
+    def testing_replacement_execution_lock(
+        self, operation_id: str
+    ) -> Iterator[Callable[[], None] | None]:
+        if self.database_dialect_name != "postgresql":
+            from control_plane.storage.testing_replacement_recovery import file_execution_lock
+
+            database_path = self._engine.url.database
+            if not database_path or database_path == ":memory:":
+                yield None
+                return
+            with file_execution_lock(Path(database_path + ".testing-locks"), operation_id) as check:
+                yield check
+            return
+        assert self._preview_lock_engine is not None
+        with self._preview_lock_engine.connect() as connection:
+            acquired = connection.scalar(
+                text("select pg_try_advisory_xact_lock(hashtextextended(:name, 0))"),
+                {"name": f"launchplane-testing-replacement:{operation_id}"},
+            )
+            if not acquired:
+                yield None
+                return
+
+            def check_connection() -> None:
+                # Never silently reconnect a lost transaction and lose exclusion.
+                if connection.invalidated or not connection.in_transaction():
+                    raise RuntimeError("Testing replacement execution lock was lost.")
+                connection.execute(text("select 1"))
+
+            yield check_connection
 
     def recover_expired_odoo_stable_target_replacement_operation_records(
         self,

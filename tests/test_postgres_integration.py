@@ -9572,3 +9572,72 @@ class RealPostgresServiceTokenRetirementTests(unittest.TestCase):
                             future.result(timeout=10)
                 self.assertEqual(store.read_secret_record("token-global").status, "configured")
                 self.assertEqual(store.list_secret_audit_events(secret_id="token-global"), ())
+
+
+class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
+    def test_execution_exclusion_is_cross_connection_and_releases_on_exit(self) -> None:
+        with _head_postgres_database() as url:
+            first = PostgresRecordStore(database_url=url)
+            second = PostgresRecordStore(database_url=url)
+            self.addCleanup(first.close)
+            self.addCleanup(second.close)
+            with first.testing_replacement_execution_lock("operation-a") as check:
+                self.assertIsNotNone(check)
+                assert check is not None
+                check()
+                with second.testing_replacement_execution_lock("operation-a") as competing:
+                    self.assertIsNone(competing)
+                with second.testing_replacement_execution_lock("operation-b") as independent:
+                    self.assertIsNotNone(independent)
+            with second.testing_replacement_execution_lock("operation-a") as successor:
+                self.assertIsNotNone(successor)
+
+    def test_recovery_cancellation_rechecks_the_binding_on_postgres(self) -> None:
+        from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests, stamp
+        from tests.test_product_reconcile import _profile, _inventory
+        from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+        from control_plane.testing_replacement_recovery import (
+            guard_testing_replacement,
+            recover_stranded_testing_replacements,
+        )
+
+        with _head_postgres_database() as url, TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            store.write_repository_inventory_record(_inventory())
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_profile())
+            )
+            store.write_dokploy_target_record(
+                DokployTargetRecord(context="cm", instance="testing", updated_at=stamp())
+            )
+            store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context="cm", instance="testing", target_id="compose-123", updated_at=stamp()
+                )
+            )
+            fixture = TestingReplacementRecoveryTests()
+            operation = fixture.running(store)
+            with guard_testing_replacement(
+                store, operation, "worker", lambda _: None
+            ) as checkpoint:
+                checkpoint("first-write")
+            fixture.fence(store)
+            with patch(
+                "control_plane.testing_replacement_recovery.inspect_testing_replacement",
+                return_value={"state": "quiescent_safe_to_retry"},
+            ):
+                self.assertEqual(
+                    recover_stranded_testing_replacements(store, Path(directory)),
+                    (operation.operation_id,),
+                )
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(
+                    operation.operation_id
+                ).status,
+                "cancelled",
+            )
+            self.assertEqual(
+                store.list_product_reconcile_requests(product="site")[0].state, "pending"
+            )
