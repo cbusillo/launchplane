@@ -263,7 +263,7 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
             host.commands,
             [
                 ["launchplane-backup-boundary"],
-                ["pvesm", "status", "--storage", "pbs-production"],
+                ["pvesm", "status", "--storage", host.storage],
             ],
         )
         for private in [
@@ -327,7 +327,7 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
                         )
                     if problem == "storage" and host.commands[-1][0] == "pvesm":
                         return subprocess.CompletedProcess(
-                            command, 0, stdout="pbs-production pbs inactive 0 0 0", stderr=""
+                            command, 0, stdout=f"{host.storage} pbs inactive 0 0 0", stderr=""
                         )
                     return result
 
