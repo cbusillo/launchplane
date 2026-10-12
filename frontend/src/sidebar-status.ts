@@ -1,5 +1,5 @@
 import type { ProductEnvironmentSummary } from "./generated/openapi.ts";
-import { environmentOperationalTone, negativeTlsStates, failedRuntimeIdentityStates } from "./product-environment-signal";
+import { environmentOperationalTone, negativeTlsStates, failedRuntimeIdentityStates, expireEnvironmentEvidence, publicObservationGap } from "./product-environment-signal";
 
 // Labels describe returned diagnostic layers; they do not infer a failing proxy
 // or app from a generic connection/HTTP failure.
@@ -13,12 +13,23 @@ export function sidebarLayerLabel(layer: string): string {
   return layerLabels[layer] ?? "Unknown layer";
 }
 
-export function sidebarStatus(environment: ProductEnvironmentSummary | null, label: string) {
+export function sidebarStatus(environment: ProductEnvironmentSummary | null, label: string, staleDescription = "") {
+  if (staleDescription) return { tone: "stale" as const, description: `${label}: ${staleDescription}` };
+  environment = environment ? expireEnvironmentEvidence(environment) : null;
   const tone = environmentOperationalTone(environment);
+  const evidenceStale = environment && (environment.provenance.freshness_status === "stale" ||
+    environment.topology.observed.placement.trust_state === "stale" ||
+    environment.health_monitoring.checks.some(check => check.probe_effective && check.trust_state === "stale") ||
+    environment.topology.desired.public_website !== "none" && (
+      environment.topology.observed.ingress.trust_state === "stale" ||
+      environment.topology.observed.tls_domains.some(domain => domain.trust_state === "stale")));
+  if (tone === "stale" || tone === "warning" && evidenceStale) {
+    return { tone: "stale" as const, description: `${label}: Stale evidence; awaiting current observations` };
+  }
   const state = !environment ? "Absent (not recorded)"
     : tone === "verified" ? "Healthy"
     : tone === "danger" ? "Alert"
-    : tone === "warning" || tone === "stale" ? "Warning or stale evidence"
+    : tone === "warning" ? "Warning"
     : tone === "unsupported" ? "Unsupported"
     : tone === "recorded" ? "Unknown (recorded, not verified)"
     : "Unknown (unverified)";
@@ -39,5 +50,15 @@ export function sidebarStatus(environment: ProductEnvironmentSummary | null, lab
       layers.add(sidebarLayerLabel("tls"));
     }
   }
-  return { tone, description: `${label}: ${state}${layers.size ? `; ${[...layers].join(", ")}` : ""}` };
+  const reasons = new Set<string>();
+  if (tone === "warning" && environment) {
+    const gap = publicObservationGap(environment.topology);
+    if (gap) reasons.add(gap);
+    if (environment.topology.observed.placement.runtime_identity_status !== "match") reasons.add("Runtime identity unverified");
+    environment.topology.warnings.filter(warning => warning.severity === "warning")
+      .forEach(warning => reasons.add(warning.detail));
+    environment.warnings.forEach(warning => reasons.add(warning));
+    if (!reasons.size) reasons.add("Health or runtime evidence not yet verified");
+  }
+  return { tone, description: `${label}: ${state}${layers.size ? `; ${[...layers].join(", ")}` : ""}${reasons.size ? `; ${[...reasons].join("; ")}` : ""}` };
 }
