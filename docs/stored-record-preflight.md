@@ -13,11 +13,11 @@ the service context. It opens one repeatable-read, read-only transaction inside
 the running service. The caller receives JSON, never a production database URL,
 SQL access, keys or provider credentials. No grant or credential setup is needed.
 
-Version 1 exports every authorization policy, product profile (including lanes),
+Both formats export every authorization policy, product profile (including lanes),
 environment inventory and merge-train policy, plus the latest merge-train run
 for each repository/base-branch pair. Train history is neither deleted nor
 exported; its unbounded growth cannot consume the snapshot budget. Limits are
-10,000 total rows, 16 MiB of scrubbed JSON and a 20-second export budget. A
+10,000 total rows, 16 MiB of snapshot JSON on the wire and a 20-second export budget. A
 server cursor fetches one row at a time. The service checks source row size in
 SQL before decoding JSON, refusing a row above 16 MiB. It counts scrubbed bytes
 as rows accumulate and checks the complete envelope before returning it.
@@ -28,6 +28,27 @@ source-row bytes, scrubbed-output bytes, rows and elapsed time, with code-owned
 family names and value-free budget counters. Each database statement
 has at most 15 seconds, clipped to the remaining budget. Exceeding a limit
 refuses; there is no truncated or empty-policy success.
+
+Version 2 is explicitly requested with `?format_version=2`; the default remains
+version 1 for existing candidates. It streams scrubbed rows as newline-delimited
+JSON through gzip into a base64 JSON envelope, with per-table counts and the
+decoded byte count. Neither full raw history nor full decoded history is
+accumulated in the producer. Compression is lossless after scrubbing: field
+absence, audit payloads, projections and every policy revision survive. The
+consumer accepts both formats and restores version 2 one row at a time. It
+rejects truncated streams, mismatched counts, unsupported table coverage and
+expansion beyond the independent decoded limits before migrating its empty DB.
+
+The wire cap remains 16 MiB, as does each source/decoded row cap. Version 2 adds
+a 128 MiB total decoded cap. Around 400 full policy copies of roughly 180 KiB
+already exceed the old total cap even though most structure repeats; 128 MiB
+covers that scale with headroom while bounding decompression and isolated DB
+work. Row, freshness, export-time and rehearsal-time budgets remain. This is a
+finite compatibility rehearsal, not an unbounded archive export: future growth
+can still refuse visibly. Retaining full copies in the authority store supports
+audit and historical readers; the export neither deletes history nor changes
+policy writes, rollback or privileged-operation records. Identical proposals
+and unchanged managed reconciliation do not write new policy revisions.
 
 Managed-secret, runtime-value, provider, session, worker and all other tables
 are excluded, including encrypted secret values. Identity strings and numbers,
@@ -106,6 +127,15 @@ manual deploys validate the same bootstrap image repository and immutable digest
 reported as missing standing authority; this mode creates no new grant. Landing both in one batch would require a route the old service lacks.
 This ordered capability rollout supplies a supported way to keep deploying.
 
+The version-2 producer and dual-format consumer land together before their
+read-only qualification workflow requests version 2. Qualify with that landed
+candidate image, then refresh the held mandatory-gate PR to request the same
+format. Never activate the gate on source evidence alone. Older candidate images
+can still request version 1, which can refuse its existing size limit; emergency
+recovery remains separately governed. If preview holds refuse normal installation,
+the Supervisor obtains approval for the existing manual break-glass path and
+installs the immutable image built from this producer's landed main commit.
+
 The gate change on #3413 runs after immutable image resolution and before
 rendering or requesting self-deploy. It deletes snapshot material after every
 attempt and retains only counts, revision and pass/fail evidence. The existing
@@ -115,7 +145,7 @@ After a rollback, verify that the running service still exports the required
 format and that the candidate supports its database revision. A missing route
 or newer columns unavailable to the rolled-back exporter is an explicit
 recovery prerequisite; use the separately governed emergency recovery path in
-operations, not an automatic gate exception. Version 1 owns the five families
+operations, not an automatic gate exception. Both formats own the five families
 above. A future family or table-format change must ship its version-compatible,
 ordered producer/consumer rollout while retaining the previous supported
 format. Missing coverage refuses rather than passing as "not covered".

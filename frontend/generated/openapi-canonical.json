@@ -3906,6 +3906,56 @@
         "title": "ClientReleaseStepView",
         "type": "object"
       },
+      "CompressedStoredRecordSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "captured_at": {
+            "title": "Captured At",
+            "type": "string"
+          },
+          "database_schema_revision": {
+            "title": "Database Schema Revision",
+            "type": "string"
+          },
+          "encoding": {
+            "const": "gzip-ndjson-base64",
+            "default": "gzip-ndjson-base64",
+            "title": "Encoding",
+            "type": "string"
+          },
+          "expanded_bytes": {
+            "maximum": 134217728.0,
+            "minimum": 1.0,
+            "title": "Expanded Bytes",
+            "type": "integer"
+          },
+          "rows_gzip_base64": {
+            "title": "Rows Gzip Base64",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 2,
+            "default": 2,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "table_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Table Counts",
+            "type": "object"
+          }
+        },
+        "required": [
+          "captured_at",
+          "database_schema_revision",
+          "expanded_bytes",
+          "rows_gzip_base64"
+        ],
+        "title": "CompressedStoredRecordSnapshot",
+        "type": "object"
+      },
       "DataProvenance": {
         "additionalProperties": false,
         "properties": {
@@ -44297,7 +44347,15 @@
         "additionalProperties": false,
         "properties": {
           "snapshot": {
-            "$ref": "#/components/schemas/StoredRecordSnapshot"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StoredRecordSnapshot"
+              },
+              {
+                "$ref": "#/components/schemas/CompressedStoredRecordSnapshot"
+              }
+            ],
+            "title": "Snapshot"
           },
           "status": {
             "const": "ok",
@@ -87725,6 +87783,18 @@
       "get": {
         "operationId": "read_stored_record_snapshot",
         "parameters": [
+          {
+            "in": "query",
+            "name": "format_version",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "maximum": 2,
+              "minimum": 1,
+              "title": "Format Version",
+              "type": "integer"
+            }
+          },
           {
             "in": "header",
             "name": "Authorization",

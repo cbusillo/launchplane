@@ -20,6 +20,7 @@ from control_plane.contracts.stored_record_snapshot import (
     SNAPSHOT_MAX_ROWS,
     StoredRecordPreflightResult,
     StoredRecordSnapshot,
+    CompressedStoredRecordSnapshot,
     StoredRecordSnapshotResponse,
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
@@ -28,6 +29,7 @@ from control_plane.drivers import native_routes
 from control_plane.storage.postgres import PostgresRecordStore, _build_engine
 from control_plane.storage.schema_migration import alembic_config, migrate_schema
 from control_plane.stored_record_snapshot import SNAPSHOT_RECORD_TYPES, snapshot_failure_diagnostics
+from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
 
 
 class _ClosedVerifier:
@@ -35,7 +37,9 @@ class _ClosedVerifier:
         raise ValueError("Rehearsal accepts no caller credentials.")
 
 
-def validate_snapshot(snapshot: StoredRecordSnapshot, *, now: datetime) -> None:
+def validate_snapshot(
+    snapshot: StoredRecordSnapshot | CompressedStoredRecordSnapshot, *, now: datetime
+) -> None:
     captured = datetime.fromisoformat(snapshot.captured_at.replace("Z", "+00:00"))
     if (
         captured.tzinfo is None
@@ -43,12 +47,20 @@ def validate_snapshot(snapshot: StoredRecordSnapshot, *, now: datetime) -> None:
     ):
         raise ValueError("Snapshot is stale or has an invalid capture time.")
     expected_tables = {row_type.__tablename__ for row_type, _ in SNAPSHOT_RECORD_TYPES}
-    if set(snapshot.tables) != expected_tables:
+    tables = (
+        snapshot.tables if isinstance(snapshot, StoredRecordSnapshot) else snapshot.table_counts
+    )
+    if set(tables) != expected_tables:
         raise ValueError("Snapshot table coverage is incomplete or unsupported.")
-    if sum(map(len, snapshot.tables.values())) > SNAPSHOT_MAX_ROWS:
-        raise ValueError("Snapshot exceeds its row bound.")
-    policies = snapshot.tables["launchplane_authz_policies"]
-    if sum(row.get("status") == "active" for row in policies) != 1:
+    row_count = 0
+    active_policy_count = 0
+    for table, row in iter_snapshot_rows(snapshot):
+        row_count += 1
+        if row_count > SNAPSHOT_MAX_ROWS:
+            raise ValueError("Snapshot exceeds its row bound.")
+        if table == "launchplane_authz_policies" and row.get("status") == "active":
+            active_policy_count += 1
+    if active_policy_count != 1:
         raise ValueError("Snapshot requires exactly one active authorization policy.")
 
 
@@ -93,23 +105,29 @@ def check_restored_records(store: PostgresRecordStore, *, state_dir: Path) -> in
     return count
 
 
-def restore_snapshot(engine: Engine, snapshot: StoredRecordSnapshot) -> str:
+def restore_snapshot(
+    engine: Engine, snapshot: StoredRecordSnapshot | CompressedStoredRecordSnapshot
+) -> str:
     """Restore into an empty rehearsal database, then run the hosted migrations."""
     database_url = engine.url.render_as_string(hide_password=False)
     if inspect(engine).get_table_names():
         raise ValueError("Preflight requires an empty isolated database.")
+    validate_snapshot(snapshot, now=datetime.now(timezone.utc))
     command.upgrade(alembic_config(database_url), snapshot.database_schema_revision)
     with engine.begin() as connection:
-        for row_type, _ in SNAPSHOT_RECORD_TYPES:
-            table = Table(row_type.__tablename__, MetaData(), autoload_with=connection)
-            rows = snapshot.tables[table.name]
-            if rows:
-                connection.execute(insert(table), rows)
+        tables = {
+            row_type.__tablename__: Table(
+                row_type.__tablename__, MetaData(), autoload_with=connection
+            )
+            for row_type, _ in SNAPSHOT_RECORD_TYPES
+        }
+        for name, row in iter_snapshot_rows(snapshot):
+            connection.execute(insert(tables[name]), row)
     return migrate_schema(database_url=database_url)
 
 
 def preflight_stored_records(
-    snapshot: StoredRecordSnapshot, *, database_url: str
+    snapshot: StoredRecordSnapshot | CompressedStoredRecordSnapshot, *, database_url: str
 ) -> StoredRecordPreflightResult:
     validate_snapshot(snapshot, now=datetime.now(timezone.utc))
     url = make_url(database_url)
