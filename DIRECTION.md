@@ -15,7 +15,7 @@ production for real business.
 
 Judge every change by one question: can a product be maintained without
 anyone touching Launchplane? Work that adds upkeep to Launchplane itself needs
-a strong reason. Prefer deleting a concept to adding one.
+a strong reason.
 
 A product repository builds its own artifacts from its own files, with
 provenance Launchplane can verify; it never calls Launchplane, and Launchplane
