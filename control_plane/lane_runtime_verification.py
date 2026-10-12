@@ -241,8 +241,18 @@ def read_lane_runtime_verification(
         ),
         None,
     )
-    evidence = identity_failure or next(
-        (result for result in results if result.runtime_target is not None), None
+    failed_evidence = next(
+        (
+            result
+            for result in results
+            if result.provenance.freshness_status != "verified" and result.observation is not None
+        ),
+        None,
+    )
+    evidence = (
+        identity_failure
+        or failed_evidence
+        or next((result for result in results if result.runtime_target is not None), None)
     )
     return LaneRuntimeVerification(
         provenance,

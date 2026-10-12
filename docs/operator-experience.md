@@ -489,9 +489,9 @@ do not override current monitor verification. Missing, expired or mismatched
 monitor evidence cannot fall back to a passing deploy check. Lanes without
 effective monitoring retain the bounded deploy-health evidence path.
 `health_provenance` identifies the monitor evidence and its freshness deadline;
-inventory timestamps continue to describe the deploy record. A new monitor
-observation changes the reviewed evidence fingerprint and requires a new
-direct dry-run before workflow dispatch. The source and
+inventory timestamps continue to describe the deploy record. Equivalent passing
+monitor renewals preserve the reviewed candidate/target fingerprint; current
+health and trust are rechecked before dispatch and execution. The source and
 destination artifacts must be digest-pinned `@sha256:` references and source
 revisions must be immutable commit IDs. Current production provider-target
 authority comes only from the explicit provider-target record; deployment

@@ -748,6 +748,11 @@ def _promotion_evidence(
             )
         ):
             freshness = "recorded"
+        health_provenance = verification.provenance
+        if verification.observation is not None and freshness == "recorded":
+            health_provenance = health_provenance.model_copy(
+                update={"detail": verification.observation.summary}
+            )
         evidence = evidence.model_copy(
             update={
                 "health_status": health_status,
@@ -757,7 +762,7 @@ def _promotion_evidence(
                 "runtime_identity_detail": (
                     target.runtime_identity_detail if target else verification.provenance.detail
                 ),
-                "health_provenance": verification.provenance,
+                "health_provenance": health_provenance,
                 "trust_state": freshness,
             }
         )
@@ -888,7 +893,7 @@ def _environment_evidence_blockers(
         blockers.append(f"{label} deployment evidence is not passing.")
     if evidence.health_provenance is not None:
         health_verified = evidence.health_provenance.freshness_status == "verified"
-        health_identity_matches = health_verified
+        health_identity_matches = evidence.runtime_identity_status == "match"
     else:
         health_verified = inventory.destination_health.verified
         health_identity_matches = _health_identity_matches_inventory(
@@ -980,8 +985,10 @@ def _promotion_evidence_fingerprint(
             "profile_updated_at": profile.updated_at,
             "repository": profile.repository,
             "workflow": profile.promotion_workflow.model_dump(mode="json"),
-            "source": source.model_dump(mode="json"),
-            "destination": destination.model_dump(mode="json"),
+            # Equivalent monitor renewals preserve the reviewed candidate/target
+            # binding. Current health and trust are still checked on every request.
+            "source": source.model_dump(mode="json", exclude={"health_provenance"}),
+            "destination": destination.model_dump(mode="json", exclude={"health_provenance"}),
             "release_review": {
                 "required": release_review.required,
                 "approved": release_review.approved,

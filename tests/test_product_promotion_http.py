@@ -183,7 +183,8 @@ class _MonitoredPromotionStore(_PromotionStore):
         summaries = original.summaries.copy()
         if old_inventory:
             for key, summary in summaries.items():
-                inventory = cast(EnvironmentInventory, summary.inventory)
+                inventory = summary.inventory
+                assert inventory is not None
                 summaries[key] = summary.model_copy(
                     update={
                         "inventory": inventory.model_copy(
@@ -198,9 +199,8 @@ class _MonitoredPromotionStore(_PromotionStore):
         self.observations = [self.observation(lane) for lane in profile.lanes]
 
     def observation(self, lane: ProductLaneProfile) -> PublicIngressObservationRecord:
-        inventory = cast(
-            EnvironmentInventory, self.summaries[(lane.context, lane.instance)].inventory
-        )
+        inventory = self.summaries[(lane.context, lane.instance)].inventory
+        assert inventory is not None
         return PublicIngressObservationRecord(
             record_id=f"monitor-{lane.instance}",
             product=self.profile.product,
@@ -463,6 +463,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
                     profile.lanes, (status.source, status.destination), strict=True
                 ):
                     summary = store.summaries[(lane.context, lane.instance)]
+                    assert summary.inventory is not None
                     verification = read_lane_runtime_verification(
                         record_store=store,
                         profile=profile,
@@ -476,7 +477,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
                     self.assertEqual(evidence.runtime_identity_status, "match")
                     self.assertEqual(
                         evidence.inventory_updated_at,
-                        cast(EnvironmentInventory, summary.inventory).updated_at,
+                        summary.inventory.updated_at,
                     )
                 self.assertTrue(status.direct_dry_run.enabled)
                 self.assertEqual(status.source.artifact_id, TESTING_ARTIFACT)
@@ -509,16 +510,20 @@ class ProductPromotionStatusTests(unittest.TestCase):
                 elif change == "profile_changed":
                     store.profile = store.profile.model_copy(update={"updated_at": NOW.isoformat()})
                 elif change == "deployment_changed":
-                    summary = store.summaries[("atlas-commerce", "testing")]
-                    store.summaries[("atlas-commerce", "testing")] = summary.model_copy(
+                    lane = store.profile.lanes[0]
+                    key = (lane.context, lane.instance)
+                    summary = store.summaries[key]
+                    assert summary.inventory is not None
+                    store.summaries[key] = summary.model_copy(
                         update={
-                            "inventory": cast(EnvironmentInventory, summary.inventory).model_copy(
+                            "inventory": summary.inventory.model_copy(
                                 update={"updated_at": NOW.isoformat()}
                             )
                         }
                     )
                 else:
-                    expected = cast(RuntimeIdentity, observation.expected_runtime_identity)
+                    expected = observation.expected_runtime_identity
+                    assert expected is not None
                     store.observations[0] = observation.model_copy(
                         update={
                             "expected_runtime_identity": expected.model_copy(
@@ -535,7 +540,8 @@ class ProductPromotionStatusTests(unittest.TestCase):
         store = _MonitoredPromotionStore()
         passed = store.observations[0]
         target = passed.targets[0]
-        identity = cast(RuntimeIdentity, target.observed_runtime_identity)
+        identity = target.observed_runtime_identity
+        assert identity is not None
         failed = passed.model_copy(
             update={
                 "record_id": "failed-monitor",
@@ -578,7 +584,39 @@ class ProductPromotionStatusTests(unittest.TestCase):
         self.assertNotEqual(status.source.health_status, "pass")
         self.assertNotEqual(status.source.trust_state, "verified")
 
-    def test_monitor_refresh_changes_the_reviewed_promotion_fingerprint(self) -> None:
+        failed = store.observations[0].model_copy(
+            update={
+                "record_id": "additional-failure",
+                "check_name": extra.name,
+                "status": "fail",
+                "failure_code": "http_error",
+                "summary": "Additional endpoint returned HTTP 500.",
+                "targets": (
+                    store.observations[0]
+                    .targets[0]
+                    .model_copy(
+                        update={"status": "fail", "failure_code": "http_error", "http_status": 500}
+                    ),
+                ),
+            }
+        )
+        store.observations.append(failed)
+        verification = read_lane_runtime_verification(
+            record_store=store,
+            profile=store.profile,
+            lane=lane,
+            summary=store.summaries[(lane.context, lane.instance)],
+            now=NOW,
+        )
+        self.assertEqual(verification.observation, failed)
+        _, _, status = _status(store)
+        self.assertEqual(status.source.health_status, "fail")
+        self.assertEqual(status.source.runtime_identity_status, "match")
+        assert status.source.health_provenance is not None
+        self.assertEqual(status.source.health_provenance.detail, failed.summary)
+        self.assertFalse(status.workflow_live.enabled)
+
+    def test_equivalent_monitor_refresh_preserves_the_reviewed_promotion_fingerprint(self) -> None:
         store = _MonitoredPromotionStore(old_inventory=True)
         _, _, before = _status(store)
         store.observations[0] = store.observations[0].model_copy(
@@ -587,7 +625,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
         _, _, after = _status(store)
         self.assertTrue(before.direct_dry_run.enabled)
         self.assertTrue(after.direct_dry_run.enabled)
-        self.assertNotEqual(before.evidence_fingerprint, after.evidence_fingerprint)
+        self.assertEqual(before.evidence_fingerprint, after.evidence_fingerprint)
 
     def test_status_derives_reviewed_identity_from_runtime_evidence(self) -> None:
         profile, lane, status = _status(_store())
