@@ -736,9 +736,8 @@ def _promotion_evidence(
             "pass"
             if freshness == "verified"
             else "fail"
-            if freshness == "recorded" and verification.observation is not None
-            else target.status
             if target is not None
+            and (target.status == "fail" or target.runtime_identity_status != "match")
             else "skipped"
         )
         if freshness == "verified" and (
@@ -749,9 +748,7 @@ def _promotion_evidence(
         ):
             freshness = "recorded"
         health_provenance = verification.provenance
-        if verification.observation is not None and (
-            freshness == "recorded" or verification.observation.status == "fail"
-        ):
+        if verification.observation is not None and health_status == "fail":
             health_provenance = health_provenance.model_copy(
                 update={"detail": verification.observation.summary}
             )

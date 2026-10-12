@@ -158,6 +158,7 @@ class _MonitoredPromotionStore(_PromotionStore):
         )
         profile = original.profile.model_copy(
             update={
+                "updated_at": (NOW - timedelta(days=2)).isoformat(),
                 "lanes": tuple(
                     lane.model_copy(
                         update={
@@ -177,7 +178,7 @@ class _MonitoredPromotionStore(_PromotionStore):
                         }
                     )
                     for lane in original.profile.lanes
-                )
+                ),
             }
         )
         summaries = original.summaries.copy()
@@ -494,7 +495,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
             "wrong_expected",
         ):
             with self.subTest(change=change):
-                store = _MonitoredPromotionStore()
+                store = _MonitoredPromotionStore(old_inventory=change == "expired")
                 observation = store.observations[0]
                 if change == "missing":
                     store.observations.pop(0)
@@ -535,6 +536,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
                 self.assertFalse(status.direct_dry_run.enabled)
                 self.assertFalse(status.workflow_live.enabled)
                 self.assertNotEqual(status.source.trust_state, "verified")
+                self.assertEqual(status.source.health_status, "skipped")
 
     def test_latest_monitor_failure_supersedes_deploy_and_older_monitor_success(self) -> None:
         store = _MonitoredPromotionStore()
