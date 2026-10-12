@@ -9923,14 +9923,17 @@ class PostgresRecordStore(HumanSessionStore):
                     binding_row = session.scalar(binding_statement)
                     if binding_row is None:
                         return False
-                    bindings.append(
-                        cast(
-                            LaunchplaneProductProfileRow
-                            | LaunchplaneDokployTargetRow
-                            | LaunchplaneDokployTargetIdRow,
-                            binding_row,
-                        ).payload
-                    )
+                    binding_payload = cast(
+                        LaunchplaneProductProfileRow
+                        | LaunchplaneDokployTargetRow
+                        | LaunchplaneDokployTargetIdRow,
+                        binding_row,
+                    ).payload
+                    if isinstance(binding_row, LaunchplaneProductProfileRow):
+                        binding_payload = self._read_product_profile_payload(
+                            binding_payload
+                        ).model_dump(mode="json", exclude_none=True)
+                    bindings.append(binding_payload)
                 if (
                     not service_testing_operation(current_record)
                     or current_record != expected_record

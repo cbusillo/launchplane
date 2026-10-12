@@ -800,7 +800,9 @@ def _transport_summary(
     *, profile: LaunchplaneProductProfileRecord
 ) -> GenericWebPreviewTransportSummary:
     return GenericWebPreviewTransportSummary(
-        data_transport_mode=profile.preview.data_transport_mode,
+        data_transport_mode=profile.preview.historical_transport.get(
+            "data_transport_mode", profile.preview.data_transport_mode
+        ),
         copied_env_keys=profile.preview.copied_env_keys,
         omitted_env_keys=profile.preview.omitted_env_keys,
         override_env_keys=tuple(sorted(profile.preview.override_env)),

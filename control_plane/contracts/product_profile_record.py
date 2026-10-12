@@ -333,7 +333,7 @@ class ProductPreviewProfile(BaseModel):
             normalized["data_transport_mode"] = "none"
         for field in ("migration_command", "seed_command"):
             command = normalized.pop(field, "")
-            if command:
+            if isinstance(command, str) and command.strip():
                 historical[field] = command
                 historical.setdefault("data_transport_mode", mode)
         normalized["historical_transport"] = historical

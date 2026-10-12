@@ -139,6 +139,7 @@ class PreviewTransportCompatibilityTests(unittest.TestCase):
                             checked_at=profile.updated_at,
                         )
                         self.assertEqual(readiness.readiness_status, "blocked")
+                        self.assertEqual(readiness.transport.data_transport_mode, mode)
                         self.assertEqual(
                             readiness.transport.compatibility_status, "unsupported_saved_intent"
                         )
@@ -175,6 +176,14 @@ class PreviewTransportCompatibilityTests(unittest.TestCase):
         )
         self.assertFalse(saved.preview.historical_transport)
         self.assertEqual(saved.preview.data_transport_mode, "none")
+        payload["preview"].update(
+            data_transport_mode="driver", migration_command="  ", seed_command="\t "
+        )
+        saved = LaunchplaneProductProfileRecord.model_validate(
+            payload, context={"stored_product_profile": True}
+        )
+        self.assertFalse(saved.preview.historical_transport)
+        self.assertEqual(saved.preview.data_transport_mode, "driver")
 
     def test_old_readiness_transport_evidence_stays_readable_and_truthful(self) -> None:
         for mode, commands in (("bootstrap", False), ("driver", True), ("none", False)):
