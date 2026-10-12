@@ -85,17 +85,19 @@ export function expireProductEvidence(product: ProductSiteOverview, now = Date.n
 
 export type SignalTone = ProductEnvironmentSummary["trust_state"] | "warning" | "danger";
 
+export const negativeTlsStates: ReadonlySet<string> = new Set([
+  "expired", "hostname_mismatch", "untrusted", "self_signed", "unreachable",
+]);
+export const failedRuntimeIdentityStates: ReadonlySet<string> = new Set(["mismatch", "malformed"]);
+
 export function environmentOperationalTone(environment: ProductEnvironmentSummary | null, now = Date.now()): SignalTone {
   if (!environment) return "missing";
   environment = expireEnvironmentEvidence(environment, now);
   const checks = environment.health_monitoring.checks.filter(check => check.probe_effective);
-  const negativeTlsStates = new Set([
-    "expired", "hostname_mismatch", "untrusted", "self_signed", "unreachable",
-  ]);
   if (
     environment.health_monitoring.open_incidents.length > 0 ||
     checks.some(check => check.status === "fail" || check.incident_status === "open") ||
-    ["mismatch", "malformed"].includes(
+    failedRuntimeIdentityStates.has(
       environment.topology.observed.placement?.runtime_identity_status ?? "unchecked",
     ) ||
     environment.topology.warnings.some(warning => warning.severity === "error") ||

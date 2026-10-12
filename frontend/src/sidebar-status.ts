@@ -1,5 +1,5 @@
 import type { ProductEnvironmentSummary } from "./generated/openapi.ts";
-import { environmentOperationalTone } from "./product-environment-signal";
+import { environmentOperationalTone, negativeTlsStates, failedRuntimeIdentityStates } from "./product-environment-signal";
 
 // Labels describe returned diagnostic layers; they do not infer a failing proxy
 // or app from a generic connection/HTTP failure.
@@ -17,7 +17,7 @@ export function sidebarStatus(environment: ProductEnvironmentSummary | null, lab
   const tone = environmentOperationalTone(environment);
   const state = !environment ? "Absent (not recorded)"
     : tone === "verified" ? "Healthy"
-    : tone === "danger" ? "Failing"
+    : tone === "danger" ? "Alert"
     : tone === "warning" || tone === "stale" ? "Warning or stale evidence"
     : tone === "unsupported" ? "Unsupported"
     : tone === "recorded" ? "Unknown (recorded, not verified)"
@@ -31,11 +31,11 @@ export function sidebarStatus(environment: ProductEnvironmentSummary | null, lab
       if (check.failure_code.startsWith("tls_")) layers.add(sidebarLayerLabel("tls"));
       if (check.failure_code === "wrong_runtime_identity") layers.add(sidebarLayerLabel("runtime_identity"));
     }
-    if (["mismatch", "malformed"].includes(environment.topology.observed.placement.runtime_identity_status)) {
+    if (failedRuntimeIdentityStates.has(environment.topology.observed.placement.runtime_identity_status)) {
       layers.add(sidebarLayerLabel("runtime_identity"));
     }
     if (environment.topology.observed.tls_domains.some(domain =>
-      ["expired", "hostname_mismatch", "untrusted", "self_signed", "unreachable"].includes(domain.status))) {
+      negativeTlsStates.has(domain.status))) {
       layers.add(sidebarLayerLabel("tls"));
     }
   }

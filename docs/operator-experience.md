@@ -764,8 +764,9 @@ or reviewed request. Return to the product to check the retained original again.
 ## Sidebar lane status
 
 The product sidebar shows Testing then Production with saturated state icons:
-check for healthy, triangle for warning or stale evidence, x for failure, question
+check for healthy, triangle for warning or stale evidence, x for an alert or failure, question
 mark for unverified evidence, and minus for absent or unsupported lanes. Hover
 labels and the accessible status name identify the lane, state and known
-diagnostic failure layers. Colors are tuned separately for light and dark themes;
+diagnostic layers. An alert can include an open warning-severity incident;
+its tone follows the shared operational health calculation. Colors are tuned separately for light and dark themes;
 the sidebar uses the same operational health calculation as the product view.
