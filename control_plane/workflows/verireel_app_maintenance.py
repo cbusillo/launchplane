@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import json
 import re
@@ -180,22 +181,25 @@ def _smoke_maintenance_operation_name(request: VeriReelAppMaintenanceRequest) ->
 def _resolve_stable_testing_application(
     *,
     control_plane_root: Path,
+    context_name: str = "verireel",
 ) -> tuple[str, str]:
     source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
     target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
-        context_name="verireel",
+        context_name=context_name,
         instance_name="testing",
     )
     if target_definition is None:
-        raise click.ClickException("No Dokploy target definition found for verireel/testing.")
+        raise click.ClickException(
+            f"No Dokploy target definition found for {context_name}/testing."
+        )
     if target_definition.target_type != "application" or not target_definition.target_id.strip():
         raise click.ClickException(
-            "VeriReel app maintenance requires verireel/testing to resolve to an application target."
+            "Testing app maintenance requires its recorded lane to resolve to an application target."
         )
-    target_name = target_definition.target_name.strip() or "ver-testing-app"
+    target_name = target_definition.target_name.strip() or target_definition.target_id.strip()
     return target_name, target_definition.target_id.strip()
 
 
@@ -285,33 +289,39 @@ def _fetch_application_by_id(*, host: str, token: str, application_id: str) -> J
     )
 
 
-def _resolve_stable_testing_base_url(*, control_plane_root: Path) -> str:
+def _resolve_stable_testing_base_url(
+    *, control_plane_root: Path, context_name: str = "verireel"
+) -> str:
     source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
     target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
-        context_name="verireel",
+        context_name=context_name,
         instance_name="testing",
     )
     if target_definition is None:
-        raise click.ClickException("No Dokploy target definition found for verireel/testing.")
+        raise click.ClickException(
+            f"No Dokploy target definition found for {context_name}/testing."
+        )
     base_urls = dokploy_source.resolve_healthcheck_base_urls(
         target_definition=target_definition,
         environment_values={},
     )
     if not base_urls:
-        raise click.ClickException("No base URL configured for verireel/testing.")
+        raise click.ClickException(f"No base URL configured for {context_name}/testing.")
     return _validate_base_url(
         base_urls[0],
         label="VeriReel stable smoke maintenance",
     )
 
 
-def _resolve_stable_testing_smoke_maintenance_secret(*, control_plane_root: Path) -> str:
+def _resolve_stable_testing_smoke_maintenance_secret(
+    *, control_plane_root: Path, context_name: str = "verireel"
+) -> str:
     environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
         control_plane_root=control_plane_root,
-        context_name="verireel",
+        context_name=context_name,
         instance_name="testing",
     )
     secret = str(environment_values.get(SMOKE_MAINTENANCE_SECRET_KEY) or "").strip()
@@ -532,19 +542,61 @@ def _trigger_application_deploy(*, host: str, token: str, application_id: str) -
     )
 
 
+@dataclass(frozen=True)
+class RecordedTestingMaintenanceTarget:
+    """Internal exact target from a reserved deploy, never a caller-selected API field."""
+
+    context: str
+    application_id: str
+
+    def __post_init__(self) -> None:
+        if not self.context.strip() or not self.application_id.strip():
+            raise ValueError("Testing maintenance requires an exact recorded lane and target.")
+
+
+def _bound_testing_application(
+    root: Path,
+    target: RecordedTestingMaintenanceTarget,
+) -> tuple[str, str]:
+    name, application_id = _resolve_stable_testing_application(
+        control_plane_root=root,
+        context_name=target.context,
+    )
+    if application_id != target.application_id:
+        raise click.ClickException("Testing maintenance target changed during deployment.")
+    return name, application_id
+
+
 def execute_verireel_app_maintenance(
     *,
     control_plane_root: Path,
     request: VeriReelAppMaintenanceRequest,
+    testing_target: RecordedTestingMaintenanceTarget | None = None,
 ) -> VeriReelAppMaintenanceResult:
     started_at = utc_now_timestamp()
     application_name = ""
     application_id = ""
     schedule_name = ""
     try:
+        if testing_target is not None and (
+            request.instance != "testing" or request.action == "reset-testing"
+        ):
+            raise click.ClickException(
+                "Reserved testing maintenance cannot reset data or act on previews."
+            )
         if _uses_internal_smoke_maintenance_api(request):
             schedule_name = _smoke_maintenance_operation_name(request)
-            if request.context == "verireel":
+            if testing_target is not None:
+                application_name, application_id = _bound_testing_application(
+                    control_plane_root, testing_target
+                )
+                base_url = _resolve_stable_testing_base_url(
+                    control_plane_root=control_plane_root, context_name=testing_target.context
+                )
+                secret = _resolve_stable_testing_smoke_maintenance_secret(
+                    control_plane_root=control_plane_root, context_name=testing_target.context
+                )
+            elif request.context == "verireel":
                 application_name, application_id = _resolve_stable_testing_application(
                     control_plane_root=control_plane_root,
                 )
@@ -573,8 +625,10 @@ def execute_verireel_app_maintenance(
             )
         else:
             host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
-            application_name, application_id = _resolve_stable_testing_application(
-                control_plane_root=control_plane_root,
+            application_name, application_id = (
+                _bound_testing_application(control_plane_root, testing_target)
+                if testing_target is not None
+                else _resolve_stable_testing_application(control_plane_root=control_plane_root)
             )
             schedule_name, command = _command_for_request(request)
             _run_application_command_with_retries(
@@ -595,7 +649,7 @@ def execute_verireel_app_maintenance(
             maintenance_status="pass",
             action=request.action,
             intent=request.intent,
-            context=request.context,
+            context=testing_target.context if testing_target else request.context,
             instance=request.instance,
             application_name=application_name,
             application_id=application_id,
@@ -608,7 +662,7 @@ def execute_verireel_app_maintenance(
             maintenance_status="fail",
             action=request.action,
             intent=request.intent,
-            context=request.context,
+            context=testing_target.context if testing_target else request.context,
             instance=request.instance,
             application_name=application_name,
             application_id=application_id,

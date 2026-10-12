@@ -53,6 +53,14 @@ from control_plane.workflows.generic_web_deploy_provider import (
     generic_web_provider_deployment_succeeded,
 )
 from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.workflows.generic_web_application_snapshot import (
+    application_snapshot_for_deploy,
+    recorded_application_lifecycle,
+)
+from control_plane.workflows.generic_web_application_lifecycle import (
+    GenericWebApplicationLifecycle,
+    application_lifecycle_for_lane,
+)
 from control_plane.workflows.ship import (
     build_deployment_record,
     generate_deployment_record_id,
@@ -112,6 +120,7 @@ class GenericWebDeployResult(BaseModel):
     provider_id: str = ""
     provider_target_type: str = ""
     provider_effect_attempted: bool = False
+    image_effect_attempted: bool = False
     post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
     error_message: str = ""
 
@@ -464,6 +473,9 @@ def execute_generic_web_deploy(
     before_records_commit: Callable[[], None] | None = None,
     recorded_artifact: bool = False,
     rollback: bool = False,
+    proved_pre_image_retry: bool = False,
+    rollback_source_deployment_record_id: str = "",
+    rollback_target_deployment_record_id: str = "",
 ) -> GenericWebDeployResult:
     """Deploy ``request``; ``recorded_artifact`` marks its artifact as Launchplane's own record."""
     normalized_provider_operation_title = provider_operation_title.strip()
@@ -542,14 +554,31 @@ def execute_generic_web_deploy(
 
     deploy_completed = False
     provider_effect_attempted = False
+    image_effect_attempted = False
     provider_deployment_observation: GenericWebProviderDeploymentObservation | None = None
     post_deploy_update = PostDeployUpdateEvidence()
+    try:
+        prior_attempt = record_store.read_deployment_record(record_id)
+    except FileNotFoundError:
+        pass
+    else:
+        if recorded_application_lifecycle(prior_attempt) is not None:
+            # Pre-effect refusals must not erase the original attempt's receipt.
+            post_deploy_update = PostDeployUpdateEvidence(
+                evidence=prior_attempt.post_deploy_update.evidence
+            )
     key_readback: IntegrationKeyReadbackEvidence | None = None
     verified_build_evidence: dict[str, str] = {}
+    application_lifecycle: GenericWebApplicationLifecycle | None = None
 
     def mark_provider_effect_started() -> None:
         nonlocal provider_effect_attempted
         provider_effect_attempted = True
+
+    def mark_image_effect_started() -> None:
+        nonlocal image_effect_attempted
+        image_effect_attempted = True
+        mark_provider_effect_started()
 
     try:
         desired_build = LaneBuild(
@@ -580,7 +609,62 @@ def execute_generic_web_deploy(
                 _recorded_generic_build(record_store, resolved_profile, desired_build)
                 or desired_build
             )
+        if (
+            resolved_lane.generic_web_extensions.verification_extension
+            and post_deploy_executor is None
+        ):
+            raise click.ClickException(
+                "Declared product verification has no supported post-deploy executor."
+            )
         verified_build_evidence = lane_build_proof(desired_build)
+        snapshot = application_snapshot_for_deploy(
+            store=record_store,
+            product=resolved_profile.product,
+            context=resolved_lane.context,
+            instance=resolved_lane.instance,
+            provider_id=resolved_deploy_provider.provider_id,
+            target_id=resolved_target.target_id,
+            artifact_id=ship_request.artifact_id,
+            source_git_ref=ship_request.source_git_ref,
+            deployment_record_id=record_id,
+            extensions=resolved_lane.generic_web_extensions,
+            rollback=rollback,
+            proved_pre_image_retry=proved_pre_image_retry,
+            rollback_source_deployment_record_id=rollback_source_deployment_record_id,
+            rollback_target_deployment_record_id=rollback_target_deployment_record_id,
+        )
+        application_lifecycle = application_lifecycle_for_lane(
+            control_plane_root=control_plane_root,
+            snapshot=snapshot,
+            provider=resolved_deploy_provider,
+            target_type=resolved_target.target_type,
+            target_id=resolved_target.target_id,
+            checkpoint=provider_effect_checkpoint or (lambda _phase: None),
+            effect_started=mark_provider_effect_started,
+        )
+        if application_lifecycle is not None:
+            application_lifecycle.capture()
+            post_deploy_update = PostDeployUpdateEvidence(
+                evidence=application_lifecycle.snapshot.evidence(),
+            )
+            record_store.write_deployment_record(
+                build_deployment_record(
+                    request=ship_request,
+                    record_id=record_id,
+                    deployment_id="control-plane-dokploy",
+                    deployment_status="pending",
+                    started_at=started_at,
+                    finished_at="",
+                    resolved_target=resolved_target,
+                    deployed_target=prepared_deploy_target.deployed_target,
+                    delegated_executor=resolved_deploy_provider.delegated_executor,
+                    post_deploy_update=post_deploy_update,
+                    runtime_source=verified_build_evidence,
+                )
+            )
+            if provider_effect_checkpoint is not None:
+                provider_effect_checkpoint("application_lifecycle_prepared")
+            application_lifecycle.prepare()
         untitled_deployment_observation = resolved_deploy_provider.execute_artifact_deploy(
             control_plane_root=control_plane_root,
             resolved_deploy_target=prepared_deploy_target,
@@ -592,7 +676,7 @@ def execute_generic_web_deploy(
             ),
             deployment_title=normalized_provider_operation_title,
             before_provider_mutation=(provider_effect_checkpoint or (lambda _phase: None)),
-            effect_started=mark_provider_effect_started,
+            effect_started=mark_image_effect_started,
         )
         if normalized_provider_operation_title and untitled_deployment_observation is not None:
             provider_deployment_observation = _prove_untitled_deployment_effect(
@@ -623,8 +707,16 @@ def execute_generic_web_deploy(
             context_name=resolved_lane.context,
             instance_name=resolved_lane.instance,
         )
+        if application_lifecycle is not None:
+            maintenance_evidence = application_lifecycle.maintain()
+            post_deploy_update = PostDeployUpdateEvidence(
+                attempted=True,
+                status="pass",
+                detail="Declared application maintenance completed.",
+                evidence={**post_deploy_update.evidence, **maintenance_evidence},
+            )
         if post_deploy_executor is not None:
-            post_deploy_update = _run_post_deploy_extension(
+            extension_update = _run_post_deploy_extension(
                 control_plane_root=control_plane_root,
                 record_store=record_store,
                 context=_build_post_deploy_context(
@@ -644,11 +736,54 @@ def execute_generic_web_deploy(
                     ),
                 ),
             )
+            post_deploy_update = extension_update.model_copy(
+                update={"evidence": {**post_deploy_update.evidence, **extension_update.evidence}}
+            )
             if post_deploy_update.status == "fail":
                 raise click.ClickException(
                     post_deploy_update.detail or "Generic web post-deploy extension failed."
                 )
+        if application_lifecycle is not None:
+            extension_evidence = application_lifecycle.complete()
+            application_lifecycle.snapshot.state = "qualified"
+            post_deploy_update = PostDeployUpdateEvidence(
+                attempted=True,
+                status="pass",
+                detail="Declared application maintenance and schedules completed.",
+                evidence={
+                    **post_deploy_update.evidence,
+                    **extension_evidence,
+                    **application_lifecycle.snapshot.evidence(),
+                },
+            )
     except click.ClickException as exc:
+        if application_lifecycle is not None:
+            try:
+                if (
+                    image_effect_attempted
+                    or application_lifecycle.snapshot.resume_from_hold
+                    or (
+                        application_lifecycle.snapshot.mode == "rollback"
+                        and not application_lifecycle.snapshot.restore_current_on_pre_image_failure
+                    )
+                ):
+                    application_lifecycle.snapshot.state = "held"
+                    application_lifecycle.hold()
+                else:
+                    application_lifecycle.snapshot.state = "restore_failed"
+                    application_lifecycle.restore()
+                    application_lifecycle.snapshot.state = "restored"
+            except click.ClickException as restore_error:
+                exc = click.ClickException(f"{exc}\n{restore_error}")
+            post_deploy_update = PostDeployUpdateEvidence(
+                attempted=application_lifecycle.effect_attempted,
+                status="fail" if application_lifecycle.effect_attempted else "skipped",
+                detail=str(exc),
+                evidence={
+                    **post_deploy_update.evidence,
+                    **application_lifecycle.snapshot.evidence(),
+                },
+            )
         finished_at = utc_now_timestamp()
         deployment_status: Literal["pass", "fail"] = "pass" if deploy_completed else "fail"
         recorded_deployment_id = (
@@ -671,6 +806,7 @@ def execute_generic_web_deploy(
                 attempted=True,
                 status="fail",
                 detail=str(exc),
+                evidence=post_deploy_update.evidence,
             )
         runtime_identity = (
             _build_runtime_identity(
@@ -728,6 +864,7 @@ def execute_generic_web_deploy(
             provider_id=target_fields.provider_id,
             provider_target_type=target_fields.provider_target_type,
             provider_effect_attempted=provider_effect_attempted,
+            image_effect_attempted=image_effect_attempted,
             post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
             error_message=str(exc),
         )
@@ -792,6 +929,7 @@ def execute_generic_web_deploy(
         provider_id=target_fields.provider_id,
         provider_target_type=target_fields.provider_target_type,
         provider_effect_attempted=provider_effect_attempted,
+        image_effect_attempted=image_effect_attempted,
         post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
     )
 
@@ -833,11 +971,16 @@ def record_observed_generic_web_deploy(
         if existing_record is not None
         else PostDeployUpdateEvidence()
     )
-    if post_deploy_unobserved and post_deploy_update.status == "skipped":
+    receipt = recorded_application_lifecycle(existing_record) if existing_record else None
+    post_deploy_unobserved = post_deploy_unobserved or (
+        receipt is not None and receipt.state != "qualified"
+    )
+    if post_deploy_unobserved and post_deploy_update.status in {"skipped", "pending"}:
         post_deploy_update = PostDeployUpdateEvidence(
             attempted=True,
             status="fail",
             detail="Post-deploy extension was not durably observed after provider recovery.",
+            evidence=post_deploy_update.evidence,
         )
     runtime_identity = existing_record.runtime_identity if existing_record is not None else None
     if deploy_status == "pass" and runtime_identity is None:
@@ -973,6 +1116,7 @@ def build_generic_web_runtime_close_out_result(
         provider_id=target_fields.provider_id,
         provider_target_type=target_fields.provider_target_type,
         provider_effect_attempted=True,
+        image_effect_attempted=True,
     ).model_dump(mode="json")
 
 
