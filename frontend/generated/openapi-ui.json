@@ -16943,7 +16943,14 @@
           },
           "intended_next_action": {
             "title": "Intended Next Action",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-snapshot-protocol": [
+              "idle",
+              "block",
+              "merge",
+              "update_branch",
+              "wait_for_checks"
+            ]
           },
           "mode": {
             "enum": [
@@ -16997,7 +17004,12 @@
           "selected_mergeable": {
             "default": "",
             "title": "Selected Mergeable",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-snapshot-protocol": [
+              "mergeable",
+              "conflicting",
+              "unknown"
+            ]
           },
           "selected_pr_number": {
             "anyOf": [
@@ -17013,7 +17025,13 @@
           "selected_required_checks_status": {
             "default": "",
             "title": "Selected Required Checks Status",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-snapshot-protocol": [
+              "pass",
+              "fail",
+              "pending",
+              "unknown"
+            ]
           },
           "snapshot": {
             "additionalProperties": true,
@@ -17022,7 +17040,19 @@
           },
           "status": {
             "title": "Status",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-snapshot-protocol": [
+              "blocked",
+              "branch_updated",
+              "waiting",
+              "merged",
+              "idle",
+              "stale_head",
+              "block",
+              "merge",
+              "update_branch",
+              "wait_for_checks"
+            ]
           },
           "trace_id": {
             "title": "Trace Id",
@@ -29535,7 +29565,12 @@
           "default_bump": {
             "default": "patch",
             "title": "Default Bump",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-snapshot-protocol": [
+              "patch",
+              "minor",
+              "major"
+            ]
           },
           "deploy_reference_input": {
             "default": "deploy_reference",

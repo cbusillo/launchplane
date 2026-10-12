@@ -84,6 +84,7 @@ def execute_generic_web_deploy_result(
     provider_operation_title: str = "",
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    before_records_commit: Callable[[], None] | None = None,
     recorded_artifact: bool = False,
     proved_pre_image_retry: bool = False,
 ) -> tuple[dict[str, object], dict[str, object]]:
@@ -101,6 +102,7 @@ def execute_generic_web_deploy_result(
         provider_operation_title=provider_operation_title,
         deployment_record_id=deployment_record_id,
         provider_effect_checkpoint=provider_effect_checkpoint,
+        before_records_commit=before_records_commit,
         recorded_artifact=recorded_artifact,
         proved_pre_image_retry=proved_pre_image_retry,
     )

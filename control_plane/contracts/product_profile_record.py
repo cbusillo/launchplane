@@ -2,7 +2,7 @@ from collections.abc import Iterable
 import hashlib
 import json
 import re
-from typing import Literal
+from typing import Literal, get_args
 
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
@@ -19,6 +19,7 @@ ProductLifecycleState = Literal["active", "retiring", "retired"]
 ProductPublicWebsite = Literal["required", "none"]
 OdooDataAuthority = Literal["unknown", "resettable", "restorable", "authoritative"]
 OdooRebuildSourceMode = Literal["empty", "upstream_restore"]
+BumpLevel = Literal["patch", "minor", "major"]
 
 
 class ProductProfileChangedError(ValueError):
@@ -440,7 +441,10 @@ class ProductPromotionWorkflowProfile(BaseModel):
     deploy_reference_input: str = "deploy_reference"
     source_git_ref_input: str = "source_git_ref"
     promotion_intent_input: str = "promotion_intent_id"
-    default_bump: str = "patch"
+    default_bump: str = Field(
+        default="patch",
+        json_schema_extra={"x-launchplane-snapshot-protocol": list(get_args(BumpLevel))},
+    )
 
     @model_validator(mode="after")
     def _validate_workflow(self) -> "ProductPromotionWorkflowProfile":
@@ -470,7 +474,7 @@ class ProductPromotionWorkflowProfile(BaseModel):
         )
         if len(set(input_names)) != len(input_names):
             raise ValueError("product promotion workflow input names must be unique")
-        if self.default_bump.strip() not in {"patch", "minor", "major"}:
+        if self.default_bump.strip() not in get_args(BumpLevel):
             raise ValueError(
                 "product promotion workflow default_bump must be patch, minor, or major"
             )

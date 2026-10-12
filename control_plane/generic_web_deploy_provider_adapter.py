@@ -610,6 +610,7 @@ class GenericWebDeployProviderMutationAdapter:
                 deploy_provider=self._deploy_provider,
                 resolved_deploy_target=self._resolve_deploy_target(),
                 provider_effect_checkpoint=checkpoint,
+                before_records_commit=lambda: checkpoint("records_commit"),
                 recorded_artifact=self._recorded_artifact,
                 proved_pre_image_retry=proved_pre_image_retry,
             )
