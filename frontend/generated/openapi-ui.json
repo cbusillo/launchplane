@@ -16471,6 +16471,17 @@
             "default": 1,
             "title": "Schema Version",
             "type": "integer"
+          },
+          "stall": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeTrainStallRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -16761,6 +16772,17 @@
             "minimum": 1,
             "title": "Schema Version",
             "type": "integer"
+          },
+          "stall_alert_workflow": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeTrainStallWorkflow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -17347,6 +17369,138 @@
           "context",
           "product"
         ]
+      },
+      "MergeTrainStallObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "progress_key": {
+            "default": "",
+            "title": "Progress Key",
+            "type": "string"
+          },
+          "progress_since": {
+            "default": "",
+            "title": "Progress Since",
+            "type": "string"
+          },
+          "ready_since": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Ready Since",
+            "type": "object"
+          },
+          "reasons": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          }
+        },
+        "title": "MergeTrainStallObservation",
+        "type": "object",
+        "required": [
+          "progress_key",
+          "progress_since",
+          "ready_since",
+          "reasons"
+        ]
+      },
+      "MergeTrainStallRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "delivery_error": {
+            "default": "",
+            "title": "Delivery Error",
+            "type": "string"
+          },
+          "issue_body_sha256": {
+            "default": "",
+            "title": "Issue Body Sha256",
+            "type": "string"
+          },
+          "issue_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issue Number"
+          },
+          "issue_state": {
+            "default": "closed",
+            "enum": [
+              "open",
+              "closed"
+            ],
+            "title": "Issue State",
+            "type": "string"
+          },
+          "notification_key": {
+            "default": "",
+            "title": "Notification Key",
+            "type": "string"
+          },
+          "notified_key": {
+            "default": "",
+            "title": "Notified Key",
+            "type": "string"
+          },
+          "observations": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MergeTrainStallObservation"
+            },
+            "title": "Observations",
+            "type": "object"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "delivery_error",
+          "issue_body_sha256",
+          "issue_number",
+          "issue_state",
+          "notification_key",
+          "notified_key",
+          "observations",
+          "observed_at",
+          "repository"
+        ],
+        "title": "MergeTrainStallRecord",
+        "type": "object"
+      },
+      "MergeTrainStallWorkflow": {
+        "additionalProperties": false,
+        "description": "Existing sender's repository/ref, supplied by the active policy record.",
+        "properties": {
+          "ref": {
+            "minLength": 1,
+            "title": "Ref",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref",
+          "repository"
+        ],
+        "title": "MergeTrainStallWorkflow",
+        "type": "object"
       },
       "MergeTrainStructuralCandidateResult": {
         "additionalProperties": false,

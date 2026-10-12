@@ -1918,3 +1918,17 @@ version landed through its own review. A hold in that case describes the
 unqualified saved version, rather than claiming that the PR is still open.
 Active landing diagnostics name its old policy record; selection diagnostics
 retain the complete separate obsolete-policy inventory.
+
+### Recovery after a passing check rerun
+
+A failed candidate with an exactly bound closed, unmerged batch PR is reobserved
+against current required checks. When those checks pass on rerun, the controller
+plans a fresh replacement for that failed record. Recovery is idempotent per
+failed record, rather than capped across an unchanged queue: a later replacement
+that separately fails and then passes can recover too. Its ref includes the
+failed record identity so generations cannot reuse a prior retry ref. The
+replacement still passes its own checks, current-head admission and normal
+protected landing. Missing, pending or unreadable checks, an unbound batch PR,
+a changed queue or base, and genuine failing checks retain existing
+reflow/isolation/refusal paths. See [stall monitoring](merge-train-events.md#stall-monitoring)
+for the independent attention record.

@@ -1,3 +1,4 @@
+from control_plane.contracts.merge_train_stall import MergeTrainStallWorkflow
 import hashlib
 import json
 import tomllib
@@ -393,6 +394,11 @@ class MergeTrainPolicy(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     policies: tuple[MergeTrainRepositoryPolicy, ...]
+    stall_alert_workflow: MergeTrainStallWorkflow | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_policy(self, info: ValidationInfo) -> "MergeTrainPolicy":

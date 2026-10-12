@@ -1421,6 +1421,7 @@ export type MergeTrainControllerStatusReadModel = {
     reconciliation_diagnostics: Array<MergeTrainReconciliationDiagnostic>;
     repository: string;
     schema_version: number;
+    stall?: MergeTrainStallRecord | null;
 };
 
 export type MergeTrainControllerStatusResponse = {
@@ -1479,6 +1480,7 @@ export type MergeTrainLatestDryRunSummary = {
 export type MergeTrainPolicyOutput = {
     policies: Array<MergeTrainRepositoryPolicyOutput>;
     schema_version: number;
+    stall_alert_workflow?: MergeTrainStallWorkflow | null;
 };
 
 export type MergeTrainPolicyRecordOutput = {
@@ -1583,6 +1585,34 @@ export type MergeTrainServiceAuthz = {
     action: string;
     context: string;
     product: string;
+};
+
+export type MergeTrainStallObservation = {
+    progress_key: string;
+    progress_since: string;
+    ready_since: {
+        [key: string]: string;
+    };
+    reasons: Array<string>;
+};
+
+export type MergeTrainStallRecord = {
+    delivery_error: string;
+    issue_body_sha256: string;
+    issue_number: number | null;
+    issue_state: 'open' | 'closed';
+    notification_key: string;
+    notified_key: string;
+    observations: {
+        [key: string]: MergeTrainStallObservation;
+    };
+    observed_at: string;
+    repository: string;
+};
+
+export type MergeTrainStallWorkflow = {
+    ref: string;
+    repository: string;
 };
 
 export type MergeTrainStructuralCandidateResult = {
