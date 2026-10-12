@@ -311,9 +311,9 @@ managed `route_binding.read` / `.apply` or external
 target is authorized before the first binding write. Its request accepts only
 schema version, mode, reason and confirmation. Apply requires
 `APPLY ODOO STABLE ROUTE BINDING REFRESH` and an Idempotency-Key. The new route
-grants no access and starts no schedule; a service-owned clock, its existing-authority
-execution path, consecutive completion proof and subsequent TLS read-back must
-be qualified separately before claiming recurring renewal.
+grants no access and starts no schedule. Q193 declines a standing renewal clock;
+stored attestation expiry is diagnostic for operational health, while managed
+route changes retain their independent authority checks.
 
 Product authority bundle writes are the same atomicity boundary for product
 runtime/config ownership. PostgreSQL storage exposes a single
@@ -1415,6 +1415,11 @@ public-name match evidence, validity window, days remaining, route-binding
 ownership/source metadata, active-probe freshness, and provider-safe incident
 linkage. Full certificate chains, private topology, local resolver artifacts,
 and secrets are intentionally excluded from the durable record.
+For a Live product without a route binding, the same TLS observation records
+explicitly use `route_binding_status = "missing"`, unknown ownership (`none`),
+and product-profile URL intent as their source. Validated-address, certificate
+and active-probe freshness evidence remains independent of that missing
+authority; these probes create no route record or access grant.
 
 Incident records are the source of truth for whether Launchplane currently
 considers a lane to be in a public-ingress incident. Notification routing and

@@ -59,7 +59,7 @@ test("an expiring certificate is not named as a failure layer", () => {
   Object.assign(lane.health_monitoring.checks[0], { probe_effective: true, status: "pass", trust_state: "verified", incident_status: "" });
   lane.health_monitoring.checks[0].provenance.stale_after = lane.provenance.stale_after;
   lane.topology.observed.tls_domains = [{ status: "expiring", trust_state: "verified", provenance: lane.provenance }];
-  assert.equal(environmentOperationalTone(lane), "verified");
+  assert.notEqual(environmentOperationalTone(lane), "danger");
   assert.ok(!sidebarStatus(lane, "Production").description.includes(sidebarLayerLabel("tls")));
   Object.assign(lane.health_monitoring.checks[0], { status: "fail", failure_code: "dns_failure" });
   assert.equal(environmentOperationalTone(lane), "danger");

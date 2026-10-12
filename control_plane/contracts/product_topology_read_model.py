@@ -389,7 +389,7 @@ def build_product_environment_topology(
 def _desired_topology(
     *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
 ) -> ProductDesiredTopology:
-    domains = _desired_domains(lane)
+    domains = product_lane_public_domains(lane)
     trust_state: FreshnessStatus = (
         "recorded"
         if profile.public_website == "none" or lane.base_url or lane.health_url
@@ -412,7 +412,7 @@ def _desired_topology(
     )
 
 
-def _desired_domains(lane: ProductLaneProfile) -> tuple[ProductTopologyDomain, ...]:
+def product_lane_public_domains(lane: ProductLaneProfile) -> tuple[ProductTopologyDomain, ...]:
     domains: dict[str, ProductTopologyDomain] = {}
     url_sources: tuple[tuple[ProductTopologyDomainRole, str], ...] = (
         ("primary", lane.base_url),
