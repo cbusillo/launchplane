@@ -10,6 +10,7 @@ from typing import Any
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 
 import click
+from sqlalchemy.exc import OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -318,23 +319,52 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
             trace_id="lock-test",
             deploy_provider=self.provider,
         )
-        adapter.execution_check = Mock(side_effect=RuntimeError("execution lock lost"))
-        lease = Mock()
 
         def execute(**kwargs: Any) -> None:
             kwargs["provider_effect_checkpoint"]("target_update")
             self.fail("provider effect ran after execution lock loss")
 
-        with (
-            patch.object(adapter, "_resolve_deploy_target", return_value=self.target),
-            patch(
-                "control_plane.generic_web_deploy_provider_adapter.execute_generic_web_deploy_result",
-                side_effect=execute,
-            ),
-            self.assertRaises(ProviderMutationRejectedError),
+        for error in (
+            RuntimeError("execution lock lost"),
+            OperationalError("select 1", None, RuntimeError("connection closed")),
         ):
-            adapter.apply("operation", lease)
-        lease.checkpoint_effect.assert_not_called()
+            with self.subTest(error=type(error).__name__):
+                adapter.execution_check = Mock(side_effect=error)
+                lease = Mock()
+                with (
+                    patch.object(adapter, "_resolve_deploy_target", return_value=self.target),
+                    patch(
+                        "control_plane.generic_web_deploy_provider_adapter.execute_generic_web_deploy_result",
+                        side_effect=execute,
+                    ),
+                    self.assertRaises(ProviderMutationRejectedError),
+                ):
+                    adapter.apply("operation", lease)
+                lease.checkpoint_effect.assert_not_called()
+
+    def test_connection_loss_before_or_after_inspection_keeps_reservation(self) -> None:
+        record = self.reserve()
+        for checks in (
+            [OperationalError("select 1", None, RuntimeError("connection closed"))],
+            [None, OperationalError("select 1", None, RuntimeError("connection closed"))],
+        ):
+            with self.subTest(after_inspection=len(checks) > 1):
+                refusals: list[str] = []
+                result = retire_unavailable_testing_event_deploy(
+                    store=self.store,
+                    reservation=record,
+                    profile=self.profile,
+                    context=self.context,
+                    current_target_key=self.target_key,
+                    provider=self.provider,
+                    root=self.root,
+                    trace_id="lock-loss",
+                    check_execution_lock=Mock(side_effect=checks),
+                    record_refusal=refusals.append,
+                )
+                self.assertIsNone(result)
+                self.assertTrue(refusals)
+                self.assertEqual(self.current(record), record)
 
     def test_provider_unknown_nonempty_and_incomplete_evidence_preserves_fence(self) -> None:
         record = self.reserve()

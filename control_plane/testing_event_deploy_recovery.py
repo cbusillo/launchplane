@@ -6,6 +6,7 @@ from pathlib import Path
 import logging
 
 import click
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
@@ -160,5 +161,7 @@ def retire_unavailable_testing_event_deploy(
         )
     except TestingEventDeployRecoveryRefused as error:
         return decline(error.code)
+    except (RuntimeError, SQLAlchemyError):
+        return decline("recovery_execution_lock_or_storage_unavailable")
     except (FileNotFoundError, ValueError, click.ClickException):
         return decline("recovery_evidence_unavailable_or_changed")

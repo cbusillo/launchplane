@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 import click
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.generic_web_deploy_recovery import (
     GenericWebDeployProviderEvidenceClassification,
@@ -487,7 +488,7 @@ class GenericWebDeployProviderMutationAdapter:
         def checkpoint(phase: str) -> None:
             try:
                 self.execution_check()
-            except RuntimeError as error:
+            except (RuntimeError, SQLAlchemyError) as error:
                 # The runner releases only when no earlier effect checkpoint
                 # exists; after an effect it preserves the reconciliation fence.
                 raise ProviderMutationRejectedError(error) from error

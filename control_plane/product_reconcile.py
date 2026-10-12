@@ -765,28 +765,28 @@ def _deploy_generic_web_testing(
                             reservation = reservation.model_copy(
                                 update={"state": "reconcile_required"}
                             )
-                    if check_execution_lock is not None:
-                        from control_plane.testing_event_deploy_recovery import (
-                            retire_unavailable_testing_event_deploy,
-                        )
+                    from control_plane.testing_event_deploy_recovery import (
+                        retire_unavailable_testing_event_deploy,
+                    )
 
-                        recovery = retire_unavailable_testing_event_deploy(
-                            store=record_store,
-                            reservation=recovery_reservation,
-                            profile=profile,
-                            context=lane.context,
-                            current_target_key=adapter.target_key(),
-                            provider=provider,
-                            root=control_plane_root,
-                            trace_id=trace_id,
-                            check_execution_lock=check_execution_lock,
-                            record_refusal=lambda code: plan.__setitem__(
-                                "testing_deploy_recovery_refusal", code
-                            ),
-                        )
-                        if recovery is not None:
-                            plan["testing_deploy_recovery"] = recovery
-                            continue
+                    recovery = retire_unavailable_testing_event_deploy(
+                        store=record_store,
+                        reservation=recovery_reservation,
+                        profile=profile,
+                        context=lane.context,
+                        current_target_key=adapter.target_key(),
+                        provider=provider,
+                        root=control_plane_root,
+                        trace_id=trace_id,
+                        check_execution_lock=check_execution_lock,
+                        record_refusal=lambda code: plan.__setitem__(
+                            "testing_deploy_recovery_refusal", code
+                        ),
+                    )
+                    if recovery is not None:
+                        plan.pop("testing_deploy_recovery_refusal", None)
+                        plan["testing_deploy_recovery"] = recovery
+                        continue
                     held_outcome = _generic_web_testing_outcome(
                         plan=plan,
                         result=DurableProviderOperationResult("target_busy", reservation, 409, {}),
