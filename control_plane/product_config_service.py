@@ -308,8 +308,8 @@ def product_config_service_error(
     error_code = error.code
     error_message = "Product config request failed validation."
     status_code = 400
-    if error_code == "secret_copy_refused":
-        # Copy planning emits fixed messages with no caller input or secret data.
+    if error_code in {"secret_copy_refused", "runtime_key_safety_target_required"}:
+        # These domain refusals use fixed messages with no caller input or secret data.
         error_message = str(error)
     if error_code == "secret_copy_source_changed":
         status_code = 409
@@ -328,12 +328,6 @@ def product_config_service_error(
         error_message = "Launchplane runtime key-safety policy is unavailable."
     if error_code == "runtime_key_safety_failed":
         error_message = "Product config runtime key-safety gate failed."
-    if error_code == "runtime_key_safety_target_required":
-        error_message = (
-            "Runtime secrets require a context and instance for key-safety evaluation. "
-            "For a shared secret, keep scope context and name an owned stable lane "
-            "as the top-level instance."
-        )
     if error_code == "provider_env_unavailable":
         status_code = 503
         error_message = "Launchplane could not read the lane's provider env."
