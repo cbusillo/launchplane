@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from uuid import uuid4
 from typing import Literal, Protocol
 
 import click
@@ -20,7 +21,9 @@ from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
     artifact_manifest_matches_image_repository,
 )
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.runtime_platform_credentials import PlatformCredentialRefusedError
+from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import RecordFailure
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -35,6 +38,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.contracts.odoo_target_replacement_failures import (
     DEPLOY_FAILED_CODE,
     OdooProviderEffectUncertainError,
+    OdooProviderSafetyRefusedError,
     deploy_blocked_code,
     deploy_blocked_code_for_runtime_error,
     deploy_failure_description,
@@ -63,6 +67,16 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     artifact_odoo_version,
     merge_odoo_install_modules,
     missing_required_odoo_modules_from_artifact,
+)
+from control_plane.workflows.odoo_backup_proof import (
+    read_odoo_backup_restore_proof,
+)
+from control_plane.workflows.odoo_prod_backup_gate import (
+    OdooProdBackupGateRequest,
+    OdooProdBackupVerificationRequest,
+    execute_odoo_prod_backup_gate,
+    execute_odoo_prod_backup_verification,
+    odoo_backup_paths_from_runtime,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
@@ -98,9 +112,10 @@ from control_plane.dokploy.api import JsonObject, JsonValue
 
 # The checkpoint immediately before a replacement first writes to the provider.
 TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE = "target_replacement_raw_source"
+TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE = "target_replacement_destructive_restore"
 
 
-class OdooTargetReplacementStageError(click.ClickException):
+class OdooTargetReplacementStageError(OdooProviderSafetyRefusedError):
     """A check or step outside the driver's recorded results failed.
 
     ``code`` names it so the operation record says where the deploy stopped;
@@ -128,6 +143,10 @@ def _failure_stage(code: str) -> Iterator[None]:
 class OdooStableTargetReplacementStore(
     RuntimeKeySafetyPolicyReadStore, control_plane_secrets.SecretBindingSelectionStore, Protocol
 ):
+    def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
+
+    def write_backup_gate_record(self, record: BackupGateRecord) -> object: ...
+
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def read_dokploy_target_record(
@@ -348,6 +367,7 @@ class OdooStableTargetReplacementPlan(BaseModel):
     allow_empty_data: bool = False
     data_source_mode: Literal["existing", "empty", "upstream_restore"] = "existing"
     approval_issue_url: str = ""
+    destructive_backup_required: bool = False
     retired_provider_keys: tuple[str, ...] = ()
     # Names of the settings the replacement would give the app, from the site's
     # records and the provider env; never values.
@@ -937,6 +957,69 @@ def _assert_prelaunch_rebuild_policy_allows_request(
     return policy.approval_issue_url
 
 
+def _replacement_backup_required(
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    request: OdooStableTargetReplacementRequest,
+) -> bool:
+    return request.data_source_mode != "existing" and profile.odoo_replacement_proof_required(lane)
+
+
+def _replacement_backup_values(
+    record_store: OdooStableTargetReplacementStore,
+    lane: ProductLaneProfile,
+) -> dict[str, str]:
+    target = record_store.read_dokploy_target_record(
+        context_name=lane.context,
+        instance_name=lane.instance,
+    )
+    return _resolve_recorded_runtime_values(
+        record_store=record_store,
+        target_record=target,
+        context=lane.context,
+        instance=lane.instance,
+    )
+
+
+def _replacement_backup_proof(
+    *,
+    record_store: OdooStableTargetReplacementStore,
+    request: OdooStableTargetReplacementRequest,
+    backup_record_id: str,
+    verification_record_id: str,
+) -> dict[str, str]:
+    profile = record_store.read_product_profile_record(request.product)
+    lane = _read_lane(profile=profile, instance=request.instance)
+    if not _replacement_backup_required(profile, lane, request):
+        return {}
+    proof = read_odoo_backup_restore_proof(
+        record_store=record_store,
+        context=lane.context,
+        instance=lane.instance,
+        backup_record_id=backup_record_id,
+        verification_record_id=verification_record_id,
+        expected_paths=odoo_backup_paths_from_runtime(
+            runtime_values=_replacement_backup_values(record_store, lane),
+            backup_record_id=backup_record_id,
+        ),
+    )
+    if proof.blockers:
+        raise click.ClickException(
+            "Replacement backup/restore proof refused: " + "; ".join(proof.blockers)
+        )
+    return {
+        "backup_record_id": backup_record_id,
+        "backup_verification_record_id": verification_record_id,
+        "backup_verification_nonce": str(proof.evidence["verification_nonce"]),
+        "backup_created_at": proof.backup_record.created_at if proof.backup_record else "",
+        "backup_verification_created_at": proof.verification_record.created_at
+        if proof.verification_record
+        else "",
+        "database_dump_sha256": str(proof.evidence["database_dump_sha256"]),
+        "filestore_archive_sha256": str(proof.evidence["filestore_archive_sha256"]),
+    }
+
+
 def _build_ship_request(
     *,
     plan: OdooStableTargetReplacementPlan,
@@ -1081,6 +1164,10 @@ def _deploy_step_failure(error: BaseException) -> RecordFailure:
     """
     code = ""
     keys: tuple[str, ...] = ()
+    if isinstance(error, DurableOperationAuthorizationDeniedError):
+        return RecordFailure(
+            code=error.code, description="Authorization refused the provider effect."
+        )
     if isinstance(error, LaneMovementRefused):
         return error.record_failure()
     if isinstance(error, OdooTargetReplacementStageError):
@@ -1295,6 +1382,15 @@ def build_odoo_stable_target_replacement_plan(
     if isinstance(target_record, DokployTargetRecord) and target_record.target_type != "compose":
         block("target_not_compose", "Odoo stable replacement currently requires a compose target.")
     approval_issue_url = ""
+    destructive_backup_required = _replacement_backup_required(profile, lane, request)
+    if destructive_backup_required:
+        try:
+            odoo_backup_paths_from_runtime(
+                runtime_values=_replacement_backup_values(record_store, lane),
+                backup_record_id="replacement-plan",
+            )
+        except (click.ClickException, FileNotFoundError) as error:
+            block("backup_restore_proof_required", str(error))
     if request.data_source_mode != "existing" and not request.allow_empty_data:
         block(
             "allow_empty_data_required",
@@ -1337,7 +1433,9 @@ def build_odoo_stable_target_replacement_plan(
             )
         except click.ClickException as error:
             block("prelaunch_rebuild_policy_refused", str(error))
-        if current_target.required_volume_keys_missing and not request.allow_empty_data:
+        if current_target.required_volume_keys_missing and (
+            request.data_source_mode == "existing" or not request.allow_empty_data
+        ):
             block(
                 "volume_env_keys_missing",
                 "Current target is missing required Odoo volume env keys: "
@@ -1559,6 +1657,7 @@ def build_odoo_stable_target_replacement_plan(
         allow_empty_data=request.allow_empty_data,
         data_source_mode=request.data_source_mode,
         approval_issue_url=approval_issue_url,
+        destructive_backup_required=destructive_backup_required,
         retired_provider_keys=tuple(sorted(retired_provider_keys)),
         delivered_runtime_keys=delivered_runtime_keys,
         blockers=blockers_tuple,
@@ -1779,6 +1878,46 @@ def execute_odoo_stable_target_replacement_apply(
         image_reference=image_reference,
     )
     runtime_source: dict[str, str] = {}
+    backup_record_id = ""
+    verification_record_id = ""
+    captured_proof: dict[str, str] = {}
+
+    def check_backup_proof() -> None:
+        with _failure_stage(deploy_blocked_code("backup_restore_proof_required")):
+            try:
+                current_profile = record_store.read_product_profile_record(request.product)
+                current_lane = _read_lane(profile=current_profile, instance=request.instance)
+                if (
+                    _replacement_backup_required(current_profile, current_lane, request)
+                    != plan.destructive_backup_required
+                ):
+                    raise click.ClickException("Replacement data authority changed after planning.")
+                current_proof = _replacement_backup_proof(
+                    record_store=record_store,
+                    request=request,
+                    backup_record_id=backup_record_id,
+                    verification_record_id=verification_record_id,
+                )
+            except FileNotFoundError as error:
+                raise click.ClickException(
+                    "Replacement backup authority is unavailable."
+                ) from error
+            if current_proof != captured_proof:
+                raise click.ClickException(
+                    "Replacement backup/restore proof changed after planning."
+                )
+            runtime_source.update(current_proof)
+
+    def restore_effect_checkpoint(phase: str) -> None:
+        if provider_effect_checkpoint is not None:
+            if (
+                phase == dokploy_post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
+                and plan.data_source_mode == "upstream_restore"
+            ):
+                provider_effect_checkpoint(TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE)
+            provider_effect_checkpoint(phase)
+        check_backup_proof()
+
     odoo_override_record = _read_odoo_instance_override_record(
         record_store=record_store,
         context=plan.context,
@@ -2104,8 +2243,54 @@ def execute_odoo_stable_target_replacement_apply(
                     ),
                     desired=desired_build,
                 )
+        if plan.destructive_backup_required:
+            with _failure_stage(deploy_blocked_code("backup_restore_proof_required")):
+                backup_record_id = "replacement-" + uuid4().hex
+                runtime_source["backup_record_id"] = backup_record_id
+                values = _replacement_backup_values(record_store, lane)
+                capture = execute_odoo_prod_backup_gate(
+                    control_plane_root=control_plane_root,
+                    record_store=record_store,
+                    request=OdooProdBackupGateRequest(
+                        context=plan.context,
+                        instance=plan.instance,
+                        backup_record_id=backup_record_id,
+                        timeout_seconds=request.timeout_seconds,
+                    ),
+                    runtime_values=values,
+                    provider_effect_checkpoint=provider_effect_checkpoint,
+                )
+                if capture.backup_status != "pass":
+                    raise click.ClickException(
+                        "Replacement backup capture failed before target mutation."
+                    )
+                backup_verification = execute_odoo_prod_backup_verification(
+                    control_plane_root=control_plane_root,
+                    record_store=record_store,
+                    request=OdooProdBackupVerificationRequest(
+                        context=plan.context,
+                        instance=plan.instance,
+                        backup_record_id=backup_record_id,
+                        timeout_seconds=request.timeout_seconds,
+                    ),
+                    runtime_values=values,
+                    provider_effect_checkpoint=provider_effect_checkpoint,
+                )
+                verification_record_id = backup_verification.verification_record_id
+                runtime_source["backup_verification_record_id"] = verification_record_id
+                if backup_verification.verification_status != "pass":
+                    raise click.ClickException(
+                        "Replacement backup verification failed before target mutation."
+                    )
+                captured_proof = _replacement_backup_proof(
+                    record_store=record_store,
+                    request=request,
+                    backup_record_id=backup_record_id,
+                    verification_record_id=verification_record_id,
+                )
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+        check_backup_proof()
         production_write_started = True
         raw_compose_evidence = dokploy_compose.sync_dokploy_compose_raw_source(
             host=host,
@@ -2382,6 +2567,8 @@ def execute_odoo_stable_target_replacement_apply(
         "restore" if plan.data_source_mode == "upstream_restore" else "deploy"
     )
     try:
+        if post_deploy_phase == "restore":
+            check_backup_proof()
         with _failure_stage("post_deploy_setup_failed"):
             post_deploy_result = execute_odoo_post_deploy(
                 control_plane_root=control_plane_root,
@@ -2392,7 +2579,11 @@ def execute_odoo_stable_target_replacement_apply(
                     phase=post_deploy_phase,
                 ),
                 run_destructive_restore=plan.data_source_mode == "upstream_restore",
-                provider_effect_checkpoint=provider_effect_checkpoint,
+                provider_effect_checkpoint=(
+                    restore_effect_checkpoint
+                    if post_deploy_phase == "restore"
+                    else provider_effect_checkpoint
+                ),
                 hold_uncertain_effects=hold_uncertain_effects,
                 allow_historical_sender_contract=allow_historical_sender_contract,
                 schedule_execution_timeout_seconds=(
@@ -2413,6 +2604,25 @@ def execute_odoo_stable_target_replacement_apply(
                 attempted=True, status="fail", detail="Post-deploy outcome requires reconciliation."
             ),
             destination_health=HealthcheckEvidence(status="skipped"),
+        )
+        raise
+    except (OdooTargetReplacementStageError, DurableOperationAuthorizationDeniedError) as error:
+        _write_failed_deployment(
+            record_store=record_store,
+            ship_request=ship_request,
+            deployment_record_id=deployment_record_id,
+            started_at=started_at,
+            resolved_target=resolved_target,
+            runtime_source=runtime_source,
+            runtime_identity=runtime_identity,
+            post_deploy_update=PostDeployUpdateEvidence(
+                attempted=True,
+                status="fail",
+                detail=deploy_failure_description(getattr(error, "code", ""))
+                or "Post-deploy setup failed.",
+            ),
+            destination_health=HealthcheckEvidence(status="skipped"),
+            failure=_deploy_step_failure(error),
         )
         raise
     post_deploy_evidence = PostDeployUpdateEvidence(

@@ -112,8 +112,6 @@ class _Store:
                     odoo_data_policy=ProductOdooLaneDataPolicy(
                         data_authority="resettable",
                         allowed_rebuild_sources=("empty",),
-                        requires_backup_before_destroy=False,
-                        requires_restore_proof=False,
                     ),
                 ),
             ),

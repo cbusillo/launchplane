@@ -121,6 +121,7 @@ from control_plane.workflows.odoo_prod_retained_volume_backup_import import (
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
     TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
+    TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE,
     OdooTargetReplacementStageError,
     execute_odoo_stable_target_replacement_apply,
 )
@@ -2150,6 +2151,18 @@ def _execute_target_replacement_with_checkpoint(
             )
         ),
     )
+
+    def checkpoint_provider_effect(phase: str) -> None:
+        if execution_checkpoint is not None:
+            execution_checkpoint(phase)
+        elif phase in {
+            TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
+            TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE,
+        }:
+            authorization_guard.recheck_provider_effect(phase)
+        else:
+            authorization_guard.checkpoint_provider_effect(phase)
+
     try:
         authorization_guard.authorize_execution()
         if _reconcile_deploy_is_held(record_store=record_store, operation=operation):
@@ -2164,9 +2177,7 @@ def _execute_target_replacement_with_checkpoint(
             control_plane_root=control_plane_root_path,
             record_store=cast(OdooStableTargetReplacementStore, record_store),
             request=operation.request,
-            provider_effect_checkpoint=(
-                execution_checkpoint or authorization_guard.checkpoint_provider_effect
-            ),
+            provider_effect_checkpoint=checkpoint_provider_effect,
             hold_uncertain_effects=execution_checkpoint is not None,
             before_records_commit=(
                 (lambda: execution_checkpoint("target_replacement_records_commit"))
@@ -2195,7 +2206,7 @@ def _execute_target_replacement_with_checkpoint(
         )
     except DurableOperationAuthorizationDeniedError as error:
         logging.warning(
-            "Odoo stable target replacement operation %s was denied before provider mutation: %s",
+            "Odoo stable target replacement operation %s was denied at a provider boundary: %s",
             operation.operation_id,
             error,
         )
