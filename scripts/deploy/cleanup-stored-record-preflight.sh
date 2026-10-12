@@ -34,4 +34,3 @@ done <<< "$network_inventory"
 for network_id in "${network_ids[@]}"; do
   docker network rm "$network_id" >/dev/null
 done
-
