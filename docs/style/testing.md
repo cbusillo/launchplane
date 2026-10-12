@@ -242,8 +242,12 @@ without build cache only when cache-key computation reports the missing-layer
 `httpReadSeeker` error; unrelated failures and a failed retry remain blocking.
 The loaded image still runs every Compose qualification and vulnerability scan.
 
-The CI container-scan jobs pin the setup action and request Docker Compose
-v5.3.1 before that qualification. Local reproduction requires a compatible
+CI container and unittest jobs install Docker Compose with the pinned setup
+action at the version declared once in `ci.yml`. The service Compose test
+renders synthetic image and network inputs without starting containers. It
+requires Docker in CI and checks image propagation before the runtime
+qualification can overwrite those settings. Dockerless local runs skip that
+rendering test. Local reproduction requires a compatible
 `docker compose` command, GNU `timeout`, the Docker engine, and built image.
 The fixture uses bounded detached `up` calls and explicit running, absence, and
 container-identity checks because Compose v5.3.1 `--wait` incorrectly requires
