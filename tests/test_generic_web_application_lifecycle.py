@@ -164,6 +164,12 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         )
 
     def test_interrupted_image_deploy_retains_original_schedule_before_retry(self) -> None:
+        self._check_interrupted_retry("interrupted")
+
+    def test_new_attempt_after_interruption_retains_original_enabled_schedule(self) -> None:
+        self._check_interrupted_retry("new-attempt")
+
+    def _check_interrupted_retry(self, retry_record_id: str) -> None:
         self._api_context()
         profile = _profile()
         lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
@@ -194,10 +200,10 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             record_store=store,
             request=_request(),
             deploy_provider=provider,
-            deployment_record_id="interrupted",
+            deployment_record_id=retry_record_id,
         )
         self.assertEqual(result.post_deploy_status, "fail")
-        retried = recorded_application_lifecycle(store.read_deployment_record("interrupted"))
+        retried = recorded_application_lifecycle(store.read_deployment_record(retry_record_id))
         assert retried is not None
         self.assertEqual(retried.originals, receipt.originals)
         self.assertFalse(self.schedules["billing-recovery"]["enabled"])
@@ -222,6 +228,20 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         self.assertEqual(result.deploy_status, "fail")
         self.assertEqual(self.schedules["billing-recovery"], self.original)
         self.assertEqual(self.commands, [])
+
+    def test_unrelated_disabled_maintenance_schedule_is_not_overwritten(self) -> None:
+        unrelated = schedule_payload(
+            GenericWebMaintenanceCommand(
+                name=self.extensions.maintenance[0].name, command="./unrelated"
+            ),
+            "app-123",
+            enabled=False,
+        )
+        self.schedules[self.extensions.maintenance[0].name] = unrelated
+        result, _store = self._deploy()
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertEqual(self.commands, [])
+        self.assertEqual(self.schedules[self.extensions.maintenance[0].name], unrelated)
 
     def test_profile_edit_cannot_make_existing_attempt_image_only(self) -> None:
         _result, store = self._deploy()

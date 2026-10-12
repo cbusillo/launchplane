@@ -1,4 +1,3 @@
-import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.workflows.generic_web_application_snapshot import (
     has_recorded_application_lifecycle,
+    generic_web_provider_deployment_record_id,
     recorded_application_lifecycle,
 )
 from control_plane.contracts.generic_web_deploy_recovery import (
@@ -388,6 +388,7 @@ class GenericWebDeployProviderMutationAdapter:
         self,
         *,
         resolved_deploy_target: GenericWebResolvedDeployTarget,
+        provider_operation_key: str = "",
     ) -> GenericWebRuntimeCloseOutEvidence | None:
         """Return close-out evidence only when the original image provably runs.
 
@@ -502,12 +503,10 @@ class GenericWebDeployProviderMutationAdapter:
         )
 
     def _deployment_record_id(self, provider_operation_key: str) -> str:
-        digest = hashlib.sha256()
-        digest.update(provider_operation_key.encode())
-        operation_digest = digest.hexdigest()[:24]
-        return (
-            f"deployment-provider-operation-{operation_digest}-"
-            f"{self._lane.context}-{self._lane.instance}"
+        return generic_web_provider_deployment_record_id(
+            provider_operation_key,
+            context=self._lane.context,
+            instance=self._lane.instance,
         )
 
     def apply(

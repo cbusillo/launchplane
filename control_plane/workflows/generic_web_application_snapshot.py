@@ -1,6 +1,8 @@
 """Artifact-bound lifecycle receipts, including the state to restore on rollback."""
 
 from typing import Literal, Protocol, cast
+from datetime import datetime, timezone
+import hashlib
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -16,6 +18,7 @@ APPLICATION_LIFECYCLE_EVIDENCE_KEY = "generic_web_application_lifecycle"
 class ApplicationLifecycleSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    captured_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     product: str
     context: str
     instance: str
@@ -137,6 +140,28 @@ def application_snapshot_for_deploy(
                     if previous_record.artifact_identity is not None:
                         previous_artifact = previous_record.artifact_identity.artifact_id
                         previous_source = previous_record.source_git_ref
+    if callable(getattr(store, "list_deployment_records", None)):
+        # A paused attempt may not have deployed an image or written inventory.
+        # Receipts carry capture time independently of provider deployment times.
+        receipts = []
+        for record in cast(_ApplicationLifecycleRecordLister, store).list_deployment_records(
+            context_name=context,
+            instance_name=instance,
+        ):
+            candidate = recorded_application_lifecycle(record)
+            if candidate is not None and (
+                candidate.product,
+                candidate.provider_id,
+                candidate.target_id,
+            ) == (product, provider_id, target_id):
+                receipts.append(candidate)
+        latest = max(receipts, key=lambda item: item.captured_at, default=None)
+        if (
+            latest is not None
+            and latest.state != "qualified"
+            and (prior is None or latest.captured_at >= prior.captured_at)
+        ):
+            prior = latest
     same_attempt = read_snapshot(deployment_record_id)
     if same_attempt is not None:
         if (same_attempt.artifact_id, same_attempt.source_git_ref) != (artifact_id, source_git_ref):
@@ -238,22 +263,43 @@ class _ApplicationLifecycleRecordLister(Protocol):
     ) -> tuple[DeploymentRecord, ...]: ...
 
 
+def generic_web_provider_deployment_record_id(
+    provider_operation_key: str, *, context: str, instance: str
+) -> str:
+    digest = hashlib.sha256(provider_operation_key.encode()).hexdigest()[:24]
+    return f"deployment-provider-operation-{digest}-{context}-{instance}"
+
+
 def has_recorded_application_lifecycle(
-    store: object, *, context: str, instance: str, artifact_id: str = "", source_git_ref: str = ""
+    store: object,
+    *,
+    context: str,
+    instance: str,
+    deployment_record_id: str = "",
+    artifact_id: str = "",
+    source_git_ref: str = "",
 ) -> bool:
-    """Current profile edits cannot erase an attempt's required qualification."""
-    if not callable(getattr(store, "list_deployment_records", None)):
+    """Read one bound operation (or current inventory), never the lane's history."""
+    reader = cast(_ApplicationLifecycleStore, store)
+    try:
+        if not deployment_record_id:
+            if not callable(getattr(store, "read_environment_inventory", None)):
+                return False
+            inventory = reader.read_environment_inventory(
+                context_name=context, instance_name=instance
+            )
+            deployment_record_id = inventory.deployment_record_id
+        if not deployment_record_id:
+            return False
+        record = reader.read_deployment_record(deployment_record_id)
+    except FileNotFoundError:
         return False
-    for record in cast(_ApplicationLifecycleRecordLister, store).list_deployment_records(
-        context_name=context,
-        instance_name=instance,
+    if (record.context, record.instance) != (context, instance):
+        raise click.ClickException("Application lifecycle operation belongs to another lane.")
+    if artifact_id and (
+        record.artifact_identity is None or record.artifact_identity.artifact_id != artifact_id
     ):
-        if artifact_id and (
-            record.artifact_identity is None or record.artifact_identity.artifact_id != artifact_id
-        ):
-            continue
-        if source_git_ref and record.source_git_ref != source_git_ref:
-            continue
-        if recorded_application_lifecycle(record) is not None:
-            return True
-    return False
+        return False
+    if source_git_ref and record.source_git_ref != source_git_ref:
+        return False
+    return recorded_application_lifecycle(record) is not None

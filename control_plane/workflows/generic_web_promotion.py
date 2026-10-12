@@ -482,7 +482,7 @@ def execute_generic_web_prod_promotion(
             request=request,
             rollback_target=rollback_target,
             production_changed=deploy_result.deploy_status == "pass"
-            or deploy_result.provider_effect_attempted,
+            or deploy_result.image_effect_attempted,
             deploy_provider=deploy_provider,
             provider_operation_title=provider_operation_title,
             deployment_record_id=deploy_result.deployment_record_id,

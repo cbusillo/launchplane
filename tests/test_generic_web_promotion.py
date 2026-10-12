@@ -1203,6 +1203,9 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
     def test_rollback_pre_image_refusal_keeps_jobs_paused_on_failed_image(self) -> None:
         self._check_maintenance_failure("rollback_preflight")
 
+    def test_initial_pre_image_refusal_does_not_rollback_unchanged_production(self) -> None:
+        self._check_maintenance_failure("initial_preflight")
+
     def _check_maintenance_failure(self, failure: str) -> None:
         from control_plane.contracts.generic_web_extensions import (
             GenericWebLaneExtensions,
@@ -1224,6 +1227,8 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
                 effect_started: Callable[[], None],
                 **kwargs: object,
             ) -> None:
+                if failure == "initial_preflight":
+                    raise click.ClickException("initial image preflight refused")
                 if (
                     failure == "rollback_preflight"
                     and runtime_identity.artifact_id == _PREVIOUS_ARTIFACT
@@ -1308,6 +1313,12 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         ):
             result = self._promote(store, provider)
         self.assertEqual(result.promotion_status, "fail")
+        if failure == "initial_preflight":
+            self.assertEqual(result.rollback_status, "skipped")
+            self.assertEqual(provider.deployed_artifacts, [])
+            self.assertEqual(schedules["billing"], original)
+            self.assertEqual(executed, [])
+            return
         self.assertEqual(
             result.rollback_status, "fail" if failure == "rollback_preflight" else "pass"
         )

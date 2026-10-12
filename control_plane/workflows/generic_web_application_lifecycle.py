@@ -172,8 +172,12 @@ class DokployApplicationLifecycle:
 
     def _run_command(self, definition: GenericWebMaintenanceCommand) -> None:
         observed = self._read(definition.name)
-        if observed is not None and observed.get("enabled") is not False:
-            raise click.ClickException("Application maintenance cannot replace an active schedule.")
+        if observed is not None and observed != schedule_payload(
+            definition, self.application_id, enabled=False
+        ):
+            raise click.ClickException(
+                "Application maintenance cannot replace a different or active schedule; declare a distinct command name."
+            )
         schedule = self._upsert(
             schedule_payload(definition, self.application_id, enabled=False),
             "application_maintenance_prepare",

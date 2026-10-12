@@ -119,6 +119,7 @@ class GenericWebDeployResult(BaseModel):
     provider_id: str = ""
     provider_target_type: str = ""
     provider_effect_attempted: bool = False
+    image_effect_attempted: bool = False
     post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
     error_message: str = ""
 
@@ -835,6 +836,7 @@ def execute_generic_web_deploy(
             provider_id=target_fields.provider_id,
             provider_target_type=target_fields.provider_target_type,
             provider_effect_attempted=provider_effect_attempted,
+            image_effect_attempted=image_effect_attempted,
             post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
             error_message=str(exc),
         )
@@ -897,6 +899,7 @@ def execute_generic_web_deploy(
         provider_id=target_fields.provider_id,
         provider_target_type=target_fields.provider_target_type,
         provider_effect_attempted=provider_effect_attempted,
+        image_effect_attempted=image_effect_attempted,
         post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
     )
 
@@ -1083,6 +1086,7 @@ def build_generic_web_runtime_close_out_result(
         provider_id=target_fields.provider_id,
         provider_target_type=target_fields.provider_target_type,
         provider_effect_attempted=True,
+        image_effect_attempted=True,
     ).model_dump(mode="json")
 
 
