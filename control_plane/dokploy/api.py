@@ -4,6 +4,8 @@ import time
 
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Literal
 from urllib.error import HTTPError, URLError
@@ -53,6 +55,22 @@ _DOKPLOY_COMPOSE_SERVICE_PATTERN = re.compile(r"^$|^[a-z0-9][a-z0-9._-]{0,127}$"
 type JsonPrimitive = str | int | float | bool | None
 type JsonValue = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
 type JsonObject = dict[str, JsonValue]
+type MutationObserver = Callable[[str, str, JsonObject, Callable[[], JsonValue]], JsonValue]
+_mutation_observer: ContextVar[MutationObserver | None] = ContextVar(
+    "dokploy_mutation_observer", default=None
+)
+
+
+@contextmanager
+def observe_dokploy_mutations(observer: MutationObserver) -> Iterator[None]:
+    """Observe mutations in this execution only, including imported request aliases."""
+    context_token = _mutation_observer.set(observer)
+    try:
+        yield
+    finally:
+        _mutation_observer.reset(context_token)
+
+
 type DeploymentHistoryState = Literal["present", "no_history", "unknown"]
 
 
@@ -1783,6 +1801,44 @@ def dokploy_request(
     payload: JsonObject | None = None,
     query: dict[str, str | int] | None = None,
     timeout_seconds: int | float = 60,
+) -> JsonValue:
+    observer = _mutation_observer.get()
+    if observer is not None and method.upper() != "GET":
+        mutation_payload = dict(payload or {})
+        return observer(
+            host,
+            path,
+            mutation_payload,
+            lambda: _dokploy_request(
+                host=host,
+                token=token,
+                path=path,
+                method=method,
+                payload=mutation_payload,
+                query=query,
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+    return _dokploy_request(
+        host=host,
+        token=token,
+        path=path,
+        method=method,
+        payload=payload,
+        query=query,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _dokploy_request(
+    *,
+    host: str,
+    token: str,
+    path: str,
+    method: str,
+    payload: JsonObject | None,
+    query: dict[str, str | int] | None,
+    timeout_seconds: int | float,
 ) -> JsonValue:
     normalized_host = host.rstrip("/")
     normalized_path = path if path.startswith("/") else f"/{path}"

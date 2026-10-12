@@ -23,6 +23,10 @@ from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     parse_launchplane_mutation_timestamp,
 )
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    OdooStableTargetReplacementOperationRecord,
+)
+from control_plane.testing_replacement_recovery import service_testing_operation
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.outbox_delivery import (
     OutboxDeliveryRecord,
@@ -275,6 +279,7 @@ class PublicIngressMonitorTarget:
     tls_stale_after: str = ""
     tls_provider_evidence: dict[str, str] | None = None
     deploy_fence: LaunchplaneIdempotencyRecord | None = None
+    testing_replacement: OdooStableTargetReplacementOperationRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -363,8 +368,22 @@ def discover_public_ingress_monitor_targets(
         if profile.is_active
     )
     held_deploy_fences = _held_generic_web_deploy_fences(record_store)
+    read_replacements = getattr(
+        record_store, "list_odoo_stable_target_replacement_operation_records", None
+    )
+    held_replacements = {
+        (operation.product, operation.context, operation.instance): operation
+        for operation in (
+            read_replacements(instance_name="testing", statuses=("reconciliation_required",))
+            if callable(read_replacements)
+            else ()
+        )
+        if service_testing_operation(operation)
+    }
     open_deploy_fence_lanes = (
-        _open_deploy_fence_incident_lanes(record_store) if held_deploy_fences is not None else set()
+        _open_deploy_fence_incident_lanes(record_store)
+        if held_deploy_fences is not None or callable(read_replacements)
+        else set()
     )
     for profile in product_profiles:
         for lane in profile.lanes:
@@ -391,15 +410,21 @@ def discover_public_ingress_monitor_targets(
                 lane=lane,
             ):
                 targets.append(tls_target)
-            if held_deploy_fences is None or not _profile_uses_generic_web(profile):
+            if not _profile_uses_generic_web(profile):
                 continue
             # Only lanes with a fence, or an open fence incident to resolve, get a probe.
-            fence = held_deploy_fences.get((lane.context, lane.instance))
-            if fence is not None or (
-                (profile.product, lane.context, lane.instance) in open_deploy_fence_lanes
+            fence = (held_deploy_fences or {}).get((lane.context, lane.instance))
+            replacement = held_replacements.get((profile.product, lane.context, lane.instance))
+            if (
+                fence is not None
+                or replacement is not None
+                or ((profile.product, lane.context, lane.instance) in open_deploy_fence_lanes)
             ):
                 targets.append(
-                    _deploy_fence_monitor_target(profile=profile, lane=lane, fence=fence)
+                    replace(
+                        _deploy_fence_monitor_target(profile=profile, lane=lane, fence=fence),
+                        testing_replacement=replacement,
+                    )
                 )
     return tuple(targets)
 
@@ -2562,6 +2587,20 @@ def _check_deploy_fence(
     checked_at: str,
 ) -> PublicIngressTargetObservation:
     url = f"provider://{target.provider}/{target.provider_check}"
+    replacement = target.testing_replacement
+    if replacement is not None:
+        return PublicIngressTargetObservation(
+            target="provider",
+            url=url,
+            status="fail",
+            failure_code="deploy_fence_held",
+            summary=(
+                f"Testing replacement {replacement.operation_id} remains fenced since "
+                f"{replacement.updated_at}. Launchplane cannot prove its provider effects "
+                "safe to release. Missing references, an active worker, running jobs or "
+                "unknown provider outcomes require further reconciliation; no effects are replayed."
+            ),
+        )
     fence = target.deploy_fence
     if fence is None or not _deploy_fence_is_stuck(fence, checked_at=checked_at):
         return PublicIngressTargetObservation(
