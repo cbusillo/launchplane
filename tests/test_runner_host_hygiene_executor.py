@@ -1377,6 +1377,21 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             command_runner.commands,
         )
 
+    def test_shipped_hygiene_helpers_have_valid_shell_syntax(self) -> None:
+        scripts = Path(__file__).resolve().parents[1] / "scripts"
+        for name in (
+            "runner-host-hygiene-workdir-usage.sh",
+            "runner-host-hygiene-generated-run-cache.sh",
+        ):
+            with self.subTest(helper=name):
+                result = subprocess.run(
+                    ("/bin/bash", "-n", str(scripts / name)),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_executor_rejects_noncanonical_or_duplicate_runner_roots(self) -> None:
         with self.assertRaisesRegex(ValueError, "scoped absolute path"):
             _request(
