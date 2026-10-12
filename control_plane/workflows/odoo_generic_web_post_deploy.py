@@ -6,7 +6,6 @@ from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebPostDeployContext,
-    GenericWebPostDeployExecutor,
     GenericWebPostDeployGuard,
 )
 from control_plane.workflows.odoo_post_deploy import (
@@ -14,17 +13,6 @@ from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployResult,
     execute_odoo_post_deploy,
 )
-
-
-_ODOO_GENERIC_WEB_POST_DEPLOY_DRIVERS = frozenset({"odoo"})
-
-
-def generic_web_post_deploy_executor_for_driver_id(
-    driver_id: str,
-) -> GenericWebPostDeployExecutor | None:
-    if driver_id.strip() in _ODOO_GENERIC_WEB_POST_DEPLOY_DRIVERS:
-        return execute_odoo_generic_web_post_deploy
-    return None
 
 
 def post_deploy_evidence_from_odoo_result(

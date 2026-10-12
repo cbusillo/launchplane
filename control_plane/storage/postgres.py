@@ -323,6 +323,7 @@ from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
 )
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
+from control_plane.contracts.stored_record_snapshot import StoredRecordSnapshot
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyCompareWriteResult,
     MergeTrainPolicyRecord,
@@ -5844,6 +5845,11 @@ class PostgresRecordStore(HumanSessionStore):
             return
         Base.metadata.create_all(self._engine)
 
+    def export_stored_record_snapshot(self) -> StoredRecordSnapshot:
+        from control_plane.stored_record_snapshot import export_stored_record_snapshot
+
+        return export_stored_record_snapshot(self._engine)
+
     def verify_schema(self) -> None:
         backend_name = self._engine.url.get_backend_name()
         inspector = inspect(self._engine)
@@ -9923,14 +9929,17 @@ class PostgresRecordStore(HumanSessionStore):
                     binding_row = session.scalar(binding_statement)
                     if binding_row is None:
                         return False
-                    bindings.append(
-                        cast(
-                            LaunchplaneProductProfileRow
-                            | LaunchplaneDokployTargetRow
-                            | LaunchplaneDokployTargetIdRow,
-                            binding_row,
-                        ).payload
-                    )
+                    binding_payload = cast(
+                        LaunchplaneProductProfileRow
+                        | LaunchplaneDokployTargetRow
+                        | LaunchplaneDokployTargetIdRow,
+                        binding_row,
+                    ).payload
+                    if isinstance(binding_row, LaunchplaneProductProfileRow):
+                        binding_payload = self._read_product_profile_payload(
+                            binding_payload
+                        ).model_dump(mode="json", exclude_none=True)
+                    bindings.append(binding_payload)
                 if (
                     not service_testing_operation(current_record)
                     or current_record != expected_record
@@ -36068,7 +36077,8 @@ class PostgresRecordStore(HumanSessionStore):
                 migrate_product_profile_monitoring_intent_payload(
                     migrate_product_profile_health_monitoring_payload(payload)
                 )
-            )
+            ),
+            context={"stored_product_profile": True},
         )
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:

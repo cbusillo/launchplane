@@ -84,7 +84,10 @@ def execute_generic_web_deploy_result(
     provider_operation_title: str = "",
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    before_records_commit: Callable[[], None] | None = None,
     recorded_artifact: bool = False,
+    proved_pre_image_retry: bool = False,
+    post_deploy_authority_digest: str = "",
 ) -> tuple[dict[str, object], dict[str, object]]:
     driver_result = execute_generic_web_deploy(
         control_plane_root=control_plane_root,
@@ -92,13 +95,18 @@ def execute_generic_web_deploy_result(
         request=request.deploy,
         profile=profile,
         lane=lane,
-        post_deploy_executor=_generic_web_post_deploy_executor_for_profile(profile),
+        post_deploy_executor=_generic_web_post_deploy_executor_for_profile(
+            profile, instance=lane.instance
+        ),
+        post_deploy_authority_digest=post_deploy_authority_digest,
         deploy_provider=deploy_provider,
         resolved_deploy_target=resolved_deploy_target,
         provider_operation_title=provider_operation_title,
         deployment_record_id=deployment_record_id,
         provider_effect_checkpoint=provider_effect_checkpoint,
+        before_records_commit=before_records_commit,
         recorded_artifact=recorded_artifact,
+        proved_pre_image_retry=proved_pre_image_retry,
     )
     result = _scrub_retired_target_type_alias(driver_result.model_dump(mode="json"))
     return {"deployment_record_id": driver_result.deployment_record_id}, result

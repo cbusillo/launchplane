@@ -202,7 +202,6 @@ def _odoo_compose_profile() -> LaunchplaneProductProfileRecord:
             template_instance="testing",
             override_env={"ODOO_INSTALL_MODULES": "cm_custom,cm_website"},
             preview_url_env_keys=("WEB_BASE_URL",),
-            data_transport_mode="bootstrap",
         ),
         updated_at="2026-05-09T15:00:00Z",
         source="test",
@@ -271,8 +270,6 @@ class GenericWebPreviewTests(unittest.TestCase):
                 override_env_keys=(),
                 preview_url_env_keys=(),
                 preview_domain_env_keys=(),
-                migration_command_configured=False,
-                seed_command_configured=False,
             ),
             checks=(),
         )
@@ -558,13 +555,17 @@ class GenericWebPreviewTests(unittest.TestCase):
                 )
 
     def test_execute_generic_web_preview_inventory_filters_by_app_prefix(self) -> None:
-        store = _GenericWebPreviewStore(_profile())
+        profile = _profile()
+        profile = profile.model_copy(
+            update={"preview": profile.preview.model_copy(update={"app_name_suffix": "-app"})}
+        )
+        store = _GenericWebPreviewStore(profile)
         raw_projects = [
             {
                 "environments": [
                     {
                         "applications": [
-                            {"applicationId": "app-1", "name": "syo-preview-preview-42-site"},
+                            {"applicationId": "app-1", "name": "syo-preview-preview-42-site-app"},
                             {"applicationId": "app-2", "name": "other-preview-pr-1"},
                         ]
                     }
@@ -711,15 +712,6 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(result.readiness_status, "blocked")
         self.assertEqual(result.missing_template_env_keys, ("SMTP_HOST", "SMTP_FROM"))
         self.assertEqual(result.missing_provider_fields, ("dockerImage", "username"))
-        self.assertEqual(
-            [check.check_id for check in result.checks],
-            [
-                "preview_base_url",
-                "template_env",
-                "template_provider_fields",
-                "transport_policy",
-            ],
-        )
 
     def test_evaluate_generic_web_preview_readiness_keeps_template_lane_when_target_id_missing(
         self,

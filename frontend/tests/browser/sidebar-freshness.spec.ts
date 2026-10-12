@@ -3,6 +3,11 @@ import { READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
 
 for (const theme of ["dark", "light"] as const) {
   test(`sidebar refreshes, distinguishes stale data and recovers in ${theme}`, { tag: "@layout" }, async ({ page }, testInfo) => {
+    // Install before the app schedules timers, then freeze before loading fixtures.
+    const clockStart = Date.now();
+    await page.clock.install({ time: new Date(clockStart) });
+    // A 1ms pause can be in the past by the time the browser receives the RPC.
+    await page.clock.pauseAt(new Date(clockStart + testInfo.timeout));
     await page.goto("/ui/products?fixture=products");
     const fixtures = await page.evaluate(async () => {
       const modulePath = "/ui/src/dev-fixtures.ts";
@@ -30,8 +35,6 @@ for (const theme of ["dark", "light"] as const) {
       Object.assign(lane.health_monitoring.checks[0], { status: "pass", trust_state: "verified", probe_effective: true, incident_status: "" });
       return { products, identity: module.fixtureIdentity, now };
     });
-    await page.clock.install({ time: new Date(fixtures.now) });
-    await page.clock.pauseAt(new Date(fixtures.now + 1));
     let mode: "fresh" | "warning" | "alert" | "fail" | "delay" = "fresh";
     let reads = 0;
     let release: (() => void) | undefined;
@@ -99,8 +102,11 @@ for (const theme of ["dark", "light"] as const) {
     await page.goto(`/ui/products/${fixtures.products[0].product}/activity`);
     await expect(testing).toHaveAttribute("data-tone", "verified");
     const activityReads = reads;
+    mode = "warning";
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS + 10);
     await expect.poll(() => reads).toBe(activityReads + 1);
+    // Observe the response's new state before testing the next focus refresh.
+    await expect(testing).toHaveAttribute("data-tone", "warning");
     release = undefined;
     mode = "delay";
     // Simulate sleep on browsers whose monotonic clock pauses: focus must

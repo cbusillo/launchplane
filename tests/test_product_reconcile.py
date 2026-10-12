@@ -1395,6 +1395,397 @@ def _generic_web_profile() -> LaunchplaneProductProfileRecord:
 
 
 class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
+    def test_declared_maintenance_changes_testing_retry_authority(self) -> None:
+        from control_plane.contracts.generic_web_extensions import (
+            GenericWebLaneExtensions,
+            GenericWebMaintenanceCommand,
+        )
+        from control_plane.product_reconcile import _generic_web_testing_authority
+
+        lane = self.store.read_product_profile_record("site").lanes[0]
+        before = _generic_web_testing_authority(record_store=self.store, lane=lane)
+        changed = lane.model_copy(
+            update={
+                "generic_web_extensions": GenericWebLaneExtensions(
+                    maintenance=(GenericWebMaintenanceCommand(name="migrate", command="./migrate"),)
+                )
+            }
+        )
+        after = _generic_web_testing_authority(record_store=self.store, lane=changed)
+        self.assertNotEqual(before, after)
+        self.assertEqual(
+            after, _generic_web_testing_authority(record_store=self.store, lane=changed)
+        )
+
+    def prepare_unqualified_verireel_testing(self) -> str:
+        self.github.add_run(20, DEPLOYABLE)
+        self.github.add_run(30, OLDER)
+        self.request()
+        plan = self.reconcile()
+        self.store.write_product_profile_record(
+            _generic_web_profile().model_copy(update={"driver_id": "verireel"})
+        )
+        return cast(str, plan["deployment_record_id"])
+
+    @staticmethod
+    def _testing_qualification_evidence(*args: object) -> object:
+        from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
+        from control_plane.workflows.generic_web_deploy import (
+            GenericWebPostDeployContext,
+            GenericWebDeployStore,
+        )
+
+        context = cast(GenericWebPostDeployContext, args[2])
+        from control_plane.workflows.verireel_testing_post_deploy import (
+            testing_qualification_authority,
+        )
+
+        authority = testing_qualification_authority(cast(GenericWebDeployStore, args[1]), context)
+        return PostDeployUpdateEvidence(
+            attempted=True,
+            status="pass",
+            evidence={
+                "authority_digest": authority,
+                "driver_id": "verireel",
+                "deployment_record_id": context.deployment_record_id,
+                "artifact_id": context.artifact_id,
+                "source_git_ref": context.source_git_ref,
+                "migration_status": "pass",
+                "creator_verification_status": "pass",
+                "admin_verification_status": "pass",
+                "cleanup_status": "pass",
+            },
+        )
+
+    def test_verireel_unqualified_image_uses_existing_deploy_once_then_stops(self) -> None:
+        deployment_id = self.prepare_unqualified_verireel_testing()
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=self._testing_qualification_evidence,
+        ) as qualify:
+            self.request()
+            first = self.reconcile()
+            self.request()
+            repeated = self.reconcile()
+        self.assertEqual(first["action"], "deploy")
+        self.assertEqual(first["post_deploy_status"], "pass")
+        self.assertNotEqual(first["deployment_record_id"], deployment_id)
+        self.assertEqual(repeated["reason"], "already_deployed")
+        qualify.assert_called_once()
+        self.assertEqual(len(self.deploys.runtime_identities), 2)
+        record = self.store.read_deployment_record(cast(str, first["deployment_record_id"]))
+        self.assertEqual(record.post_deploy_update.evidence["source_git_ref"], DEPLOYABLE)
+        inventory = self.store.read_environment_inventory(
+            context_name="cm", instance_name="testing"
+        )
+        self.assertEqual(inventory.post_deploy_update, record.post_deploy_update)
+
+    def test_verireel_failed_qualification_is_not_repeated_or_called_healthy(self) -> None:
+        from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
+
+        self.prepare_unqualified_verireel_testing()
+
+        def failure(*args: object) -> PostDeployUpdateEvidence:
+            result = cast(PostDeployUpdateEvidence, self._testing_qualification_evidence(*args))
+            result.evidence["creator_verification_status"] = "fail"
+            return result.model_copy(update={"status": "fail"})
+
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=failure,
+        ) as qualify:
+            self.request()
+            first = self.run_once()
+            self.request()
+            repeated = self.run_once()
+        self.assertEqual(first.state, "failed")
+        self.assertEqual(repeated.last_plan["reason"], "testing_qualification_failed")
+        self.assertEqual(repeated.state, "failed")
+        qualify.assert_called_once()
+        self.assertEqual(len(self.deploys.runtime_identities), 2)
+
+    def test_verireel_qualification_respects_staff_testing_hold(self) -> None:
+        self.prepare_unqualified_verireel_testing()
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="cm",
+                instance="testing",
+                target_type="application",
+                target_name="site-testing-app",
+                updated_at="2026-10-12T00:00:00Z",
+                policies=DokployTargetPolicies(
+                    staff_testing_hold=DokployTargetStaffTestingHold(
+                        reason="staff test",
+                        recorded_by="director",
+                        recorded_at="2026-10-12T00:00:00Z",
+                    )
+                ),
+            )
+        )
+        self.request()
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy"
+        ) as qualify:
+            plan = self.reconcile()
+        self.assertEqual(plan["reason"], "staff_testing")
+        qualify.assert_not_called()
+
+    def test_verireel_failure_before_authority_snapshot_has_bounded_retries(self) -> None:
+        from control_plane.workflows.verireel_testing_post_deploy import (
+            MAX_TRANSIENT_QUALIFICATION_ATTEMPTS,
+        )
+
+        self.prepare_unqualified_verireel_testing()
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.testing_qualification_authority",
+            side_effect=FileNotFoundError("authority temporarily unavailable"),
+        ) as authority:
+            for _ in range(MAX_TRANSIENT_QUALIFICATION_ATTEMPTS):
+                self.request()
+                self.assertEqual(self.run_once().state, "failed")
+            self.request()
+            final = self.run_once()
+        self.assertEqual(final.last_plan["reason"], "testing_qualification_failed")
+        self.assertEqual(authority.call_count, MAX_TRANSIENT_QUALIFICATION_ATTEMPTS)
+
+    def test_verireel_transient_qualification_failure_has_bounded_retries(self) -> None:
+        from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
+        from control_plane.workflows.generic_web_deploy import GenericWebPostDeployContext
+        from control_plane.workflows.verireel_testing_post_deploy import (
+            MAX_TRANSIENT_QUALIFICATION_ATTEMPTS,
+            previous_transient_attempts,
+        )
+
+        self.prepare_unqualified_verireel_testing()
+
+        def transient(*args: object) -> PostDeployUpdateEvidence:
+            context = cast(GenericWebPostDeployContext, args[2])
+            result = cast(PostDeployUpdateEvidence, self._testing_qualification_evidence(*args))
+            result.evidence.update(
+                failure_kind="transient",
+                transient_attempts=str(previous_transient_attempts(args[1], context) + 1),
+                creator_verification_status="fail",
+            )
+            return result.model_copy(update={"status": "fail"})
+
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=transient,
+        ) as qualify:
+            for _ in range(MAX_TRANSIENT_QUALIFICATION_ATTEMPTS):
+                self.request()
+                self.assertEqual(self.run_once().state, "failed")
+            self.request()
+            final = self.run_once()
+        self.assertEqual(final.last_plan["reason"], "testing_qualification_failed")
+        self.assertEqual(qualify.call_count, MAX_TRANSIENT_QUALIFICATION_ATTEMPTS)
+
+    def test_verireel_configuration_repair_permits_a_failed_candidate_to_qualify(self) -> None:
+        from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
+
+        self.prepare_unqualified_verireel_testing()
+
+        def failure(*args: object) -> PostDeployUpdateEvidence:
+            result = cast(PostDeployUpdateEvidence, self._testing_qualification_evidence(*args))
+            result.evidence["creator_verification_status"] = "fail"
+            return result.model_copy(update={"status": "fail"})
+
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=failure,
+        ):
+            self.request()
+            self.assertEqual(self.run_once().state, "failed")
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="cm",
+                instance="testing",
+                env={"SYNC_INTERVAL_SECONDS": 1800},
+                updated_at="2026-10-12T00:00:00Z",
+            )
+        )
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=self._testing_qualification_evidence,
+        ) as qualify:
+            self.request()
+            self.assertEqual(self.reconcile()["post_deploy_status"], "pass")
+            self.request()
+            self.assertEqual(self.reconcile()["reason"], "already_deployed")
+        qualify.assert_called_once()
+
+    def test_verireel_lost_effect_fence_is_held_without_repeating_post_deploy(self) -> None:
+        from control_plane.provider_operations import ProviderMutationUnknownError
+
+        self.prepare_unqualified_verireel_testing()
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=ProviderMutationUnknownError("lost fence"),
+        ) as qualify:
+            self.request()
+            self.assertEqual(self.run_once().state, "failed")
+            self.request()
+            repeated = self.run_once()
+        self.assertEqual(repeated.last_plan["deploy_operation_status"], "reconcile_required")
+        qualify.assert_called_once()
+
+    def test_declared_generic_web_profile_requalifies_then_reuses_complete_evidence(self) -> None:
+        from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+
+        self.prepare_unqualified_verireel_testing()
+        profile = self.store.read_product_profile_record("site")
+        profile = profile.model_copy(
+            update={
+                "driver_id": "generic-web",
+                "lanes": tuple(
+                    lane.model_copy(
+                        update={
+                            "generic_web_extensions": GenericWebLaneExtensions(
+                                verification_extension="verireel-testing"
+                            )
+                        }
+                    )
+                    if lane.instance == "testing"
+                    else lane
+                    for lane in profile.lanes
+                ),
+            }
+        )
+        self.store.write_product_profile_record(profile)
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=self._testing_qualification_evidence,
+        ) as qualify:
+            self.request()
+            first = self.run_once()
+            self.request()
+            repeated = self.run_once()
+        self.assertEqual(first.state, "done")
+        self.assertEqual(repeated.last_plan["reason"], "already_deployed")
+        qualify.assert_called_once()
+
+    def test_passed_legacy_testing_is_requalified_after_declaring_shared_lifecycle(self) -> None:
+        from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+
+        self.prepare_unqualified_verireel_testing()
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=self._testing_qualification_evidence,
+        ) as qualify:
+            self.request()
+            legacy = self.reconcile()
+            profile = self.store.read_product_profile_record("site")
+            self.store.write_product_profile_record(
+                profile.model_copy(
+                    update={
+                        "driver_id": "generic-web",
+                        "lanes": tuple(
+                            lane.model_copy(
+                                update={
+                                    "generic_web_extensions": GenericWebLaneExtensions(
+                                        verification_extension="verireel-testing"
+                                    )
+                                }
+                            )
+                            if lane.instance == "testing"
+                            else lane
+                            for lane in profile.lanes
+                        ),
+                    }
+                )
+            )
+            self.request()
+            transitioned = self.reconcile()
+            self.request()
+            repeated = self.reconcile()
+        self.assertEqual(transitioned["action"], "deploy")
+        self.assertEqual(transitioned["post_deploy_status"], "pass")
+        self.assertNotEqual(legacy["deployment_record_id"], transitioned["deployment_record_id"])
+        self.assertEqual(repeated["reason"], "already_deployed")
+        self.assertEqual(qualify.call_count, 2)
+
+    def test_a_profile_transition_during_qualification_cannot_credit_the_new_lifecycle(
+        self,
+    ) -> None:
+        from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+
+        self.prepare_unqualified_verireel_testing()
+        transitioned = False
+
+        def qualify_then_transition(*args: object) -> object:
+            nonlocal transitioned
+            if not transitioned:
+                transitioned = True
+                profile = self.store.read_product_profile_record("site")
+                self.store.write_product_profile_record(
+                    profile.model_copy(
+                        update={
+                            "driver_id": "generic-web",
+                            "lanes": tuple(
+                                lane.model_copy(
+                                    update={
+                                        "generic_web_extensions": GenericWebLaneExtensions(
+                                            verification_extension="verireel-testing"
+                                        )
+                                    }
+                                )
+                                if lane.instance == "testing"
+                                else lane
+                                for lane in profile.lanes
+                            ),
+                        }
+                    )
+                )
+            return self._testing_qualification_evidence(*args)
+
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=qualify_then_transition,
+        ) as qualify:
+            self.request()
+            before_transition = self.reconcile()
+            self.request()
+            after_transition = self.reconcile()
+            self.request()
+            repeated = self.reconcile()
+        self.assertEqual(after_transition["action"], "deploy")
+        self.assertNotEqual(
+            before_transition["deployment_record_id"], after_transition["deployment_record_id"]
+        )
+        self.assertEqual(after_transition["post_deploy_status"], "pass")
+        self.assertEqual(repeated["reason"], "already_deployed")
+        self.assertEqual(qualify.call_count, 2)
+
+    def test_a_changed_runtime_input_requalifies_previously_passing_testing(self) -> None:
+        self.prepare_unqualified_verireel_testing()
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=self._testing_qualification_evidence,
+        ) as qualify:
+            self.request()
+            previous = self.reconcile()
+            profile = self.store.read_product_profile_record("site")
+            lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+            self.store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context=lane.context,
+                    instance=lane.instance,
+                    env={"SYNC_INTERVAL_SECONDS": 1800},
+                    updated_at=profile.updated_at,
+                )
+            )
+            self.request()
+            changed = self.reconcile()
+            self.request()
+            repeated = self.reconcile()
+        self.assertEqual(changed["action"], "deploy")
+        self.assertNotEqual(previous["deployment_record_id"], changed["deployment_record_id"])
+        self.assertEqual(changed["post_deploy_status"], "pass")
+        self.assertEqual(repeated["reason"], "already_deployed")
+        self.assertEqual(qualify.call_count, 2)
+
     def setUp(self) -> None:
         super().setUp()
         encryption_key = patch.dict(

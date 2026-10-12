@@ -62,6 +62,12 @@ from control_plane.service_auth import (
     LocalOperatorIdentity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.testing_replacement_recovery import TestingReplacementRecoveryRead
+from control_plane.testing_replacement_recovery import (
+    TestingRecoveryStore,
+    testing_replacement_recovery_read,
+    service_testing_operation,
+)
 
 _LAUNCHPLANE_DRIVER_READ_PRODUCT = "launchplane"
 _LAUNCHPLANE_DRIVER_READ_CONTEXT = "launchplane"
@@ -98,6 +104,7 @@ class OdooStableTargetReplacementOperationStatusResponse(BaseModel):
 
     status: Literal["ok"] = "ok"
     trace_id: str
+    recovery: TestingReplacementRecoveryRead | None = None
     operation: dict[str, object]
     result: dict[str, object] | None = None
 
@@ -441,6 +448,7 @@ def register_operation_status_read_routes(
     app: ApiRouteRegistrar,
     *,
     dependencies: ReadRouteDependencies,
+    control_plane_root: FilePath = FilePath("."),
 ) -> None:
     def read_odoo_stable_bootstrap_operation_status(
         operation_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -524,7 +532,7 @@ def register_operation_status_read_routes(
                 code="not_found",
                 message=str(error),
             ) from error
-        if not _operation_status_execute_allowed(
+        full_record = _operation_status_execute_allowed(
             dependencies=dependencies,
             identity=identity,
             trace_id=trace_id,
@@ -538,20 +546,38 @@ def register_operation_status_read_routes(
                 "Workflow cannot read Odoo target replacement operation status "
                 "for the requested product/context."
             ),
-        ):
+        )
+        recovery = testing_replacement_recovery_read(
+            cast(TestingRecoveryStore, record_store), operation, control_plane_root
+        )
+        if not full_record:
+            status_view = operation_status_read_view(
+                operation,
+                poll_url=ODOO_STABLE_TARGET_REPLACEMENT_OPERATION_STATUS_ROUTE.format(
+                    operation_id=operation.operation_id.strip()
+                ),
+            )
+            if operation.status == "reconciliation_required" and service_testing_operation(
+                operation
+            ):
+                # The maintained bounded helper already retains this public
+                # description even when it omits new structured response fields.
+                status_view["error_description"] = (
+                    f"Recovery: {recovery['reason'] or recovery['status']}. "
+                    f"Journal: {recovery['journal']}. "
+                    f"Provider effects: {recovery['provider_effects']}. "
+                    "The operation fence is retained; this read changes nothing."
+                )
             return OdooStableTargetReplacementOperationStatusResponse(
                 trace_id=trace_id,
-                operation=operation_status_read_view(
-                    operation,
-                    poll_url=ODOO_STABLE_TARGET_REPLACEMENT_OPERATION_STATUS_ROUTE.format(
-                        operation_id=operation.operation_id.strip()
-                    ),
-                ),
+                recovery=TestingReplacementRecoveryRead.model_validate(recovery),
+                operation=status_view,
                 result=operation_result_read_view(operation.result),
             )
         result = operation.result.model_dump(mode="json") if operation.result else None
         return OdooStableTargetReplacementOperationStatusResponse(
             trace_id=trace_id,
+            recovery=TestingReplacementRecoveryRead.model_validate(recovery),
             operation=odoo_stable_target_replacement_operation_status_payload(operation),
             result=result,
         )
