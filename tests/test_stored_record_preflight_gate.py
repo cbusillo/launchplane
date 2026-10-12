@@ -8,7 +8,7 @@ import yaml
 
 
 class StoredRecordPreflightGateTests(unittest.TestCase):
-    def test_embedded_gate_propagates_candidate_failure_through_tee(self) -> None:
+    def test_workflow_gate_propagates_candidate_failure_through_tee(self) -> None:
         root = Path(__file__).resolve().parents[1]
         workflow = yaml.safe_load((root / ".github/workflows/deploy-launchplane.yml").read_text())
         script = next(
@@ -21,7 +21,7 @@ class StoredRecordPreflightGateTests(unittest.TestCase):
             docker = temporary / "docker"
             docker.write_text("""#!/bin/bash
 for argument in "$@"; do
-  if [[ "$argument" == --entrypoint || "$argument" == --entrypoint=* ]]; then
+  if [[ "$argument" == "$CANDIDATE_IMAGE" ]]; then
     exit 23
   fi
 done

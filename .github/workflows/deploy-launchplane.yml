@@ -382,6 +382,11 @@ jobs:
           fi
           printf 'image_reference=%s\n' "$image_reference" >> "$GITHUB_OUTPUT"
 
+      - name: Authenticate preflight image read
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/deploy/authenticate-preflight-registry.sh
+
       - name: Read scrubbed Launchplane stored records
         id: stored_record_snapshot
         uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
