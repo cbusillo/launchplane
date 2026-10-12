@@ -31,7 +31,8 @@ for (const theme of ["dark", "light"] as const) {
       return { products, identity: module.fixtureIdentity, now };
     });
     await page.clock.install({ time: new Date(fixtures.now) });
-    await page.clock.pauseAt(new Date(fixtures.now + 1));
+    // Pause safely ahead of installation; a 1 ms margin races browser scheduling.
+    await page.clock.pauseAt(new Date(fixtures.now + 60_000));
     let mode: "fresh" | "warning" | "alert" | "fail" | "delay" = "fresh";
     let reads = 0;
     let release: (() => void) | undefined;
