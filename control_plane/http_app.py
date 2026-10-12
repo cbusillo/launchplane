@@ -23743,6 +23743,7 @@ def create_launchplane_fastapi_app(
                     label=owner_profile.owner.review_label,
                     record_store=record_store,
                     client_set=owner_profile.owner.is_set,
+                    director_standing=owner_profile.release_on_acceptance == "director_standing",
                 )
                 if owner_review_requested and owner_profile.owner.is_set:
                     owner_login = owner_profile.owner.github_login

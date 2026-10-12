@@ -16,6 +16,7 @@ class DependabotClientReviewTests(unittest.TestCase):
         pull["labels"] = []
         pull["user"] = {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"}
         profile = SimpleNamespace(
+            release_on_acceptance="held",
             is_active=True,
             repository="cbusillo/sellyouroutboard",
             owner=SimpleNamespace(is_set=True, review_label="owner-review"),
@@ -99,6 +100,7 @@ class DependabotClientReviewTests(unittest.TestCase):
         pull["body"] = "Bumps a dependency."
         pull["user"] = {"login": "dependabot[bot]", "type": "Bot", "id": 49699333}
         profile = SimpleNamespace(
+            release_on_acceptance="held",
             is_active=True,
             repository="example/site",
             driver_id="odoo",

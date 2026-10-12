@@ -3424,6 +3424,7 @@ class GitHubMergeTrainSnapshotReader:
                 labels=labels,
                 review_label=profile.owner.review_label,
                 pure_dependency_update=dependency_only,
+                director_standing=profile.release_on_acceptance == "director_standing",
             )
             for profile in profiles
         )
