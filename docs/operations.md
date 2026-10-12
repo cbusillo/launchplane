@@ -1693,13 +1693,12 @@ onboarding updates preserve it.
 When intent makes an open public or TLS incident ineligible, the monitor keeps
 the real probe observation and writes a separate skipped reconciliation
 observation. The incident resolves with `monitoring_intent_changed`, not a false
-recovery. Observation, incident, and GitHub outbox rows are fenced by canonical
+recovery. Observation, incident, and notification outbox rows are fenced by canonical
 fingerprints of the product profile and any private endpoint or route binding
 used by the target. The checks happen in one transaction, so an in-flight run
 discovered under old authority cannot reopen or resolve admin state after a
-record changes, even when its human timestamp is unchanged. Email and Discord
-delivery behavior and DB-backed notification policies are unchanged; do not
-disable destinations to perform an intent transition.
+record changes, even when its human timestamp is unchanged. Do not disable
+notification destinations to perform an intent transition.
 
 Every failing observation is retained and linked to its open incident. The
 monitor derives a typed material fingerprint from failure layer/category,
@@ -1813,7 +1812,27 @@ for deployment, promotion, route, provider-target, or TLS authority.
 Notification routing is a separate service-backed policy and delivery concern,
 not lane-owned text config. The initial notification destinations are GitHub
 issues, email, and Discord; each is selected by DB-backed policy and evidenced
-by delivery-attempt records.
+by delivery-attempt records. The DB-backed monitor commits enabled destinations'
+material-event deliveries in the same transaction as the observation and incident.
+The outbox worker sends email and Discord as well as GitHub notifications, so a
+healthy probe after recovery does not need to manufacture another resolution
+for delivery to resume. Each delivery keeps the original event and rendered body;
+email/Discord payloads reference the policy destination without copying credentials
+or secret references. The worker resolves that destination from current enabled
+policy and the existing managed-secret resolver at send time.
+
+Returned delivery failures use the outbox's bounded backoff and attempt budget;
+exhaustion is recorded as `failed / max_attempts_exhausted`. These retries are
+at least once: a provider may accept a message before returning an error.
+Successful completion atomically records the attempt and terminal outbox state,
+preventing further sends for that event/destination. SMTP and Discord cannot
+reconcile a worker interruption after the durable provider-start marker; that
+work becomes `failed / delivery_outcome_unknown` without an automatic resend.
+A removed or disabled destination becomes `failed / destination_unavailable`.
+Incident state and bounded reminder cadence remain independent of delivery.
+The file-backed rehearsal path retains synchronous delivery; durable service
+recovery uses the DB-backed transition and worker.
+
 GitHub delivery bodies carry a material-event marker for exact replay and a
 stable incident marker for issue recovery. Updates, reminders, and resolutions
 search the incident marker when their queued payload predates the committed

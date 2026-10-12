@@ -4,13 +4,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import time
-from typing import Protocol
+from typing import Protocol, cast
 
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.workflows.generic_web_promotion_workflow import (
     dispatch_generic_web_promotion_workflow_delivery,
 )
 from control_plane.workflows.public_ingress_monitor import (
+    PublicIngressMonitorStore,
     PublicIngressNotificationDriverSet,
     deliver_public_ingress_notification_outbox_delivery,
 )
@@ -91,6 +92,7 @@ def run_outbox_worker_once(
     elif record.kind == "public_ingress_notification":
         result = deliver_public_ingress_notification_outbox_delivery(
             record=record,
+            record_store=cast(PublicIngressMonitorStore, record_store),
             drivers=notification_drivers or PublicIngressNotificationDriverSet(),
             mark_provider_started=lambda provider_operation_key, provider_id: (
                 _mark_provider_started(
