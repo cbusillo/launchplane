@@ -4,6 +4,7 @@ import {
   CircleHelp,
   CircleMinus,
   CircleX,
+  Clock3,
   ChevronRight,
   CircleUserRound,
   LogOut,
@@ -13,7 +14,7 @@ import {
   TriangleAlert,
   Wrench,
 } from "lucide-react";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import type {
   GitHubHumanIdentityResponse,
@@ -23,6 +24,7 @@ import type { ResourceState } from "./resource";
 import { useEvidenceExpiry } from "./ProductOps";
 import { expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import { sidebarStatus } from "./sidebar-status";
+import { READ_REFRESH_INTERVAL_MS } from "./use-evidence-refresh";
 import {
   environmentLabel,
   environmentViewLabel,
@@ -49,6 +51,7 @@ export function AppShell({
   onRefresh,
   onThemeChange,
   productsResource,
+  inventoryReceivedAt,
   route,
   selectedProduct,
   signingOut,
@@ -62,11 +65,30 @@ export function AppShell({
   onRefresh: () => void;
   onThemeChange: (theme: Theme) => void;
   productsResource: ResourceState<ProductSiteOverview[]>;
+  inventoryReceivedAt: number | null;
   route: AppRoute;
   selectedProduct: ProductSiteOverview | null;
   signingOut: boolean;
   theme: Theme;
 }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const update = () => setNow(Date.now());
+    update();
+    const timer = inventoryReceivedAt === null ? undefined : window.setTimeout(update,
+      Math.max(1, inventoryReceivedAt + 2 * READ_REFRESH_INTERVAL_MS - Date.now()));
+    window.addEventListener("focus", update);
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", update);
+      document.removeEventListener("visibilitychange", update);
+    };
+  }, [inventoryReceivedAt]);
+  const inventoryStale = productsResource.status === "error" || inventoryReceivedAt === null ||
+    now >= inventoryReceivedAt + 2 * READ_REFRESH_INTERVAL_MS;
+  const staleDescription = inventoryStale ? `Stale data${inventoryReceivedAt === null ? "" :
+    `; data from ${new Date(inventoryReceivedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}` : "";
   const products = (productsResource.data ?? []).map(product => expireProductEvidence(product));
   useEvidenceExpiry(products.flatMap(product => product.environments));
   const selectedProductKey = routeProductKey(route);
@@ -164,6 +186,12 @@ export function AppShell({
               <p className="rail-state">No products recorded</p>
             ) : null}
             {products.length ? (
+              <p className="rail-freshness" role="status">
+                {inventoryStale ? <Clock3 size={14} aria-hidden="true" /> : null}
+                {inventoryStale ? staleDescription : "Updates about every minute"}
+              </p>
+            ) : null}
+            {products.length ? (
               <ul className="rail-product-list">
                 {products.map((product) => {
                   const active = selectedProductKey === product.product;
@@ -176,7 +204,7 @@ export function AppShell({
                         to={productPath(product.product)}
                       >
                         <span title={product.display_name}>{product.display_name}</span>
-                        <ProductTrustDots product={product} />
+                        <ProductTrustDots product={product} staleDescription={staleDescription} />
                       </AppLink>
                     </li>
                   );
@@ -315,15 +343,15 @@ export function AppShell({
   );
 }
 
-function ProductTrustDots({ product }: { product: ProductSiteOverview }) {
+function ProductTrustDots({ product, staleDescription }: { product: ProductSiteOverview; staleDescription: string }) {
   const testing = product.environments.find(
     (environment) => environment.environment === "testing",
   );
   const production = product.environments.find(
     (environment) => environment.environment === "prod",
   );
-  const { tone: testingTone, description: testingDescription } = sidebarStatus(testing ?? null, "Testing");
-  const { tone: productionTone, description: productionDescription } = sidebarStatus(production ?? null, "Production");
+  const { tone: testingTone, description: testingDescription } = sidebarStatus(testing ?? null, "Testing", staleDescription);
+  const { tone: productionTone, description: productionDescription } = sidebarStatus(production ?? null, "Production", staleDescription);
   return (
     <span
       aria-label={`${testingDescription}; ${productionDescription}`}
@@ -347,10 +375,11 @@ function ProductTrustDots({ product }: { product: ProductSiteOverview }) {
 }
 
 function StatusIcon({ tone, absent }: { tone: SignalTone; absent: boolean }) {
-  const Icon = absent || tone === "unsupported" ? CircleMinus
+  const Icon = tone === "stale" ? Clock3
+    : absent || tone === "unsupported" ? CircleMinus
     : tone === "verified" ? CircleCheck
     : tone === "danger" ? CircleX
-    : tone === "warning" || tone === "stale" ? TriangleAlert
+    : tone === "warning" ? TriangleAlert
     : CircleHelp;
   return <Icon size="100%" strokeWidth={2.5} aria-hidden="true" />;
 }

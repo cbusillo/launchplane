@@ -379,6 +379,16 @@ h3 {
   color: var(--danger);
 }
 
+.rail-freshness {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  margin: 0 0 8px;
+}
+
 .rail-product-list {
   display: grid;
   gap: 3px;
@@ -437,7 +447,10 @@ h3 {
   color: var(--sidebar-healthy);
 }
 
-.product-trust-dots > span[data-tone="stale"],
+.product-trust-dots > span[data-tone="stale"] {
+  color: var(--sidebar-unknown);
+}
+
 .product-trust-dots > span[data-tone="warning"] {
   color: var(--sidebar-warning);
 }

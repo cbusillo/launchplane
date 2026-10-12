@@ -96,7 +96,7 @@ for (const state of cases) {
     const healthy = state === "healthy" || state === "missing-route" || state === "expired-route";
     const tone = healthy ? "verified" : state === "failed" || state === "incident" ? "danger" : state === "stale" ? "warning" : "missing";
     await expect(signal).toHaveAttribute("data-tone", tone);
-    await expect(dot).toHaveAttribute("data-tone", tone);
+    await expect(dot).toHaveAttribute("data-tone", state === "stale" ? "stale" : tone);
     await expect(dot).toHaveAttribute("title", fixtures.testingDescription);
     await expect(railLink.locator(".product-trust-dots")).toHaveAttribute("aria-label", new RegExp(fixtures.testingDescription.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     await expect(dot.locator("svg")).toBeAttached();
@@ -120,9 +120,9 @@ for (const state of cases) {
       await page.screenshot({ path: `../tmp/browser-smoke/sidebar-${state}-${theme}-${testInfo.project.name}.png`, fullPage: false });
     }
     if (state === "healthy") {
-      const colors = await page.locator('.rail-product-link [data-lane="testing"]').evaluateAll(icons =>
-        icons.map(icon => getComputedStyle(icon).color));
-      expect(new Set(colors).size).toBe(colors.length);
+      const signals = await page.locator('.rail-product-link [data-lane="testing"]').evaluateAll(icons =>
+        icons.map(icon => `${getComputedStyle(icon).color};${icon.querySelector("svg")?.getAttribute("class")}`));
+      expect(new Set(signals).size).toBe(signals.length);
     }
     expect(mutations).toEqual([]);
   });
