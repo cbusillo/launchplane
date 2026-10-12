@@ -285,6 +285,7 @@ def verify_verireel_testing_product(
     evidence["fixture_email"] = email
     public_label = f"Launchplane testing {stamp}"
     destination = f"https://example.com/watch/{stamp}"
+    effect_unknown = False
     # A disposable application fixture only; no operator credential is created.
     with sync_playwright() as playwright:
         browser = launch_testing_browser(playwright.chromium)
@@ -376,20 +377,33 @@ def verify_verireel_testing_product(
                         ).to_be_visible(timeout=30_000)
                         assert_verireel_testing_identity(base_url, context)
                     evidence["admin_verification_status"] = "pass"
+                except ProviderMutationUnknownError:
+                    effect_unknown = True
+                    raise
                 finally:
                     # The existing cleanup intent also removes sponsored creator fixtures.
                     evidence["cleanup_status"] = "fail"
-                    _maintenance(
-                        root,
-                        context,
-                        guard,
-                        action="delete-user",
-                        intent="owner-route-delete-user",
-                        email=email,
-                    )
-                    evidence["cleanup_status"] = "pass"
+                    if not effect_unknown:
+                        try:
+                            _maintenance(
+                                root,
+                                context,
+                                guard,
+                                action="delete-user",
+                                intent="owner-route-delete-user",
+                                email=email,
+                            )
+                        except ProviderMutationUnknownError:
+                            effect_unknown = True
+                            raise
+                        evidence["cleanup_status"] = "pass"
         finally:
-            browser.close()
+            try:
+                browser.close()
+            except Exception:
+                if not effect_unknown:
+                    raise
+                _LOGGER.warning("Browser cleanup failed after an unknown testing effect.")
 
 
 def execute_verireel_testing_post_deploy(

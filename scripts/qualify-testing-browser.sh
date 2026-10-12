@@ -9,9 +9,35 @@ fixture_dir="$(mktemp -d "$scratch_root/lp-browser.XXXXXXXX")"
 project="$(basename "$fixture_dir" | tr '[:upper:].' '[:lower:]-')"
 compose=(docker compose -p "$project" -f "$fixture_dir/browser.json")
 owns_project=0
+active_pid=""
+run_interruptible() {
+    "$@" <&0 &
+    active_pid="$!"
+    wait "$active_pid"
+    active_pid=""
+}
+cancel() {
+    trap '' INT TERM
+    if [[ -n "$active_pid" ]]; then
+        kill -KILL "$active_pid" 2>/dev/null || true
+        wait "$active_pid" 2>/dev/null || true
+    fi
+    exit "$1"
+}
 cleanup() {
     local result="$?"
     trap - EXIT
+    trap '' INT TERM
+    if [[ -f "$fixture_dir/probe.cid" ]]; then
+        local probe
+        probe="$(cat "$fixture_dir/probe.cid")"
+        if docker container inspect "$probe" >/dev/null 2>&1; then
+            if ! docker rm --force "$probe"; then
+                printf 'Browser probe cleanup failed; retained %s.\n' "$fixture_dir" >&2
+                exit 1
+            fi
+        fi
+    fi
     if [[ "$owns_project" == 1 && -f "$fixture_dir/browser.json" ]]; then
         if ! "${compose[@]}" down --volumes --timeout 5; then
             printf 'Browser fixture cleanup failed; retained %s.\n' "$fixture_dir" >&2
@@ -22,6 +48,8 @@ cleanup() {
     exit "$result"
 }
 trap cleanup EXIT
+trap 'cancel 130' INT
+trap 'cancel 143' TERM
 
 cp "$repo_root/docker-compose.yml" "$fixture_dir/compose.yml"
 printf '%s\n' 'LAUNCHPLANE_BROWSER_CREDENTIAL_FIXTURE=control-plane-only' > "$fixture_dir/.env"
@@ -38,7 +66,7 @@ if [[ -n "$(docker ps --all --quiet --filter "label=com.docker.compose.project=$
     exit 1
 fi
 owns_project=1
-"${compose[@]}" up -d --wait --wait-timeout 60
+run_interruptible "${compose[@]}" up -d --wait --wait-timeout 60
 container="$("${compose[@]}" ps -q launchplane-browser)"
 [[ -n "$container" ]]
 docker inspect "$container" > "$fixture_dir/container.json"
@@ -50,7 +78,7 @@ jq -e '
     (.NetworkSettings.Ports | to_entries | all(.value == null))
 ' "$fixture_dir/container.json" >/dev/null
 network="$(jq -r '.[0].NetworkSettings.Networks | keys[0]' "$fixture_dir/container.json")"
-docker run --rm --network "$network" \
+run_interruptible docker run --rm --cidfile "$fixture_dir/probe.cid" --network "$network" \
     --env LAUNCHPLANE_BROWSER_WS_ENDPOINT=ws://launchplane-browser:3000/ \
     --env LAUNCHPLANE_BROWSER_CREDENTIAL_FIXTURE=control-plane-only \
     --entrypoint /app/.venv/bin/python "$image" -c '

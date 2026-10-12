@@ -320,6 +320,35 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
         self.assertEqual(identity.call_count, 2)
         sleep.assert_called_once()
 
+    def test_unknown_effect_cannot_be_hidden_by_a_cleanup_failure(self) -> None:
+        from control_plane.provider_operations import ProviderMutationUnknownError
+
+        browser = MagicMock()
+        browser.close.side_effect = RuntimeError("browser disconnected")
+        evidence: dict[str, str] = {}
+        with (
+            patch("control_plane.workflows.verireel_testing_post_deploy.sync_playwright"),
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.launch_testing_browser",
+                return_value=browser,
+            ),
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.assert_verireel_testing_identity",
+                side_effect=ProviderMutationUnknownError("effect fence lost"),
+            ),
+            patch("control_plane.workflows.verireel_testing_post_deploy._maintenance") as maintain,
+        ):
+            with self.assertRaises(ProviderMutationUnknownError):
+                verify_verireel_testing_product(
+                    Path("."),
+                    self.context,
+                    GenericWebPostDeployGuard(),
+                    "https://video.test",
+                    evidence,
+                )
+        maintain.assert_not_called()
+        self.assertEqual(evidence["cleanup_status"], "fail")
+
     def test_identity_requires_the_exact_deployment_source_and_digest(self) -> None:
         identity = {
             key: getattr(self.context, key)
