@@ -159,8 +159,9 @@ class TitledOrSoleNewDeploymentWaitTests(unittest.TestCase):
 
     def test_failed_untitled_deployment_stays_unknown_when_another_job_appears(self) -> None:
         failed = [_deployment("old-1"), _deployment("old-2"), _deployment("new", status="error")]
-        with self.assertRaisesRegex(click.ClickException, "Timed out"):
+        with self.assertRaises(click.ClickException) as raised:
             _wait([failed, failed, [*failed, _deployment("ours", status="running")]] * 2)
+        self.assertNotIsInstance(raised.exception, dokploy_api.DokployDeploymentFailed)
 
 
 def _compose_ship_request() -> tuple[ShipRequest, ResolvedTargetEvidence]:
