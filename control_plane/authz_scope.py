@@ -9,6 +9,8 @@ DOKPLOY_TARGET_LANE_SETUP_ACTION = "dokploy_target.lane_setup"
 _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
     {
         "backup_gate.write",
+        # Retired capture grants still scope historical-operation cancellation.
+        "verireel_prod_backup_gate.execute",
         "deployment.read",
         DOKPLOY_TARGET_LANE_SETUP_ACTION,
         "every_code_feedback_resume.request",

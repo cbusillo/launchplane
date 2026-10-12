@@ -1189,11 +1189,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     verireel_prod_http.VeriReelProdDeployEnvelope,
                     "prod deploy driver",
                 ),
-                "prod_backup_gate": (
-                    verireel_prod_http._VERIREEL_PROD_BACKUP_GATE_ROUTE,
-                    verireel_prod_http.VeriReelProdBackupGateEnvelope,
-                    "prod backup gate driver",
-                ),
                 "prod_promotion": (
                     verireel_prod_http._VERIREEL_PROD_PROMOTION_ROUTE,
                     verireel_prod_http.VeriReelProdPromotionEnvelope,

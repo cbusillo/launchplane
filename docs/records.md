@@ -1843,15 +1843,15 @@ provider message or rollback health exception is embedded in the detail.
   artifact paths, SHA-256 values, counts, sizes, and bounded per-check status.
   A passing verification record is evidence for the dedicated restore planner;
   it does not authorize routine target replacement or promotion.
-- VeriReel prod backup-gate records remain the promotion evidence and replay
-  authority, but long-running backup-gate execution is queued separately in
+- Shared production backup execution is queued in the existing storage locations
   `launchplane_verireel_prod_backup_gate_operations` for DB-backed storage and
   `verireel_prod_backup_gate_operations` for file-backed local state. The HTTP
-  route writes a pending backup-gate record plus a typed operation record; the
-  supervised `verireel-workers` process claims the operation, heartbeats its
-  lease, executes shared captures from typed bindings, writes terminal backup-gate
-  evidence, and completes the operation record. Legacy requests without a typed
-  binding receive failed records without invoking the delegated host worker. Expired operations retry only
+  route at `/v1/production-backup-gates` writes a typed operation record; the
+  shared worker in `workflows/production_backup_gate_operation_worker.py` claims
+  it, heartbeats its lease, executes captures from typed bindings, writes terminal
+  backup-gate evidence, and completes the operation record. Historical record
+  schemas and storage locations remain readable. Legacy requests without a typed
+  binding receive failed records without a provider effect. Expired operations retry only
   before the external backup side-effect boundary; once the phase reaches
   `backup_gate`, lease expiry fails closed for admin review.
   A pending operation can be cancelled through the deployed service. The

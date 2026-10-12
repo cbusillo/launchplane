@@ -70,18 +70,18 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     run_odoo_stable_operation_worker_loop,
     run_odoo_stable_operation_worker_once,
 )
-from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
-    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_ERROR_BACKOFF_SECONDS,
-    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS,
-    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_LEASE_SECONDS,
-    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
-    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_CONSECUTIVE_ERRORS,
-    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_POLL_SECONDS,
-    VeriReelProdBackupGateOperationWorkerStore,
-    build_verireel_prod_backup_gate_operation_worker_status,
-    reconcile_stale_verireel_prod_backup_gate_operation_records,
-    run_verireel_prod_backup_gate_operation_worker_loop,
-    run_verireel_prod_backup_gate_operation_worker_once,
+from control_plane.workflows.production_backup_gate_operation_worker import (
+    DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_ERROR_BACKOFF_SECONDS,
+    DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS,
+    DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_LEASE_SECONDS,
+    DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+    DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_CONSECUTIVE_ERRORS,
+    DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_POLL_SECONDS,
+    ProductionBackupGateOperationWorkerStore,
+    build_production_backup_gate_operation_worker_status,
+    reconcile_stale_production_backup_gate_operation_records,
+    run_production_backup_gate_operation_worker_loop,
+    run_production_backup_gate_operation_worker_once,
 )
 
 from control_plane.workflows.public_ingress_monitor import public_ingress_notification_drivers
@@ -1376,19 +1376,19 @@ def service_verireel_workers() -> None:
 @click.option(
     "--lease-seconds",
     type=int,
-    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_LEASE_SECONDS,
+    default=DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_LEASE_SECONDS,
     show_default=True,
 )
 @click.option(
     "--heartbeat-seconds",
     type=int,
-    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS,
+    default=DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS,
     show_default=True,
 )
 @click.option(
     "--max-attempts",
     type=int,
-    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+    default=DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
     show_default=True,
 )
 def service_verireel_workers_run_once(
@@ -1407,9 +1407,9 @@ def service_verireel_workers_run_once(
     generated_lease_owner = (
         f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
     )
-    result = run_verireel_prod_backup_gate_operation_worker_once(
+    result = run_production_backup_gate_operation_worker_once(
         record_store=cast(
-            VeriReelProdBackupGateOperationWorkerStore,
+            ProductionBackupGateOperationWorkerStore,
             _store(state_dir=state_dir, database_url=database_url),
         ),
         control_plane_root_path=control_plane_root or _control_plane_root(),
@@ -1434,7 +1434,7 @@ def service_verireel_workers_run_once(
 @click.option(
     "--max-attempts",
     type=int,
-    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+    default=DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
     show_default=True,
 )
 def service_verireel_workers_reconcile(
@@ -1448,9 +1448,9 @@ def service_verireel_workers_reconcile(
             "VeriReel operation worker reconciliation requires --database-url or "
             "LAUNCHPLANE_DATABASE_URL."
         )
-    result = reconcile_stale_verireel_prod_backup_gate_operation_records(
+    result = reconcile_stale_production_backup_gate_operation_records(
         record_store=cast(
-            VeriReelProdBackupGateOperationWorkerStore,
+            ProductionBackupGateOperationWorkerStore,
             _store(state_dir=state_dir, database_url=database_url),
         ),
         max_attempts=max_attempts,
@@ -1487,37 +1487,37 @@ def service_verireel_workers_reconcile(
 @click.option(
     "--lease-seconds",
     type=int,
-    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_LEASE_SECONDS,
+    default=DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_LEASE_SECONDS,
     show_default=True,
 )
 @click.option(
     "--heartbeat-seconds",
     type=int,
-    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS,
+    default=DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS,
     show_default=True,
 )
 @click.option(
     "--max-attempts",
     type=int,
-    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+    default=DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
     show_default=True,
 )
 @click.option(
     "--poll-seconds",
     type=int,
-    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_POLL_SECONDS,
+    default=DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_POLL_SECONDS,
     show_default=True,
 )
 @click.option(
     "--error-backoff-seconds",
     type=int,
-    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_ERROR_BACKOFF_SECONDS,
+    default=DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_ERROR_BACKOFF_SECONDS,
     show_default=True,
 )
 @click.option(
     "--max-consecutive-errors",
     type=int,
-    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_CONSECUTIVE_ERRORS,
+    default=DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_CONSECUTIVE_ERRORS,
     show_default=True,
 )
 def service_verireel_workers_run(
@@ -1547,9 +1547,9 @@ def service_verireel_workers_run(
     previous_sigterm = signal.signal(signal.SIGTERM, _request_stop)
     previous_sigint = signal.signal(signal.SIGINT, _request_stop)
     try:
-        result = run_verireel_prod_backup_gate_operation_worker_loop(
+        result = run_production_backup_gate_operation_worker_loop(
             record_store=cast(
-                VeriReelProdBackupGateOperationWorkerStore,
+                ProductionBackupGateOperationWorkerStore,
                 _store(state_dir=state_dir, database_url=database_url),
             ),
             control_plane_root_path=control_plane_root or _control_plane_root(),
@@ -1593,9 +1593,9 @@ def service_verireel_workers_status(
         raise click.ClickException(
             "VeriReel operation worker status requires --database-url or LAUNCHPLANE_DATABASE_URL."
         )
-    result = build_verireel_prod_backup_gate_operation_worker_status(
+    result = build_production_backup_gate_operation_worker_status(
         record_store=cast(
-            VeriReelProdBackupGateOperationWorkerStore,
+            ProductionBackupGateOperationWorkerStore,
             _store(state_dir=state_dir, database_url=database_url),
         ),
         recent_terminal_limit=recent_terminal_limit,

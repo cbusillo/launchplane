@@ -516,15 +516,12 @@ from control_plane.verireel_nonprod_http import (
     apply_verireel_testing_deploy_result,
 )
 from control_plane.verireel_prod_http import (
-    VERIREEL_PROD_BACKUP_GATE_ROUTE as _VERIREEL_PROD_BACKUP_GATE_ROUTE,
     VERIREEL_PROD_DEPLOY_ROUTE as _VERIREEL_PROD_DEPLOY_ROUTE,
     VERIREEL_PROD_PROMOTION_ROUTE as _VERIREEL_PROD_PROMOTION_ROUTE,
     VERIREEL_PROD_ROLLBACK_ROUTE as _VERIREEL_PROD_ROLLBACK_ROUTE,
-    VeriReelProdBackupGateEnvelope,
     VeriReelProdDeployEnvelope,
     VeriReelProdPromotionEnvelope,
     VeriReelProdRollbackEnvelope,
-    apply_verireel_prod_backup_gate_result,
     apply_verireel_prod_deploy_result,
     apply_verireel_prod_promotion_result,
     apply_verireel_prod_rollback_result,
@@ -896,9 +893,9 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
     reconcile_stale_odoo_stable_operation_records,
 )
-from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
-    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
-    reconcile_stale_verireel_prod_backup_gate_operation_records,
+from control_plane.workflows.production_backup_gate_operation_worker import (
+    DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+    reconcile_stale_production_backup_gate_operation_records,
 )
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_lifecycle_cleanup import (
@@ -1861,7 +1858,7 @@ class OdooStableOperationWorkerReconcileResponse(BaseModel):
     reconcile_result: OdooStableOperationWorkerReconcileResultResponse
 
 
-class VeriReelProdBackupGateOperationLeaseSummaryResponse(BaseModel):
+class ProductionBackupGateOperationLeaseSummaryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     operation_id: str
@@ -1889,7 +1886,7 @@ class VeriReelProdBackupGateOperationWorkerStatusResponseModel(BaseModel):
     stalled_count: int
     terminal_count: int
     counts_by_status: dict[str, int]
-    operations: tuple[VeriReelProdBackupGateOperationLeaseSummaryResponse, ...]
+    operations: tuple[ProductionBackupGateOperationLeaseSummaryResponse, ...]
 
 
 class VeriReelProdBackupGateOperationWorkerStatusResponse(BaseModel):
@@ -5537,7 +5534,7 @@ def create_launchplane_fastapi_app(
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         max_attempts: Annotated[str, Query()] = str(
-            DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS
+            DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_ATTEMPTS
         ),
     ) -> VeriReelProdBackupGateOperationWorkerReconcileResponse:
         trace_id = next_trace_id()
@@ -5549,12 +5546,12 @@ def create_launchplane_fastapi_app(
             parsed_max_attempts = control_plane_service_status.query_int_value(
                 max_attempts,
                 "max_attempts",
-                default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+                default=DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
                 minimum=1,
                 maximum=100,
             )
             assert parsed_max_attempts is not None
-            reconcile_result = reconcile_stale_verireel_prod_backup_gate_operation_records(
+            reconcile_result = reconcile_stale_production_backup_gate_operation_records(
                 record_store=control_plane_service_status.require_verireel_prod_backup_gate_operation_worker_store(
                     record_store
                 ),
@@ -23517,112 +23514,6 @@ def create_launchplane_fastapi_app(
             )
         return response
 
-    async def apply_verireel_prod_backup_gate(
-        request: Request,
-        backup_gate_request: VeriReelProdBackupGateEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse | JSONResponse:
-        trace_id = next_trace_id()
-        try:
-            authorization_product, authorization_context = resolve_verireel_route_authorization(
-                record_store=record_store,
-                product=backup_gate_request.product,
-                context=backup_gate_request.backup_gate.context,
-                instance=backup_gate_request.backup_gate.instance,
-            )
-        except VeriReelRouteDependencyError:
-            return handle_verireel_route_dependency_error(
-                trace_id=trace_id,
-                route_path=_VERIREEL_PROD_BACKUP_GATE_ROUTE,
-            )
-        except VeriReelProductMismatchError as error:
-            raise_verireel_product_mismatch_error(trace_id=trace_id, error=error)
-        except (ValueError, click.ClickException) as error:
-            raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
-        if not native_routes.native_driver_route_authorization_allows(
-            endpoint=apply_verireel_prod_backup_gate,
-            authorization_allows=resolved_authz_policy_runtime.policy.allows,
-            identity=identity,
-            product=authorization_product,
-            context=authorization_context,
-            instances=(backup_gate_request.backup_gate.instance,),
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot execute the VeriReel prod backup gate driver"
-                    " for the requested product/context."
-                ),
-            )
-        (
-            normalized_key,
-            payload_fingerprint,
-            replayed_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=record_store,
-            identity=identity,
-            route_path=_VERIREEL_PROD_BACKUP_GATE_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
-        )
-        if replayed_response is not None:
-            return replayed_response
-        created_at = utc_now_timestamp()
-        try:
-            operation_authorization = capture_durable_operation_authorization(
-                identity=identity,
-                action=native_routes.native_driver_route_authz_action(
-                    apply_verireel_prod_backup_gate
-                ),
-                product=authorization_product,
-                context=authorization_context,
-                instances=(backup_gate_request.backup_gate.instance,),
-                policy_record=resolved_authz_policy_runtime.policy_record(updated_at=created_at),
-                authorized_at=created_at,
-            )
-        except DurableOperationAuthorizationCaptureError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="authorization_provenance_unavailable",
-                message="Durable operation authorization provenance is unavailable.",
-            ) from error
-        try:
-            records, result = apply_verireel_prod_backup_gate_result(
-                record_store=record_store,
-                request=backup_gate_request,
-                authorization=operation_authorization,
-            )
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=f"No Launchplane route for {_VERIREEL_PROD_BACKUP_GATE_ROUTE}.",
-            ) from error
-        except (ValueError, click.ClickException) as error:
-            raise_verireel_invalid_request_error(trace_id=trace_id, error=error)
-        except Exception as error:
-            raise_verireel_unexpected_driver_error(trace_id=trace_id, error=error)
-        response = accepted_evidence_response(trace_id=trace_id, records=records, result=result)
-        if should_store_verireel_prod_result_idempotency(result, skip_pending=True):
-            store_apply_idempotency(
-                record_store=record_store,
-                identity=identity,
-                route_path=_VERIREEL_PROD_BACKUP_GATE_ROUTE,
-                idempotency_key=normalized_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
-            )
-        return response
-
     async def apply_verireel_prod_promotion(
         request: Request,
         promotion_request: VeriReelProdPromotionEnvelope,
@@ -25908,35 +25799,6 @@ def create_launchplane_fastapi_app(
         },
         operation_id="apply_verireel_prod_deploy",
         summary="Execute VeriReel prod deploy",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        _VERIREEL_PROD_BACKUP_GATE_ROUTE,
-        apply_verireel_prod_backup_gate,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        openapi_extra={
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {
-                        "schema": _openapi_model_schema(VeriReelProdBackupGateEnvelope)
-                    }
-                },
-            }
-        },
-        operation_id="apply_verireel_prod_backup_gate",
-        summary="Execute VeriReel prod backup gate",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
@@ -28877,7 +28739,7 @@ def create_launchplane_fastapi_app(
     register_production_backup_authority_write_routes(
         app,
         dependencies=ProductionBackupAuthorityWriteRouteDependencies(
-            read_write_identity=read_bearer_identity,
+            read_write_identity=read_operator_mutation_identity,
             get_record_store=get_record_store,
             next_trace_id=next_trace_id,
             authorization_allows=resolved_authz_policy_runtime.allows,
