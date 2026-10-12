@@ -133,8 +133,37 @@ PY
   done
 }
 
+check_testing_browser() {
+  # Exercise the actual packaged caller services, including the event worker.
+  for service in launchplane launchplane-odoo-workers; do
+    run_interruptible "${compose[@]}" exec -T "$service" /app/.venv/bin/python - <<'PY'
+import time
+from playwright.sync_api import sync_playwright
+from control_plane.workflows.verireel_testing_post_deploy import launch_testing_browser
+deadline = time.monotonic() + 60
+while True:
+    try:
+        with sync_playwright() as playwright:
+            browser = launch_testing_browser(playwright.chromium)
+            try:
+                page = browser.new_page()
+                heading = "Packaged testing qualification"
+                page.set_content(f"<h1>{heading}</h1>")
+                assert page.locator("h1").inner_text() == heading
+            finally:
+                browser.close()
+        break
+    except Exception:
+        if time.monotonic() >= deadline:
+            raise
+        time.sleep(1)
+PY
+  done
+}
+
 run_interruptible "${compose[@]}" up --detach --no-build --pull never --wait --wait-timeout 120
 check_workers
+check_testing_browser
 before="$("${compose[@]}" ps --quiet "${services[@]}" | sort)"
 run_interruptible "${compose[@]}" exec -T launchplane /app/.venv/bin/python - <<'PY'
 import os
@@ -160,6 +189,7 @@ after="$("${compose[@]}" ps --quiet "${services[@]}" | sort)"
 test -n "$after"
 test -z "$(comm -12 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
 check_workers
+check_testing_browser
 run_interruptible "${compose[@]}" exec -T launchplane /app/.venv/bin/python - <<'PY'
 import json
 import os

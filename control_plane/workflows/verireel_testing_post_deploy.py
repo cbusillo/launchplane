@@ -95,6 +95,12 @@ def launch_testing_browser(chromium: BrowserType) -> Browser:
     return chromium.launch(chromium_sandbox=True, env=environment)
 
 
+def check_testing_browser_availability() -> None:
+    with sync_playwright() as playwright:
+        browser = launch_testing_browser(playwright.chromium)
+        browser.close()
+
+
 def checkpoint_testing_effect(guard: GenericWebPostDeployGuard, phase: str) -> None:
     try:
         guard.checkpoint_effect(phase)
@@ -249,6 +255,8 @@ def _maintenance(
 
 def _goto(page: Page, base_url: str, path: str) -> None:
     response = page.goto(f"{base_url}{path}", wait_until="domcontentloaded")
+    if response is not None and response.status >= 500:
+        raise click.ClickException("Testing product gateway is unavailable.")
     if response is None or response.status >= 400:
         raise TestingProductCheckFailed("Testing product route failed.")
     if urlparse(page.url).netloc != urlparse(base_url).netloc:
@@ -419,6 +427,8 @@ def execute_verireel_testing_post_deploy(
         base_url = _resolve_stable_testing_base_url(control_plane_root=control_plane_root)
         phase = "runtime_identity"
         wait_for_verireel_testing_identity(base_url, context)
+        phase = "browser_availability"
+        check_testing_browser_availability()
         phase = "migration"
         evidence["migration_status"] = "fail"
         _maintenance(
@@ -453,7 +463,8 @@ def execute_verireel_testing_post_deploy(
         status = "fail"
         evidence["failure_kind"] = (
             "product_check"
-            if isinstance(error, TestingProductCheckFailed) or evidence["cleanup_status"] == "fail"
+            if isinstance(error, (TestingProductCheckFailed, AssertionError))
+            or evidence["cleanup_status"] == "fail"
             else "transient"
         )
         if evidence["failure_kind"] == "transient":

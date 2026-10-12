@@ -58,6 +58,11 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
                 verification_path(origin, href)
 
     def setUp(self) -> None:
+        browser_availability = patch(
+            "control_plane.workflows.verireel_testing_post_deploy.check_testing_browser_availability"
+        )
+        browser_availability.start()
+        self.addCleanup(browser_availability.stop)
         authority = patch(
             "control_plane.workflows.verireel_testing_post_deploy.testing_qualification_authority",
             return_value="test-authority",
@@ -157,6 +162,42 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
         self.assertEqual(result.evidence["migration_status"], "fail")
         verify.assert_not_called()
 
+    def test_unavailable_browser_makes_no_migration_or_fixture_change(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.check_testing_browser_availability",
+                side_effect=click.ClickException("browser unavailable"),
+            ),
+            patch("control_plane.workflows.verireel_testing_post_deploy._maintenance") as maintain,
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.assert_verireel_testing_identity"
+            ),
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy._resolve_stable_testing_base_url",
+                return_value="https://video.test",
+            ),
+        ):
+            result = self.execute()
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(result.evidence["failure_kind"], "transient")
+        self.assertEqual(result.evidence["migration_status"], "skipped")
+        maintain.assert_not_called()
+
+    def test_gateway_outage_is_transient_and_a_missing_route_is_a_product_failure(self) -> None:
+        from control_plane.workflows.verireel_testing_post_deploy import (
+            TestingProductCheckFailed,
+            _goto,
+        )
+
+        page = Mock(url="https://video.test/dashboard")
+        page.goto.return_value.status = 503
+        with self.assertRaises(click.ClickException) as transient:
+            _goto(page, "https://video.test", "/dashboard")
+        self.assertNotIsInstance(transient.exception, TestingProductCheckFailed)
+        page.goto.return_value.status = 404
+        with self.assertRaises(TestingProductCheckFailed):
+            _goto(page, "https://video.test", "/dashboard")
+
     def test_production_and_runtime_mismatch_make_no_maintenance_call(self) -> None:
         with (
             patch(
@@ -196,7 +237,7 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
         maintain.assert_not_called()
         identity.assert_not_called()
 
-    def test_remote_browser_receives_no_control_plane_credentials(self) -> None:
+    def test_remote_browser_connects_without_forwarding_the_local_environment(self) -> None:
         chromium = Mock()
         endpoint = "ws://browser.example.test:3000/"
         with patch.dict(
@@ -311,13 +352,11 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
         browser = MagicMock()
         page = browser.new_context.return_value.__enter__.return_value.new_page.return_value
         page.wait_for_load_state.side_effect = RuntimeError("signup failed")
-        playwright = MagicMock()
-        playwright.__enter__.return_value.chromium.launch.return_value = browser
         evidence: dict[str, str] = {}
         with (
             patch(
-                "control_plane.workflows.verireel_testing_post_deploy.sync_playwright",
-                return_value=playwright,
+                "control_plane.workflows.verireel_testing_post_deploy.launch_testing_browser",
+                return_value=browser,
             ),
             patch(
                 "control_plane.workflows.verireel_testing_post_deploy.assert_verireel_testing_identity"

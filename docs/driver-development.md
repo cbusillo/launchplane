@@ -99,7 +99,10 @@ The service image includes matching Playwright Chromium. The Compose browser
 service uses Playwright's built-in remote server in an unprivileged, read-only
 container with no credentials, runtime volume, host socket or published port.
 `LAUNCHPLANE_BROWSER_WS_ENDPOINT` is Launchplane self-bootstrap wiring to that
-private component; Linux verification refuses an absent endpoint. Local
+private component. Both the HTTP service and the event-reconcile worker receive
+that endpoint and private network; control-plane startup does not wait on browser
+health. Verification checks browser availability before migration and Linux
+verification refuses an absent endpoint. Local
 non-Linux rehearsals use a sandboxed browser with a scrubbed environment.
 Fixture passwords are ephemeral and never enter qualification evidence.
 See [event-driven deploys](event-driven-deploys.md) for requalification and replay.
