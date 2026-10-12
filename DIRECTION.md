@@ -43,8 +43,7 @@ a behavior needs no other reason. A test earns its place by catching a real
 regression, not by restating the code or its wording.
 
 Only an admin or Launchplane merges. Clients can veto a change, never merge
-one. The merge train is the delivery path; when the train itself is broken,
-merge through the protected branch and record why in the pull request.
+one.
 
 Launchplane records each product's Client and runs every production release
 through the same gated path: verified backup, release record, post-deploy
