@@ -869,3 +869,48 @@ freshly returned failures and open incidents retain their alert. Stored route
 authority expiry remains a separate diagnostic, as described above.
 Cache age uses both elapsed and forward wall-clock time, so setting the clock
 backward cannot prolong freshness and waking a sleeping browser catches up.
+
+### Signed-in non-production setup
+
+On a product's **Overview**, an administrator can open **Set up a
+non-production environment**. **Add environment** uses the existing stable-lane
+repair endpoint: choose a context already owned by the product, enter the new
+non-production environment name and, for a product with a public website, its
+prepared HTTPS origin, and run the service dry run. A product whose stored
+website declaration is `none` omits that origin; it still requires matching
+prepared target records. Configure its private health check separately after
+registration. Review the exact service result and confirm **Apply reviewed
+change**. The target records must already exist and, when supplied, agree with that origin;
+missing or changed target authority is a visible service refusal, not permission
+to create or guess a target. The apply is bound to the reviewed plan digest.
+
+After the environment exists, **Declare managed-secret fields** selects that
+lane and accepts one or more binding keys and integrations. Context and instance
+come from the selected product lane. Run the dry run, review the service's added
+and unchanged declarations, confirm the scope, and apply. This is add-only
+expected-config metadata; it contains no secret values. Both operations read
+back the product profile before reporting success. Edits invalidate the review;
+an uncertain apply preserves its original request and idempotency key for retry.
+Both endpoints replay their atomic receipt before refusing a stale write. A
+definitive stale refusal settles the original retry so a new dry run can proceed;
+a fresh authorization denial does not prove the original write failed.
+
+**Open <environment> managed secrets** reaches the existing password-entry
+screen. The signed-in administrator supplies values there through its separate
+reviewed secret-write flow. Declarations do not prove runtime delivery, health,
+or release readiness. Setup does not release or activate the product.
+
+These endpoints use the existing authenticated browser mutation boundary,
+including same-origin and single-use CSRF checks and current action authority.
+Read-only users and Clients do not receive these setup controls. An incomplete
+profile response disables setup with a scoped error, while existing product
+controls remain available; no setup write uses that incomplete metadata.
+**Retry setup read** fetches fresh metadata. A pending uncertain apply stays
+visible and retains its request/key; its original retry returns after a valid
+profile read. Existing agent
+policy checks and the Live-product `LocalOperatorIdentity` expected-config
+refusal remain in force; this UI adds no grant or credential authority.
+Database-backed declaration apply also refuses a concurrent product-profile
+change rather than overwriting it with an earlier profile snapshot.
+Existing workflow callers receive the same concurrent-change refusal; review
+current metadata and run a new dry run before retrying a stale apply.
