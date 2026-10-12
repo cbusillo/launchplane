@@ -65,7 +65,16 @@ class AuthorizationAllows(Protocol):
         product: str,
         context: str,
         target: AuthorizationTarget | None = None,
+        inherit_agent_read_role: bool = True,
     ) -> bool: ...
+
+
+class ReadRoleProducts(Protocol):
+    def __call__(self, *, identity: LaunchplaneIdentity, context: str) -> frozenset[str]: ...
+
+
+def no_read_role_products(*, identity: LaunchplaneIdentity, context: str) -> frozenset[str]:
+    return frozenset()
 
 
 class HttpErrorFactory(Protocol):
@@ -88,3 +97,4 @@ class ReadRouteDependencies:
     authorization_allows: AuthorizationAllows
     http_error: HttpErrorFactory
     error_response_model: type[BaseModel]
+    read_role_products: ReadRoleProducts = no_read_role_products

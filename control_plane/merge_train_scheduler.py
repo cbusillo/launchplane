@@ -96,6 +96,8 @@ class MergeTrainScheduledTargetResult:
     # failed: the pass could not run, and reason_code says why.
     status: str
     reason_code: str = ""
+    controller_action: str = ""
+    last_controller_result: dict[str, object] = field(default_factory=dict)
     trace_id: str = ""
     records: dict[str, str] = field(default_factory=dict)
     feedback_delivered: int = 0
@@ -411,9 +413,19 @@ def _run_controller(
             },
             now=now,
         )
+    diagnosis = controller_result.accepted_result.get("last_controller_result")
+    reason = (
+        diagnosis.get("reason_code")
+        if isinstance(diagnosis, dict)
+        else controller_result.accepted_result.get("reason_code")
+    )
+    action = controller_result.accepted_result.get("controller_action")
     return _target_result(
         repository_policy,
         status="ran",
+        reason_code=reason if isinstance(reason, str) else "",
+        controller_action=action if isinstance(action, str) else "",
+        last_controller_result=diagnosis,
         trace_id=trace_id,
         records=controller_result.records,
         feedback_delivered=delivered,
@@ -552,6 +564,8 @@ def _target_result(
     *,
     status: str,
     reason_code: str = "",
+    controller_action: str = "",
+    last_controller_result: object = None,
     trace_id: str = "",
     records: dict[str, str] | None = None,
     feedback_delivered: int = 0,
@@ -565,6 +579,10 @@ def _target_result(
         mutate=repository_policy.scheduler.mutate,
         status=status,
         reason_code=reason_code,
+        controller_action=controller_action,
+        last_controller_result=(
+            dict(last_controller_result) if isinstance(last_controller_result, dict) else {}
+        ),
         trace_id=trace_id,
         records=dict(records or {}),
         feedback_delivered=feedback_delivered,

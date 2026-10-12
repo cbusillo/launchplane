@@ -21,7 +21,12 @@ from control_plane.product_generic_web_transition import (
     ProductGenericWebTransitionRequest,
     build_generic_web_transition_plan,
 )
-from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
+from control_plane.service_auth import (
+    GitHubHumanIdentity,
+    LaunchplaneIdentity,
+    LocalOperatorIdentity,
+    TerminalAgentIdentity,
+)
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -48,17 +53,34 @@ def register_product_generic_web_transition_routes(
                 status_code=status, trace_id=trace, code=code, message=message
             )
 
-        if not isinstance(identity, GitHubHumanIdentity) or identity.role != "admin":
-            refusal(
-                403, "authorization_denied", "Shared-web transitions require a signed-in admin."
+        admin_write = (
+            isinstance(identity, GitHubHumanIdentity)
+            and identity.role == "admin"
+            and dependencies.authorization_allows(
+                identity=identity,
+                action="product_profile.write",
+                product=product,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
             )
-        if not dependencies.authorization_allows(
-            identity=identity,
-            action="product_profile.write",
-            product=product,
-            context=LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            refusal(403, "authorization_denied", "Caller cannot change this product profile.")
+        )
+        agent_plan = (
+            body.mode == "dry-run"
+            and isinstance(identity, LocalOperatorIdentity | TerminalAgentIdentity)
+            and product
+            in dependencies.read_role_products(
+                identity=identity, context=LAUNCHPLANE_SERVICE_CONTEXT
+            )
+            and dependencies.authorization_allows(
+                identity=identity,
+                action="product_profile.plan",
+                product=product,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+            )
+        )
+        if not admin_write and not agent_plan:
+            refusal(
+                403, "authorization_denied", "Caller cannot plan or apply this product transition."
+            )
         if not isinstance(record_store, PostgresRecordStore):
             refusal(
                 503, "database_storage_required", "Shared-web transitions require database storage."

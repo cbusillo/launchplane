@@ -1,9 +1,8 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
@@ -123,14 +122,14 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
             store.write_merge_train_controller_state_record(controller)
             # A passed candidate really reaches observation before the
             # controller creates its landing plan, including full-CI fallback.
-            lease = cast(
-                MergeTrainControllerLeaseContext,
-                cast(object, SimpleNamespace(record=controller, checkpoint=Mock())),
-            )
+            lease = MergeTrainControllerLeaseContext(record=controller)
             request = MergeTrainControllerRunOnceEnvelope(repository=REPOSITORY, mutate=True)
-            with patch(
-                "control_plane.merge_train_controller_run_once._reflow_stale_candidate_record",
-                return_value=None,
+            with (
+                patch.object(lease, "checkpoint"),
+                patch(
+                    "control_plane.merge_train_controller_run_once._reflow_stale_candidate_record",
+                    return_value=None,
+                ),
             ):
                 advanced = _advance_passed_candidate_record(
                     request=request,

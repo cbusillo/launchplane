@@ -131,6 +131,30 @@ class MergeTrainSchedulerPassTests(TestCase):
 
         self.assertEqual(self._run(), ())
 
+    def test_worker_summary_keeps_the_canonical_controller_diagnosis(self) -> None:
+        self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
+            ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True)),
+        )
+        self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
+            "admitted"
+        )
+        diagnosis = {
+            "action": "candidate_failed",
+            "reason_code": "candidate_failure_read_unavailable",
+            "source_failed_record_id": "failed-record",
+        }
+        controller_result = _controller_result()
+        controller_result.accepted_result.update(
+            controller_action=diagnosis["action"],
+            reason_code="failed_candidate_recovery_unavailable",
+            last_controller_result=diagnosis,
+        )
+        self.mocks["execute_merge_train_controller_run_once"].return_value = controller_result
+        result = self._run()[0]
+        self.assertEqual(result.controller_action, diagnosis["action"])
+        self.assertEqual(result.reason_code, diagnosis["reason_code"])
+        self.assertEqual(result.last_controller_result, diagnosis)
+
     def test_controller_evidence_reads_leave_the_scheduler_token_usable(self) -> None:
         self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),

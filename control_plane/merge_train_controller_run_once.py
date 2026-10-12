@@ -1,7 +1,7 @@
 import hashlib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import logging
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -103,6 +103,8 @@ from control_plane.merge_train_original_review import (
     original_review_recovery_records,
     original_review_recovery_details,
 )
+from control_plane.merge_train_diagnostics import controller_last_result
+from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecordStore,
     stack_collapse_expected_root_head_sha,
@@ -223,6 +225,52 @@ class MergeTrainControllerLeaseContext:
     record: MergeTrainControllerStateRecord
     record_store: MergeTrainControllerStateRecordStore | None = None
     lease_seconds: int = DEFAULT_MERGE_TRAIN_CONTROLLER_LEASE_SECONDS
+    observations: dict[str, str] = field(default_factory=dict)
+
+    def observe(self, **evidence: str) -> None:
+        self.observations.update(evidence)
+
+    def observe_failed_candidate(self, record: MergeTrainBatchCandidateRecord) -> None:
+        candidate = record.candidate
+        self.observations.update(
+            source_failed_record_id=record.record_id,
+            candidate_batch_id=candidate.batch_id,
+            candidate_sha=candidate.candidate_sha,
+            base_sha=candidate.base_sha,
+            check_retry_of=candidate.check_retry_of,
+            infrastructure_retry_of=candidate.infrastructure_retry_of,
+            batch_body_retry_of=candidate.batch_body_retry_of,
+        )
+
+    def record_result(
+        self,
+        result: dict[str, object],
+        *,
+        pass_started_at: str,
+        trace_id: str,
+        reconciliation_required: bool,
+        policy_key: str = "",
+        policy_sha256: str = "",
+    ) -> None:
+        diagnosis, progress_key = controller_last_result(
+            result=result,
+            state=self.record,
+            observations=self.observations,
+            pass_started_at=pass_started_at,
+            observed_at=utc_now_timestamp(),
+            trace_id=trace_id,
+            policy_key=policy_key or self.record.policy_key,
+            policy_sha256=policy_sha256 or self.record.policy_sha256,
+            reconciliation_required=reconciliation_required,
+            persisted=self.record_store is not None,
+        )
+        if self.record_store is not None:
+            # The existing fenced release persists this with the lease outcome.
+            # Diagnostic metadata adds no renewal or independent write.
+            self.record = self.record.model_copy(
+                update={"last_result": diagnosis, "semantic_progress_key": progress_key}
+            )
+        result["last_controller_result"] = diagnosis.model_dump(mode="json")
 
     @property
     def owner(self) -> str:
@@ -332,6 +380,15 @@ def merge_train_controller_mutation_fence(
         raise
     except Exception as error:
         try:
+            lease.record_result(
+                {
+                    "controller_action": lease.record.active_action,
+                    "reason_code": _controller_exception_reconciliation_detail(error).split(";")[0],
+                },
+                pass_started_at=controller_state.updated_at,
+                trace_id=trace_id,
+                reconciliation_required=True,
+            )
             lease.release(
                 reconciliation_status="required",
                 reconciliation_detail=_controller_exception_reconciliation_detail(error),
@@ -610,10 +667,29 @@ def _execute_merge_train_controller_with_client(
                     lease=lease,
                     release_hold_reader=release_hold_reader,
                 )
+        lease.record_result(
+            result,
+            pass_started_at=recorded_at,
+            trace_id=trace_id,
+            reconciliation_required=_controller_result_requires_reconciliation(result),
+            policy_key=repository_policy.policy_key,
+            policy_sha256=policy_sha256,
+        )
     except MergeTrainControllerLeaseLostError:
         raise
     except Exception as error:
         try:
+            lease.record_result(
+                {
+                    "controller_action": lease.record.active_action,
+                    "reason_code": _controller_exception_reconciliation_detail(error).split(";")[0],
+                },
+                pass_started_at=recorded_at,
+                trace_id=trace_id,
+                reconciliation_required=True,
+                policy_key=repository_policy.policy_key,
+                policy_sha256=policy_sha256,
+            )
             lease.release(
                 reconciliation_status="required",
                 reconciliation_detail=_controller_exception_reconciliation_detail(error),
@@ -641,6 +717,19 @@ def _execute_merge_train_controller_with_client(
         except Exception as error:
             if request.mutate:
                 try:
+                    lease.record_result(
+                        {
+                            **result,
+                            "reason_code": _controller_exception_reconciliation_detail(error).split(
+                                ";"
+                            )[0],
+                        },
+                        pass_started_at=recorded_at,
+                        trace_id=trace_id,
+                        reconciliation_required=True,
+                        policy_key=repository_policy.policy_key,
+                        policy_sha256=policy_sha256,
+                    )
                     lease.release(
                         reconciliation_status="required",
                         reconciliation_detail=_controller_exception_reconciliation_detail(error),
@@ -2534,7 +2623,13 @@ def _advance_active_candidate_record(
         )
     except ValueError as error:
         raise MergeTrainControllerRequestError(str(error)) from error
+    lease.observe(
+        candidate_batch_id=active_candidate_record.candidate.batch_id,
+        candidate_sha=active_candidate_record.candidate.candidate_sha,
+        base_sha=active_candidate_record.candidate.base_sha,
+    )
     if active_candidate_record.candidate.status == "failed":
+        lease.observe_failed_candidate(active_candidate_record)
         if request.mutate:
             _close_service_batch_pull_request(
                 github_client=github_client,
@@ -2722,6 +2817,11 @@ def _advance_active_candidate_record(
                 lease.checkpoint(active_phase="ensure_batch_pull_request")
                 github_client.ensure_batch_pull_request(candidate=active_candidate_record.candidate)
                 lease.checkpoint(active_phase="observe_required_checks")
+            if request.mutate:
+                lease.observe(
+                    candidate_checks_status="unknown",
+                    candidate_sha=active_candidate_record.candidate.candidate_sha,
+                )
             candidate = (
                 github_client.observe_batch_candidate_checks(
                     candidate=active_candidate_record.candidate
@@ -2729,6 +2829,8 @@ def _advance_active_candidate_record(
                 if request.mutate
                 else active_candidate_record.candidate
             )
+            if request.mutate:
+                lease.observe(candidate_checks_status=candidate.required_checks_status)
         except MergeTrainGitHubStaleHeadError as error:
             controller_action = "candidate_failed"
             candidate_build_error = error
@@ -3089,9 +3191,14 @@ def _advance_passed_candidate_record(
     )
     batch_pull_request_number = None
     if passed_candidate_record.candidate.head_check_reuse is not None:
+        lease.observe(
+            candidate_checks_status="unknown",
+            candidate_sha=passed_candidate_record.candidate.candidate_sha,
+        )
         refreshed = github_client.observe_batch_candidate_checks(
             candidate=passed_candidate_record.candidate
         )
+        lease.observe(candidate_checks_status=refreshed.required_checks_status)
         refreshed_record = build_merge_train_batch_candidate_record(
             candidate=refreshed,
             source=f"service:controller:head-check-revalidation:{trace_id}",
@@ -4321,6 +4428,7 @@ def try_reflow_failed_merge_train_candidate(
             base_branch=base_branch,
         )
     except Exception:
+        lease.observe(reason_code="recovery_queue_read_unavailable")
         return None
     snapshot = _without_obsolete_stack_collapse_pull_requests(
         snapshot=snapshot,
@@ -4356,6 +4464,7 @@ def try_reflow_failed_merge_train_candidate(
             "base_branch": base_branch,
             "mode": "dry-run",
             "controller_action": "wait_for_checks",
+            "reason_code": "original_head_checks_pending",
             "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
             "dry_run_result": dry_run_result.model_dump(mode="json"),
         }
@@ -4702,7 +4811,9 @@ def _resume_known_failed_batch(
             )
         if unfinished_retry and retry.candidate_sha:
             try:
+                lease.observe(candidate_checks_status="unknown", candidate_sha=retry.candidate_sha)
                 observed = github_client.observe_batch_candidate_checks(candidate=retry)
+                lease.observe(candidate_checks_status=observed.required_checks_status)
                 closed = bound_closed_batch_pull_request(client=github_client, candidate=retry)
             except (MergeTrainGitHubError, MergeAdmissionDeniedError):
                 return _stop_failed_batch_after_conflict_probe(
@@ -4949,16 +5060,23 @@ def _retry_closed_candidate_after_passing_checks(
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
     failed = active_candidate_record.candidate
+    lease.observe_failed_candidate(active_candidate_record)
     if failed.required_checks_status != "fail":
+        lease.observe(reason_code="candidate_not_failed_checks")
         return None
     try:
+        lease.observe(candidate_checks_status="unknown")
         observed = github_client.observe_batch_candidate_checks(candidate=failed)
+        lease.observe(candidate_checks_status=observed.required_checks_status)
         if observed.required_checks_status != "pass":
+            lease.observe(reason_code="candidate_checks_not_recovered")
             return None
         closed = bound_closed_batch_pull_request(client=github_client, candidate=failed)
     except (MergeTrainGitHubError, MergeAdmissionDeniedError):
+        lease.observe(reason_code="candidate_retry_evidence_unavailable")
         return None
     if closed is None:
+        lease.observe(reason_code="candidate_closed_batch_evidence_unavailable")
         return None
     details: dict[str, object] = {
         "observed_candidate_sha": failed.candidate_sha,
@@ -5072,6 +5190,7 @@ def _recover_failed_merge_train_candidate(
     blocked. ``None`` keeps the failure stopped.
     """
     failed = active_candidate_record.candidate
+    lease.observe_failed_candidate(active_candidate_record)
     if (
         active_candidate_record.ordinary_job_binding is not None
         or failed.required_checks_status != "fail"
@@ -5081,9 +5200,11 @@ def _recover_failed_merge_train_candidate(
     try:
         failures = github_client.read_candidate_check_failures(candidate=failed)
     except MergeTrainGitHubError:
+        lease.observe(reason_code="candidate_failure_read_unavailable")
         return None
     if not failures.conclusive:
         # A re-run in progress or a failure no longer visible blames nobody yet.
+        lease.observe(reason_code="candidate_failure_evidence_unavailable")
         return None
     details: dict[str, object] = {
         "failed_checks": [
@@ -5133,6 +5254,7 @@ def _recover_failed_merge_train_candidate(
         )
     except MergeTrainGitHubError:
         base_check_status = "unknown"
+    lease.observe(base_checks_status=base_check_status)
     if base_check_status != "pass":
         # Failure on an unverified base cannot identify a queued change as its cause.
         base_detail = (
@@ -5464,6 +5586,7 @@ def _reobserve_failed_merge_train_candidate(
     multi-entry merge batch stays failed until its queue changes.
     """
     candidate = active_candidate_record.candidate
+    lease.observe_failed_candidate(active_candidate_record)
     if candidate.required_checks_status != "fail":
         return None
     if (
@@ -5473,9 +5596,12 @@ def _reobserve_failed_merge_train_candidate(
     ):
         return None
     try:
+        lease.observe(candidate_checks_status="unknown")
         observed_candidate = github_client.observe_batch_candidate_checks(candidate=candidate)
     except MergeTrainGitHubError:
+        lease.observe(reason_code="candidate_check_read_unavailable")
         return None
+    lease.observe(candidate_checks_status=observed_candidate.required_checks_status)
     if observed_candidate.required_checks_status == "fail":
         return None
     observed_candidate = observed_candidate.model_copy(update={"held_out": held_out})
