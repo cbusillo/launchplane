@@ -715,8 +715,9 @@ requires fresh passing effective health checks and exact matching runtime
 identity. Products that require a website also require an effective public HTTP
 check; private checks cannot substitute for public reachability. Missing,
 disabled, expired or divergent stored route authority remains visible in
-diagnostics and does not prevent operational green for Live products with fresh observed proof. Route-change readiness and
-the proof required immediately before a managed route change remain separate.
+diagnostics and does not prevent operational green with fresh observed proof.
+Route-change readiness and the proof required immediately before a managed
+route change remain separate.
 Public green also requires a fresh passing public observation whose runtime
 identity matches the expected deployment, and a fresh valid certificate for
 each HTTPS domain in the lane's desired URL records, with matching public name,
