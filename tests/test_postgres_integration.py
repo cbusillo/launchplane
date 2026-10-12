@@ -3728,11 +3728,14 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 repair.close()
 
     def test_self_deploy_fence_and_release_admission_serialize_in_both_orders(self) -> None:
+        from control_plane.product_reconcile import reconcile_reservation_scope
         from control_plane.service_deploy_drain import ServiceDeployDraining, prepare
 
         for admission_kind, admission_first in (
             ("reservation", True),
             ("reservation", False),
+            ("event-reservation", True),
+            ("event-reservation", False),
             ("backup-claim", True),
             ("backup-claim", False),
             ("testing-replacement-claim", True),
@@ -3794,7 +3797,11 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                             claimed_at=datetime.now(timezone.utc).isoformat(),
                         )
                     return store.reserve_mutation(
-                        scope="client-release",
+                        scope=(
+                            reconcile_reservation_scope("example-product")
+                            if admission_kind == "event-reservation"
+                            else "client-release"
+                        ),
                         route_path="/isolated",
                         idempotency_key="race",
                         request_fingerprint="release",
@@ -3851,7 +3858,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                             self.assertEqual(record.state, "draining")
                             record_id = (
                                 reservation.operation_id
-                                if admission_kind != "reservation"
+                                if admission_kind not in {"reservation", "event-reservation"}
                                 else reservation.record.record_id
                             )
                             self.assertEqual(running, (record_id,))
@@ -3860,7 +3867,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                             _, running, dispatch = initial.result(10)
                             self.assertTrue(dispatch)
                             self.assertFalse(running)
-                            if admission_kind != "reservation":
+                            if admission_kind not in {"reservation", "event-reservation"}:
                                 self.assertIsNone(contender.result(10))
                             else:
                                 with self.assertRaises(ServiceDeployDraining):

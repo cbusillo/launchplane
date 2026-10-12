@@ -84,6 +84,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
 )
 from control_plane.contracts.product_reconcile import (
+    RECONCILE_SOURCE as RECONCILE_SOURCE,
     ProductReconcileRequestRecord,
     ProductReconcileTarget,
 )
@@ -213,7 +214,6 @@ PRODUCT_RECONCILE_SWEEP_SECONDS = 30 * 60
 # A running reconcile renews its lease every third of it, so a long preview apply
 # keeps it; a crashed worker's request is reclaimed after this, well inside one sweep.
 PRODUCT_RECONCILE_LEASE_SECONDS = 20 * 60
-RECONCILE_SOURCE = "launchplane-reconcile"
 TESTING_DEPLOY_MAX_FAILED_ATTEMPTS = 3
 PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS = 3
 TESTING_DEPLOY_MAX_ATTEMPT_CHAIN = 20

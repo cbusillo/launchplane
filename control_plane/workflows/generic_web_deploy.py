@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 from pathlib import Path
 from typing import Callable, Literal, Protocol, cast
 
@@ -46,6 +47,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
 )
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebProviderDeploymentObservation,
+    GenericWebProviderDeploymentFailed,
 )
 from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
 from control_plane.workflows.generic_web_deploy_provider import default_generic_web_deploy_provider
@@ -120,6 +122,7 @@ class GenericWebDeployResult(BaseModel):
     provider_id: str = ""
     provider_target_type: str = ""
     provider_effect_attempted: bool = False
+    provider_failure_proved: bool = False
     image_effect_attempted: bool = False
     post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
     error_message: str = ""
@@ -592,6 +595,39 @@ def execute_generic_web_deploy(
     verified_build_evidence: dict[str, str] = {}
     application_lifecycle: GenericWebApplicationLifecycle | None = None
 
+    def checkpoint_provider(phase: str) -> None:
+        nonlocal post_deploy_update
+        if provider_effect_checkpoint is not None:
+            provider_effect_checkpoint(phase)
+        if phase == "provider_dispatch_prepared":
+            # Value-free provider references join the already reserved original
+            # request/target before any env write or deploy trigger can happen.
+            post_deploy_update = post_deploy_update.model_copy(
+                update={
+                    "evidence": {
+                        **post_deploy_update.evidence,
+                        "provider_dispatch": json.dumps(
+                            prepared_deploy_target.provider_dispatch_evidence, sort_keys=True
+                        ),
+                    }
+                }
+            )
+            record_store.write_deployment_record(
+                build_deployment_record(
+                    request=ship_request,
+                    record_id=record_id,
+                    deployment_id="control-plane-dokploy",
+                    deployment_status="pending",
+                    started_at=started_at,
+                    finished_at="",
+                    resolved_target=resolved_target,
+                    deployed_target=prepared_deploy_target.deployed_target,
+                    delegated_executor=resolved_deploy_provider.delegated_executor,
+                    post_deploy_update=post_deploy_update,
+                    runtime_source=verified_build_evidence,
+                )
+            )
+
     def mark_provider_effect_started() -> None:
         nonlocal provider_effect_attempted
         provider_effect_attempted = True
@@ -696,7 +732,7 @@ def execute_generic_web_deploy(
                 deployment_record_id=record_id,
             ),
             deployment_title=normalized_provider_operation_title,
-            before_provider_mutation=(provider_effect_checkpoint or (lambda _phase: None)),
+            before_provider_mutation=checkpoint_provider,
             effect_started=mark_image_effect_started,
         )
         if normalized_provider_operation_title and untitled_deployment_observation is not None:
@@ -779,6 +815,8 @@ def execute_generic_web_deploy(
                 },
             )
     except click.ClickException as exc:
+        if isinstance(exc, GenericWebProviderDeploymentFailed):
+            provider_deployment_observation = exc.observation
         if application_lifecycle is not None:
             try:
                 if (
@@ -886,6 +924,11 @@ def execute_generic_web_deploy(
             provider_id=target_fields.provider_id,
             provider_target_type=target_fields.provider_target_type,
             provider_effect_attempted=provider_effect_attempted,
+            provider_failure_proved=(
+                isinstance(exc, GenericWebProviderDeploymentFailed)
+                and application_lifecycle is None
+                and not deploy_completed
+            ),
             image_effect_attempted=image_effect_attempted,
             post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
             error_message=str(exc),
