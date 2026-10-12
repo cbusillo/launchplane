@@ -125,7 +125,8 @@ governed expectation, custody and currentness contract.
 - native FastAPI Launchplane service runtime reads:
   - `GET /v1/service/health-monitor/status`, requiring
     `launchplane_service.read` for the Launchplane service context; returns
-    bounded persisted scheduler completion and watchdog report receipts, with
+    bounded persisted scheduler completion, watchdog and on-change receipts;
+    `instance=prod|testing` selects that cadence's slot window, with
     no request payloads, keys, leases or monitor invocation. See
     [health monitoring operations](operations.md)
     for paging and the separate notification-delivery qualification.
@@ -342,6 +343,7 @@ governed expectation, custody and currentness contract.
   - `POST /v1/product-profiles/prelaunch-rebuild/apply` (native FastAPI for
     exact-lane reviewed Odoo prelaunch-rebuild policy planning, profile
     compare-and-write, and apply-only atomic idempotency enforcement)
+  - `POST /v1/product-profiles/{product}/display-name` (signed-in admin reviewed display-name changes)
   - `POST /v1/product-profiles/{product}/owner` (native FastAPI for bearer-token
     and signed-in admin callers, server-side GitHub login resolution, profile
     compare-and-write, and apply-only atomic idempotency enforcement)
@@ -1998,6 +2000,22 @@ may report destroyed/cleanup-failed feedback. Unsupported/fork notices still
 require the explicit feedback grant because they are outside the normal
 refresh/destroy flow.
 
+### Private Stable Lane Registration
+
+Stable-lane repair accepts an empty `base_url` only when the stored product
+profile declares `public_website=none`. It still requires matching tracked
+provider, Dokploy target and target-id records and an existing owned context.
+The added lane has no public URLs or fabricated monitoring check. Configure
+its private endpoint and enabled `private_http` monitoring through their
+reviewed service paths before treating the lane as verified. An already
+registered private lane is refused rather than rewritten. Website products
+still require a tracked HTTPS origin. The deployed service evaluates the request contract. The protected Product
+Onboarding Manifest (Advanced) wrapper retains its existing immutable worker
+pin. Its pinned version still requires a public origin: private registration
+needs a separately qualified supported service/UI caller or a reviewed pinned
+worker activation before dispatch. Source delivery alone does not update that
+transport or its managed authority.
+
 ### Product profile endpoints
 
 - `GET /v1/product-profiles`
@@ -2007,6 +2025,7 @@ refresh/destroy flow.
 - `POST /v1/product-profiles/health-monitoring/apply`
 - `POST /v1/product-profiles/prelaunch-rebuild/apply`
 - `POST /v1/product-profiles/preview-tls/apply`
+- `POST /v1/product-profiles/{product}/display-name`
 - `POST /v1/product-profiles/{product}/owner`
 - `POST /v1/product-profiles/{product}/image-repository`
 - `POST /v1/product-profiles/{product}/production-use`
@@ -2060,6 +2079,20 @@ a registered endpoint key; the service requires an active private endpoint
 record owned by the exact lane and never returns or logs its internal URL.
 Strict public runtime-identity checks must resolve to a lane-owned HTTPS host.
 The requested intent must retain its required enabled public or private check.
+
+Signed-in administrators use the environment Actions page's Health monitoring
+editor for existing public/private HTTP checks. The route accepts the existing
+CSRF-checked browser session dependency; every request still checks the policy's
+exact product/context/instance plan or apply authority. Bearer/OIDC authority is
+unchanged. The editor loads the stored profile, shows the preserved endpoint and
+current private endpoint key comparison (browser-session responses only, to
+preserve existing strict terminal/workflow decoders), and the
+before/after flags, invalidates review on edits, and requires confirmation before
+apply. An uncertain request retains its original payload and idempotency key
+across reloads; retry replays that request rather than planning another change.
+Successful apply reads the stored policy back, without claiming fresh health or
+runtime-identity proof before the monitor produces it. Fixture-mode writes and
+read-only browser controls are disabled.
 
 Prelaunch-rebuild apply is an exact-instance mutation for one Odoo stable lane's
 `odoo_prelaunch_rebuild` policy. Dry-run requires

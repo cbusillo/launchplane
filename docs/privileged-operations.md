@@ -29,46 +29,16 @@ empty context selector so it can read the stored context of each environment.
 That standing access still requires
 separate concrete administrator confirmation and governed installation.
 
-The ordinary-agent delivery preparation described in the next four paragraphs
-belongs to the retired delegated-delivery design (see
-[DIRECTION.md](../DIRECTION.md#retired));
-[#2437](https://github.com/cbusillo/launchplane/issues/2437) deletes its code.
-Do not use or extend it.
+Ordinary-agent delivery preparation and activation planning are removed.
+Historical activation records remain readable, but cannot be planned, approved,
+canceled, or revoked through the service. Schema-3 policy parsing and maintenance
+remain available for existing records. Exact removal of an ordinary rule through
+the existing managed-policy reconciliation path remains the policy stop: new
+worker authorization fails when its bound rule is absent. This source retirement
+assumes the completed Q91 access and pilot qualification; it adds no grant or
+policy mutation. Remaining deletion is tracked by
+[launchplane#2437](https://github.com/cbusillo/launchplane/issues/2437).
 
-The Agent delivery workbench also offers a read-only preparation-input check at
-`GET /v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs`.
-It uses the existing strict admin and managed-proposal authority
-to resolve current repository, configured-branch, and fixed-scope inspection-App
-setup metadata on the server. The inspection projection reports recorded
-selectors and binding pointers only; it does not read secret versions or values,
-verify App identity or installation, call providers, or grant generic secret-list
-access. It creates no plan or access and does not inspect agent registration or
-preview readiness. See [Inspecting Pilot Preparation Inputs](authorization-authority.md#inspecting-pilot-preparation-inputs)
-for current-record selection and incomplete-read behavior.
-
-After this read, the administrator can use **Prepare client access** to name a
-new client and choose a recorded project/branch. Its dedicated typed preparation
-route creates an ordinary-rule proposal for the existing managed authorization
-descriptor, then carries the saved reference into delivery setup. The client
-principal and request identities are independent; interrupted requests retain
-both for exact replay. No policy JSON, managed IDs, or routine reason is entered
-by the administrator. See [first-client policy preparation](authorization-authority.md#preparing-the-first-ordinary-client-policy)
-for the authority and compatibility boundaries.
-
-The same workbench first reports the configured terminal enrollment capability
-without exposing terminal identity values or bearer material. If the narrow
-capability is missing and unambiguous, **Allow the trusted terminal to request a client
-connection** uses the existing closed authorization-candidate route and standard
-managed-policy plan. It does not approve or apply the policy, issue a client
-credential, or activate delivery; every connection remains separately approved.
-
-The Merge-train policy workbench separately supports
-[preparing one ordinary-agent target](merge-train-policy.md#preparing-an-ordinary-agent-target).
-Its typed inputs and prepare routes use the merge-policy descriptor's existing
-human proposal authority. The server preserves unrelated policy and creates an
-inert standard import plan; the form does not require a full policy body or
-routine reasons, record IDs, timestamps, or hashes. The prepared target has no
-ambient token binding or enabled scheduler, and is not execution-ready.
 
 ## Agent Policy Proposals
 

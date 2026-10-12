@@ -556,3 +556,39 @@ budget limits source reads, and the blob cache avoids repeats within an attempt.
 Repeated large change sets or retries can still consume that shared allowance. Rate admission,
 large-change coverage and interrupted-process resource behavior need operational
 qualification before broad activation; this source proof does not establish them.
+
+### Stranded Odoo testing replacements
+
+Launchplane's existing stable-operation worker inspects stranded replacements
+from its own event reconciler. Recovery applies only to testing,
+`recreate-in-place`, existing-data attempts with the service reconcile grant.
+Production, Client releases and caller-started operations keep their existing
+recovery rules.
+
+The worker holds an operation execution lock through provider effects and local
+publication. Each provider mutation first records a value-free dispatch intent
+on the operation's `recovery_journal`; acknowledgement, target identity, schedule
+IDs and unique deployment titles bind subsequent inspection to that attempt.
+Every further mutation checks the live lease, generation, execution lock and
+service authority. A publication intent stays uncertain until the normal
+terminal commit, so recovery cannot race a surviving worker's inventory write.
+
+With the worker excluded, recovery reads the current provider after the fence.
+It requires an unchanged product/target binding, acknowledged known effects,
+an exact terminal deployment for each deploy title, and terminal schedule
+histories with disabled schedules. Unknown endpoints, missing references,
+incomplete responses, running jobs or changed authority leave the lane fenced.
+A timeout never means that an effect did not happen. Legacy attempts without a
+journal, including attempts started before this capability, remain fenced;
+provider idleness or a newer runtime identity cannot replace their missing proof.
+
+Only a proved-quiescent attempt is cancelled with the existing timestamped
+`safe_to_release=true` attestation. The observed references are persisted beside
+that attestation, and storage rechecks the original operation and product/target
+fingerprint under locks before releasing it. The existing testing reconciler is
+then woken to choose a bounded fresh attempt; recovery never replays an effect,
+rewrites expected identity, or treats cancellation as a successful deployment.
+Unresolved service-owned testing fences are monitored as `launchplane-deploy-fence`
+provider incidents on the ordinary products/environment incident surfaces. The
+monitor resolves that provider occurrence after recovery; runtime identity and
+health incidents still require their normal passing observations.

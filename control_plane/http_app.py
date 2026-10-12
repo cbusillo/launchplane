@@ -257,14 +257,6 @@ from control_plane.http_routes.production_backup_gate import (
     ProductionBackupGateRouteDependencies,
     register_production_backup_gate_routes,
 )
-from control_plane.http_routes.ordinary_agent_management import (
-    OrdinaryAgentManagementDependencies,
-    register_ordinary_agent_management_routes,
-)
-from control_plane.http_routes.ordinary_agent import (
-    OrdinaryAgentRouteDependencies,
-    register_ordinary_agent_routes,
-)
 from control_plane.http_routes.event_deploy_recovery import register_event_deploy_recovery_routes
 from control_plane.http_routes.generic_web_promotion_recovery import (
     register_promotion_recovery_routes,
@@ -935,6 +927,7 @@ from control_plane.workflows.launchplane_self_deploy import (
     execute_launchplane_self_deploy,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.http_routes.product_display_name import register_product_display_name_routes
 from control_plane.http_routes.product_website_cleanup import (
     register_product_website_cleanup_routes,
 )
@@ -5370,6 +5363,7 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
         slots: Annotated[int, Query(ge=1, le=48)] = 6,
         end_slot: Annotated[int | None, Query(ge=0)] = None,
+        instance: Literal["prod", "testing"] = "prod",
     ) -> HealthMonitorStatusResponse:
         trace_id = next_trace_id()
         require_launchplane_service_read_authorization(identity=identity, trace_id=trace_id)
@@ -5386,6 +5380,7 @@ def create_launchplane_fastapi_app(
                 now=datetime.now(timezone.utc).timestamp(),
                 slots=slots,
                 end_slot=end_slot,
+                instance=instance,
             )
         except HealthMonitorSlotRangeError as error:
             raise _launchplane_http_error(
@@ -12822,11 +12817,24 @@ def create_launchplane_fastapi_app(
 
     async def apply_product_health_monitoring(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
+    ) -> AcceptedEvidenceResponse | JSONResponse:
         trace_id = next_trace_id()
+
+        def monitoring_response(
+            response: AcceptedEvidenceResponse,
+        ) -> AcceptedEvidenceResponse | JSONResponse:
+            if isinstance(identity, GitHubHumanIdentity):
+                return response
+            # Keep legacy nullable result fields on the wire for existing callers.
+            # Browser responses alone use the additional typed review projection.
+            payload = response.model_dump(mode="json", exclude_none=True)
+            if isinstance(payload.get("result"), dict):
+                payload["result"].pop("current_private_endpoint_key", None)
+            return JSONResponse(status_code=202, content=payload)
+
         try:
             raw_payload = await request.json()
         except ValueError as error:
@@ -12950,7 +12958,7 @@ def create_launchplane_fastapi_app(
             )
             replay_response = prepare_product_health_monitoring_mutation()
             if replay_response is not None:
-                return replay_response
+                return monitoring_response(replay_response)
         try:
             profile = database_store.read_product_profile_record(health_monitoring_request.product)
         except FileNotFoundError as error:
@@ -13004,13 +13012,17 @@ def create_launchplane_fastapi_app(
                 code="invalid_product_profile",
                 message="Updated product profile failed validation.",
             ) from error
+        # Existing terminal/workflow consumers reject unknown result fields.
+        # The extra endpoint comparison belongs to the signed-in editor only.
+        if not isinstance(identity, GitHubHumanIdentity):
+            plan = plan.model_copy(update={"current_private_endpoint_key": None})
         if (
             health_monitoring_request.mode == "apply"
             and health_monitoring_request.reviewed_plan_sha256 != plan.plan_sha256
         ):
             replay_response = prepare_product_health_monitoring_mutation()
             if replay_response is not None:
-                return replay_response
+                return monitoring_response(replay_response)
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -13072,10 +13084,12 @@ def create_launchplane_fastapi_app(
             if write_result.status == "replayed":
                 if write_result.idempotency_record is None:
                     raise RuntimeError("Replayed product profile write requires evidence.")
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=write_result.idempotency_record,
-                    route_path=_PRODUCT_HEALTH_MONITORING_APPLY_ROUTE,
+                return monitoring_response(
+                    replay_idempotent_response(
+                        trace_id=trace_id,
+                        stored_record=write_result.idempotency_record,
+                        route_path=_PRODUCT_HEALTH_MONITORING_APPLY_ROUTE,
+                    )
                 )
             if write_result.status == "idempotency_conflict":
                 raise _launchplane_http_error(
@@ -13127,16 +13141,18 @@ def create_launchplane_fastapi_app(
                         "before retry."
                     ),
                 )
-            return response
-        return accepted_evidence_response(
-            trace_id=trace_id,
-            records={
-                "product_profile": health_monitoring_request.product,
-                "context": health_monitoring_request.context,
-                "instance": health_monitoring_request.instance,
-                "health_check": plan.check_name,
-            },
-            result=plan.model_dump(mode="json"),
+            return monitoring_response(response)
+        return monitoring_response(
+            accepted_evidence_response(
+                trace_id=trace_id,
+                records={
+                    "product_profile": health_monitoring_request.product,
+                    "context": health_monitoring_request.context,
+                    "instance": health_monitoring_request.instance,
+                    "health_check": plan.check_name,
+                },
+                result=plan.model_dump(mode="json"),
+            )
         )
 
     async def apply_product_owner(
@@ -27407,19 +27423,6 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=privileged_operation_route_dependencies,
     )
-    register_ordinary_agent_routes(
-        app,
-        dependencies=OrdinaryAgentRouteDependencies(common=read_route_dependencies),
-    )
-    register_ordinary_agent_management_routes(
-        app,
-        dependencies=OrdinaryAgentManagementDependencies(
-            common=read_route_dependencies,
-            read_bearer_identity=read_bearer_identity,
-            policy_record_reader=lambda: read_active_authz_policy_record(get_record_store()),
-            human_session_manager=human_session_manager,
-        ),
-    )
     register_governance_projection_routes(
         app,
         dependencies=GovernanceProjectionRouteDependencies(
@@ -27965,7 +27968,7 @@ def create_launchplane_fastapi_app(
         apply_product_health_monitoring,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
+        response_model=control_plane_product_health_monitoring.ProductHealthMonitoringResponse,
         response_model_exclude_none=True,
         openapi_extra={
             "requestBody": {
@@ -28879,6 +28882,10 @@ def create_launchplane_fastapi_app(
     )
 
     register_import_override_reconcile_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
+    )
+
+    register_product_display_name_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
 

@@ -479,8 +479,24 @@ recorded approval. The escape hatch still requires database
 storage, an `Idempotency-Key`, the same target snapshot check, and the same
 durable provider-mutation reservation.
 
-Both testing and production inventory must be fresh, healthy, and bound to
-matching generated runtime identity. The source and
+Both testing and production must have fresh, healthy evidence bound to
+matching generated runtime identity. For lanes with effective monitoring,
+promotion status uses the same current runtime verifier as the Products page;
+monitor evidence must follow the current profile, deployment and private
+endpoint configuration, and every effective check must pass. Each check follows
+its configured identity requirement; the lane still needs a current matching
+runtime-identity probe even when other checks supply only health. Deploy inventory
+still owns the artifact and source revision, but its age and historical health
+do not override current monitor verification. Missing, expired or mismatched
+monitor evidence cannot fall back to a passing deploy check. Lanes without
+effective monitoring retain the bounded deploy-health evidence path.
+After deployment, wait for the next scheduled monitor verification or use the
+supported `POST /v1/products/public-ingress-monitor/run-once` service operation
+under existing authorization to obtain current evidence before promoting.
+`health_provenance` identifies the monitor evidence and its freshness deadline;
+inventory timestamps continue to describe the deploy record. Equivalent passing
+monitor renewals preserve the reviewed candidate/target fingerprint; current
+health and trust are rechecked before dispatch and execution. The source and
 destination artifacts must be digest-pinned `@sha256:` references and source
 revisions must be immutable commit IDs. Current production provider-target
 authority comes only from the explicit provider-target record; deployment
@@ -604,6 +620,25 @@ that draft and offers Retry save with the original payload and key; another
 change stays locked until the Save settles. If the reviewed request cannot be
 stored and read back, Save sends nothing and asks the admin to restore session
 storage and retry. A confirmed Save removes the retained draft.
+
+## Product Display Name
+
+The product overview's **Display name** panel lets a signed-in administrator
+review and apply the name used in the sidebar and workspace. Enter the new
+name and a reason, select **Preview name change**, inspect the before/after
+names, then select **Apply name change**. The page reads the profile back and
+refreshes the product directory. It reports an unconfirmed read separately
+from an accepted apply.
+
+`POST /v1/product-profiles/{product}/display-name` requires the existing
+`product_profile.write` permission and browser mutation protections. Dry-run
+writes nothing; apply requires the reviewed plan digest and an idempotency key.
+Only `display_name` and mutation provenance change. Product identity, lanes,
+history, Client and release authority remain owned by their existing records.
+Concurrent profile edits invalidate the review. An uncertain apply retains its
+original draft/key and exposes **Retry original name change** and **Check
+original operation** using the scoped profile mutation receipt; reading the
+current name alone does not settle an uncertain write.
 
 ## No-website Profile Cleanup
 

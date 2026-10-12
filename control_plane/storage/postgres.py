@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 import hashlib
+import json
 import logging
 import secrets
 from threading import local
@@ -42,6 +43,7 @@ from sqlalchemy import (
     create_engine,
     delete,
     desc,
+    event,
     false,
     func,
     inspect,
@@ -5926,6 +5928,130 @@ class PostgresRecordStore(HumanSessionStore):
         if self._preview_lock_engine is not None:
             self._preview_lock_engine.dispose()
 
+    def subscribe_health_monitor_changes(self, wake: Callable[[], None]) -> Callable[[], None]:
+        """Wake after committed runtime authority writes, never after sensor/receipt writes."""
+        authority_rows = (
+            LaunchplaneProductProfileRow,
+            LaunchplaneInventoryRow,
+            LaunchplaneDeploymentRow,
+            LaunchplaneRuntimeEnvironmentRow,
+            LaunchplaneOdooInstanceOverrideRow,
+            LaunchplaneSecretBindingRow,
+            LaunchplaneSecretRow,
+            LaunchplanePrivateHealthEndpointRow,
+            LaunchplaneRouteBindingRow,
+            LaunchplaneProviderTargetRow,
+        )
+
+        def flushed(session: Session, _flush_context: object) -> None:
+            if any(
+                isinstance(row, authority_rows)
+                for row in session.new | session.dirty | session.deleted
+            ):
+                transaction = session.get_nested_transaction() or session.get_transaction()
+                if transaction is not None:
+                    session.info.setdefault("health_monitor_changed", set()).add(transaction)
+
+        def committed(session: Session) -> None:
+            transaction = session.get_nested_transaction() or session.get_transaction()
+            changed = session.info.get("health_monitor_changed", set())
+            if transaction in changed:
+                changed.remove(transaction)
+                if transaction is not None and transaction.nested:
+                    changed.add(transaction.parent)
+                else:
+                    wake()
+
+        def rolled_back(session: Session) -> None:
+            transaction = session.get_nested_transaction() or session.get_transaction()
+            changed = session.info.get("health_monitor_changed", set())
+            changed.discard(transaction)
+            if transaction is not None and not transaction.nested:
+                changed.clear()
+
+        event.listen(self._session_factory, "after_flush", flushed)
+        event.listen(self._session_factory, "after_commit", committed)
+        event.listen(self._session_factory, "after_rollback", rolled_back)
+
+        def unsubscribe() -> None:
+            event.remove(self._session_factory, "after_flush", flushed)
+            event.remove(self._session_factory, "after_commit", committed)
+            event.remove(self._session_factory, "after_rollback", rolled_back)
+
+        return unsubscribe
+
+    def health_monitor_authority_revisions(self) -> dict[tuple[str, str, str], str]:
+        """Bulk-read lane authority, with no provider calls or plaintext secret reads."""
+        profiles = tuple(
+            profile for profile in self.list_product_profile_records() if profile.is_active
+        )
+        lane_rows = (
+            LaunchplaneInventoryRow,
+            LaunchplaneRuntimeEnvironmentRow,
+            LaunchplaneOdooInstanceOverrideRow,
+            LaunchplaneSecretBindingRow,
+            LaunchplanePrivateHealthEndpointRow,
+            LaunchplaneRouteBindingRow,
+            LaunchplaneProviderTargetRow,
+        )
+        snapshots: dict[tuple[str, str], list[object]] = {}
+        contexts = {lane.context for profile in profiles for lane in profile.lanes}
+        if not contexts:
+            return {}
+        with self._session_factory() as session:
+            for row_type in lane_rows:
+                for context, instance, payload in session.execute(
+                    select(row_type.context, row_type.instance, row_type.payload).where(
+                        row_type.context.in_((*contexts, ""))
+                    )
+                ):
+                    snapshots.setdefault((context, instance), []).append(
+                        (row_type.__tablename__, payload)
+                    )
+            for context, instance, secret_id, version_id, status in session.execute(
+                select(
+                    LaunchplaneSecretRow.context,
+                    LaunchplaneSecretRow.instance,
+                    LaunchplaneSecretRow.secret_id,
+                    LaunchplaneSecretRow.current_version_id,
+                    LaunchplaneSecretRow.status,
+                ).where(LaunchplaneSecretRow.context.in_(contexts))
+            ):
+                snapshots.setdefault((context, instance), []).append(
+                    ("secret-version", secret_id, version_id, status)
+                )
+        from control_plane.workflows.generic_web_deploy_provider import (
+            decode_generic_web_provider_reconciliation_target,
+        )
+
+        for reservation in self.list_held_provider_target_reservations():
+            try:
+                target = decode_generic_web_provider_reconciliation_target(
+                    reservation.reconciliation_key
+                )
+            except ValueError:
+                continue
+            snapshots.setdefault((target.context, target.instance), []).append(
+                ("deploy-fence", reservation.record_id, reservation.state)
+            )
+        revisions = {}
+        for profile in profiles:
+            for lane in profile.lanes:
+                material = [
+                    profile.model_dump(mode="json"),
+                    *snapshots.get(("", ""), []),
+                    *snapshots.get((lane.context, ""), []),
+                    *snapshots.get((lane.context, lane.instance), []),
+                ]
+                # Sorting canonical fragments makes database row order irrelevant.
+                fragments = sorted(
+                    json.dumps(item, sort_keys=True, separators=(",", ":")) for item in material
+                )
+                revisions[(profile.product, lane.context, lane.instance)] = hashlib.sha256(
+                    "\n".join(fragments).encode()
+                ).hexdigest()
+        return revisions
+
     def __del__(self) -> None:
         with suppress(Exception):
             self.close()
@@ -8671,6 +8797,7 @@ class PostgresRecordStore(HumanSessionStore):
         response_trace_id: str,
         response_payload: dict[str, Any],
         expected_promotion_evidence: tuple[BaseModel, ...] = (),
+        expected_binding_evidence: tuple[BaseModel, ...] = (),
         promotion_recovery_inventory: EnvironmentInventory | None = None,
         promotion_recovery_record: PromotionRecord | None = None,
         promotion_recovery_deployments: tuple[DeploymentRecord, ...] = (),
@@ -8707,7 +8834,7 @@ class PostgresRecordStore(HumanSessionStore):
                     record=current_record,
                 )
             expired_promotion = (
-                bool(expected_promotion_evidence)
+                bool(expected_promotion_evidence or expected_binding_evidence)
                 and current_record.state == "running"
                 and parse_launchplane_mutation_timestamp(
                     current_record.lease_expires_at, field_name="lease_expires_at"
@@ -8729,7 +8856,7 @@ class PostgresRecordStore(HumanSessionStore):
             # Recovery adopts only the reviewed records. Lock and compare them in
             # the same transaction that completes the exact reservation; an expired
             # running promotion need not first change state in a separate write.
-            for evidence in expected_promotion_evidence:
+            for evidence in (*expected_promotion_evidence, *expected_binding_evidence):
                 statement: Any
                 if isinstance(evidence, LaunchplaneProductProfileRecord):
                     statement = select(LaunchplaneProductProfileRow).where(
@@ -8743,6 +8870,16 @@ class PostgresRecordStore(HumanSessionStore):
                     statement = select(LaunchplaneProviderTargetRow).where(
                         LaunchplaneProviderTargetRow.context == evidence.context,
                         LaunchplaneProviderTargetRow.instance == evidence.instance,
+                    )
+                elif isinstance(evidence, DokployTargetRecord):
+                    statement = select(LaunchplaneDokployTargetRow).where(
+                        LaunchplaneDokployTargetRow.context == evidence.context,
+                        LaunchplaneDokployTargetRow.instance == evidence.instance,
+                    )
+                elif isinstance(evidence, DokployTargetIdRecord):
+                    statement = select(LaunchplaneDokployTargetIdRow).where(
+                        LaunchplaneDokployTargetIdRow.context == evidence.context,
+                        LaunchplaneDokployTargetIdRow.instance == evidence.instance,
                     )
                 elif isinstance(evidence, PromotionRecord):
                     statement = select(LaunchplanePromotionRow).where(
@@ -9719,12 +9856,23 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def cancel_pending_odoo_stable_target_replacement_operation_record(
-        self, record: OdooStableTargetReplacementOperationRecord
+        self,
+        record: OdooStableTargetReplacementOperationRecord,
+        *,
+        expected_record: OdooStableTargetReplacementOperationRecord | None = None,
     ) -> bool:
         if record.status != "cancelled" or record.phase != "cancelled":
             raise ValueError("Odoo target replacement cancellation requires a cancelled record.")
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            if expected_record is None:
+                self._begin_serialized_write(session)
+            if expected_record is not None:
+                self._lock_odoo_stable_lane(
+                    session,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                )
             statement = (
                 select(LaunchplaneOdooStableTargetReplacementOperationRow)
                 .where(
@@ -9742,6 +9890,55 @@ class PostgresRecordStore(HumanSessionStore):
                 model_type=OdooStableTargetReplacementOperationRecord,
                 payload=row.payload,
             )
+            if expected_record is not None:
+                from control_plane.testing_replacement_recovery import (
+                    recovery_binding_fingerprint,
+                    service_testing_operation,
+                )
+
+                bindings = []
+                for model, filters in (
+                    (
+                        LaunchplaneProductProfileRow,
+                        (LaunchplaneProductProfileRow.product == current_record.product,),
+                    ),
+                    (
+                        LaunchplaneDokployTargetRow,
+                        (
+                            LaunchplaneDokployTargetRow.context == current_record.context,
+                            LaunchplaneDokployTargetRow.instance == current_record.instance,
+                        ),
+                    ),
+                    (
+                        LaunchplaneDokployTargetIdRow,
+                        (
+                            LaunchplaneDokployTargetIdRow.context == current_record.context,
+                            LaunchplaneDokployTargetIdRow.instance == current_record.instance,
+                        ),
+                    ),
+                ):
+                    binding_statement = select(model).where(*filters)
+                    if self.database_dialect_name == "postgresql":
+                        binding_statement = binding_statement.with_for_update()
+                    binding_row = session.scalar(binding_statement)
+                    if binding_row is None:
+                        return False
+                    bindings.append(
+                        cast(
+                            LaunchplaneProductProfileRow
+                            | LaunchplaneDokployTargetRow
+                            | LaunchplaneDokployTargetIdRow,
+                            binding_row,
+                        ).payload
+                    )
+                if (
+                    not service_testing_operation(current_record)
+                    or current_record != expected_record
+                    or current_record.recovery_journal is None
+                    or recovery_binding_fingerprint(bindings)
+                    != current_record.recovery_journal.target_fingerprint
+                ):
+                    return False
             if not odoo_stable_lane_cancellation_is_allowed(
                 current_status=current_record.status,
                 reconciliation_required_at=current_record.updated_at,
@@ -9777,13 +9974,14 @@ class PostgresRecordStore(HumanSessionStore):
         if not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update(skip_locked=True)
         with self._session_factory() as session:
-            if self.database_url.startswith("sqlite"):
-                self._lock_odoo_stable_lane(
-                    session,
-                    product="",
-                    context="",
-                    instance="",
+            from control_plane.service_deploy_drain import admission_allowed, lock
+
+            lock(self, session)
+            if not admission_allowed(session, self._database_mutation_timestamp(session)):
+                logging.getLogger(__name__).debug(
+                    "Odoo testing replacement claims paused for Launchplane replacement."
                 )
+                return None
             for row in session.scalars(statement).all():
                 record = self._read_payload(
                     model_type=OdooStableTargetReplacementOperationRecord,
@@ -9903,9 +10101,49 @@ class PostgresRecordStore(HumanSessionStore):
                 or current_record.lease_expires_at <= completed_at
             ):
                 return False
+            if record.status == "running" and record.recovery_journal is not None:
+                record = current_record.model_copy(
+                    update={"recovery_journal": record.recovery_journal}
+                )
+            elif current_record.recovery_journal is not None:
+                record = record.model_copy(
+                    update={"recovery_journal": current_record.recovery_journal}
+                )
             self._sync_odoo_stable_target_replacement_operation_row(row, record)
             session.commit()
             return True
+
+    @contextmanager
+    def testing_replacement_execution_lock(
+        self, operation_id: str
+    ) -> Iterator[Callable[[], None] | None]:
+        if self.database_dialect_name != "postgresql":
+            from control_plane.storage.testing_replacement_recovery import file_execution_lock
+
+            database_path = self._engine.url.database
+            if not database_path or database_path == ":memory:":
+                yield None
+                return
+            with file_execution_lock(Path(database_path + ".testing-locks"), operation_id) as check:
+                yield check
+            return
+        assert self._preview_lock_engine is not None
+        with self._preview_lock_engine.connect() as connection:
+            acquired = connection.scalar(
+                text("select pg_try_advisory_xact_lock(hashtextextended(:name, 0))"),
+                {"name": f"launchplane-testing-replacement:{operation_id}"},
+            )
+            if not acquired:
+                yield None
+                return
+
+            def check_connection() -> None:
+                # Never silently reconnect a lost transaction and lose exclusion.
+                if connection.invalidated or not connection.in_transaction():
+                    raise RuntimeError("Testing replacement execution lock was lost.")
+                connection.execute(text("select 1"))
+
+            yield check_connection
 
     def recover_expired_odoo_stable_target_replacement_operation_records(
         self,

@@ -136,8 +136,6 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/service/github-delivery": "read_service_github_delivery_controls",
-    "/v1/ordinary-agent-jobs/{principal_id}/{request_id}": "read_human_ordinary_agent_job",
-    "/v1/ordinary-agent-operations/{principal_id}/{operation_id}": "read_human_ordinary_agent_operation",
     "/v1/auth/session": "read_human_auth_session",
     "/v1/drivers": "read_driver_descriptors",
     "/v1/contexts/{context}/driver-view": "read_driver_context_view",
@@ -193,15 +191,6 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/privileged-operations/plans/{operation_id}/review": (
         "read_human_privileged_operation_review"
     ),
-    "/v1/privileged-operations/ordinary-agent-delivery-activation/options": (
-        "read_ordinary_agent_delivery_activation_options"
-    ),
-    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs": (
-        "read_ordinary_agent_delivery_authorization_candidate_inputs"
-    ),
-    "/v1/privileged-operations/merge-train-targets/inputs": (
-        "read_ordinary_agent_merge_train_target_inputs"
-    ),
 }
 
 
@@ -210,29 +199,18 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/service/delivery/apply-receipt": "read_service_delivery_apply_receipt",
     "/v1/service/github-delivery/configuration": "configure_launchplane_github_delivery",
     "/v1/service/github-delivery/token-retirement": "retire_service_github_tokens",
-    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/prepare": (
-        "prepare_ordinary_agent_delivery_policy"
-    ),
-    "/v1/privileged-operations/merge-train-targets/prepare": (
-        "prepare_ordinary_agent_merge_train_target"
-    ),
     "/v1/privileged-operations/authorization-candidates/prepare": (
         "prepare_authorization_candidate"
     ),
-    "/v1/privileged-operations/ordinary-agent-delivery-activation/plans": (
-        "plan_ordinary_agent_delivery_activation"
-    ),
-    "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/approve": "approve_ordinary_agent_operation",
-    "/v1/ordinary-agent-operations/{principal_id}/{operation_id}/cancel": "cancel_ordinary_agent_operation",
-    "/v1/ordinary-agent-sessions/{principal_id}/{session_id}/revoke": "revoke_ordinary_agent_session",
-    "/v1/ordinary-agent-connections/{principal_id}/disconnect": "disconnect_ordinary_agent_principal",
     "/v1/work-graph/rank": "rank_work_graph_snapshot",
     "/v1/products/{product}/environments/{environment}/config/apply": (
         "apply_product_environment_config"
     ),
     "/v1/product-profiles/{product}/owner": "apply_product_owner",
+    "/v1/product-profiles/health-monitoring/apply": "apply_product_health_monitoring",
     "/v1/product-profiles/{product}/image-repository": "apply_product_image_repository",
     "/v1/product-profiles/{product}/production-use": "apply_product_production_use",
+    "/v1/product-profiles/{product}/display-name": "apply_product_display_name",
     "/v1/product-profiles/{product}/website-cleanup": "apply_product_website_cleanup",
     "/v1/products/{product}/environments/{environment}/promotion/dry-run": (
         "dry_run_product_promotion"

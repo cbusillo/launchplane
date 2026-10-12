@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -23,6 +25,10 @@ from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     parse_launchplane_mutation_timestamp,
 )
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    OdooStableTargetReplacementOperationRecord,
+)
+from control_plane.testing_replacement_recovery import service_testing_operation
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.outbox_delivery import (
     OutboxDeliveryRecord,
@@ -275,6 +281,7 @@ class PublicIngressMonitorTarget:
     tls_stale_after: str = ""
     tls_provider_evidence: dict[str, str] | None = None
     deploy_fence: LaunchplaneIdempotencyRecord | None = None
+    testing_replacement: OdooStableTargetReplacementOperationRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -363,8 +370,22 @@ def discover_public_ingress_monitor_targets(
         if profile.is_active
     )
     held_deploy_fences = _held_generic_web_deploy_fences(record_store)
+    read_replacements = getattr(
+        record_store, "list_odoo_stable_target_replacement_operation_records", None
+    )
+    held_replacements = {
+        (operation.product, operation.context, operation.instance): operation
+        for operation in (
+            read_replacements(instance_name="testing", statuses=("reconciliation_required",))
+            if callable(read_replacements)
+            else ()
+        )
+        if service_testing_operation(operation)
+    }
     open_deploy_fence_lanes = (
-        _open_deploy_fence_incident_lanes(record_store) if held_deploy_fences is not None else set()
+        _open_deploy_fence_incident_lanes(record_store)
+        if held_deploy_fences is not None or callable(read_replacements)
+        else set()
     )
     for profile in product_profiles:
         for lane in profile.lanes:
@@ -391,15 +412,21 @@ def discover_public_ingress_monitor_targets(
                 lane=lane,
             ):
                 targets.append(tls_target)
-            if held_deploy_fences is None or not _profile_uses_generic_web(profile):
+            if not _profile_uses_generic_web(profile):
                 continue
             # Only lanes with a fence, or an open fence incident to resolve, get a probe.
-            fence = held_deploy_fences.get((lane.context, lane.instance))
-            if fence is not None or (
-                (profile.product, lane.context, lane.instance) in open_deploy_fence_lanes
+            fence = (held_deploy_fences or {}).get((lane.context, lane.instance))
+            replacement = held_replacements.get((profile.product, lane.context, lane.instance))
+            if (
+                fence is not None
+                or replacement is not None
+                or ((profile.product, lane.context, lane.instance) in open_deploy_fence_lanes)
             ):
                 targets.append(
-                    _deploy_fence_monitor_target(profile=profile, lane=lane, fence=fence)
+                    replace(
+                        _deploy_fence_monitor_target(profile=profile, lane=lane, fence=fence),
+                        testing_replacement=replacement,
+                    )
                 )
     return tuple(targets)
 
@@ -647,6 +674,8 @@ def run_public_ingress_monitor_once(
     runtime_identity_confirmation_delay_seconds: float = 0,
     sleep: Callable[[float], None] = time.sleep,
     should_stop: Callable[[], bool] | None = None,
+    lane_keys: frozenset[tuple[str, str, str]] | None = None,
+    max_concurrent_probes: int = 1,
 ) -> PublicIngressMonitorResult:
     observed_at = checked_at.strip() or utc_now_timestamp()
     public_get = http_get or fetch_public_ingress_url
@@ -655,7 +684,11 @@ def run_public_ingress_monitor_once(
     profiles = tuple(
         profile for profile in record_store.list_product_profile_records() if profile.is_active
     )
-    targets = discover_public_ingress_monitor_targets(record_store, profiles=profiles)
+    targets = tuple(
+        target
+        for target in discover_public_ingress_monitor_targets(record_store, profiles=profiles)
+        if lane_keys is None or (target.product, target.context, target.instance) in lane_keys
+    )
     eligible_target_keys = {
         _monitor_target_key(target) for target in targets if target.incident_eligible
     }
@@ -676,7 +709,20 @@ def run_public_ingress_monitor_once(
             tls_get=tls_probe,
         )
 
-    probed = [(target, probe(target)) for target in targets]
+    if max_concurrent_probes < 1:
+        raise ValueError("Monitor probe concurrency must be positive")
+
+    def probe_targets(
+        selected: tuple[PublicIngressMonitorTarget, ...],
+    ) -> list[tuple[PublicIngressMonitorTarget, PublicIngressObservationRecord]]:
+        if max_concurrent_probes == 1 or not selected:
+            return [(target, probe(target)) for target in selected]
+        with ThreadPoolExecutor(
+            max_workers=min(max_concurrent_probes, len(selected)), thread_name_prefix="health-probe"
+        ) as executor:
+            return list(zip(selected, executor.map(probe, selected), strict=True))
+
+    probed = probe_targets(targets)
     unconfirmed = [
         index
         for index, (_target, record) in enumerate(probed)
@@ -686,6 +732,7 @@ def run_public_ingress_monitor_once(
         # One wait per run, however many lanes are mid-deploy.
         if runtime_identity_confirmation_delay_seconds > 0:
             sleep(runtime_identity_confirmation_delay_seconds)
+        retry_targets = []
         for index in unconfirmed:
             target = probed[index][0]
             target = replace(
@@ -696,7 +743,9 @@ def run_public_ingress_monitor_once(
                     instance_name=target.instance,
                 ),
             )
-            probed[index] = (target, probe(target))
+            retry_targets.append(target)
+        for index, retried in zip(unconfirmed, probe_targets(tuple(retry_targets)), strict=True):
+            probed[index] = retried
     for target, record in probed:
         _check_monitor_cancelled(should_stop)
         stored_transition = _store_monitor_observation(
@@ -722,6 +771,7 @@ def run_public_ingress_monitor_once(
         profiles=profiles,
         eligible_target_keys=eligible_target_keys,
         observed_at=observed_at,
+        lane_keys=lane_keys,
     ):
         _check_monitor_cancelled(should_stop)
         stored_transition = _store_monitor_observation(
@@ -771,10 +821,16 @@ def record_monitor_cadence(
     observed_at: str,
     notification_drivers: PublicIngressNotificationDrivers | None = None,
     should_stop: Callable[[], bool] | None = None,
+    lane_keys: frozenset[tuple[str, str, str]] | None = None,
 ) -> None:
     """Separate scheduler incidents, delivered only to each check's existing destinations."""
     for target in discover_public_ingress_monitor_targets(record_store):
         _check_monitor_cancelled(should_stop)
+        if (
+            lane_keys is not None
+            and (target.product, target.context, target.instance) not in lane_keys
+        ):
+            continue
         if not target.incident_eligible:
             continue
         check_name = f"{MONITOR_CADENCE_CHECK_PREFIX}{target.check_kind}:{target.check_name}"
@@ -969,10 +1025,16 @@ def _monitoring_reconciliation_observations(
     profiles: tuple[LaunchplaneProductProfileRecord, ...],
     eligible_target_keys: set[tuple[str, str, str, str, str]],
     observed_at: str,
+    lane_keys: frozenset[tuple[str, str, str]] | None = None,
 ) -> tuple[tuple[PublicIngressObservationRecord, str], ...]:
     reconciliations: list[tuple[PublicIngressObservationRecord, str]] = []
     for profile in profiles:
         for lane in profile.lanes:
+            if (
+                lane_keys is not None
+                and (profile.product, lane.context, lane.instance) not in lane_keys
+            ):
+                continue
             open_incidents = record_store.list_public_ingress_incident_records(
                 product=profile.product,
                 context_name=lane.context,
@@ -2562,6 +2624,20 @@ def _check_deploy_fence(
     checked_at: str,
 ) -> PublicIngressTargetObservation:
     url = f"provider://{target.provider}/{target.provider_check}"
+    replacement = target.testing_replacement
+    if replacement is not None:
+        return PublicIngressTargetObservation(
+            target="provider",
+            url=url,
+            status="fail",
+            failure_code="deploy_fence_held",
+            summary=(
+                f"Testing replacement {replacement.operation_id} remains fenced since "
+                f"{replacement.updated_at}. Launchplane cannot prove its provider effects "
+                "safe to release. Missing references, an active worker, running jobs or "
+                "unknown provider outcomes require further reconciliation; no effects are replayed."
+            ),
+        )
     fence = target.deploy_fence
     if fence is None or not _deploy_fence_is_stuck(fence, checked_at=checked_at):
         return PublicIngressTargetObservation(

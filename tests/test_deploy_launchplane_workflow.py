@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
 
+from control_plane.deploy_failure_alert import FINAL_VERIFICATION_TIMEOUT_SECONDS
 from tests.support.workflows import load_workflow
 
 
@@ -47,11 +48,11 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 "LANG": "C.UTF-8",
                 "GITHUB_OUTPUT": str(directory / "output"),
                 "RUNNER_TEMP": str(directory),
+                "MINIMUM_TIMEOUT_MS": str(FINAL_VERIFICATION_TIMEOUT_SECONDS * 1000),
                 **declared_env,
                 "PREVIOUS_RUNTIME_RESPONSE_FILE": str(runtime),
                 "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
                 "LAUNCHPLANE_DOKPLOY_TARGET_ID": "compose-test",
-                "OMIT_EVERY_CODE_ENV": "false",
                 "OMIT_TERMINAL_AGENT_ENV": "false",
                 "OMIT_OWNER_AGENT_ENV": "false",
                 "OMIT_NPMPLUS_ENV": "false",
@@ -95,6 +96,7 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
             "Resolve deploy_runtime_wait remaining wait",
             "Resolve deploy_marker_wait remaining wait",
             "Resolve rollback_runtime_wait remaining wait",
+            "Resolve final runtime marker remaining wait",
         ):
             for remaining in (60, -60):
                 with (
@@ -118,9 +120,18 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                         self.assertLessEqual(actual, remaining * 1000)
                         self.assertGreater(actual, (remaining - 10) * 1000)
                     else:
-                        self.assertEqual(actual, 1)
+                        self.assertEqual(
+                            actual,
+                            FINAL_VERIFICATION_TIMEOUT_SECONDS * 1000
+                            if step
+                            in (
+                                "Resolve final runtime marker remaining wait",
+                                "Resolve deploy_marker_wait remaining wait",
+                            )
+                            else 1,
+                        )
 
-    def test_finished_drain_starts_short_observation_deadline_then_later_wait_consumes_it(
+    def test_finished_drain_preserves_worker_stop_budget_then_later_wait_consumes_it(
         self,
     ) -> None:
         with TemporaryDirectory() as directory_name:
@@ -159,11 +170,65 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
             )
             self.assertLessEqual(int(later["timeout_ms"]), int(values["timeout_ms"]))
 
+    def test_recovered_health_clears_previous_failed_probe(self) -> None:
+        for mode in ("recovering", "healthy_at_deadline", "unhealthy_at_deadline"):
+            with TemporaryDirectory() as directory_name:
+                directory = Path(directory_name)
+                curl = directory / "curl"
+                curl.write_text("""#!/usr/bin/env bash
+    while [ "$1" != "-o" ]; do shift; done
+    touch "$RUNNER_TEMP/health-probed"
+if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
+      printf '{"status":"ok"}' > "$2"
+      printf 200
+    else
+      touch "$RUNNER_TEMP/probed"
+      printf '{"status":"unhealthy"}' > "$2"
+      printf 503
+    fi
+    """)
+                curl.chmod(0o700)
+                sleep = directory / "sleep"
+                sleep.write_text("#!/usr/bin/env bash\nexit 0\n")
+                sleep.chmod(0o700)
+                date = directory / "date"
+                date.write_text("#!/usr/bin/env bash\nprintf '%s' \"$TEST_NOW_EPOCH\"\n")
+                date.chmod(0o700)
+                evidence = directory / "launchplane-deployed-health-result.json"
+                result = self._run_step(
+                    "deploy",
+                    "Wait for deployed Launchplane health URLs",
+                    {
+                        "WAIT_DEADLINE_EPOCH": "10001" if mode == "recovering" else "10000",
+                        "HEALTH_RECOVERED": "true" if mode == "healthy_at_deadline" else "false",
+                        "TEST_NOW_EPOCH": "10000",
+                        "LAUNCHPLANE_DEPLOY_HEALTH_URLS": "https://health.example.invalid",
+                        "PATH": str(directory) + os.pathsep + os.environ["PATH"],
+                    },
+                    directory,
+                )
+                self.assertTrue((directory / "health-probed").is_file())
+                if mode == "unhealthy_at_deadline":
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertTrue(evidence.read_text())
+                    self.assertFalse((directory / "output").exists())
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(evidence.read_text(), "")
+                self.assertTrue((directory / "output").is_file())
+                values = dict(
+                    line.split("=", 1) for line in (directory / "output").read_text().splitlines()
+                )
+                self.assertEqual(
+                    int(values["remaining_timeout_ms"]), FINAL_VERIFICATION_TIMEOUT_SECONDS * 1000
+                )
+
     def test_timed_out_drain_does_not_request_service_rollback(self) -> None:
         for payload in (
             {"result": {"deploy_state": "draining"}},
             {"error": {"code": "invalid_request"}},
             {"error": {"code": "authorization_denied"}},
+            {"error": {"code": "authentication_required"}},
             {"error": {"code": "self_deploy_fence_conflict"}},
         ):
             with self.subTest(payload=payload), TemporaryDirectory() as directory_name:
@@ -181,6 +246,35 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 self.assertFalse(
                     (directory / "launchplane-self-deploy-rollback-payload.json").exists()
                 )
+
+    def test_dispatch_checker_failure_keeps_conservative_rollback(self) -> None:
+        with TemporaryDirectory() as name:
+            directory = Path(name)
+            uv = directory / "uv"
+            uv.write_text("#!/usr/bin/env bash\nexit 1\n")
+            uv.chmod(0o700)
+            previous_image = "registry.example/service@sha256:" + "a" * 64
+            result = self._run_step(
+                "deploy",
+                "Render Launchplane rollback request",
+                {
+                    "BOOTSTRAP_SECRET_OPERATION": "preserve",
+                    "ORDINARY_AGENT_WORKERS": "preserve",
+                    "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "absent",
+                    "DEPLOYED_IMAGE_REFERENCE": "registry.example/service@sha256:" + "b" * 64,
+                    "PREVIOUS_IMAGE_REFERENCE": previous_image,
+                    "FORWARD_DEPLOYMENT_MARKER": "forward",
+                    "ROLLBACK_DEPLOYMENT_MARKER": "rollback",
+                    "SELF_DEPLOY_IDEMPOTENCY_KEY": "deployment-key",
+                    "PATH": str(directory) + os.pathsep + os.environ["PATH"],
+                },
+                directory,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(
+                (directory / "launchplane-self-deploy-rollback-payload.json").read_text()
+            )
+            self.assertEqual(payload["deploy"]["image_reference"], previous_image)
 
     def test_rollback_requires_matching_marker_even_when_preserving_bootstrap(self) -> None:
         for marker_outcome in ("success", "failure"):
@@ -257,6 +351,34 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
             deploy["ordinary_agent_worker_replicas"],
             {"expected": "1", "desired": "absent"},
         )
+
+    def test_self_deploy_ignores_retired_every_code_credentials(self) -> None:
+        retired = {
+            "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "retired-worker-token",
+            "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": "retired-webhook-secret",
+            "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN": "retired-github-token",
+            "LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR": "retired-actor",
+        }
+        payload = self._render(
+            "Render Launchplane self deploy request",
+            {
+                "BOOTSTRAP_SECRET_OPERATION": "preserve",
+                "ORDINARY_AGENT_WORKERS": "preserve",
+                "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "absent",
+                "DEPLOYMENT_MARKER": "deploy-marker",
+                "DEPLOY_IMAGE_REFERENCE": "ghcr.io/example/service@sha256:" + ("b" * 64),
+                "IMAGE_REPOSITORY": "ghcr.io/example/service",
+                "LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS": "true",
+                "OMIT_EVERY_CODE_ENV": "false",
+                **retired,
+            },
+        )
+        deploy = cast(dict[str, object], payload["deploy"])
+        oauth_env = cast(dict[str, str], deploy["oauth_env"])
+        self.assertTrue(retired.keys().isdisjoint(oauth_env))
+        removals = cast(list[str], deploy.get("oauth_env_removals", []))
+        self.assertTrue(retired.keys().isdisjoint(removals))
+        self.assertEqual(oauth_env["LAUNCHPLANE_DEPLOYMENT_MARKER"], "deploy-marker")
 
     def test_self_deploy_removes_unset_public_ingress_token_and_omitted_npmplus_env(
         self,
@@ -383,7 +505,6 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                         "DISPATCH_IMAGE_REFERENCE": "",
                         "DISPATCH_SELF_DEPLOY_IDEMPOTENCY_KEY": "",
                         "DISPATCH_SUPERSEDES_DEPLOYMENT_MARKER": repair,
-                        "OMIT_EVERY_CODE_ENV": "false",
                         "OMIT_TERMINAL_AGENT_ENV": "false",
                         "OMIT_OWNER_AGENT_ENV": "false",
                         "OMIT_NPMPLUS_ENV": "false",

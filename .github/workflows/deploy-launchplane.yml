@@ -47,11 +47,6 @@ on:
         description: Exact unsettled runtime.release_drain marker for a reviewed service repair.
         required: false
         type: string
-      omit_every_code_env:
-        description: Temporarily omit Every Code env for one compatibility deploy.
-        required: false
-        default: false
-        type: boolean
       omit_terminal_agent_env:
         description: Temporarily omit terminal-agent env for one compatibility deploy.
         required: false
@@ -122,16 +117,11 @@ jobs:
       LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES: ${{ vars.LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES }}
       LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT: ${{ vars.LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT }}
       LAUNCHPLANE_WORK_GRAPH_GH_BINARY: ${{ vars.LAUNCHPLANE_WORK_GRAPH_GH_BINARY }}
-      LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS: ${{ vars.LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS }}
       LAUNCHPLANE_GITHUB_CLIENT_SECRET: ${{ secrets.LAUNCHPLANE_GITHUB_CLIENT_SECRET }}
       LAUNCHPLANE_SESSION_SECRET: ${{ secrets.LAUNCHPLANE_SESSION_SECRET }}
       LAUNCHPLANE_WORK_GRAPH_GH_TOKEN: ${{ secrets.LAUNCHPLANE_WORK_GRAPH_GH_TOKEN }}
       LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN: ${{ secrets.LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN }}
-      LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN: ${{ secrets.LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN }}
-      LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET: ${{ secrets.LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET }}
       LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET: ${{ secrets.LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET }}
-      LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN: ${{ secrets.LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN }}
-      LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR: ${{ vars.LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR }}
       LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN: ${{ secrets.LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN }}
       LAUNCHPLANE_TERMINAL_AGENT_SUBJECT: ${{ vars.LAUNCHPLANE_TERMINAL_AGENT_SUBJECT }}
       LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL: ${{ vars.LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL }}
@@ -146,7 +136,6 @@ jobs:
       LAUNCHPLANE_NPMPLUS_SECRET: ${{ secrets.LAUNCHPLANE_NPMPLUS_SECRET }}
       LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON: ${{ vars.LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON }}
       LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK: ${{ vars.LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK }}
-      OMIT_EVERY_CODE_ENV: ${{ inputs.omit_every_code_env || false }}
       OMIT_TERMINAL_AGENT_ENV: ${{ inputs.omit_terminal_agent_env || false }}
       OMIT_OWNER_AGENT_ENV: ${{ inputs.omit_owner_agent_env || false }}
       OMIT_NPMPLUS_ENV: ${{ inputs.omit_npmplus_env || false }}
@@ -287,7 +276,6 @@ jobs:
           validate_single_line_value "rollback deployment marker" "$rollback_deployment_marker"
 
           for omit_environment_variable in \
-            OMIT_EVERY_CODE_ENV \
             OMIT_TERMINAL_AGENT_ENV \
             OMIT_OWNER_AGENT_ENV \
             OMIT_NPMPLUS_ENV; do
@@ -419,7 +407,7 @@ jobs:
       - name: Read previous Launchplane runtime
         id: previous_runtime
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -438,12 +426,23 @@ jobs:
 
           wait_timeout_seconds="$(uv run --extra dev python scripts/deploy/resolve-wait-timeout.py)"
           drained_timeout_seconds="$(uv run --extra dev python scripts/deploy/resolve-wait-timeout.py --release-drain-complete)"
+          replacement_timeout_seconds="$(uv run --extra dev python scripts/deploy/resolve-wait-timeout.py --replacement)"
+          final_verification_seconds="$(uv run --extra dev python scripts/deploy/resolve-wait-timeout.py --final-verification)"
           {
             echo "timeout_seconds=$wait_timeout_seconds"
             echo "drained_timeout_seconds=$drained_timeout_seconds"
+            echo "replacement_timeout_seconds=$replacement_timeout_seconds"
+            echo "replacement_timeout_ms=$((replacement_timeout_seconds * 1000))"
+            echo "final_verification_timeout_ms=$((final_verification_seconds * 1000))"
             echo "timeout_ms=$((wait_timeout_seconds * 1000))"
             echo "deadline_epoch=$(($(date +%s) + wait_timeout_seconds))"
           } >>"$GITHUB_OUTPUT"
+
+      - name: Validate existing deploy failure sender
+        shell: bash
+        env:
+          DISCORD_LAUNCHPLANE_WEBHOOK: ${{ secrets.DISCORD_LAUNCHPLANE_WEBHOOK }}
+        run: uv run python scripts/deploy/notify-deploy-failure.py --validate-sender
 
       - name: Render Launchplane self deploy request
         id: self_deploy
@@ -527,12 +526,7 @@ jobs:
               --arg work_graph_gh_binary "${LAUNCHPLANE_WORK_GRAPH_GH_BINARY:-}" \
               --arg work_graph_gh_token "${LAUNCHPLANE_WORK_GRAPH_GH_TOKEN:-}" \
               --arg public_ingress_github_token "${LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN:-}" \
-              --arg enable_every_code_runtime_secrets "${LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS:-}" \
-              --arg every_code_worker_token "${LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN:-}" \
-              --arg every_code_webhook_secret "${LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET:-}" \
               --arg manager_preview_webhook_secret "${LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET:-}" \
-              --arg every_code_github_token "${LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN:-}" \
-              --arg every_code_github_actor "${LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR:-}" \
               --arg terminal_agent_read_token "${LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN:-}" \
               --arg terminal_agent_subject "${LAUNCHPLANE_TERMINAL_AGENT_SUBJECT:-}" \
               --arg terminal_agent_token_label "${LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL:-}" \
@@ -546,7 +540,6 @@ jobs:
               --arg npmplus_base_url "${LAUNCHPLANE_NPMPLUS_BASE_URL:-}" \
               --arg npmplus_identity "${LAUNCHPLANE_NPMPLUS_IDENTITY:-}" \
               --arg npmplus_secret "${LAUNCHPLANE_NPMPLUS_SECRET:-}" \
-              --argjson omit_every_code_env "$OMIT_EVERY_CODE_ENV" \
               --argjson omit_terminal_agent_env "$OMIT_TERMINAL_AGENT_ENV" \
               --argjson omit_owner_agent_env "$OMIT_OWNER_AGENT_ENV" \
               --argjson omit_npmplus_env "$OMIT_NPMPLUS_ENV" \
@@ -589,19 +582,6 @@ jobs:
                       LAUNCHPLANE_LOCAL_ADMIN_TOKEN: $local_admin_token,
                       LAUNCHPLANE_LOCAL_ADMIN_SUBJECT: $local_admin_subject,
                       LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL: $local_admin_token_label
-                    }
-                  else
-                    {}
-                  end
-                )
-                + (
-                  if (($omit_every_code_env | not)
-                    and (($enable_every_code_runtime_secrets | ascii_downcase) == "true")) then
-                    {
-                      LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN: $every_code_worker_token,
-                      LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET: $every_code_webhook_secret,
-                      LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN: $every_code_github_token,
-                      LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR: $every_code_github_actor
                     }
                   else
                     {}
@@ -753,7 +733,7 @@ jobs:
       - name: Request Launchplane self deploy
         id: self_deploy_request
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -772,7 +752,11 @@ jobs:
           poll-retry-on-request-error: "true"
           poll-interval-ms: "10000"
           poll-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.timeout_ms }}
-          timeout-ms: "30000"
+          poll-unavailable-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.replacement_timeout_ms }}
+          timeout-ms: "10000"
+          oidc-timeout-ms: "10000"
+          retry-attempts: "1"
+          ingress-retry-delay-ms: "1000"
           response-output-file: ${{ runner.temp }}/launchplane-self-deploy-response.json
           log-response-body: "false"
 
@@ -829,21 +813,26 @@ jobs:
           fi
           echo "timeout_ms=$remaining_timeout_ms" >>"$GITHUB_OUTPUT"
 
-      - name: Wait for deployed Launchplane runtime image
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+      - name: Wait for replacement Launchplane runtime marker
+        id: replacement_runtime
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
           route-path: /v1/service/runtime
           method: GET
           expected-status: "200"
-          timeout-ms: "30000"
-          poll-until-path: runtime.docker_image_reference
-          poll-until-value: ${{ steps.image.outputs.image_reference }}
+          timeout-ms: "10000"
+          oidc-timeout-ms: "10000"
+          retry-attempts: "1"
+          ingress-retry-delay-ms: "1000"
+          poll-until-path: runtime.deployment_marker
+          poll-until-value: ${{ steps.prep.outputs.forward_deployment_marker }}
           poll-retry-on-request-error: "true"
           poll-retry-on-unexpected-status: "true"
           poll-interval-ms: "5000"
           poll-timeout-ms: ${{ steps.deploy_runtime_wait.outputs.timeout_ms }}
+          poll-unavailable-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.replacement_timeout_ms }}
           response-output-file: ${{ runner.temp }}/launchplane-deployed-runtime-wait.json
           log-response-body: "false"
 
@@ -851,30 +840,36 @@ jobs:
         id: deploy_marker_wait
         shell: bash
         env:
-          WAIT_DEADLINE_EPOCH: ${{ steps.deploy_runtime_wait.outputs.deadline_epoch }}
+          MINIMUM_TIMEOUT_MS: ${{ steps.deploy_wait_timeout.outputs.final_verification_timeout_ms }}
+          WAIT_DEADLINE_EPOCH: ${{ steps.replacement_runtime.outputs.observation-deadline-epoch }}
         run: |
           set -euo pipefail
           remaining_timeout_ms=$(( (${WAIT_DEADLINE_EPOCH:?} - $(date +%s)) * 1000 ))
-          if [ "$remaining_timeout_ms" -lt 1 ]; then
-            remaining_timeout_ms=1
+          if [ "$remaining_timeout_ms" -lt "${MINIMUM_TIMEOUT_MS:?}" ]; then
+            remaining_timeout_ms="$MINIMUM_TIMEOUT_MS"
           fi
           echo "timeout_ms=$remaining_timeout_ms" >>"$GITHUB_OUTPUT"
 
-      - name: Wait for deployed Launchplane runtime marker
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+      - name: Wait for deployed Launchplane runtime image
+        id: deployed_image
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
           route-path: /v1/service/runtime
           method: GET
           expected-status: "200"
-          timeout-ms: "30000"
-          poll-until-path: runtime.deployment_marker
-          poll-until-value: ${{ steps.prep.outputs.forward_deployment_marker }}
+          timeout-ms: "10000"
+          oidc-timeout-ms: "10000"
+          retry-attempts: "1"
+          ingress-retry-delay-ms: "1000"
+          poll-until-path: runtime.docker_image_reference
+          poll-until-value: ${{ steps.image.outputs.image_reference }}
           poll-retry-on-request-error: "true"
           poll-retry-on-unexpected-status: "true"
           poll-interval-ms: "5000"
           poll-timeout-ms: ${{ steps.deploy_marker_wait.outputs.timeout_ms }}
+          poll-unavailable-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.replacement_timeout_ms }}
           response-output-file: ${{ runner.temp }}/launchplane-deployed-marker-wait.json
           log-response-body: "false"
 
@@ -882,13 +877,17 @@ jobs:
         id: deployed_health
         shell: bash
         env:
-          WAIT_DEADLINE_EPOCH: ${{ steps.deploy_runtime_wait.outputs.deadline_epoch }}
+          MINIMUM_TIMEOUT_MS: ${{ steps.deploy_wait_timeout.outputs.final_verification_timeout_ms }}
+          WAIT_DEADLINE_EPOCH: ${{ steps.replacement_runtime.outputs.observation-deadline-epoch }}
         run: |
           set -euo pipefail
 
           deadline_epoch="${WAIT_DEADLINE_EPOCH:?}"
+          : > "$RUNNER_TEMP/launchplane-deployed-health-result.json"
           last_report_seconds=0
-          while [ "$(date +%s)" -lt "$deadline_epoch" ]; do
+          first_probe=1
+          while [ "$first_probe" -eq 1 ] || [ "$(date +%s)" -lt "$deadline_epoch" ]; do
+            first_probe=0
             all_healthy=1
             health_report=""
             while IFS= read -r raw_url; do
@@ -897,7 +896,7 @@ jobs:
                 continue
               fi
               health_response_file="$(mktemp)"
-              health_status_code="$(curl -sSL -o "$health_response_file" -w '%{http_code}' "$health_url" 2>/dev/null || true)"
+              health_status_code="$(curl -sSL --connect-timeout 3 --max-time 5 -o "$health_response_file" -w '%{http_code}' "$health_url" 2>/dev/null || true)"
               health_status_value="$(jq -r '.status // empty' "$health_response_file" 2>/dev/null || true)"
               if [ -z "$health_report" ]; then
                 health_report="${health_url}=${health_status_code:-curl_failed}:${health_status_value:-unknown}"
@@ -905,6 +904,9 @@ jobs:
                 health_report="$health_report,${health_url}=${health_status_code:-curl_failed}:${health_status_value:-unknown}"
               fi
               if [ "$health_status_code" != "200" ] || [ "$health_status_value" != "ok" ]; then
+                jq -n --arg http_status "$health_status_code" \
+                  '{http_status: $http_status, result: "unhealthy"}' \
+                  > "$RUNNER_TEMP/launchplane-deployed-health-result.json"
                 all_healthy=0
                 rm -f "$health_response_file"
                 break
@@ -913,13 +915,14 @@ jobs:
             done < <(printf '%s\n' "$LAUNCHPLANE_DEPLOY_HEALTH_URLS" | tr ',' '\n')
 
             if [ "$all_healthy" -eq 1 ]; then
+              : > "$RUNNER_TEMP/launchplane-deployed-health-result.json"
               remaining_seconds=$((deadline_epoch - $(date +%s)))
               if [ "$remaining_seconds" -lt 0 ]; then
                 remaining_seconds=0
               fi
               remaining_timeout_ms=$((remaining_seconds * 1000))
-              if [ "$remaining_timeout_ms" -lt 1 ]; then
-                remaining_timeout_ms=1
+              if [ "$remaining_timeout_ms" -lt "${MINIMUM_TIMEOUT_MS:?}" ]; then
+                remaining_timeout_ms="$MINIMUM_TIMEOUT_MS"
               fi
               echo "remaining_timeout_ms=$remaining_timeout_ms" >>"$GITHUB_OUTPUT"
               exit 0
@@ -928,6 +931,9 @@ jobs:
               echo "Waiting for Launchplane health URLs. health=${health_report:-none}"
               last_report_seconds=$SECONDS
             fi
+            if [ "$(date +%s)" -ge "$deadline_epoch" ]; then
+              break
+            fi
             sleep 5
           done
 
@@ -935,36 +941,76 @@ jobs:
           exit 1
 
       - name: Verify deployed Launchplane runtime image after health
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+        id: final_image
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
           route-path: /v1/service/runtime
           method: GET
           expected-status: "200"
-          timeout-ms: "30000"
+          timeout-ms: "10000"
+          oidc-timeout-ms: "10000"
+          retry-attempts: "1"
+          ingress-retry-delay-ms: "1000"
           poll-until-path: runtime.docker_image_reference
           poll-until-value: ${{ steps.image.outputs.image_reference }}
+          poll-retry-on-request-error: "true"
+          poll-retry-on-unexpected-status: "true"
           poll-interval-ms: "1000"
           poll-timeout-ms: ${{ steps.deployed_health.outputs.remaining_timeout_ms }}
+          poll-unavailable-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.replacement_timeout_ms }}
           response-output-file: ${{ runner.temp }}/launchplane-deployed-runtime-final.json
           log-response-body: "false"
 
+      - name: Resolve final runtime marker remaining wait
+        id: final_marker_wait
+        shell: bash
+        env:
+          MINIMUM_TIMEOUT_MS: ${{ steps.deploy_wait_timeout.outputs.final_verification_timeout_ms }}
+          WAIT_DEADLINE_EPOCH: ${{ steps.replacement_runtime.outputs.observation-deadline-epoch }}
+        run: |
+          set -euo pipefail
+          remaining_timeout_ms=$(( (${WAIT_DEADLINE_EPOCH:?} - $(date +%s)) * 1000 ))
+          if [ "$remaining_timeout_ms" -lt "${MINIMUM_TIMEOUT_MS:?}" ]; then
+            remaining_timeout_ms="$MINIMUM_TIMEOUT_MS"
+          fi
+          echo "timeout_ms=$remaining_timeout_ms" >>"$GITHUB_OUTPUT"
+
       - name: Verify deployed Launchplane runtime marker after health
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+        id: final_marker
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
           route-path: /v1/service/runtime
           method: GET
           expected-status: "200"
-          timeout-ms: "30000"
+          timeout-ms: "10000"
+          oidc-timeout-ms: "10000"
+          retry-attempts: "1"
+          ingress-retry-delay-ms: "1000"
           poll-until-path: runtime.deployment_marker
           poll-until-value: ${{ steps.prep.outputs.forward_deployment_marker }}
+          poll-retry-on-request-error: "true"
+          poll-retry-on-unexpected-status: "true"
           poll-interval-ms: "1000"
-          poll-timeout-ms: ${{ steps.deployed_health.outputs.remaining_timeout_ms }}
+          poll-timeout-ms: ${{ steps.final_marker_wait.outputs.timeout_ms }}
+          poll-unavailable-timeout-ms: ${{ steps.deploy_wait_timeout.outputs.replacement_timeout_ms }}
           response-output-file: ${{ runner.temp }}/launchplane-deployed-marker-final.json
           log-response-body: "false"
+
+      - name: Alert failed Launchplane replacement
+        if: failure() && steps.self_deploy_request.outcome != '' && steps.self_deploy_request.outcome != 'skipped'
+        shell: bash
+        env:
+          DISCORD_LAUNCHPLANE_WEBHOOK: ${{ secrets.DISCORD_LAUNCHPLANE_WEBHOOK }}
+          DEPLOYED_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
+          PREVIOUS_IMAGE_REFERENCE: ${{ steps.self_deploy.outputs.previous_image_reference }}
+          SELF_DEPLOY_RESPONSE_FILE: ${{ runner.temp }}/launchplane-self-deploy-response.json
+          FAILING_RUNTIME_STATUS: ${{ steps.final_marker.outcome == 'failure' && steps.final_marker.outputs.status-code || steps.final_image.outcome == 'failure' && steps.final_image.outputs.status-code || steps.deployed_image.outcome == 'failure' && steps.deployed_image.outputs.status-code || steps.replacement_runtime.outcome == 'failure' && steps.replacement_runtime.outputs.status-code || steps.self_deploy_request.outcome == 'failure' && steps.self_deploy_request.outputs.status-code || 'unavailable' }}
+          FAILING_HEALTH_RESULT_FILE: ${{ runner.temp }}/launchplane-deployed-health-result.json
+        run: uv run python scripts/deploy/notify-deploy-failure.py
 
       - name: Render Launchplane rollback request
         if: failure() && steps.self_deploy.outputs.previous_image_reference != ''
@@ -984,9 +1030,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -s "${SELF_DEPLOY_RESPONSE_FILE:-}" ] \
-            && jq -e '.result.deploy_state == "draining"
-              or (.error.code | IN("self_deploy_refused", "self_deploy_fence_conflict", "invalid_request", "authorization_denied"))' "$SELF_DEPLOY_RESPONSE_FILE" >/dev/null; then
+          may_have_dispatched="$(uv run --no-sync python scripts/deploy/notify-deploy-failure.py --check-dispatch || echo true)"
+          if [ "$may_have_dispatched" = false ]; then
             echo "Forward request did not dispatch; no service rollback is needed."
             exit 0
           fi
@@ -1115,7 +1160,7 @@ jobs:
           && steps.rollback_request.outputs.previous_image_reference != ''
         id: rollback_request_action
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1207,7 +1252,7 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
         id: rollback_marker
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1246,7 +1291,7 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
         id: rollback_runtime
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1398,7 +1443,7 @@ jobs:
           && steps.rollback_request_action.outcome == 'success'
           && steps.rollback_runtime.outcome == 'success'
           && steps.rollback_health.outcome == 'success'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1422,7 +1467,7 @@ jobs:
           && steps.rollback_marker.outcome == 'success'
           && steps.rollback_runtime.outcome == 'success'
           && steps.rollback_health.outcome == 'success'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1447,7 +1492,7 @@ jobs:
 
       - name: Ensure runtime key-safety policy
         if: steps.runtime_key_safety.outputs.has_runtime_key_safety_policy == 'true'
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -1461,7 +1506,7 @@ jobs:
         if: always() && steps.service.outputs.service_url != ''
         id: deployed_runtime
         continue-on-error: true
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}

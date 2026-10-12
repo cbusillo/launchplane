@@ -377,7 +377,6 @@ class ProductOnboardingTests(unittest.TestCase):
                         "GITHUB_OUTPUT": str(output_file),
                         "GITHUB_REPOSITORY": "cbusillo/launchplane",
                         "LAUNCHPLANE_IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
-                        "OMIT_EVERY_CODE_ENV": "false",
                         "OMIT_NPMPLUS_ENV": "false",
                         "OMIT_OWNER_AGENT_ENV": "false",
                         "OMIT_TERMINAL_AGENT_ENV": "false",
@@ -462,7 +461,6 @@ class ProductOnboardingTests(unittest.TestCase):
                         "LAUNCHPLANE_DOKPLOY_TARGET_ID": "launchplane-target",
                         "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
                         "LAUNCHPLANE_SECRET_KEYS_JSON": secret_keys_json,
-                        "OMIT_EVERY_CODE_ENV": "false",
                         "OMIT_NPMPLUS_ENV": "false",
                         "OMIT_OWNER_AGENT_ENV": "false",
                         "OMIT_TERMINAL_AGENT_ENV": "false",
@@ -585,6 +583,12 @@ class ProductOnboardingTests(unittest.TestCase):
             rollback_payload_path = (
                 temporary_directory / "launchplane-self-deploy-rollback-payload.json"
             )
+            declared_env = {}
+            for key, value in cast(dict[str, object], rollback_step.data.get("env", {})).items():
+                if isinstance(value, str):
+                    resolved = value.replace("${{ runner.temp }}", str(temporary_directory))
+                    if "${{" not in resolved:
+                        declared_env[key] = resolved
 
             def render_rollback(operation: str) -> subprocess.CompletedProcess[str]:
                 output_file = temporary_directory / "github-output.txt"
@@ -597,6 +601,7 @@ class ProductOnboardingTests(unittest.TestCase):
                     env={
                         "PATH": os.environ["PATH"],
                         "HOME": str(temporary_directory),
+                        **declared_env,
                         "BOOTSTRAP_SECRET_OPERATION": operation,
                         "ORDINARY_AGENT_WORKERS": "preserve",
                         "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "absent",

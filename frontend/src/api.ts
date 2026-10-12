@@ -5,7 +5,11 @@ import type {
   ProductListPayload,
 } from "./types";
 import type {
+  ApplyProductHealthMonitoringData,
+  ApplyProductHealthMonitoringResponse,
   ApplyProductEnvironmentConfigData,
+  ApplyProductDisplayNameData,
+  ApplyProductDisplayNameResponse,
   ApplyProductWebsiteCleanupData,
   ApplyProductWebsiteCleanupResponse,
   ApplyProductEnvironmentConfigResponse,
@@ -29,27 +33,14 @@ import type {
   EnqueueProductionBackupGateResponse,
   EveryCodeSummaryResponse,
   GovernanceProjectionResponse,
-  InspectionSetupMetadata,
   ListHumanPrivilegedOperationsData,
   ListHumanPrivilegedOperationsResponse,
   ListProductProfilesData,
   ListProductProfilesResponse,
   MergeTrainControllerStatusResponse,
   MergeTrainPolicyTargetsResponse,
-  OrdinaryAgentDeliveryActivationOptionsResponse,
-  OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
-  OrdinaryAgentMergeTrainTargetInputsResponse,
-  OrdinaryAgentMergeTrainTargetIntentInput,
-  OrdinaryAgentMergeTrainTargetPrepareResponse,
-  OrdinaryAgentDeliveryActivationRevokeRequest,
-  OrdinaryAgentDeliveryActivationSetupRequest,
-  PlanOrdinaryAgentDeliveryActivationData,
-  PlanOrdinaryAgentDeliveryActivationResponse,
   PrepareAuthorizationCandidateData,
   PrepareAuthorizationCandidateResponse,
-  PrepareOrdinaryAgentMergeTrainTargetData,
-  PrepareOrdinaryAgentDeliveryPolicyData,
-  PrepareOrdinaryAgentDeliveryPolicyResponse,
   ProductActivityResponse,
   ProductEnvironmentConfigStatusResponse,
   ProductEnvironmentIncidentResponse,
@@ -70,8 +61,6 @@ import type {
   ReadHumanPrivilegedOperationResponse,
   ReadHumanPrivilegedOperationReviewData,
   ReadHumanPrivilegedOperationReviewResponse,
-  ReadOrdinaryAgentDeliveryActivationOptionsResponse,
-  ReadOrdinaryAgentMergeTrainTargetInputsData,
   RankWorkGraphSnapshotData,
   RankWorkGraphSnapshotResponse,
   ReadProductOperationalReadinessData,
@@ -100,20 +89,7 @@ import type {
   ReadOdooProdRollbackOperationData,
   ReadOdooProdRollbackOperationResponse,
 } from "./generated/openapi.ts";
-import type {
-  OrdinaryAgentOperationClientResponse,
-  OrdinaryAgentJobView,
-  OrdinaryAgentConnectionView,
-} from "./generated/openapi.ts";
-export type { OrdinaryAgentOperationClientResponse } from "./generated/openapi.ts";
 
-export type {
-  InspectionSetupMetadata as OrdinaryAgentDeliveryInspectionSetup,
-} from "./generated/openapi.ts";
-export type OrdinaryAgentDeliveryInspectionRuntimeState =
-  InspectionSetupMetadata["runtime"]["state"];
-export type OrdinaryAgentDeliveryInspectionSecretState =
-  InspectionSetupMetadata["managed_secret"]["state"];
 import type { BrowserOperationOptions } from "./browser-operation";
 import type { RestartLaneServiceData, LaneServiceRestartResponse } from "./generated/openapi.ts";
 import {
@@ -550,40 +526,7 @@ export function readMergeTrainPolicyTargets(
   );
 }
 
-export function readOrdinaryAgentMergeTrainTargetInputs(
-  signal?: AbortSignal,
-): Promise<OrdinaryAgentMergeTrainTargetInputsResponse> {
-  const request: ReadOrdinaryAgentMergeTrainTargetInputsData = {
-    url: "/v1/privileged-operations/merge-train-targets/inputs",
-  };
-  return requestJson<OrdinaryAgentMergeTrainTargetInputsResponse>(
-    request.url,
-    "GET",
-    undefined,
-    signal,
-  );
-}
 
-export function prepareOrdinaryAgentMergeTrainTarget(
-  intent: OrdinaryAgentMergeTrainTargetIntent,
-  sourceEventId: string,
-  signal?: AbortSignal,
-): Promise<OrdinaryAgentMergeTrainTargetPrepareResponse> {
-  const request: PrepareOrdinaryAgentMergeTrainTargetData = {
-    url: BROWSER_WRITE_ROUTES.ordinaryMergeTrainTargetPrepare,
-    body: {
-      schema_version: 1,
-      source_event_id: sourceEventId,
-      intent,
-    },
-  };
-  return requestJson<OrdinaryAgentMergeTrainTargetPrepareResponse>(
-    request.url,
-    "POST",
-    request.body,
-    signal,
-  );
-}
 
 export function applyProductEnvironmentConfig(
   product: string,
@@ -604,6 +547,16 @@ export function applyProductEnvironmentConfig(
     options.signal,
     generatedIdempotencyKey(request.headers),
     options.onDispatch,
+  );
+}
+
+export function applyProductHealthMonitoring(
+  payload: ApplyProductHealthMonitoringData["body"],
+  options: BrowserOperationOptions,
+): Promise<ApplyProductHealthMonitoringResponse> {
+  return requestJson<ApplyProductHealthMonitoringResponse>(
+    BROWSER_WRITE_ROUTES.productHealthMonitoringApply,
+    "POST", payload, options.signal, options.idempotencyKey, options.onDispatch,
   );
 }
 
@@ -637,7 +590,7 @@ export function readProductProfile(
 
 export function readProductProfileMutationReceipt(
   product: string,
-  field: "owner" | "image-repository" | "production-use" | "website-cleanup",
+  field: "owner" | "image-repository" | "production-use" | "website-cleanup" | "display-name",
   operationKey: string,
   signal?: AbortSignal,
 ): Promise<ReadProductProfileMutationReceiptResponse> {
@@ -665,6 +618,17 @@ export function applyProductOwner(
     options.signal,
     generatedIdempotencyKey(request.headers),
     options.onDispatch,
+  );
+}
+
+export function applyProductDisplayName(
+  product: string,
+  payload: ApplyProductDisplayNameData["body"],
+  options: BrowserOperationOptions,
+): Promise<ApplyProductDisplayNameResponse> {
+  return requestJson<ApplyProductDisplayNameResponse>(
+    BROWSER_WRITE_ROUTES.productDisplayName.replace("{product}", encodeURIComponent(product)),
+    "POST", payload, options.signal, options.idempotencyKey, options.onDispatch,
   );
 }
 
@@ -894,41 +858,14 @@ export function retryProductReviewFeedback(
 
 
 export type {
-  OrdinaryAgentDeliveryActivationOptionsResponse,
-  OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
-  OrdinaryAgentMergeTrainTargetInputsResponse,
-  OrdinaryAgentMergeTrainTargetIntentInput,
-  OrdinaryAgentMergeTrainTargetPrepareResponse,
-  OrdinaryAgentDeliveryActivationRevokeRequest,
-  OrdinaryAgentDeliveryActivationSetupRequest,
   PrivilegedOperationListResponse,
   PrivilegedOperationRecord,
   PrivilegedOperationSemanticReview,
   PrivilegedOperationSemanticReviewResponse,
 };
 
-export type OrdinaryAgentMergeTrainTargetIntent =
-  OrdinaryAgentMergeTrainTargetIntentInput;
 
-export type OrdinaryAgentDeliveryPolicyIntent =
-  PrepareOrdinaryAgentDeliveryPolicyData["body"]["intent"];
 
-export function prepareOrdinaryAgentDeliveryPolicy(
-  intent: OrdinaryAgentDeliveryPolicyIntent,
-  sourceEventId: string,
-  signal?: AbortSignal,
-): Promise<PrepareOrdinaryAgentDeliveryPolicyResponse> {
-  const request: PrepareOrdinaryAgentDeliveryPolicyData = {
-    url: BROWSER_WRITE_ROUTES.ordinaryAgentDeliveryPolicyPrepare,
-    body: { schema_version: 1, source_event_id: sourceEventId, intent },
-  };
-  return requestJson<PrepareOrdinaryAgentDeliveryPolicyResponse>(
-    request.url,
-    "POST",
-    request.body,
-    signal,
-  );
-}
 
 export type PrivilegedOperationDescriptorId = NonNullable<
   ListHumanPrivilegedOperationsData["query"]
@@ -977,49 +914,8 @@ export function readPrivilegedOperationPlans(
   );
 }
 
-export function readOrdinaryAgentDeliveryActivationOptions(
-  signal?: AbortSignal,
-): Promise<OrdinaryAgentDeliveryActivationOptionsResponse> {
-  return requestJson<ReadOrdinaryAgentDeliveryActivationOptionsResponse>(
-    "/v1/privileged-operations/ordinary-agent-delivery-activation/options",
-    "GET",
-    undefined,
-    signal,
-  );
-}
 
-export function readOrdinaryAgentDeliveryAuthorizationCandidateInputs(
-  signal?: AbortSignal,
-): Promise<OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse> {
-  return requestJson<OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse>(
-    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs",
-    "GET",
-    undefined,
-    signal,
-  );
-}
 
-export function planOrdinaryAgentDeliveryActivation(
-  requestPayload:
-    | OrdinaryAgentDeliveryActivationSetupRequest
-    | OrdinaryAgentDeliveryActivationRevokeRequest,
-  expiresInSeconds = 1800,
-): Promise<PrivilegedOperationHumanResponse> {
-  const request: PlanOrdinaryAgentDeliveryActivationData = {
-    url: BROWSER_WRITE_ROUTES.ordinaryAgentDeliveryActivationPlan,
-    body: {
-      schema_version: 1,
-      source_event_id: `ui:activation-plan:${Date.now()}`,
-      expires_in_seconds: expiresInSeconds,
-      request: requestPayload,
-    },
-  };
-  return requestJson<PlanOrdinaryAgentDeliveryActivationResponse>(
-    request.url,
-    "POST",
-    request.body,
-  );
-}
 
 export function readPrivilegedOperationReview(
   operationId: string,
@@ -1092,29 +988,11 @@ export function revokePrivilegedOperation(
   );
 }
 
-export function readOrdinaryAgentOperation(principalId: string, operationId: string, signal?: AbortSignal): Promise<OrdinaryAgentOperationClientResponse> {
-  return requestJson(`/v1/ordinary-agent-operations/${encodeURIComponent(principalId)}/${encodeURIComponent(operationId)}`, "GET", undefined, signal);
-}
 
-export function approveOrdinaryAgentOperation(principalId: string, operationId: string): Promise<OrdinaryAgentOperationClientResponse> {
-  return requestJson(`/v1/ordinary-agent-operations/${encodeURIComponent(principalId)}/${encodeURIComponent(operationId)}/approve`, "POST");
-}
 
-export function cancelOrdinaryAgentOperation(principalId: string, operationId: string): Promise<OrdinaryAgentOperationClientResponse> {
-  return requestJson(`/v1/ordinary-agent-operations/${encodeURIComponent(principalId)}/${encodeURIComponent(operationId)}/cancel`, "POST");
-}
 
-export function revokeOrdinaryAgentSession(principalId: string, sessionId: string): Promise<OrdinaryAgentOperationClientResponse> {
-  return requestJson(`/v1/ordinary-agent-sessions/${encodeURIComponent(principalId)}/${encodeURIComponent(sessionId)}/revoke`, "POST");
-}
 
-export function disconnectOrdinaryAgent(principalId: string, sourceEventId: string): Promise<OrdinaryAgentConnectionView> {
-  return requestJson(`/v1/ordinary-agent-connections/${encodeURIComponent(principalId)}/disconnect`, "POST", { source_event_id: sourceEventId });
-}
 
-export function readOrdinaryAgentJob(principalId: string, requestId: string, signal?: AbortSignal): Promise<OrdinaryAgentJobView> {
-  return requestJson(`/v1/ordinary-agent-jobs/${encodeURIComponent(principalId)}/${encodeURIComponent(requestId)}`, "GET", undefined, signal);
-}
 
 export function readServiceGitHubDelivery(signal?: AbortSignal): Promise<import("./generated/openapi.ts").ServiceGitHubDeliveryStatus> {
   return requestJson("/v1/service/github-delivery", "GET", undefined, signal);

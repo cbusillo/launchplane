@@ -27,8 +27,6 @@ test("readable initial tab, refresh, explicit denial, and recovery", async ({ pa
       } else {
         await route.fulfill({ status: 403, json: { trace_id: "denied-secret", error: { code: "authorization_denied", message: "Identity cannot access privileged-operation planning." } } });
       }
-    } else if (url.pathname === "/v1/privileged-operations/merge-train-targets/inputs") {
-      await route.fulfill({ status: 403, json: { error: { code: "authorization_denied", message: "No preparation access." } } });
     } else {
       unexpected.push(url.pathname);
       await route.fulfill({ status: 404, json: { error: { message: "Unexpected test read" } } });
