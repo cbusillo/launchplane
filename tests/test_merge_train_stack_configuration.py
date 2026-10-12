@@ -4,7 +4,10 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
-from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan_record
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchLandingPlan,
+    build_merge_train_batch_landing_plan_record,
+)
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
@@ -37,9 +40,17 @@ class StackDispositionConfigurationTests(unittest.IsolatedAsyncioTestCase):
         effects: list[str] = []
 
         class EffectRecordingClient(_FakeMergeTrainGitHubClient):
+            def land_batch_candidate(self, **kwargs: Any) -> MergeTrainBatchLandingPlan:
+                effects.append("merge")
+                return super().land_batch_candidate(**kwargs)
+
             def merge_pull_request(self, **kwargs: Any) -> str:
                 effects.append("merge")
                 return super().merge_pull_request(**kwargs)
+
+            def merge_stack_child_into_parent(self, **kwargs: Any) -> str:
+                effects.append("collapse")
+                return super().merge_stack_child_into_parent(**kwargs)
 
             def cleanup_batch_candidate_ref(self, **kwargs: Any) -> bool:
                 effects.append("cleanup")
@@ -57,7 +68,8 @@ class StackDispositionConfigurationTests(unittest.IsolatedAsyncioTestCase):
                 effects.append("label")
                 super().add_pull_request_label(**kwargs)
 
-            def verify_unlanded_batch(self, **kwargs: Any) -> tuple[str, str]:
+            @staticmethod
+            def verify_unlanded_batch(**kwargs: Any) -> tuple[str, str]:
                 if retirement_unavailable:
                     raise MergeTrainGitHubStaleHeadError("Cannot prove the root is unlanded")
                 plan = kwargs["landing_plan"]

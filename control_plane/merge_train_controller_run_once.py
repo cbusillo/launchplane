@@ -782,13 +782,15 @@ def _resume_merge_train_controller_state(
         ):
             return None
         if not repository_policy.stack_child_disposition_label:
+            landing_record_id = lease.record.step_payload.get("landing_plan_record_id")
             landing = _merge_train_landing_record_by_id(
                 record_store=landing_store,
                 repository=request.repository,
                 base_branch=request.base_branch,
-                record_id=str(
-                    lease.record.step_payload.get("landing_plan_record_id")
-                    or lease.record.active_record_id
+                record_id=(
+                    landing_record_id
+                    if isinstance(landing_record_id, str) and landing_record_id
+                    else lease.record.active_record_id
                 ),
             ) or latest_merge_train_batch_landing_plan_record(
                 record_store=landing_store,
@@ -1260,7 +1262,6 @@ def _advance_active_landing_record(
                     github_client=github_client,
                     candidate_store=candidate_store,
                     landing_store=landing_store,
-                    stack_collapse_store=stack_collapse_store,
                     admission_store=admission_store,
                     admission_evaluator=admission_evaluator,
                     landing_record=active_landing_record,
@@ -1298,7 +1299,6 @@ def _advance_active_landing_record(
             github_client=github_client,
             candidate_store=candidate_store,
             landing_store=landing_store,
-            stack_collapse_store=stack_collapse_store,
             admission_store=admission_store,
             admission_evaluator=admission_evaluator,
             landing_record=active_landing_record,
@@ -1521,7 +1521,6 @@ def _advance_active_landing_record(
                 github_client=github_client,
                 candidate_store=candidate_store,
                 landing_store=landing_store,
-                stack_collapse_store=stack_collapse_store,
                 admission_store=admission_store,
                 admission_evaluator=admission_evaluator,
                 landing_record=blocked_landing_record,
@@ -1709,7 +1708,6 @@ def _retire_changed_policy_landing(
     github_client: GitHubMergeTrainClient,
     candidate_store: MergeTrainBatchCandidateRecordStore,
     landing_store: MergeTrainBatchLandingPlanRecordStore,
-    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
     admission_store: MergeAdmissionRecordStore,
     admission_evaluator: MergeAdmissionEvaluator,
     landing_record: MergeTrainBatchLandingPlanRecord,
