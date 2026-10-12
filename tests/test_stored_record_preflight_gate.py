@@ -37,6 +37,7 @@ exit 0
                     "PATH": f"{temporary}:{os.environ['PATH']}",
                     "CANDIDATE_IMAGE": "example/candidate@sha256:" + "a" * 64,
                     "RUNNER_TEMP": str(temporary),
+                    "LAUNCHPLANE_PREFLIGHT_OWNER": "fixture:gate",
                 },
                 capture_output=True,
                 text=True,
