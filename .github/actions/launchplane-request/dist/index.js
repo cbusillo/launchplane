@@ -77,6 +77,8 @@ async function isIngressResponse(response) {
   }
 }
 
+class RequestPreparationError extends Error {}
+
 async function fetchWithRetry(url, initOrFactory, options) {
   const attempts = parsePositiveInteger(options.retryAttempts, "retry-attempts");
   const delayMs = parseNonNegativeInteger(options.retryDelayMs, "retry-delay-ms");
@@ -86,7 +88,9 @@ async function fetchWithRetry(url, initOrFactory, options) {
   );
   let ingressAttempt = 0;
   let lastError = null;
+  let requestOutcomeUncertain = false;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let requestAttempted = false;
     try {
       let init = typeof initOrFactory === "function"
         ? await initOrFactory()
@@ -100,11 +104,12 @@ async function fetchWithRetry(url, initOrFactory, options) {
           signal: init.signal ? AbortSignal.any([init.signal, signal]) : signal,
         };
       }
+      requestAttempted = true;
       const response = await fetch(url, init);
       if (!(await isIngressResponse(response))) {
         return response;
       }
-      options.onUnavailable?.();
+      options.onUnavailable?.("ingress");
       ingressAttempt += 1;
       if (ingressAttempt >= INGRESS_RETRY_ATTEMPTS) {
         return response;
@@ -118,7 +123,10 @@ async function fetchWithRetry(url, initOrFactory, options) {
       )));
       attempt -= 1;
     } catch (error) {
-      options.onUnavailable?.();
+      if (requestAttempted) {
+        requestOutcomeUncertain = true;
+        options.onUnavailable?.("request");
+      }
       lastError = error;
       if (isAbortError(error) || attempt >= attempts) {
         break;
@@ -128,7 +136,8 @@ async function fetchWithRetry(url, initOrFactory, options) {
       )));
     }
   }
-  throw new Error(
+  const Failure = requestOutcomeUncertain ? Error : RequestPreparationError;
+  throw new Failure(
     `${options.label} failed after ${attempts} attempts: ${describeError(lastError)}`,
   );
 }
@@ -527,8 +536,11 @@ async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options)
     options.pollUnavailableTimeoutMs, "poll-unavailable-timeout-ms",
   );
   let unavailableSince = null;
+  let lastKnownDraining = false;
+  let requestOutcomeRecorded = false;
   let attemptStarted;
-  const onUnavailable = () => {
+  const onUnavailable = (kind) => {
+    if (kind === "ingress" && lastKnownDraining) return;
     if (unavailableTimeoutMs && unavailableSince === null) {
       unavailableSince = attemptStarted;
     }
@@ -559,7 +571,13 @@ async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options)
     } catch (error) {
       // A failed latest attempt may have dispatched. Clear an earlier pending
       // response so callers cannot mistake stale progress for a pre-effect stop.
-      options.onPollResponse?.(null, "");
+      if (!(error instanceof RequestPreparationError)) {
+        lastKnownDraining = false;
+        requestOutcomeRecorded = true;
+        options.onPollResponse?.(null, "");
+      } else if (!requestOutcomeRecorded) {
+        options.onPollResponse?.({ error: { code: "request_not_sent" } }, "");
+      }
       if (!pollPath || !options.pollRetryOnRequestError) {
         throw error;
       }
@@ -578,13 +596,18 @@ async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options)
       await sleep(pollIntervalMs);
       continue;
     }
-    options.onPollResponse?.(responseBody, String(response.status));
+    if (!(responseIsIngress && lastKnownDraining)) {
+      requestOutcomeRecorded = true;
+      options.onPollResponse?.(responseBody, String(response.status));
+    }
     const observationDeadlineEpoch = unavailableTimeoutMs ? Math.floor(
       (unavailableSince === null ? Math.min(deadline, Date.now() + unavailableTimeoutMs) : currentDeadline()) / 1000,
     ) : undefined;
     const outageDeadlineEpoch = unavailableSince === null ? undefined : observationDeadlineEpoch;
-    if (response.ok) unavailableSince = null;
-    else onUnavailable();
+    if (response.ok) {
+      unavailableSince = null;
+      lastKnownDraining = responseBody?.result?.deploy_state === "draining";
+    } else onUnavailable(responseIsIngress ? "ingress" : "request");
     const retryUnavailable = responseIsIngress && unavailableTimeoutMs
       && options.pollRetryOnRequestError;
     if (!response.ok && !retryUnavailable

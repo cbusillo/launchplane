@@ -7,6 +7,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from urllib.parse import urlsplit
 
+from control_plane.deploy_failure_alert import replacement_may_have_dispatched
+
 
 ACTION_ENTRYPOINT = Path(".github/actions/launchplane-request/dist/index.js")
 
@@ -47,6 +49,11 @@ global.fetch = async (url, init) => {{
   calls.push({{url, init}});
   if (url.startsWith('https://oidc.example/token')) {{
     oidcTokenCount += 1;
+    const oidcFailures = String(process.env.TEST_OIDC_FAILURE_ATTEMPTS || '').split(',').map(Number);
+    if (oidcFailures.includes(oidcTokenCount)) {{
+      testClock += clockStep;
+      return new Response(JSON.stringify({{error: 'temporarily unavailable'}}), {{status: 500}});
+    }}
     return new Response(JSON.stringify({{value: `oidc-token-${{oidcTokenCount}}`}}), {{status: 200}});
   }}
   launchplaneRequestCount += 1;
@@ -162,7 +169,7 @@ process.on('beforeExit', () => {{
                         "route-path": "/v1/drivers/launchplane/self-deploy",
                         "response-output-file": str(response),
                         "poll-result-path": "result.deploy_state",
-                        "poll-result-statuses": "draining",
+                        "poll-result-statuses": "draining,dispatch_in_progress",
                         "poll-retry-on-request-error": "true",
                         "poll-unavailable-timeout-ms": "25",
                         "poll-timeout-ms": "1000",
@@ -173,7 +180,9 @@ process.on('beforeExit', () => {{
                     environment={
                         "TEST_CLOCK_STEP_MS": "10",
                         "TEST_RESULT_FIELD": "deploy_state",
-                        "TEST_REFRESH_STATUSES": "draining",
+                        "TEST_REFRESH_STATUSES": "dispatch_in_progress"
+                        if kind == "TEST_INGRESS_404_ATTEMPTS"
+                        else "draining",
                         kind: ",".join(str(index) for index in range(2, 100)),
                     },
                 )
@@ -185,7 +194,15 @@ process.on('beforeExit', () => {{
                     if urlsplit(call["url"]).hostname == "launchplane.example"
                 ]
                 self.assertLess(len(mutations), 10)
-                self.assertIsNone(json.loads(response.read_text()))
+                if kind == "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS":
+                    self.assertIsNone(json.loads(response.read_text()))
+                else:
+                    self.assertNotEqual(
+                        (json.loads(response.read_text()) or {})
+                        .get("result", {})
+                        .get("deploy_state"),
+                        "draining",
+                    )
 
     def test_replacement_deadline_starts_at_marker_and_carries_elapsed_outage(self) -> None:
         for outage in (False, True):
@@ -228,6 +245,88 @@ process.on('beforeExit', () => {{
                     self.assertEqual(outage_deadline, deadline)
                 else:
                     self.assertNotIn("outage-deadline-epoch<<", output.read_text())
+
+    def test_pre_request_auth_and_ingress_outages_preserve_known_drain(self) -> None:
+        for failure in ("auth", "ingress"):
+            for recovers in (True, False):
+                with self.subTest(failure=failure, recovers=recovers), TemporaryDirectory() as name:
+                    response = Path(name) / "response.json"
+                    result = self.run_action(
+                        inputs={
+                            "launchplane-url": "https://launchplane.example",
+                            "route-path": "/v1/launchplane/self-deploy",
+                            "poll-until-path": "result.deploy_state",
+                            "poll-until-value": "requested",
+                            "poll-retry-on-request-error": "true",
+                            "poll-retry-on-unexpected-status": "true",
+                            "poll-unavailable-timeout-ms": "2000",
+                            "poll-timeout-ms": "10000",
+                            "poll-interval-ms": "1",
+                            "retry-attempts": "1",
+                            "ingress-retry-delay-ms": "0",
+                            "response-output-file": str(response),
+                        },
+                        environment={
+                            "TEST_CLOCK_STEP_MS": "1000",
+                            "TEST_RESULT_FIELD": "deploy_state",
+                            "TEST_REFRESH_STATUSES": "draining,requested"
+                            if failure == "auth"
+                            else "draining,draining,draining,draining,requested",
+                            "TEST_OIDC_FAILURE_ATTEMPTS": ",".join(
+                                str(i) for i in range(2, 5 if recovers else 20)
+                            )
+                            if failure == "auth"
+                            else "",
+                            "TEST_INGRESS_404_ATTEMPTS": ",".join(
+                                str(i) for i in range(2, 5 if recovers else 20)
+                            )
+                            if failure == "ingress"
+                            else "",
+                        },
+                    )
+                    if recovers:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(
+                            json.loads(response.read_text())["result"]["deploy_state"], "requested"
+                        )
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(
+                            json.loads(response.read_text())["result"]["deploy_state"], "draining"
+                        )
+
+    def test_auth_outage_never_overwrites_dispatch_proof(self) -> None:
+        for uncertain in (False, True):
+            with TemporaryDirectory() as name:
+                response = Path(name) / "response.json"
+                result = self.run_action(
+                    inputs={
+                        "launchplane-url": "https://launchplane.example",
+                        "route-path": "/v1/launchplane/self-deploy",
+                        "poll-until-path": "result.deploy_state",
+                        "poll-until-value": "requested",
+                        "poll-retry-on-request-error": "true",
+                        "poll-unavailable-timeout-ms": "2000",
+                        "poll-timeout-ms": "8000",
+                        "poll-interval-ms": "1",
+                        "retry-attempts": "1",
+                        "response-output-file": str(response),
+                    },
+                    environment={
+                        "TEST_CLOCK_STEP_MS": "1000",
+                        "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "1" if uncertain else "",
+                        "TEST_OIDC_FAILURE_ATTEMPTS": ",".join(
+                            str(i) for i in range(2 if uncertain else 1, 20)
+                        ),
+                    },
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(replacement_may_have_dispatched(response), uncertain)
+                calls = json.loads(result.stderr.strip().splitlines()[-1])
+                self.assertEqual(
+                    any(urlsplit(call["url"]).hostname == "launchplane.example" for call in calls),
+                    uncertain,
+                )
 
     def test_posts_oidc_authenticated_json_with_idempotency_key(self) -> None:
         with TemporaryDirectory() as temporary_directory:
