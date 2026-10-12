@@ -477,7 +477,7 @@ The shared self-deploy route records a database admission fence before changing
 the provider. Its transaction lock also covers backup and Odoo release claims
 (including failure recovery), standalone Odoo testing target replacement claims,
 and generic-web release reservations. Product-event testing and preview reservations
-share this same fence, including fresh admission, expired-owner retry and
+share this same fence, including fresh admission, expired-lease retry and
 supersession. Their scope comes from the product reconciler's contract, rather
 than a second operation queue. A Client can
 accept while replacement is preparing; that decision and pending steps remain
