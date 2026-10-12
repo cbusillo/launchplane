@@ -293,6 +293,40 @@ Admins submit exact revisioned target and policy records to
 `POST /v1/production-backup-authority/apply`. Run `mode=dry_run`, review the
 canonical `authority_digest`, then submit the same payload with `mode=apply`,
 the reviewed digest, expected-current record IDs, and an `Idempotency-Key`.
+The production lane's **Actions → Production backup authority** card accepts
+a private prepared proposal for that exact product/context/instance. It displays
+the proposed target coordinates (when supplied), whole-guest capture scope,
+snapshot retention, evidence ages and review date,
+runs the dry run, and approves only its returned digest through this same route.
+Preparation can load the file into the signed-in administrator's tab before the
+administrator reviews it. This is browser-local staging: preparation uses an
+already-authorized administrator tab, or the administrator loads the private file;
+there is no server-side proposal inbox. No terminal command or bearer token is needed from
+the person approving. Proposal loading does not submit or activate a policy.
+
+Browser writes use the existing CSRF-checked session dependency and the unchanged
+`production_backup_authority.write` authorization model. A browser target revision
+also checks this action on every active lane using that target, including inside
+the locked write. A product-scoped caller cannot revise another product's target;
+an administrator already authorized on every affected lane retains that authority.
+The card accepts only target revisions used by the submitted policy and only a
+promotion action reported by the lane's current config-status read. Policy-only
+proposals display current target IDs, kinds and revisions; that read intentionally
+withholds provider coordinates. It retains the
+private proposal and, for an uncertain approval, the original request and
+idempotency key in that tab's session storage. A changed file invalidates review;
+an uncertain result locks replacement and permits only the original request's
+retry. A stale-authority conflict returned after the route's replay preflight
+settles that original request and permits a fresh review. Apply plans only inside
+the transaction after idempotency reservation/replay, so a concurrent original
+commit cannot become an unlocked stale-planning refusal. An authorization refusal
+occurs before replay and does not prove a lost response never committed; it keeps
+the original request locked. The card reads authority back after approval and
+keeps replacement disabled during that read. Approval does not enqueue
+a capture, restore, promotion or deployment; worker credentials and real capture
+qualification remain separate prerequisites. Existing target-only policy updates
+are bound to the current target revisions by the service digest.
+
 Apply is PostgreSQL-only and commits all target supersessions, target revisions,
 policy supersession, policy revision, and idempotency evidence atomically.
 Conflicting revisions, changed expected-current records, invalid target kinds,
@@ -310,9 +344,11 @@ responses remain replayable; they do not create new authority. A new attempt
 returns the compatibility error `legacy_backup_migration_conflict` (409); this
 is a permanent refusal, so retrying it cannot migrate authority.
 
-Legacy VeriReel backup dispatch and worker commands also refuse without host
-effects. Capture through `POST /v1/production-backup-gates` after typed policy
-onboarding. Both snapshot and independent backup remain mandatory. Removing
+The legacy VeriReel capture route and delegated executor are removed. Capture
+through `POST /v1/production-backup-gates` after typed policy onboarding. The
+shared queue worker lives in `workflows/production_backup_gate_operation_worker.py`;
+existing `verireel-workers` service/CLI entrypoints remain compatibility wiring
+for that shared queue, including historical operation reads and cancellation. Both snapshot and independent backup remain mandatory. Removing
 obsolete live runtime keys, onboarding production policy and proving a real
 promotion remain separate guarded operations under #2309.
 
@@ -891,7 +927,6 @@ Current implementation scope:
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/testing-verification`
 - `POST /v1/drivers/verireel/prod-deploy`
-- `POST /v1/drivers/verireel/prod-backup-gate`
 - `POST /v1/drivers/verireel/prod-promotion`
 - `POST /v1/drivers/verireel/prod-rollback`
 - `POST /v1/drivers/odoo/post-deploy`
@@ -2255,8 +2290,7 @@ Current derived-state behavior:
 - Launchplane can now execute the first explicit VeriReel driver actions
   directly: `POST /v1/drivers/verireel/testing-deploy` and
   `POST /v1/drivers/verireel/prod-deploy` trigger the shared testing and prod
-  deploys, `POST /v1/drivers/verireel/prod-backup-gate` captures the prod
-  backup gate and writes the backup-gate record, and the promotion / rollback
+  deploys, and the promotion / rollback
   drivers own the remaining stable-lane execution path. The prod-promotion
   driver writes the promotion record from the backup gate, deploy result,
   migration result, destination health check, and primitive testing-lane health

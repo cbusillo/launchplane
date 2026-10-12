@@ -795,15 +795,10 @@ even when no route binding exists, without inventing proxy or certificate
 ownership. The existing records prove resolver success and the expected runtime
 at the public route; they do not contain an independent expected IP/CNAME set.
 
-Products sidebar lane dots and their accessible descriptions use
-`environmentOperationalTone`, the same signal as product views. Absent lanes
-are neutral and described as absent (not recorded); missing or unsupported
-health evidence stays unknown; passing health with unproved identity or
-incomplete current route observations is amber, and
-failures are red. Open incidents and actual negative TLS observations remain
-blocking; a route authority warning is diagnostic rather than a health failure.
+See [Sidebar lane status](#sidebar-lane-status) for the sidebar's operational
+signals and its distinct treatment of stale inventory and evidence.
 
-Open product inventories, workspaces, and environment evidence views refresh
+Open product inventories, workspaces, activity, and environment evidence views refresh
 their read resources once a minute after a completed read. Hidden tabs pause
 automatic reads and catch up on focus or visibility return when due. Pending
 reads do not overlap; access-denied and missing resources require a manual retry.
@@ -853,9 +848,24 @@ or reviewed request. Return to the product to check the retained original again.
 ## Sidebar lane status
 
 The product sidebar shows Testing then Production with compact, saturated state icons:
-check for healthy, triangle for warning or stale evidence, x for an alert or failure, question
+check for healthy, triangle for warning, clock for stale data or evidence,
+x for an alert or failure, question
 mark for unverified evidence, and minus for absent or unsupported lanes. Hover
 labels and the accessible status name identify the lane, state and known
 diagnostic layers. An alert can include an open warning-severity incident;
 its tone follows the shared operational health calculation. Colors are tuned separately for light and dark themes;
-the sidebar uses the same operational health calculation as the product view.
+fresh sidebar signals use the same operational health calculation as the product view.
+Amber hover labels explain missing runtime identity, incomplete public DNS/TLS
+observations, or returned warning details. Route authority diagnostics alone
+do not turn healthy observed runtime evidence into a failure.
+
+The sidebar records when inventory was last received successfully. A failed
+refresh, or no completed refresh for two refresh intervals, replaces all lane
+icons with neutral clocks and shows “Stale data; data from HH:MM”. Delayed
+reads retain the last status only within that bound. Fresh responses restore
+the real lane icons immediately, including failures and warnings. Expired
+health or observed topology evidence uses a clock instead of an amber triangle;
+freshly returned failures and open incidents retain their alert. Stored route
+authority expiry remains a separate diagnostic, as described above.
+Cache age uses both elapsed and forward wall-clock time, so setting the clock
+backward cannot prolong freshness and waking a sleeping browser catches up.

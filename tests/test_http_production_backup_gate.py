@@ -43,6 +43,32 @@ from tests.test_postgres_integration import _store_for_fresh_head_database
 
 
 class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_capture_route_cannot_enqueue_an_operation(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'state.sqlite3'}"
+            )
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(),
+                    record_store_factory=lambda: store,
+                )
+                response = await request(
+                    app,
+                    "POST",
+                    "/v1/drivers/verireel/prod-backup-gate",
+                    payload={
+                        "product": "verireel",
+                        "backup_gate": {"backup_record_id": "retired-capture"},
+                    },
+                )
+                self.assertEqual(response.status_code, 404, response.text)
+                self.assertEqual(store.list_verireel_prod_backup_gate_operation_records(), ())
+            finally:
+                store.close()
+
     async def test_capture_denial_missing_key_and_non_postgres_fail_before_enqueue(self) -> None:
         for actions, key, status, code in (
             (("production_backup_authority.read",), "key", 403, "authorization_denied"),

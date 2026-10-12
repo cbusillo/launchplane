@@ -33,8 +33,8 @@ from control_plane.product_owner_setting import ProductOwnerIdentity, updated_pr
 from control_plane.release_review import build_release_review
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_promotion_backup import GENERIC_WEB_PROMOTION_BACKUP_ACTION
-from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
-    run_verireel_prod_backup_gate_operation_worker_once,
+from control_plane.workflows.production_backup_gate_operation_worker import (
+    run_production_backup_gate_operation_worker_once,
 )
 from tests.test_generic_web_promotion import (
     _ProductionProvider,
@@ -255,7 +255,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             # Real backup captures take longer than a second. Preserve ordering
             # for the two fast stub captures without a wall-clock sleep.
             patch(
-                "control_plane.workflows.verireel_prod_backup_gate_operation_worker._utc_now_timestamp",
+                "control_plane.workflows.production_backup_gate_operation_worker._utc_now_timestamp",
                 side_effect=lambda: datetime.now(UTC).isoformat(),
             ),
             patch(
@@ -270,7 +270,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 side_effect=BackupHost().run,
             ),
         ):
-            result = run_verireel_prod_backup_gate_operation_worker_once(
+            result = run_production_backup_gate_operation_worker_once(
                 record_store=self.store, control_plane_root_path=self.root, lease_owner="test"
             )
         self.assertTrue(result.terminal_write_committed)
@@ -683,6 +683,173 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             self.provider.deployed_artifacts, [decision.checklist.candidate.artifact_id]
         )
 
+    def test_standing_release_drills_once_then_promotes_the_next_candidate(self) -> None:
+        from tests.support.lane_builds import LaneBuildGitHub
+
+        next_commit = "d" * 40
+        next_digest = "sha256:" + "c" * 64
+        first_tag = "first-candidate"
+        next_tag = "next-candidate"
+        transport = LaneBuildGitHub(
+            self.profile.repository,
+            self.profile.image.repository,
+            {BASE: "sha256:" + "f" * 64, HEAD: "sha256:" + "b" * 64, next_commit: next_digest},
+            tags={HEAD: (first_tag,), next_commit: (next_tag,)},
+        )
+        self.enterContext(
+            patch(
+                "control_plane.product_reconcile.resolve_build_provenance_transport",
+                return_value=transport,
+            )
+        )
+        # Application targets preserve a declared immutable Build tag for rollback.
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        assert inventory.runtime_identity is not None
+        self.store.write_environment_inventory(
+            inventory.model_copy(
+                update={
+                    "runtime_identity": inventory.runtime_identity.model_copy(
+                        update={"image_reference": self.profile.image.repository + ":" + first_tag}
+                    )
+                }
+            )
+        )
+        self.switch("director_standing")
+        (backup_id,) = self.advance()
+        first = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        self.assertEqual(first.release_start, "promote_with_rollback_drill")
+        self.assertEqual(
+            release_start_for_acceptance(
+                store=self.store,
+                profile=self.store.read_product_profile_record(self.profile.product),
+            ),
+            "promote_with_rollback_drill",
+        )
+        self.capture()
+        self.advance()
+        # The first promotion is not proof of a completed drill.
+        self.assertEqual(
+            release_start_for_acceptance(
+                store=self.store,
+                profile=self.store.read_product_profile_record(self.profile.product),
+            ),
+            "promote_with_rollback_drill",
+        )
+        self.advance()
+        (second_backup_id,) = self.advance()
+        self.assertNotEqual(second_backup_id, backup_id)
+        self.capture()
+        self.advance()
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=first)
+        assert run is not None
+        self.assertEqual(run.state, "passed", run.model_dump())
+        self.assertTrue(all(step.status == "pass" for step in run.steps))
+        self.assertEqual(
+            self.provider.deployed_artifacts,
+            [
+                first.checklist.candidate.artifact_id,
+                first.checklist.production.artifact_id,
+                first.checklist.candidate.artifact_id,
+            ],
+        )
+        self.assertEqual(self.advance(), ())
+
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        assert inventory.runtime_identity is not None and inventory.artifact_identity is not None
+        next_artifact = self.profile.image.repository + "@" + next_digest
+        self.store.write_environment_inventory(
+            inventory.model_copy(
+                update={
+                    "source_git_ref": next_commit,
+                    "artifact_identity": inventory.artifact_identity.model_copy(
+                        update={"artifact_id": next_artifact}
+                    ),
+                    "runtime_identity": inventory.runtime_identity.model_copy(
+                        update={
+                            "source_git_ref": next_commit,
+                            "artifact_id": next_artifact,
+                            "image_reference": self.profile.image.repository + ":" + next_tag,
+                        }
+                    ),
+                }
+            )
+        )
+        self.assertEqual(len(self.advance()), 1)
+        later = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        self.assertEqual(later.acceptance_source, "director_standing")
+        self.assertEqual(later.release_start, "promote")
+        self.assertEqual(later.checklist.candidate.source_commit, next_commit)
+        self.capture()
+        self.advance()
+        later_run = read_client_release_run(store=self.store, profile=self.profile, decision=later)
+        assert later_run is not None
+        self.assertEqual(later_run.state, "passed", later_run.model_dump())
+        self.assertFalse(later_run.rollback_drill)
+        self.assertEqual(
+            self.provider.deployed_artifacts,
+            [
+                first.checklist.candidate.artifact_id,
+                first.checklist.production.artifact_id,
+                first.checklist.candidate.artifact_id,
+                next_artifact,
+            ],
+        )
+        self.assertEqual(self.advance(), ())
+
+    def test_failed_standing_repromotion_stops_and_a_new_candidate_still_drills(self) -> None:
+        self.switch("director_standing")
+        self.advance()
+        first = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        self.capture()
+        self.advance()
+        self.advance()
+        self.advance()
+        self.capture()
+        self.provider.fail_artifact = first.checklist.candidate.artifact_id
+        self.advance()
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=first)
+        assert run is not None
+        self.assertEqual(run.state, "stopped", run.model_dump())
+        failed = next(step for step in run.steps if step.step == "promote-2")
+        self.assertEqual(failed.status, "fail")
+        deployed = list(self.provider.deployed_artifacts)
+        self.assertEqual(self.advance(), ())
+        self.assertEqual(self.provider.deployed_artifacts, deployed)
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product), (first,)
+        )
+        self.assertEqual(
+            release_start_for_acceptance(
+                store=self.store,
+                profile=self.store.read_product_profile_record(self.profile.product),
+            ),
+            "promote_with_rollback_drill",
+        )
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        assert inventory.runtime_identity is not None
+        next_commit = "d" * 40
+        self.store.write_environment_inventory(
+            inventory.model_copy(
+                update={
+                    "source_git_ref": next_commit,
+                    "runtime_identity": inventory.runtime_identity.model_copy(
+                        update={"source_git_ref": next_commit}
+                    ),
+                }
+            )
+        )
+        self.assertEqual(len(self.advance()), 1)
+        latest = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        self.assertNotEqual(latest.record_id, first.record_id)
+        self.assertEqual(latest.checklist.candidate.source_commit, next_commit)
+        self.assertEqual(latest.release_start, "promote_with_rollback_drill")
+
     def test_late_standing_writer_keeps_publication_and_admitted_backup_authorized(self) -> None:
         self.switch("director_standing")
         create = self.store.create_release_review_decision_record_if_absent
@@ -819,7 +986,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.assertEqual(self.provider.deployed_artifacts, [])
 
     @patch(
-        "control_plane.workflows.verireel_prod_backup_gate_operation_worker._utc_now_timestamp",
+        "control_plane.workflows.production_backup_gate_operation_worker._utc_now_timestamp",
         side_effect=lambda: datetime.now(UTC).isoformat(),
     )
     def test_changed_notes_while_waiting_get_fresh_acceptance_and_backup(self, _clock: Any) -> None:
