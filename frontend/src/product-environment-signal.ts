@@ -85,6 +85,11 @@ export function expireProductEvidence(product: ProductSiteOverview, now = Date.n
 
 export type SignalTone = ProductEnvironmentSummary["trust_state"] | "warning" | "danger";
 
+export const negativeTlsStates: ReadonlySet<string> = new Set([
+  "expired", "hostname_mismatch", "untrusted", "self_signed", "unreachable",
+]);
+export const failedRuntimeIdentityStates: ReadonlySet<string> = new Set(["mismatch", "malformed"]);
+
 function healthWarnings(environment: ProductEnvironmentSummary): Topology["warnings"] {
   // Recorded route ownership and placement describe readiness to change a route.
   // They do not attest the health of the running application.
@@ -122,13 +127,10 @@ export function environmentOperationalTone(environment: ProductEnvironmentSummar
   const warnings = healthWarnings(environment);
   const otherWarnings = environment.warnings.filter(detail =>
     !environment.topology.warnings.some(warning => warning.detail === detail));
-  const negativeTlsStates = new Set([
-    "expired", "hostname_mismatch", "untrusted", "self_signed", "unreachable",
-  ]);
   if (
     environment.health_monitoring.open_incidents.length > 0 ||
     checks.some(check => check.status === "fail" || check.incident_status === "open") ||
-    ["mismatch", "malformed"].includes(
+    failedRuntimeIdentityStates.has(
       environment.topology.observed.placement?.runtime_identity_status ?? "unchecked",
     ) ||
     warnings.some(warning => warning.severity === "error") ||
