@@ -36,22 +36,34 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
                 authz_policy=_product_health_monitoring_policy(),
                 record_store_factory=lambda: store,
             )
-            payload = _product_health_monitoring_payload()
-            plan = await _post_product_health_monitoring(app, payload)
-            self.assertEqual(plan.status_code, 202)
-            self.assertNotIn("current_private_endpoint_key", plan.json()["result"])
-            applied = {
-                **payload,
-                "mode": "apply",
-                "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
-            }
-            for _ in range(2):
-                response = await _post_product_health_monitoring(
-                    app, applied, idempotency_key="compatible-workflow"
-                )
-                self.assertEqual(response.status_code, 202)
-                self.assertNotIn("current_private_endpoint_key", response.json()["result"])
-            self.assertTrue(response.json()["replayed"])
+            for creating in (False, True):
+                store.write_product_profile_record(_product_health_monitoring_profile())
+                payload = _product_health_monitoring_payload()
+                if creating:
+                    payload["check_name"] = "new-health-check"
+                plan = await _post_product_health_monitoring(app, payload)
+                self.assertEqual(plan.status_code, 202)
+                self.assertNotIn("current_private_endpoint_key", plan.json()["result"])
+                applied = {
+                    **payload,
+                    "mode": "apply",
+                    "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
+                }
+                for _ in range(2):
+                    response = await _post_product_health_monitoring(
+                        app, applied, idempotency_key=f"compatible-workflow-{creating}"
+                    )
+                    self.assertEqual(response.status_code, 202)
+                    self.assertNotIn("current_private_endpoint_key", response.json()["result"])
+                    if creating:
+                        for field in (
+                            "current_check_kind",
+                            "current_enabled",
+                            "current_require_runtime_identity",
+                        ):
+                            self.assertIn(field, response.json()["result"])
+                            self.assertIsNone(response.json()["result"][field])
+                self.assertTrue(response.json()["replayed"])
             store.close()
 
     async def test_terminal_agent_cannot_use_monitoring_even_with_broad_policy(self) -> None:
