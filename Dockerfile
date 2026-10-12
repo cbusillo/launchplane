@@ -87,6 +87,13 @@ COPY --from=frontend-build /app/control_plane/ui_static /app/control_plane/ui_st
 
 RUN uv sync --frozen --no-dev
 
+# Service-owned testing verification uses the library's matching headless browser.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/launchplane-browsers
+RUN uv run playwright install --with-deps --only-shell chromium \
+    && useradd --system --user-group --create-home --home-dir /opt/launchplane-browser \
+        --shell /usr/sbin/nologin launchplane-browser \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV PATH="/app/.venv/bin:${PATH}" \
     UV_NO_SYNC=1
 

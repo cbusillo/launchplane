@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Literal, Protocol, cast
 
 import click
+from control_plane.provider_operations import ProviderMutationUnknownError
 from control_plane.lane_movement import (
     LaneBuild,
     LaneMovementRefused,
@@ -460,6 +461,7 @@ def execute_generic_web_deploy(
     provider_operation_title: str = "",
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    before_records_commit: Callable[[], None] | None = None,
     recorded_artifact: bool = False,
     rollback: bool = False,
 ) -> GenericWebDeployResult:
@@ -699,6 +701,8 @@ def execute_generic_web_deploy(
             deployment_record = deployment_record.model_copy(
                 update={"failure": exc.record_failure()}
             )
+        if before_records_commit is not None:
+            before_records_commit()
         record_store.write_deployment_record(deployment_record)
         if isinstance(exc, LaneMovementRefused) and exc.code == "source_order_unavailable":
             raise
@@ -764,6 +768,8 @@ def execute_generic_web_deploy(
         ),
         runtime_source=verified_build_evidence,
     ).model_copy(update={"integration_key_readback": key_readback})
+    if before_records_commit is not None:
+        before_records_commit()
     record_store.write_deployment_record(deployment_record)
     record_store.write_environment_inventory(
         build_environment_inventory(
@@ -1001,6 +1007,8 @@ def _run_post_deploy_extension(
         return _terminal_post_deploy_update(
             post_deploy_executor(control_plane_root, record_store, context, guard)
         )
+    except ProviderMutationUnknownError:
+        raise
     except click.ClickException:
         raise
     except Exception as exc:

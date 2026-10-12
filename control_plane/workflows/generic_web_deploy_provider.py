@@ -710,7 +710,7 @@ class DokployGenericWebDeployProvider:
         operation_title: str,
         provider_effect_phase: str,
     ) -> dict[str, object] | None:
-        """Read-only proof for a testing attempt that never reached dispatch.
+        """Read-only proof of absent dispatch or a terminal, correlated dispatch.
 
         Running-container filters and permissive history parsers cannot prove
         absence: paused/stopped containers, missing lists and malformed provider
@@ -722,11 +722,7 @@ class DokployGenericWebDeployProvider:
             or target.provider_id != self.provider_id
         ):
             return None
-        # Dokploy omits any container whose name contains "dokploy" from its
-        # host inventory. Service names and container_name can cause omissions
-        # even for an ordinary appName. That reader cannot qualify a triggered
-        # attempt or rule out a partial effect from a failed deployment.
-        if provider_effect_phase not in {"", "target_update"}:
+        if provider_effect_phase not in {"", "target_update", "deploy_trigger"}:
             raise TestingEventDeployRecoveryRefused("provider_dispatch_absence_unproven")
         host, token = self._read_provider_config(control_plane_root=control_plane_root)
         payload = dokploy_api.fetch_dokploy_target_payload(
@@ -738,7 +734,7 @@ class DokployGenericWebDeployProvider:
             or not isinstance(app_name, str)
             or not app_name.strip()
             or payload.get("composeType") != "docker-compose"
-            or payload.get("composeStatus") not in {"idle", "error"}
+            or payload.get("composeStatus") not in {"idle", "error", "done"}
         ):
             raise TestingEventDeployRecoveryRefused("provider_target_not_idle_compose")
         schedules = dokploy_api.dokploy_request(
@@ -755,7 +751,44 @@ class DokployGenericWebDeployProvider:
             path="/api/deployment.allByType",
             query={"id": target.target_id, "type": "compose"},
         )
-        if history != []:
+        if provider_effect_phase == "deploy_trigger":
+            if (
+                not isinstance(history, list)
+                or not history
+                or any(not isinstance(item, dict) for item in history)
+            ):
+                raise TestingEventDeployRecoveryRefused("provider_deployment_history_unproven")
+            deployments = cast(list[dokploy_api.JsonObject], history)
+            # Every returned row must have complete terminal evidence. One
+            # correlated row alone cannot exclude another queued/running effect.
+            try:
+                if any(
+                    dokploy_api.deployment_status(item) not in {"done", "error"}
+                    or item.get("composeId") != target.target_id
+                    for item in deployments
+                ):
+                    raise ValueError("Deployment is not terminal on the original target.")
+                observations = [_terminal_deployment_observation(item) for item in deployments]
+                for observation in observations:
+                    started = parse_launchplane_mutation_timestamp(
+                        observation.started_at, field_name="started_at"
+                    )
+                    finished = parse_launchplane_mutation_timestamp(
+                        observation.finished_at, field_name="finished_at"
+                    )
+                    if finished < started:
+                        raise ValueError("Deployment timestamps are out of order.")
+            except ValueError as error:
+                raise TestingEventDeployRecoveryRefused(
+                    "provider_deployments_not_terminal"
+                ) from error
+            matched = [item for item in deployments if item.get("title") == operation_title]
+            if not operation_title or len(matched) != 1:
+                raise TestingEventDeployRecoveryRefused("provider_dispatch_correlation_unproven")
+            ids = [item.deployment_id for item in observations]
+            if len(set(ids)) != len(ids):
+                raise TestingEventDeployRecoveryRefused("provider_deployment_history_ambiguous")
+        elif history != []:
             raise TestingEventDeployRecoveryRefused(
                 "provider_deployment_history_unproven_or_present"
             )
@@ -776,6 +809,32 @@ class DokployGenericWebDeployProvider:
                 "failed",
             }:
                 raise TestingEventDeployRecoveryRefused("provider_dispatch_unproven")
+        if provider_effect_phase == "deploy_trigger":
+            # This proves the provider job ended, not that it had no effect.
+            # Running application containers are expected after a terminal deploy.
+            # The caller excludes drivers with post-deploy/data executors and
+            # holds the old worker out until atomic failed retirement completes.
+            return {
+                "state": "quiescent_safe_to_retry",
+                "proof": "correlated_terminal_dispatch",
+                "deployment_count": len(deployments),
+                "schedule_count": 0,
+                "pending_target_jobs": 0,
+                "operation_marker_sha256": hashlib.sha256(operation_title.encode()).hexdigest(),
+                "deployment_evidence_sha256": hashlib.sha256(
+                    repr(
+                        sorted(
+                            (
+                                item.deployment_id,
+                                item.deployment_status,
+                                item.started_at,
+                                item.finished_at,
+                            )
+                            for item in observations
+                        )
+                    ).encode()
+                ).hexdigest(),
+            }
         # The name-filtered Dokploy endpoint converts provider/SSH failures to
         # an empty list. A positive host read and inspections are additional
         # safeguards, not a complete inventory proof. The pre-dispatch phase,
