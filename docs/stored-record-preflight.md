@@ -17,7 +17,15 @@ Version 1 exports every authorization policy, product profile (including lanes),
 environment inventory and merge-train policy, plus the latest merge-train run
 for each repository/base-branch pair. Train history is neither deleted nor
 exported; its unbounded growth cannot consume the snapshot budget. Limits are
-10,000 total rows, 16 MiB and a 20-second export budget. Each database statement
+10,000 total rows, 16 MiB of scrubbed JSON and a 20-second export budget. A
+server cursor fetches one row at a time. The service checks source row size in
+SQL before decoding JSON, refusing a row above 16 MiB. It counts scrubbed bytes
+as rows accumulate and checks the complete envelope before returning it.
+Cumulative raw history bytes are not a response-size limit: private free text
+can shrink during scrubbing. Every included history row still reaches the
+candidate; there is no history truncation to fit the bound. Refusals distinguish
+source-row bytes, scrubbed-output bytes, rows and elapsed time, with code-owned
+family names and value-free budget counters. Each database statement
 has at most 15 seconds, clipped to the remaining budget. Exceeding a limit
 refuses; there is no truncated or empty-policy success.
 

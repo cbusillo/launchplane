@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import hmac
 import json
 import re
 import secrets
-import time
+from time import monotonic
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import select, text
-from sqlalchemy.engine import Engine
+from sqlalchemy import LargeBinary, Text, case, cast, func, select, text
+from sqlalchemy.engine import Connection, Engine, MappingResult
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.sql import ColumnElement
 
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -52,15 +55,27 @@ SNAPSHOT_RECORD_TYPES: tuple[tuple[Any, type[BaseModel]], ...] = (
 
 
 class SnapshotUnavailable(ValueError):
-    pass
+    def __init__(self, reason: str, **budgets: int | str) -> None:
+        super().__init__(reason)
+        self.budgets = budgets
 
 
 def snapshot_failure_diagnostics(error: Exception) -> dict[str, Any]:
     """Emit code-owned field paths and classifications without record inputs."""
     result: dict[str, Any] = {"error_type": type(error).__name__}
+    if isinstance(error, DBAPIError) and getattr(error.orig, "sqlstate", None) == "57014":
+        result["reason"] = "snapshot_statement_canceled"
     if isinstance(error, SnapshotUnavailable):
         result["reason"] = str(error)
-    family = getattr(error, "snapshot_record_family", "")
+        for key in ("rows_exported", "source_row_bytes", "scrubbed_bytes"):
+            value = error.budgets.get(key)
+            if isinstance(value, int) and value >= 0:
+                result[key] = value
+    family = (
+        error.budgets.get("record_family", "")
+        if isinstance(error, SnapshotUnavailable)
+        else getattr(error, "snapshot_record_family", "")
+    )
     if family in {row_type.__tablename__ for row_type, _ in SNAPSHOT_RECORD_TYPES}:
         result["record_family"] = family
     if isinstance(error, ValidationError):
@@ -94,16 +109,19 @@ class _Scrubber:
         return hmac.new(self._salt, value.encode(), hashlib.sha256).hexdigest()
 
     def number(self, value: str) -> int:
-        if value not in self._numbers:
+        # History may contain large decimal audit strings. Retain fixed-size
+        # salted keys, not the source text, across streamed rows.
+        digest = self._digest(value)
+        if digest not in self._numbers:
             # Indexed PR numbers use PostgreSQL Integer. Keep numeric identities
             # consistent across strings/payloads/projections and avoid collisions.
             maximum = (1 << 31) - 1
-            candidate = int(self._digest(value)[:12], 16) % maximum + 1
+            candidate = int(digest[:12], 16) % maximum + 1
             while candidate in self._used_numbers or str(candidate) == value:
                 candidate = candidate % maximum + 1
-            self._numbers[value] = candidate
+            self._numbers[digest] = candidate
             self._used_numbers.add(candidate)
-        return self._numbers[value]
+        return self._numbers[digest]
 
     def string(self, value: str, name: str, *, protocol: bool = False) -> str:
         if not value or value == "*":
@@ -115,7 +133,6 @@ class _Scrubber:
             and re.fullmatch(r"[a-z_][a-z_.-]*", value)
         ):
             return value
-        digest = self._digest(value)
         if protocol and (name.endswith("_at") or name in {"started_at", "finished_at"}):
             try:
                 datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -124,6 +141,7 @@ class _Scrubber:
                 pass
         if value.isdecimal():
             return str(self.number(value))
+        digest = self._digest(value)
         if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
             return digest[: len(value)]
         if name == "slug_template":
@@ -223,39 +241,87 @@ class _Scrubber:
         return value
 
 
+def _statement_timeout_ms(remaining: int) -> int:
+    return min(remaining, 15000) // 1000 * 1000 or remaining
+
+
+@contextmanager
+def _snapshot_cursor(
+    connection: Connection,
+    statement: Any,
+    refuse: Callable[[str], SnapshotUnavailable],
+) -> Iterator[MappingResult]:
+    try:
+        with connection.execute(statement.execution_options(yield_per=1)) as result:
+            yield result.mappings()
+    except DBAPIError as error:
+        if getattr(error.orig, "sqlstate", None) == "57014":
+            raise refuse("snapshot_statement_canceled") from error
+        raise
+
+
 def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
     scrubber = _Scrubber()
     tables: dict[str, list[dict[str, Any]]] = {}
     row_count = 0
-    byte_count = 0
-    deadline = time.monotonic() + 20
+    scrubbed_bytes = 0
+    source_row_bytes = 0
+    family = ""
+    deadline = monotonic() + 20
+
+    def refuse(reason: str) -> SnapshotUnavailable:
+        return SnapshotUnavailable(
+            reason,
+            record_family=family,
+            rows_exported=row_count,
+            source_row_bytes=source_row_bytes,
+            scrubbed_bytes=scrubbed_bytes,
+        )
+
     # One consistent, explicitly read-only PostgreSQL transaction. CI never
     # receives this engine, its URL, keys or SQL; it receives only the scrubbed JSON.
     with engine.connect() as connection:
         if engine.dialect.name == "postgresql":
             connection = connection.execution_options(isolation_level="REPEATABLE READ")
             connection.execute(text("SET TRANSACTION READ ONLY"))
-            connection.execute(text("SET LOCAL statement_timeout = '15000ms'"))
+            remaining = int((deadline - monotonic()) * 1000)
+            if remaining <= 0:
+                raise refuse("snapshot_time_limit")
+            connection.execute(
+                text(f"SET LOCAL statement_timeout = '{_statement_timeout_ms(remaining)}ms'")
+            )
         revision = str(
             connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         )
         for row_type, model_type in SNAPSHOT_RECORD_TYPES:
             table = row_type.__table__
+            family = table.name
             schema = model_type.model_json_schema()
             rows: list[dict[str, Any]] = []
-            remaining = int((deadline - time.monotonic()) * 1000)
+            remaining = int((deadline - monotonic()) * 1000)
             if remaining <= 0:
-                raise SnapshotUnavailable("snapshot_time_limit")
+                raise refuse("snapshot_time_limit")
             if engine.dialect.name == "postgresql":
-                connection.execute(
-                    text(f"SET LOCAL statement_timeout = '{min(remaining, 15000)}ms'")
+                statement_timeout = _statement_timeout_ms(remaining)
+                connection.execute(text(f"SET LOCAL statement_timeout = '{statement_timeout}ms'"))
+            # Bound one raw row before the driver decodes its JSON. Cumulative
+            # raw history is not the response size: free text shrinks on scrubbing.
+            sizes = []
+            for column in table.c:
+                value = cast(column, Text)
+                size = (
+                    func.octet_length(value)
+                    if engine.dialect.name == "postgresql"
+                    else func.length(cast(value, LargeBinary))
                 )
-            statement = select(table)
+                sizes.append(func.coalesce(size, 0))
+            row_bytes: ColumnElement[Any] = sizes[0]
+            for size in sizes[1:]:
+                row_bytes += size
+            statement = select(table, row_bytes.label("snapshot_source_row_bytes"))
             if row_type is LaunchplaneMergeTrainRunRow:
                 # Run history grows forever. Rehearse current per-lane state;
                 # never delete or retain production history as a deploy operation.
-                from sqlalchemy import func
-
                 ranked = select(
                     table.c.run_id,
                     func.row_number()
@@ -268,51 +334,94 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
                 statement = statement.join(ranked, table.c.run_id == ranked.c.run_id).where(
                     ranked.c.snapshot_rank == 1
                 )
-            for raw in connection.execute(statement.limit(SNAPSHOT_MAX_ROWS + 1)).mappings():
-                row_count += 1
-                if row_count > SNAPSHOT_MAX_ROWS:
-                    raise SnapshotUnavailable("snapshot_row_limit")
-                byte_count += len(json.dumps(dict(raw)).encode())
-                if byte_count > SNAPSHOT_MAX_BYTES or time.monotonic() > deadline:
-                    raise SnapshotUnavailable("snapshot_export_limit")
-                payload = scrubber.scrub(raw["payload"], schema, schema)
-                if model_type is MergeTrainRunRecord:
-                    for key, nested_type in (
-                        ("dry_run_result", MergeTrainDryRunResult),
-                        ("snapshot", MergeTrainDryRunSnapshot),
-                        ("worker_step_result", MergeTrainWorkerStepResult),
-                    ):
-                        nested_schema = nested_type.model_json_schema()
-                        if key in raw["payload"]:
-                            payload[key] = scrubber.scrub(
-                                raw["payload"][key], nested_schema, nested_schema
-                            )
-                # Check the source digest first. A scrubbed digest is evidence
-                # about the scrubbed policy; it cannot attest production authority.
-                if model_type is LaunchplaneAuthzPolicyRecord:
-                    model_type.model_validate(raw["payload"])
-                    payload["policy_sha256"] = authz_policy_sha256(
-                        LaunchplaneAuthzPolicy.model_validate(payload["policy"])
+            # OFFSET 0 keeps PostgreSQL from flattening the size calculation into
+            # every CASE expression. Measure JSON text once per row on the server.
+            sized = statement.limit(SNAPSHOT_MAX_ROWS + 1).offset(0).subquery()
+            bounded = select(
+                *(
+                    case(
+                        (
+                            sized.c.snapshot_source_row_bytes <= SNAPSHOT_MAX_BYTES,
+                            sized.c[column.name],
+                        ),
+                    ).label(column.name)
+                    for column in table.c
+                ),
+                sized.c.snapshot_source_row_bytes,
+            )
+            # A server cursor fetches one bounded row at a time instead of
+            # buffering every raw revision. Closing it also covers refusal paths.
+            with _snapshot_cursor(connection, bounded, refuse) as result:
+                for raw in result:
+                    source_row_bytes = raw["snapshot_source_row_bytes"]
+                    if row_count >= SNAPSHOT_MAX_ROWS:
+                        raise refuse("snapshot_row_limit")
+                    if monotonic() > deadline:
+                        raise refuse("snapshot_time_limit")
+                    if source_row_bytes > SNAPSHOT_MAX_BYTES:
+                        raise refuse("snapshot_source_row_byte_limit")
+                    payload = scrubber.scrub(raw["payload"], schema, schema)
+                    if model_type is MergeTrainRunRecord:
+                        for key, nested_type in (
+                            ("dry_run_result", MergeTrainDryRunResult),
+                            ("snapshot", MergeTrainDryRunSnapshot),
+                            ("worker_step_result", MergeTrainWorkerStepResult),
+                        ):
+                            nested_schema = nested_type.model_json_schema()
+                            if key in raw["payload"]:
+                                payload[key] = scrubber.scrub(
+                                    raw["payload"][key], nested_schema, nested_schema
+                                )
+                    # Check the source digest first. A scrubbed digest is evidence
+                    # about the scrubbed policy; it cannot attest production authority.
+                    if model_type is LaunchplaneAuthzPolicyRecord:
+                        model_type.model_validate(raw["payload"])
+                        payload["policy_sha256"] = authz_policy_sha256(
+                            LaunchplaneAuthzPolicy.model_validate(payload["policy"])
+                        )
+                    elif model_type is MergeTrainPolicyRecord:
+                        original = MergeTrainPolicyRecord.model_validate(raw["payload"])
+                        policy_type = type(original.policy)
+                        payload["policy_sha256"] = policy_type.model_validate(
+                            payload["policy"], context={"historical_policy_record": True}
+                        ).policy_sha256
+                    row = {
+                        key: scrubber.string(value, key) if isinstance(value, str) else value
+                        for key, value in raw.items()
+                        if key not in {"payload", "snapshot_source_row_bytes"}
+                    }
+                    # Indexed projections share the payload's scrubbed values.
+                    for key in row:
+                        if key in payload:
+                            if raw[key] != raw["payload"].get(key):
+                                raise refuse("snapshot_projection_conflict")
+                            row[key] = payload[key]
+                    row["payload"] = payload
+                    row_size = sum(
+                        len(chunk.encode())
+                        for chunk in json.JSONEncoder(
+                            separators=(",", ":"), ensure_ascii=False
+                        ).iterencode(row)
                     )
-                elif model_type is MergeTrainPolicyRecord:
-                    original = model_type.model_validate(raw["payload"])
-                    policy_type = type(original.policy)
-                    payload["policy_sha256"] = policy_type.model_validate(
-                        payload["policy"], context={"historical_policy_record": True}
-                    ).policy_sha256
-                row = {
-                    key: scrubber.string(value, key) if isinstance(value, str) else value
-                    for key, value in raw.items()
-                    if key != "payload"
-                }
-                # Indexed projections share the payload's scrubbed values.
-                for key in row:
-                    if key in payload:
-                        if raw[key] != raw["payload"].get(key):
-                            raise SnapshotUnavailable("snapshot_projection_conflict")
-                        row[key] = payload[key]
-                row["payload"] = payload
-                rows.append(row)
+                    scrubbed_bytes += row_size
+                    if scrubbed_bytes > SNAPSHOT_MAX_BYTES:
+                        raise refuse("snapshot_byte_limit")
+                    if monotonic() > deadline:
+                        raise refuse("snapshot_time_limit")
+                    row_count += 1
+                    rows.append(row)
+                    # FETCH is a new statement on the server cursor. Clip its
+                    # timeout to the budget left after processing this row.
+                    remaining = int((deadline - monotonic()) * 1000)
+                    if remaining <= 0:
+                        raise refuse("snapshot_time_limit")
+                    if engine.dialect.name == "postgresql":
+                        next_timeout = _statement_timeout_ms(remaining)
+                        if next_timeout < statement_timeout:
+                            connection.execute(
+                                text(f"SET LOCAL statement_timeout = '{next_timeout}ms'")
+                            )
+                            statement_timeout = next_timeout
             tables[table.name] = rows
         snapshot = StoredRecordSnapshot(
             captured_at=datetime.now(timezone.utc).isoformat(),
@@ -324,6 +433,11 @@ def export_stored_record_snapshot(engine: Engine) -> StoredRecordSnapshot:
     ]
     if len(active_policies) != 1:
         raise SnapshotUnavailable("snapshot_requires_one_active_policy")
+    # Envelope overhead and final encoding apply to the whole export, not the
+    # last record family visited. rows_exported always counts all accepted rows.
+    family = ""
     if len(snapshot.model_dump_json().encode()) > SNAPSHOT_MAX_BYTES:
-        raise SnapshotUnavailable("snapshot_byte_limit")
+        raise refuse("snapshot_byte_limit")
+    if monotonic() > deadline:
+        raise refuse("snapshot_time_limit")
     return snapshot
