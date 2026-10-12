@@ -370,7 +370,6 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
                 "IMAGE_REPOSITORY": "ghcr.io/example/service",
                 "LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS": "true",
                 "OMIT_EVERY_CODE_ENV": "false",
-                "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "current-operator-token",
                 **retired,
             },
         )
@@ -379,7 +378,7 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
         self.assertTrue(retired.keys().isdisjoint(oauth_env))
         removals = cast(list[str], deploy.get("oauth_env_removals", []))
         self.assertTrue(retired.keys().isdisjoint(removals))
-        self.assertEqual(oauth_env["LAUNCHPLANE_LOCAL_OPERATOR_TOKEN"], "current-operator-token")
+        self.assertEqual(oauth_env["LAUNCHPLANE_DEPLOYMENT_MARKER"], "deploy-marker")
 
     def test_self_deploy_removes_unset_public_ingress_token_and_omitted_npmplus_env(
         self,

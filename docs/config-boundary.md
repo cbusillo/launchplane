@@ -82,6 +82,11 @@ request's normal merge behavior; full runtime retirement remains in
 [#1313](https://github.com/cbusillo/launchplane/issues/1313). The Actions inventory
 and Chris's manual settings cleanup are tracked in
 [#3452](https://github.com/cbusillo/launchplane/issues/3452).
+An explicit credential update still uses the existing
+`POST /v1/drivers/launchplane/self-deploy` contract (`deploy.oauth_env`) under
+`launchplane_service_deploy.execute` authority; omitted values are preserved.
+Any real credential creation or access change retains the Director boundary.
+This PR neither rotates credentials nor establishes a live caller's grant.
 
 The manual `omit_terminal_agent_env` compatibility input omits terminal-agent
 read credentials. Director-agent write credentials use the separate
