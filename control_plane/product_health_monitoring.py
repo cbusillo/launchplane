@@ -121,6 +121,17 @@ class ProductHealthMonitoringPlan(BaseModel):
     plan_sha256: str
 
 
+class ProductHealthMonitoringResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["accepted"] = "accepted"
+    trace_id: str
+    records: dict[str, object]
+    result: ProductHealthMonitoringPlan | None = None
+    replayed: bool | None = None
+    original_trace_id: str | None = None
+
+
 def product_health_monitoring_authority(
     profile: LaunchplaneProductProfileRecord,
 ) -> dict[tuple[str, str], dict[str, object]]:

@@ -12819,7 +12819,7 @@ def create_launchplane_fastapi_app(
 
     async def apply_product_health_monitoring(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -27962,7 +27962,7 @@ def create_launchplane_fastapi_app(
         apply_product_health_monitoring,
         methods=["POST"],
         status_code=202,
-        response_model=AcceptedEvidenceResponse,
+        response_model=control_plane_product_health_monitoring.ProductHealthMonitoringResponse,
         response_model_exclude_none=True,
         openapi_extra={
             "requestBody": {

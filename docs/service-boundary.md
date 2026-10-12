@@ -2061,6 +2061,18 @@ record owned by the exact lane and never returns or logs its internal URL.
 Strict public runtime-identity checks must resolve to a lane-owned HTTPS host.
 The requested intent must retain its required enabled public or private check.
 
+Signed-in administrators use the environment Actions page's Health monitoring
+editor for existing public/private HTTP checks. The route accepts the existing
+CSRF-checked browser session dependency; every request still checks the policy's
+exact product/context/instance plan or apply authority. Bearer/OIDC authority is
+unchanged. The editor loads the stored profile, shows the preserved endpoint and
+before/after flags, invalidates review on edits, and requires confirmation before
+apply. An uncertain request retains its original payload and idempotency key
+across reloads; retry replays that request rather than planning another change.
+Successful apply reads the stored policy back, without claiming fresh health or
+runtime-identity proof before the monitor produces it. Fixture-mode writes and
+read-only browser controls are disabled.
+
 Prelaunch-rebuild apply is an exact-instance mutation for one Odoo stable lane's
 `odoo_prelaunch_rebuild` policy. Dry-run requires
 `product_profile.prelaunch_rebuild.plan`; apply requires the separate
