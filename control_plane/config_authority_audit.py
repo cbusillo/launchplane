@@ -292,7 +292,6 @@ WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
 }
 WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {
-        "inputs.omit_every_code_env.default": frozenset(("false",)),
         "inputs.omit_npmplus_env.default": frozenset(("false",)),
         "inputs.omit_owner_agent_env.default": frozenset(("false",)),
         "inputs.omit_terminal_agent_env.default": frozenset(("false",)),
@@ -648,12 +647,6 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "BREAK_GLASS_REASON": frozenset(("${{ inputs.break_glass_reason }}",)),
         "DEPLOY_GIT_REF": frozenset(("${{ inputs.git_ref }}",)),
         "DEPLOY_IMAGE_REFERENCE": frozenset(("${{ inputs.image_reference }}",)),
-        "OMIT_EVERY_CODE_ENV": frozenset(
-            (
-                "${{ inputs.omit_every_code_env }}",
-                "${{ inputs.omit_every_code_env || false }}",
-            )
-        ),
         "OMIT_NPMPLUS_ENV": frozenset(
             (
                 "${{ inputs.omit_npmplus_env }}",
