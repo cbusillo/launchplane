@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "private", "endpoint-changed", "removed-check", "stale", "denied", "readback-failed", "read-only"]) {
+for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "private", "endpoint-changed", "removed-check", "refresh-during-review", "stale", "denied", "readback-failed", "read-only"]) {
   test(`monitoring editor reviews stored policy and handles ${outcome}`, { tag: "@layout" }, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -21,6 +21,8 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
     }
     const applies: Array<{ key: string; body: Record<string, unknown> }> = [];
     const plans: Record<string, unknown>[] = [];
+    let profileReads = 0;
+    let releaseReview: (() => Promise<void>) | null = null;
     await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session",
       csrf_token: "fixture-csrf", identity: { ...fixtures.identity, role: outcome === "read-only" ? "read_only" : "admin" } } }));
     await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products: fixtures.products } }));
@@ -29,6 +31,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
     await page.route("**/operational-readiness?*", route => route.fulfill({ status: 503, json: {
       error: { code: "fixture_unavailable", message: "No readiness evidence in this isolated editor journey." } } }));
     await page.route("**/v1/product-profiles/atlas-commerce", route => {
+      profileReads += 1;
       if (outcome === "readback-failed" && applies.length) return route.abort();
       return route.fulfill({ json: { status: "ok", trace_id: "profile", profile: { product: "atlas-commerce", lanes: [lane] } } });
     });
@@ -53,7 +56,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
           enabled: body.enabled, require_runtime_identity: body.require_runtime_identity }] };
         if (outcome === "private") lane.health_monitoring.checks.unshift({ ...lane.health_monitoring.checks[0], name: "background-health" });
       } else plans.push(body);
-      return route.fulfill({ status: 202, json: { status: "accepted", trace_id: "monitoring", records: {},
+      const response = { status: 202, json: { status: "accepted", trace_id: "monitoring", records: {},
         result: { status: "ok", mode: body.mode, product: body.product, context: body.context, instance: body.instance,
           check_name: body.check_name, requested_check_kind: body.check_kind, private_endpoint_key: body.private_endpoint_key,
           current_private_endpoint_key: outcome === "endpoint-changed" ? "new-registered-private-health" : body.private_endpoint_key,
@@ -62,7 +65,12 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
           current_enabled: false, requested_enabled: body.enabled,
           current_require_runtime_identity: false, requested_require_runtime_identity: body.require_runtime_identity,
           resolved_url: body.check_kind === "private_http" ? "" : lane.health_url, changed: true, applied: body.mode === "apply", reason: body.reason,
-          plan_sha256: "a".repeat(64) } } });
+          plan_sha256: "a".repeat(64) } } };
+      if (outcome === "refresh-during-review") {
+        releaseReview = () => route.fulfill(response);
+        return;
+      }
+      return route.fulfill(response);
     });
     if (outcome === "leftover") await page.evaluate(({ context }) => {
       sessionStorage.setItem(`launchplane:monitoring-request:atlas-commerce:${context}:testing:health-monitoring:apply`, JSON.stringify({
@@ -86,6 +94,17 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
     await panel.getByLabel("Require runtime identity", { exact: true }).check();
     await panel.getByLabel("Reason", { exact: true }).fill("Enable the approved testing monitor.");
     await review.click();
+    if (outcome === "refresh-during-review") {
+      await expect.poll(() => releaseReview !== null).toBe(true);
+      const readsBeforeRefresh = profileReads;
+      await page.getByRole("button", { name: "Refresh current evidence" }).click();
+      await expect.poll(() => profileReads).toBeGreaterThan(readsBeforeRefresh);
+      await (releaseReview as unknown as () => Promise<void>)();
+      await expect(panel).toHaveAttribute("aria-busy", "false");
+      await expect(panel.getByRole("button", { name: "Apply reviewed monitoring" })).toHaveCount(0);
+      expect(applies).toHaveLength(0);
+      return;
+    }
     if (outcome === "denied") {
       await expect(panel.getByRole("alert")).toContainText("Exact lane monitoring plan denied");
       await expect(panel.getByRole("button", { name: "Apply reviewed monitoring" })).toHaveCount(0);

@@ -19,6 +19,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
   const [checkName, setCheckName] = useState("");
   const checkNameRef = useRef(checkName);
   checkNameRef.current = checkName;
+  const profileRevisionRef = useRef(0);
   const [intent, setIntent] = useState<MonitoringRequest["monitoring_intent"]>("prelaunch");
   const [enabled, setEnabled] = useState(false);
   const [identityRequired, setIdentityRequired] = useState(false);
@@ -56,6 +57,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
 
   useEffect(() => {
     if (fixtureMode) return;
+    profileRevisionRef.current += 1;
     setLoading(true); setReview(null); setConfirmed(false); setLane(null); setAdmin(false); setProfileError("");
     const controller = new AbortController();
     void Promise.all([readAuthSession(controller.signal), readProductProfile(detail.product, controller.signal)])
@@ -81,6 +83,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
   async function inspect() {
     if (locked || !supported || !check) return;
     edited();
+    const reviewedProfileRevision = profileRevisionRef.current;
     const response = await planOperation.run({
       product: detail.product, context: detail.context, instance: detail.environment,
       check_name: check.name, check_kind: check.kind as "public_http" | "private_http",
@@ -88,6 +91,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
       private_endpoint_key: check.private_endpoint_key, reason: reason.trim(), mode: "dry-run",
     });
     if (response?.result) {
+      if (reviewedProfileRevision !== profileRevisionRef.current) return;
       if (response.result.operation === "create" || response.result.current_check_kind !== response.result.requested_check_kind) {
         setMessage("The stored check changed or was removed. Refresh this environment before editing monitoring.");
         return;
