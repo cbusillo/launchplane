@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from typing import Any
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -130,7 +130,12 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
         return self.responses.get(str(kwargs["path"]))
 
     def reserve(
-        self, *, retained: bool = False, phase: str = "target_update", expired: bool = True
+        self,
+        *,
+        retained: bool = False,
+        phase: str = "target_update",
+        expired: bool = True,
+        state: str = "reconcile_required",
     ) -> LaunchplaneIdempotencyRecord:
         with patch.object(
             self.store,
@@ -158,6 +163,8 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
                 )
                 assert checkpoint.record is not None
                 record = checkpoint.record
+            if state == "running":
+                return record
             fenced = self.store.mark_mutation_reconcile_required(
                 reservation=record, reconciliation_key=record.reconciliation_key
             ).record
@@ -229,11 +236,20 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
     def test_active_lease_is_not_retired(self) -> None:
         self.assert_held_without_inspection(self.reserve(expired=False))
 
+    def test_expired_running_attempt_is_retired_with_its_exact_identity(self) -> None:
+        record = self.reserve(state="running")
+        audit = self.recover(record)
+        self.assertIsNotNone(audit)
+        completed = self.current(record)
+        self.assertEqual(completed.state, "completed")
+        self.assertEqual(completed.attempt, record.attempt)
+        self.assertEqual(completed.request_fingerprint, record.request_fingerprint)
+
     def test_post_deploy_effect_remains_held(self) -> None:
         self.assert_held_without_inspection(self.reserve(phase="post_deploy_started"))
 
     def test_queued_trigger_missing_from_history_stays_held_and_reports_why(self) -> None:
-        record = self.reserve(phase="deploy_trigger")
+        record = self.reserve()
         self.responses["/api/deployment.queueList"] = [
             {"data": {"composeId": self.target.resolved_target.target_id}, "state": "waiting"}
         ]
@@ -258,32 +274,67 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
         self.assertTrue(refusals)
         self.assertEqual(self.current(record), record)
 
-    def test_local_provider_complete_negative_reads_qualify_failed_attempt(self) -> None:
-        from control_plane.provider_operations import (
-            build_provider_operation_key,
-            provider_operation_title,
-        )
-
-        record = self.reserve(phase="deploy_trigger")
-        title = provider_operation_title(
-            build_provider_operation_key(
-                scope=record.scope,
-                route_path=record.route_path,
-                idempotency_key=record.idempotency_key,
-                request_fingerprint=record.request_fingerprint,
-                reconciliation_key=record.reconciliation_key,
-            )
-        )
+    def test_local_provider_not_dispatched_attempt_can_retire(self) -> None:
+        record = self.reserve()
         self.payload["serverId"] = None
+        self.assertIsNotNone(self.recover(record))
+
+    def test_failed_compose_may_have_hidden_live_container_and_stays_held(self) -> None:
+        record = self.reserve()
+        # getContainers omits a live custom container named "dokploy-agent"
+        # even when the compose appName is an ordinary value.
         self.responses["/api/deployment.allByType"] = [
             {
                 "deploymentId": "failed-job",
                 "status": "error",
-                "title": title,
                 "finishedAt": self.now(-1),
             }
         ]
-        self.assertIsNotNone(self.recover(record))
+        self.assertIsNone(self.recover(record))
+        self.assertEqual(self.current(record), record)
+
+    def test_triggered_attempt_cannot_qualify_with_filtered_container_inventory(self) -> None:
+        record = self.reserve(phase="deploy_trigger")
+        self.assertIsNone(self.recover(record))
+        self.assertEqual(self.current(record), record)
+
+    def test_execution_lock_loss_prevents_provider_checkpoint(self) -> None:
+        from control_plane.generic_web_deploy_provider_adapter import (
+            GenericWebDeployProviderMutationAdapter,
+        )
+        from control_plane.provider_operations import ProviderMutationRejectedError
+
+        request = event_testing_deploy_request(
+            product=self.profile.product,
+            image_reference="ghcr.io/example/site@sha256:" + "a" * 64,
+            source_commit="a" * 40,
+        )
+        adapter = GenericWebDeployProviderMutationAdapter(
+            control_plane_root=self.root,
+            record_store=self.store,
+            deploy_request=request,
+            profile=self.profile,
+            lane=next(lane for lane in self.profile.lanes if lane.instance == "testing"),
+            trace_id="lock-test",
+            deploy_provider=self.provider,
+        )
+        adapter.execution_check = Mock(side_effect=RuntimeError("execution lock lost"))
+        lease = Mock()
+
+        def execute(**kwargs: Any) -> None:
+            kwargs["provider_effect_checkpoint"]("target_update")
+            self.fail("provider effect ran after execution lock loss")
+
+        with (
+            patch.object(adapter, "_resolve_deploy_target", return_value=self.target),
+            patch(
+                "control_plane.generic_web_deploy_provider_adapter.execute_generic_web_deploy_result",
+                side_effect=execute,
+            ),
+            self.assertRaises(ProviderMutationRejectedError),
+        ):
+            adapter.apply("operation", lease)
+        lease.checkpoint_effect.assert_not_called()
 
     def test_provider_unknown_nonempty_and_incomplete_evidence_preserves_fence(self) -> None:
         record = self.reserve()
@@ -359,6 +410,7 @@ class TestingEventDeployRecoveryTests(unittest.TestCase):
                 control_plane_root=self.root,
                 target=snapshot,
                 operation_title="",
+                provider_effect_phase="target_update",
             )
         )
         self.assertIsNone(self.recover(record.model_copy(update={"scope": "caller-scope"})))

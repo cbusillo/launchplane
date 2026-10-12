@@ -485,7 +485,12 @@ class GenericWebDeployProviderMutationAdapter:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         def checkpoint(phase: str) -> None:
-            self.execution_check()
+            try:
+                self.execution_check()
+            except RuntimeError as error:
+                # The runner releases only when no earlier effect checkpoint
+                # exists; after an effect it preserves the reconciliation fence.
+                raise ProviderMutationRejectedError(error) from error
             lease.checkpoint_effect(phase)
 
         try:

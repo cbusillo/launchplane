@@ -558,13 +558,15 @@ attempt as a terminal failed reservation when it proves there is no live effect.
 It excludes other testing reconcilers with the provider-target execution lock,
 requires an expired lease, unchanged product/target bindings and the exact
 service-originated testing reservation, and refuses post-deploy/data-work effects.
-The Dokploy inspector currently qualifies only a testing compose with complete
-terminal-failure history, no containers of any state, no schedules and no queued
-or running compose work. It reads the provider's complete deployment queue;
-empty history or an idle compose alone cannot rule out a queued trigger.
-Because Dokploy's filtered container reader swallows failures as empty results,
-qualification requires a nonempty host inventory and successful container
-inspections. An empty host or an omitted Dokploy-named compose remains unproven.
+The Dokploy inspector currently qualifies only a testing compose whose held
+attempt never reached the deploy-trigger checkpoint, with empty deployment
+history, no schedules and no queued or running compose work. It reads the
+provider's deployment queue; empty history or an idle compose alone cannot rule
+out a queued trigger. Dokploy's container readers swallow failures and omit
+containers with certain names, so they cannot prove that a failed or triggered
+deployment left no effect. Those attempts remain held. A positive host read and
+successful container inspections provide additional safeguards; they are not a
+complete inventory proof. An empty host or a Dokploy-named compose is unproven.
 Missing lists, unreadable provider state, a successful
 deployment, target drift or an available original request keep the fence held.
 The failed reservation retains a value-free recovery audit; the normal verified

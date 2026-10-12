@@ -128,6 +128,7 @@ def retire_unavailable_testing_event_deploy(
             control_plane_root=root,
             target=snapshot,
             operation_title=provider_operation_title(operation_key),
+            provider_effect_phase=reservation.provider_effect_phase,
         )
         if evidence is None:
             return decline("recovery_provider_unproven")

@@ -9558,6 +9558,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
         for scenario in (
             "test_absence_retires_with_failed_audit_and_releases_target_for_normal_deploy",
             "test_target_change_during_inspection_and_stale_attempt_refuse_atomic_retirement",
+            "test_expired_running_attempt_is_retired_with_its_exact_identity",
         ):
             with self.subTest(scenario=scenario), _head_postgres_database() as url:
                 fixture = TestingEventDeployRecoveryTests(scenario)

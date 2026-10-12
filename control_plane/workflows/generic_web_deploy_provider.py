@@ -449,6 +449,7 @@ class GenericWebDeployNoLiveEffectProvider(Protocol):
         control_plane_root: Path,
         target: GenericWebProviderReconciliationTarget,
         operation_title: str,
+        provider_effect_phase: str,
     ) -> dict[str, object] | None: ...
 
 
@@ -707,8 +708,9 @@ class DokployGenericWebDeployProvider:
         control_plane_root: Path,
         target: GenericWebProviderReconciliationTarget,
         operation_title: str,
+        provider_effect_phase: str,
     ) -> dict[str, object] | None:
-        """Complete negative evidence for a never-successful, empty testing compose.
+        """Read-only proof for a testing attempt that never reached dispatch.
 
         Running-container filters and permissive history parsers cannot prove
         absence: paused/stopped containers, missing lists and malformed provider
@@ -720,6 +722,12 @@ class DokployGenericWebDeployProvider:
             or target.provider_id != self.provider_id
         ):
             return None
+        # Dokploy omits any container whose name contains "dokploy" from its
+        # host inventory. Service names and container_name can cause omissions
+        # even for an ordinary appName. That reader cannot qualify a triggered
+        # attempt or rule out a partial effect from a failed deployment.
+        if provider_effect_phase not in {"", "target_update"}:
+            raise TestingEventDeployRecoveryRefused("provider_dispatch_absence_unproven")
         host, token = self._read_provider_config(control_plane_root=control_plane_root)
         payload = dokploy_api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=target.target_id
@@ -747,15 +755,10 @@ class DokployGenericWebDeployProvider:
             path="/api/deployment.allByType",
             query={"id": target.target_id, "type": "compose"},
         )
-        if not isinstance(history, list) or any(
-            not isinstance(item, dict)
-            or dokploy_api.deployment_status(item)
-            not in {"error", "failed", "cancelled", "canceled"}
-            or not dokploy_api.deployment_key(item)
-            or not item.get("finishedAt")
-            for item in history
-        ):
-            raise TestingEventDeployRecoveryRefused("provider_history_unproven_or_nonfailed")
+        if history != []:
+            raise TestingEventDeployRecoveryRefused(
+                "provider_deployment_history_unproven_or_present"
+            )
         # A trigger may sit in the queue before any deployment row exists.
         # queueList returns the complete job inventory; HTTP/read errors and
         # unknown shapes are refused. Neither history nor composeStatus alone
@@ -774,10 +777,9 @@ class DokployGenericWebDeployProvider:
             }:
                 raise TestingEventDeployRecoveryRefused("provider_dispatch_unproven")
         # The name-filtered Dokploy endpoint converts provider/SSH failures to
-        # an empty list. Instead require a nonempty full host inventory and
-        # successfully inspect every returned container before proving absence.
-        # That inventory omits Dokploy-named containers, so such app names cannot
-        # be qualified by this reader.
+        # an empty list. A positive host read and inspections are additional
+        # safeguards, not a complete inventory proof. The pre-dispatch phase,
+        # empty history and queue proof above establish no held-operation effect.
         if "dokploy" in app_name.lower():
             raise TestingEventDeployRecoveryRefused("provider_container_inventory_incomplete")
         query: dict[str, str | int] = {}
@@ -816,8 +818,9 @@ class DokployGenericWebDeployProvider:
         # No values or provider coordinates are part of the public audit.
         return {
             "state": "no_live_effect",
-            "terminal_failed_deployments": len(history),
-            "container_count": 0,
+            "proof": "not_dispatched",
+            "deployment_count": 0,
+            "observed_target_container_count": 0,
             "schedule_count": 0,
             "pending_target_jobs": 0,
             "operation_marker_sha256": hashlib.sha256(operation_title.encode()).hexdigest(),

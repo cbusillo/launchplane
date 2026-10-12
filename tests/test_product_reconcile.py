@@ -7,11 +7,12 @@ import io
 import json
 import os
 import unittest
+from contextlib import nullcontext
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, current_thread, main_thread
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -1967,9 +1968,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         )
         self.assertEqual(coordinates.original_deploy.deploy.source_git_ref, DEPLOYABLE)
 
-    def test_unavailable_legacy_event_with_no_live_effect_retires_and_deploys_new_build(
-        self,
-    ) -> None:
+    def unavailable_legacy_event(self, *, refuse: bool = False) -> tuple[dict[str, Any], Any]:
         from control_plane.event_testing_deploy import event_testing_deploy_request
         from control_plane.generic_web_deploy_provider_adapter import (
             GenericWebDeployProviderMutationAdapter,
@@ -2054,10 +2053,20 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.deploys,
             "observe_testing_no_live_effect",
             create=True,
-            return_value={"state": "no_live_effect"},
+            return_value=None if refuse else {"state": "no_live_effect"},
         ) as inspection:
-            plan = self.reconcile()
+            completed = self.run_once()
+            plan = completed.last_plan
         inspection.assert_called_once()
+        if refuse:
+            self.assertEqual(completed.state, "failed")
+            self.assertIn(plan["testing_deploy_recovery_refusal"], completed.last_error)
+        return plan, held
+
+    def test_unavailable_legacy_event_with_no_live_effect_retires_and_deploys_new_build(
+        self,
+    ) -> None:
+        plan, held = self.unavailable_legacy_event()
         self.assertEqual(plan["deploy_status"], "pass")
         self.assertEqual(self.deploys.runtime_identities[-1].source_git_ref, DEPLOYABLE)
         retired = self.store.lookup_existing_mutation_reservation(
@@ -2069,6 +2078,29 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual(retired.state, "completed")
         self.assertGreaterEqual(retired.response_status_code, 400)
         self.assertEqual(retired.response_payload["recovery"], plan["testing_deploy_recovery"])
+
+    def test_unavailable_event_refusal_is_visible_and_preserves_old_fence(self) -> None:
+        plan, held = self.unavailable_legacy_event(refuse=True)
+        self.assertTrue(plan["testing_deploy_recovery_refusal"])
+        self.assertEqual(self.deploys.runtime_identities, [])
+        lookup = self.store.lookup_existing_mutation_reservation(
+            route_path=held.route_path,
+            idempotency_key=held.idempotency_key,
+            request_fingerprint=held.request_fingerprint,
+        )
+        self.assertEqual(lookup.record, held)
+
+    def test_another_event_worker_execution_lock_defers_without_deploying(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with patch.object(
+            self.store, "testing_replacement_execution_lock", return_value=nullcontext(None)
+        ):
+            completed = self.run_once()
+        self.assertEqual(completed.state, "pending")
+        self.assertEqual(completed.last_plan["deferred"], "lane_busy")
+        self.assertEqual(self.deploys.runtime_identities, [])
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
 
     def test_a_held_testing_lane_waits_and_deploys_nothing(self) -> None:
         self.github.add_run(20, DEPLOYABLE)

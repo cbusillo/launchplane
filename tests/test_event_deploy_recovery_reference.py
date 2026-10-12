@@ -430,6 +430,15 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             resolve_event_deploy_recovery_coordinates,
         )
         from control_plane.http_app import idempotency_request_fingerprint
+        from control_plane.workflows.generic_web_deploy_provider import (
+            decode_generic_web_provider_reconciliation_target,
+        )
+
+        self.assertIsNone(
+            decode_generic_web_provider_reconciliation_target(
+                self.reservation.reconciliation_key
+            ).original_event_deploy
+        )
 
         deploy = self.original["deploy"]
         assert isinstance(deploy, dict)
