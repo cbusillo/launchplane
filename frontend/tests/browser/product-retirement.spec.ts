@@ -40,14 +40,17 @@ for (const outcome of ["completed", "uncertain", "reconcile", "denied", "narrow-
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await panel.getByRole("button", { name: "Confirm retirement", exact: true }).click();
     if (outcome === "uncertain" || outcome === "reconcile") {
-      await expect(panel).toContainText("The result is uncertain.");
+      await expect(panel.getByRole("status")).toBeVisible();
+      await expect(panel.getByRole("button", { name: "Resume original retirement" })).toBeEnabled();
       await page.reload(); panel = page.getByRole("region", { name: "Retire product", exact: true });
       await expect(panel.getByLabel("Change reason")).toBeDisabled();
       await panel.getByRole("button", { name: "Resume original retirement" }).click();
       await expect.poll(() => sent.length).toBe(2);
       expect(sent[1]).toEqual(sent[0]);
     }
-    await expect(panel).toContainText("Product retired.");
+    await expect(panel.getByRole("status")).toBeVisible();
+    await expect(panel.getByRole("button", { name: "Confirm retirement", exact: true })).toHaveCount(0);
+    await expect(panel.getByRole("button", { name: "Review retirement plan" })).toBeDisabled();
     expect(sent).toHaveLength((outcome === "uncertain" || outcome === "reconcile") ? 2 : 1);
     await page.screenshot({ path: testInfo.outputPath("product-retirement-completed.png"), fullPage: true });
   });
