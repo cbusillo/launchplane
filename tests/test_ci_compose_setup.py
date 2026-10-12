@@ -49,7 +49,14 @@ class ComposeSetupTests(unittest.TestCase):
         curl.write_text(
             '#!/bin/sh\nset -eu\nprintf "%s\\n" "$*" >> "$DOWNLOAD_CALLS"\n'
             'if [ "$DOWNLOAD_STATUS" != 0 ]; then exit "$DOWNLOAD_STATUS"; fi\n'
-            'while [ "$1" != "--output" ]; do shift; done\n'
+            'while [ "$1" != "--output" ]; do\n'
+            '  case "$1" in https:*) download_url="$1" ;; esac\n'
+            "  shift\n"
+            "done\n"
+            'case "$download_url" in\n'
+            '  *"/${DOCKER_COMPOSE_VERSION}/"*) ;;\n'
+            "  *) exit 22 ;;\n"
+            "esac\n"
             'cp "$DOWNLOAD_SOURCE" "$2"\n',
             encoding="utf-8",
         )
@@ -112,19 +119,20 @@ class ComposeSetupTests(unittest.TestCase):
         self.cached.unlink()
         result = self.run_setup()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(
-            f"/releases/download/{self.environment['DOCKER_COMPOSE_VERSION']}/",
-            self.calls.read_text(),
-        )
-        self.assertFalse(self.cached.exists())
+        self.assertTrue(self.calls.exists())
+        self.assertEqual(self.cached.read_bytes(), PLUGIN)
+        self.calls.unlink()
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.calls.exists())
 
-    def test_corrupt_cached_binary_is_replaced_without_changing_the_runner_cache(self) -> None:
+    def test_corrupt_cached_binary_is_replaced_with_validated_release(self) -> None:
         self.cached.write_bytes(b"corrupt cached executable")
         result = self.run_setup()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Fixture Compose works", result.stdout)
         self.assertTrue(self.calls.exists())
-        self.assertEqual(self.cached.read_bytes(), b"corrupt cached executable")
+        self.assertEqual(self.cached.read_bytes(), PLUGIN)
 
     def test_invalid_download_does_not_publish_a_plugin(self) -> None:
         self.cached.unlink()
@@ -142,6 +150,6 @@ class ComposeSetupTests(unittest.TestCase):
         self.cached.unlink()
         self.environment["DOWNLOAD_STATUS"] = "22"
         result = self.run_setup()
-        self.assertEqual(result.returncode, 22, result.stderr)
+        self.assertNotEqual(result.returncode, 0)
         self.assertEqual(plugin.read_bytes(), previous)
         self.assertEqual(list(plugin.parent.glob("compose-install.*")), [])

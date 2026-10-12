@@ -133,7 +133,12 @@ class ClientTestNotesTests(unittest.TestCase):
             ),
         ):
 
-            def read(record_store: object = None, *, client_set: bool = True) -> bool:
+            def read(
+                record_store: object = None,
+                *,
+                client_set: bool = True,
+                director_standing: bool = False,
+            ) -> bool:
                 return pull_request_client_review(
                     control_plane_root=Path("."),
                     context="test",
@@ -141,14 +146,17 @@ class ClientTestNotesTests(unittest.TestCase):
                     label="owner-review",
                     record_store=record_store,
                     client_set=client_set,
+                    director_standing=director_standing,
                 )
 
             self.assertTrue(read())
+            self.assertFalse(read(director_standing=True))
             self.assertFalse(read(store))
             payload["body"] = "Synthetic train candidate."
             self.assertFalse(read(store))
             with self.assertRaises(ClientTestNotesRequired):
                 read()
+            self.assertFalse(read(director_standing=True))
             payload["body"] = "## Client test notes\nTry the price list."
             payload["base"] = {"ref": "other-base"}
             self.assertTrue(read(store))

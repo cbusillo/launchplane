@@ -321,10 +321,13 @@ def pull_request_client_review(
     label: str,
     record_store: object = None,
     client_set: bool = True,
+    director_standing: bool = False,
 ) -> bool:
     from control_plane.client_test_notes import ClientTestNotesRequired, change_client_review
     from control_plane.client_release_repositories import recorded_train_candidate
 
+    if director_standing:
+        return False
     reference = github_pull_request_reference(pr_url=anchor_pr_url)
     if reference is None:
         raise ValueError("Client review requires a pull request reference.")

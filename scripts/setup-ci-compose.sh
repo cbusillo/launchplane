@@ -25,11 +25,19 @@ fi
 if ! "${staged_binary}" docker-cli-plugin-metadata 2>/dev/null |
   jq --exit-status --arg version "${version}" '.Version == $version' >/dev/null; then
   curl --fail --silent --show-error --location \
+    --retry 3 --retry-all-errors \
     "https://github.com/docker/compose/releases/download/${version}/docker-compose-${platform}-${architecture}" \
     --output "${staged_binary}"
 fi
 chmod 0755 "${staged_binary}"
 "${staged_binary}" docker-cli-plugin-metadata |
   jq --exit-status --arg version "${version}" '.Version == $version' >/dev/null
+if [ -n "${RUNNER_TOOL_CACHE:-}" ]; then
+  mkdir -p "$(dirname "${cached_binary}")"
+  cache_staging="$(mktemp "$(dirname "${cached_binary}")/compose-cache.XXXXXXXX")"
+  trap 'rm -f "${staged_binary}" "${cache_staging}"' EXIT
+  cp "${staged_binary}" "${cache_staging}"
+  mv "${cache_staging}" "${cached_binary}"
+fi
 mv "${staged_binary}" "${plugin_directory}/docker-compose"
 docker compose version

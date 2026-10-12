@@ -245,8 +245,9 @@ The loaded image still runs every Compose qualification and vulnerability scan.
 CI container and unittest jobs run `scripts/setup-ci-compose.sh`; the workflow
 owns the Compose version. Installation copies directly from the runner's tool
 cache (or downloads the official release on a miss) into the job's Docker plugin
-directory, avoiding the setup action's shared per-user staging file. The
-self-hosted runner's Docker-config isolation hook remains required. Local reproduction requires a compatible
+directory, avoiding the setup action's shared per-user staging file. Validated
+downloads refill the runner-local cache atomically. The self-hosted runner's
+Docker-config isolation hook remains required. Local reproduction requires a compatible
 `docker compose` command, GNU `timeout`, the Docker engine, and built image.
 The fixture uses bounded detached `up` calls and explicit running, absence, and
 container-identity checks because Compose v5.3.1 `--wait` incorrectly requires

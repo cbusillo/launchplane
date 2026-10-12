@@ -310,6 +310,26 @@ class OwnerReviewStatusTests(unittest.TestCase):
             ],
         )
 
+    def test_director_standing_does_not_publish_a_pending_preview_review(self) -> None:
+        for body in ("## Client test notes\nTry the approval buttons.", ""):
+            with self.subTest(body=body):
+                github = _GitHub()
+                github.body = body
+                profile = _profile().model_copy(
+                    update={"release_on_acceptance": "director_standing"}
+                )
+                result = _publisher(github).publish(
+                    store=self.store, profile=profile, pull_request_number=_PULL_REQUEST
+                )
+                self.assertIsNotNone(result)
+                assert result is not None
+                self.assertEqual(result.state, "neutral")
+                self.assertFalse(
+                    self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                    )
+                )
+
     def test_decision_for_the_current_head_decides_the_status(self) -> None:
         cases: tuple[tuple[ProductReviewDecision, str, str], ...] = (
             ("accepted", "success", "Accepted by @site-owner"),
@@ -927,6 +947,30 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202)
         (feedback,) = self.store.list_preview_pr_feedback_records()
         self.assertIn("no Client is set", feedback.comment_markdown)
+
+    async def test_director_standing_ready_feedback_sends_no_client_invitation(self) -> None:
+        from control_plane.workflows.preview_pr_feedback import pull_request_client_review
+
+        payload = product_profile_payload("verireel")
+        payload["release_on_acceptance"] = "director_standing"
+        payload["owner"] = {"github_login": "site-owner", "github_id": str(_OWNER_GITHUB_ID)}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(_preview_pr_feedback_identity()),
+            authz_policy=_preview_pr_feedback_policy(action="preview_pr_feedback.write"),
+            control_plane_root_path=self.root,
+            record_store_factory=lambda: self.store,
+        )
+        with patch(
+            "control_plane.http_app.pull_request_client_review", new=pull_request_client_review
+        ):
+            response = await _post_preview_pr_feedback(app, _preview_pr_feedback_payload())
+        self.assertEqual(response.status_code, 202)
+        (feedback,) = self.store.list_preview_pr_feedback_records()
+        self.assertNotIn("@site-owner", feedback.comment_markdown)
+        self.assertNotIn("/ui/owner-review", feedback.comment_markdown)
 
     async def test_ready_train_preview_does_not_publish_a_duplicate_client_review(self) -> None:
         from contextlib import nullcontext
