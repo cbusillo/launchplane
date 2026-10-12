@@ -669,6 +669,12 @@ export type GenericWebApplicationSchedule = {
     timeout_seconds: number;
 };
 
+export type GenericWebLaneDeclaration = {
+    context: string;
+    extensions: GenericWebLaneExtensions;
+    instance: string;
+};
+
 export type GenericWebLaneExtensions = {
     maintenance: Array<GenericWebMaintenanceCommand>;
     schedules: Array<GenericWebApplicationSchedule>;
@@ -679,6 +685,13 @@ export type GenericWebMaintenanceCommand = {
     command: string;
     name: string;
     timeout_seconds: number;
+};
+
+export type GenericWebPreviewDeclaration = {
+    app_name_suffix?: string;
+    data_transport_mode: 'none' | 'driver';
+    transport_database_prefix?: string;
+    transport_extension?: '' | 'verireel-postgres';
 };
 
 export type GenericWebProdPromotionRecords = {
@@ -2955,6 +2968,15 @@ export type ProductExpectedConfigProfile = {
     runtime_environment_keys: Array<ProductRuntimeConfigRequirement>;
 };
 
+export type ProductGenericWebTransitionRequest = {
+    lanes: Array<GenericWebLaneDeclaration>;
+    mode?: 'dry-run' | 'apply';
+    preview?: GenericWebPreviewDeclaration | null;
+    reason: string;
+    reviewed_plan_sha256?: string;
+    schema_version?: 1;
+};
+
 export type ProductHealthMonitoringCheckSummary = {
     enabled: boolean;
     failure_code: string;
@@ -3456,7 +3478,7 @@ export type ProductProfileListResponse = {
 };
 
 export type ProductProfileMutationReceipt = {
-    field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup' | 'display-name';
+    field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup' | 'display-name' | 'generic-web-transition';
     idempotency_key: string;
     original_trace_id: string;
     product: string;
@@ -5387,7 +5409,7 @@ export type ReadProductProfileMutationReceiptData = {
     };
     path: {
         product: string;
-        field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup' | 'display-name';
+        field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup' | 'display-name' | 'generic-web-transition';
     };
     query: {
         operation_key: string;
@@ -6371,6 +6393,37 @@ export type ApplyProductDisplayNameResponses = {
 };
 
 export type ApplyProductDisplayNameResponse = ApplyProductDisplayNameResponses[keyof ApplyProductDisplayNameResponses];
+
+export type ApplyProductGenericWebTransitionData = {
+    body: ProductGenericWebTransitionRequest;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/product-profiles/{product}/generic-web-transition';
+};
+
+export type ApplyProductGenericWebTransitionErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ApplyProductGenericWebTransitionError = ApplyProductGenericWebTransitionErrors[keyof ApplyProductGenericWebTransitionErrors];
+
+export type ApplyProductGenericWebTransitionResponses = {
+    202: AcceptedEvidenceResponse;
+};
+
+export type ApplyProductGenericWebTransitionResponse = ApplyProductGenericWebTransitionResponses[keyof ApplyProductGenericWebTransitionResponses];
 
 export type ApplyProductImageRepositoryData = {
     body: {

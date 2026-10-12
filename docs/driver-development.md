@@ -162,6 +162,30 @@ remain the domain boundary for request resolution, execution, record shaping,
 and idempotency decisions. Keep new provider behavior behind those protocols and
 modules; do not add Generic Web route logic back to `http_app.py`.
 
+### Reviewed shared-web profile transition
+
+The product workspace's **Shared web driver** card uses
+`POST /v1/product-profiles/{product}/generic-web-transition`. Its request shape
+is [`ProductGenericWebTransitionRequest`](../control_plane/product_generic_web_transition.py).
+Declare every recorded lane and the supported preview transport explicitly;
+the card starts with the current declarations. Maintenance and schedule commands
+run in the product artifact and use existing managed runtime settings.
+
+Review returns the normalized declarations and a plan bound to the whole current
+profile. Apply requires that exact review, a signed-in administrator's existing
+`product_profile.write` authority, CSRF and an operation key. A concurrent profile
+edit refuses the apply. The write and original response commit atomically;
+a lost response keeps the card locked to its original key until replay or the
+profile mutation receipt settles it.
+
+This changes driver and extension declarations only. Lane placement, Client,
+release policy, health settings, runtime settings, secrets, artifacts and deployment
+records remain under their existing authority. The periodic testing reconcile
+qualifies the declared testing lifecycle; profile readback is not qualification.
+Production changes still start from the accepted release. Keep an existing product
+stack operational until testing qualifies the replacement; then remove its active
+paths while retaining historical readers.
+
 ## Capability Design
 
 Use capability names to describe admin-visible behavior, not implementation

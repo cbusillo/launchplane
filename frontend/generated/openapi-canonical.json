@@ -9449,6 +9449,31 @@
         "title": "GenericWebDeployRequest",
         "type": "object"
       },
+      "GenericWebLaneDeclaration": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "extensions": {
+            "$ref": "#/components/schemas/GenericWebLaneExtensions"
+          },
+          "instance": {
+            "minLength": 1,
+            "title": "Instance",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "instance",
+          "extensions"
+        ],
+        "title": "GenericWebLaneDeclaration",
+        "type": "object"
+      },
       "GenericWebLaneExtensions": {
         "additionalProperties": false,
         "properties": {
@@ -9592,6 +9617,43 @@
           "related_issue"
         ],
         "title": "GenericWebPreviewAuthzPlanRequest",
+        "type": "object"
+      },
+      "GenericWebPreviewDeclaration": {
+        "additionalProperties": false,
+        "properties": {
+          "app_name_suffix": {
+            "default": "",
+            "title": "App Name Suffix",
+            "type": "string"
+          },
+          "data_transport_mode": {
+            "enum": [
+              "none",
+              "driver"
+            ],
+            "title": "Data Transport Mode",
+            "type": "string"
+          },
+          "transport_database_prefix": {
+            "default": "",
+            "title": "Transport Database Prefix",
+            "type": "string"
+          },
+          "transport_extension": {
+            "default": "",
+            "enum": [
+              "",
+              "verireel-postgres"
+            ],
+            "title": "Transport Extension",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data_transport_mode"
+        ],
+        "title": "GenericWebPreviewDeclaration",
         "type": "object"
       },
       "GenericWebPreviewDesiredStateEnvelope": {
@@ -29892,6 +29954,58 @@
         "title": "ProductExpectedConfigProfile",
         "type": "object"
       },
+      "ProductGenericWebTransitionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "lanes": {
+            "items": {
+              "$ref": "#/components/schemas/GenericWebLaneDeclaration"
+            },
+            "title": "Lanes",
+            "type": "array"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "preview": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenericWebPreviewDeclaration"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "lanes",
+          "reason"
+        ],
+        "title": "ProductGenericWebTransitionRequest",
+        "type": "object"
+      },
       "ProductHealthMonitoringCheckSummary": {
         "additionalProperties": false,
         "properties": {
@@ -33055,7 +33169,8 @@
               "image-repository",
               "production-use",
               "website-cleanup",
-              "display-name"
+              "display-name",
+              "generic-web-transition"
             ],
             "title": "Field",
             "type": "string"
@@ -81913,6 +82028,137 @@
         "summary": "Preview or change a product display name"
       }
     },
+    "/v1/product-profiles/{product}/generic-web-transition": {
+      "post": {
+        "operationId": "apply_product_generic_web_transition",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductGenericWebTransitionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Preview or change a product shared-web driver declaration"
+      }
+    },
     "/v1/product-profiles/{product}/image-repository": {
       "post": {
         "operationId": "apply_product_image_repository",
@@ -82109,7 +82355,8 @@
                 "image-repository",
                 "production-use",
                 "website-cleanup",
-                "display-name"
+                "display-name",
+                "generic-web-transition"
               ],
               "title": "Field",
               "type": "string"
@@ -92780,6 +93027,7 @@
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
     "/v1/product-profiles/health-monitoring/apply": "apply_product_health_monitoring",
     "/v1/product-profiles/{product}/display-name": "apply_product_display_name",
+    "/v1/product-profiles/{product}/generic-web-transition": "apply_product_generic_web_transition",
     "/v1/product-profiles/{product}/image-repository": "apply_product_image_repository",
     "/v1/product-profiles/{product}/owner": "apply_product_owner",
     "/v1/product-profiles/{product}/production-use": "apply_product_production_use",
