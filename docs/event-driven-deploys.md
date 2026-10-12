@@ -142,6 +142,31 @@ reservation. The webhook request never waits on a deploy.
     `deploy_status`, `post_deploy_status` and `deployment_record_id`, never the
     driver's message; a refusal's reason goes to the worker log only. A product on any other driver is held with
     `no_reconcile_deploy_for_driver`.
+    For VeriReel testing, a matching image without deployment-bound migration and
+    creator/admin qualification gets one normal deploy of that same verified
+    artifact to run the testing-only post-deploy extension. Passing qualification
+    is reused only when its authority digest matches the current lane. The
+    deployment captures this digest before target preparation and provider
+    effects, and carries it into qualification rather than reading a newer
+    authority after deployment. This binds the expected starting authority;
+    it does not provide an atomic snapshot of every runtime read. Changing consumed
+    runtime settings or secret versions also requires fresh qualification. Declaring
+    a new shared-web lifecycle therefore requalifies a previously passing legacy
+    deployment even when the artifact is unchanged; a matching qualification then
+    stops at `already_deployed`. A failed qualification with unchanged
+    stored lane authority remains failed; a supported configuration repair can
+    permit a fresh attempt. Transient infrastructure failures get bounded fresh
+    attempts through the same deploy lifecycle. A cleanup failure remains failed,
+    with the reserved fixture email recorded for the existing maintenance cleanup
+    intent. An administrator can retry the exact verified artifact using the
+    existing testing deploy surface after resolving the recorded failure; no grant
+    is added for a retry. Interrupted effects retain the existing provider
+    reservation and generic-web recovery path. After interruption, the recovery
+    admin can derive the reserved fixture email from the deployment ID using
+    `fixture_email`; no cleanup mutation runs after its effect fence is lost.
+    No new caller capability or
+    product-repository call-in is involved. Production and rollback do not select
+    this extension.
   - If the lane is busy, the reconcile stays pending and runs again after it.
   - While the testing lane is held for staff testing, the reconcile records
     its plan as held (`action: wait`, reason `staff_testing`) and deploys
@@ -581,6 +606,25 @@ incomplete responses, running jobs or changed authority leave the lane fenced.
 A timeout never means that an effect did not happen. Legacy attempts without a
 journal, including attempts started before this capability, remain fenced;
 provider idleness or a newer runtime identity cannot replace their missing proof.
+
+The existing target-replacement operation GET also returns a value-free
+`recovery` classification under scoped `operations.read`. It reports persisted
+journal presence or absence, attempt/binding agreement, effect acknowledgement,
+provider inspection and an eligibility/refusal code. It excludes the execution
+worker and rechecks the operation and binding after inspection. Missing journal
+means unknown historical effects, never an absent provider dispatch. The read
+does not cancel, publish an attestation, queue reconciliation or change incidents;
+`safe_to_release` remains false even when the read observes eligibility. Raw
+references, target coordinates and authorization stay inside the service. For
+held testing operations its fixed `error_description` also carries the recovery
+reason, journal state and effect classification so the maintained bounded
+operation-read helper preserves the diagnosis while omitting the structured
+extension. Recovery still gathers and checks its own fresh proof before action.
+The classification has a closed typed response schema. Live inspection on a
+status read is bounded to a 15-second budget, with at most five seconds per
+provider call; timeout and lock contention report refusal. Contention does not
+assert that the competing lock belongs to a surviving worker. A read-time
+quiescent observation remains evidence, not release permission.
 
 Only a proved-quiescent attempt is cancelled with the existing timestamped
 `safe_to_release=true` attestation. The observed references are persisted beside

@@ -42,6 +42,7 @@
     "engineeringReviewRuns": "docs/engineering-review-runs.md",
     "engineeringReviewDecisions": "docs/engineering-review-decisions.md",
     "operations": "docs/operations.md",
+    "storedRecordPreflight": "docs/stored-record-preflight.md",
     "laneServiceRestart": "docs/lane-service-restart.md",
     "records": "docs/records.md",
     "secrets": "docs/secrets.md",
@@ -84,6 +85,7 @@
       "frontend": "pnpm --dir frontend validate",
       "container": "docker build -t launchplane-ci:test .",
       "ordinaryWorkerCompose": "bash scripts/qualify-ordinary-agent-compose.sh launchplane-ci:test",
+      "testingBrowser": "bash scripts/qualify-testing-browser.sh launchplane-ci:test",
       "serviceCompose": "bash scripts/qualify-service-compose.sh launchplane-ci:test \"${LAUNCHPLANE_CI_POSTGRES_IMAGE:?set from the top-level env in .github/workflows/ci.yml}\""
     },
     "openapi": {

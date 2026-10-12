@@ -20,6 +20,7 @@ dependencies = [
     "uvicorn>=0.52.3",
     "alembic>=1.19.1",
     "tinycss2>=1.5.1",
+    "playwright>=1.63.0",
 ]
 
 [project.optional-dependencies]

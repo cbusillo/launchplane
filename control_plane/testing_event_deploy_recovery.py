@@ -1,4 +1,4 @@
-"""Retire a service testing attempt only after original inputs and live effects are absent."""
+"""Retire a service testing attempt only after its provider effects are proved safe."""
 
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -22,8 +22,12 @@ from control_plane.workflows.generic_web_deploy_provider import (
     TestingEventDeployRecoveryRefused,
     decode_generic_web_provider_reconciliation_target,
 )
-from control_plane.workflows.odoo_generic_web_post_deploy import (
-    generic_web_post_deploy_executor_for_driver_id,
+from control_plane.workflows.generic_web_application_snapshot import (
+    has_recorded_application_lifecycle,
+    generic_web_provider_deployment_record_id,
+)
+from control_plane.workflows.generic_web_post_deploy import (
+    generic_web_post_deploy_executor_for_profile,
 )
 
 
@@ -70,7 +74,13 @@ def retire_unavailable_testing_event_deploy(
         )
         or reservation.provider_target_key != current_target_key
         or reservation.provider_effect_phase not in {"", "target_update", "deploy_trigger"}
-        or generic_web_post_deploy_executor_for_driver_id(profile.driver_id) is not None
+        or generic_web_post_deploy_executor_for_profile(profile, instance="testing") is not None
+        or any(
+            lane.context == context
+            and lane.instance == "testing"
+            and lane.generic_web_extensions.configured
+            for lane in profile.lanes
+        )
     ):
         return decline("recovery_scope_or_effect_unsupported")
     try:
@@ -125,6 +135,15 @@ def retire_unavailable_testing_event_deploy(
             request_fingerprint=reservation.request_fingerprint,
             reconciliation_key=reservation.reconciliation_key,
         )
+        if has_recorded_application_lifecycle(
+            store,
+            context=context,
+            instance="testing",
+            deployment_record_id=generic_web_provider_deployment_record_id(
+                operation_key, context=context, instance="testing"
+            ),
+        ):
+            return decline("recovery_application_lifecycle_required")
         evidence = provider.observe_testing_no_live_effect(
             control_plane_root=root,
             target=snapshot,
@@ -133,6 +152,8 @@ def retire_unavailable_testing_event_deploy(
         )
         if evidence is None:
             return decline("recovery_provider_unproven")
+        if evidence.get("state") not in {"no_live_effect", "quiescent_safe_to_retry"}:
+            return decline("recovery_provider_classification_unknown")
         check_execution_lock()
         audit: dict[str, object] = {
             "action": "retire_unavailable_testing_event_deploy",
@@ -149,7 +170,11 @@ def retire_unavailable_testing_event_deploy(
             response_payload={
                 "status": "failed",
                 "trace_id": trace_id,
-                "error": {"code": "testing_deploy_retired_without_live_effect"},
+                "error": {
+                    "code": "testing_deploy_retired_without_live_effect"
+                    if evidence.get("state") == "no_live_effect"
+                    else "testing_deploy_retired_after_terminal_dispatch"
+                },
                 "recovery": audit,
             },
             expected_binding_evidence=bindings,

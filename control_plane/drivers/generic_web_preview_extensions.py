@@ -67,8 +67,6 @@ def _successful_driver_refresh_evidence(
             override_env_keys=tuple(profile.preview.override_env),
             preview_url_env_keys=profile.preview.preview_url_env_keys,
             preview_domain_env_keys=profile.preview.preview_domain_env_keys,
-            migration_command_configured=bool(profile.preview.migration_command.strip()),
-            seed_command_configured=bool(profile.preview.seed_command.strip()),
         ),
         checks=(
             GenericWebPreviewReadinessCheck(
@@ -99,9 +97,14 @@ def apply_generic_web_preview_driver_refresh(
     request: GenericWebPreviewRefreshRequest,
     profile: LaunchplaneProductProfileRecord,
 ) -> tuple[dict[str, object], dict[str, object]] | None:
+    if profile.preview.data_transport_mode == "driver" and profile.preview.historical_transport:
+        raise click.ClickException(
+            "Saved preview transport intent was never implemented; replace the preview settings "
+            "with supported none/driver configuration before refreshing."
+        )
     if profile.preview.data_transport_mode != "driver":
         return None
-    if profile.driver_id != "verireel":
+    if not _uses_verireel_transport(profile):
         raise click.ClickException(
             f"Driver {profile.driver_id!r} does not register a generic-web preview refresh extension."
         )
@@ -134,6 +137,7 @@ def apply_generic_web_preview_driver_refresh(
     records, result = apply_verireel_preview_refresh_result(
         control_plane_root=control_plane_root,
         record_store=record_store,
+        execution_profile=profile if profile.preview.transport_extension else None,
         request=VeriReelPreviewRefreshEnvelope(
             product=profile.product,
             refresh=verireel_refresh_request,
@@ -166,7 +170,7 @@ def apply_generic_web_preview_driver_destroy(
 ) -> tuple[dict[str, object], dict[str, object]] | None:
     if profile.preview.data_transport_mode != "driver":
         return None
-    if profile.driver_id != "verireel":
+    if not _uses_verireel_transport(profile):
         raise click.ClickException(
             f"Driver {profile.driver_id!r} does not register a generic-web preview destroy extension."
         )
@@ -188,6 +192,7 @@ def apply_generic_web_preview_driver_destroy(
     records, result = apply_verireel_preview_destroy_result(
         control_plane_root=control_plane_root,
         record_store=record_store,
+        execution_profile=profile if profile.preview.transport_extension else None,
         request=VeriReelPreviewDestroyEnvelope(
             product=profile.product,
             destroy=VeriReelPreviewDestroyRequest(
@@ -214,3 +219,12 @@ def apply_generic_web_preview_driver_destroy(
         }
     )
     return records, generic_result.model_dump(mode="json")
+
+
+def _uses_verireel_transport(profile: LaunchplaneProductProfileRecord) -> bool:
+    # Existing profiles remain operational until the testing-first transition.
+    # Generic-web profiles select their genuine product extension explicitly.
+    return (
+        profile.driver_id == "generic-web"
+        and profile.preview.transport_extension == "verireel-postgres"
+    ) or (profile.driver_id == "verireel" and not profile.preview.transport_extension)

@@ -1,11 +1,13 @@
 from collections.abc import Iterable
 import hashlib
 import json
-from typing import Literal
+import re
+from typing import Literal, get_args
 
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
+from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
@@ -17,6 +19,7 @@ ProductLifecycleState = Literal["active", "retiring", "retired"]
 ProductPublicWebsite = Literal["required", "none"]
 OdooDataAuthority = Literal["unknown", "resettable", "restorable", "authoritative"]
 OdooRebuildSourceMode = Literal["empty", "upstream_restore"]
+BumpLevel = Literal["patch", "minor", "major"]
 
 
 class ProductProfileChangedError(ValueError):
@@ -135,9 +138,24 @@ class ProductOdooLaneDataPolicy(BaseModel):
     data_authority: OdooDataAuthority = "unknown"
     allowed_rebuild_sources: tuple[OdooRebuildSourceMode, ...] = ()
     upstream_source: str = ""
-    requires_backup_before_destroy: bool = True
-    requires_restore_proof: bool = True
     requires_runtime_identity: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_legacy_safeguards(cls, value: object) -> object:
+        # Stored settings never enforced these claims. Read old records without
+        # carrying them forward as configurable protection or exemptions.
+        if isinstance(value, dict):
+            return {
+                key: item
+                for key, item in value.items()
+                if key not in {"requires_backup_before_destroy", "requires_restore_proof"}
+            }
+        return value
+
+    @property
+    def destructive_replacement_proof_required(self) -> bool:
+        return self.data_authority in {"unknown", "authoritative"}
 
     @model_validator(mode="after")
     def _validate_policy(self) -> "ProductOdooLaneDataPolicy":
@@ -151,10 +169,6 @@ class ProductOdooLaneDataPolicy(BaseModel):
             raise ValueError("unknown Odoo data authority cannot allow rebuild sources")
         if "upstream_restore" in self.allowed_rebuild_sources and not self.upstream_source:
             raise ValueError("Odoo data policy allowing upstream_restore requires upstream_source")
-        if self.data_authority == "authoritative" and not self.requires_backup_before_destroy:
-            raise ValueError("authoritative Odoo data policy requires backup before destroy")
-        if self.data_authority == "authoritative" and not self.requires_restore_proof:
-            raise ValueError("authoritative Odoo data policy requires restore proof")
         return self
 
     def allows_rebuild_source(self, source: str) -> bool:
@@ -269,6 +283,11 @@ class ProductLaneProfile(BaseModel):
     instance: str
     context: str
     base_url: str = ""
+    generic_web_extensions: GenericWebLaneExtensions = Field(
+        default_factory=GenericWebLaneExtensions,
+        exclude_if=lambda value: not value.configured,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     odoo_cutover: OdooCutoverLane | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -302,6 +321,13 @@ class ProductPreviewProfile(BaseModel):
     context: str = ""
     slug_template: str = "pr-{number}"
     app_name_prefix: str = ""
+    app_name_suffix: str = Field(
+        default="",
+        max_length=40,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+        pattern=r"^(-[a-z0-9-]+)?$",
+    )
     template_instance: str = "testing"
     required_template_env_keys: tuple[str, ...] = ()
     copied_env_keys: tuple[str, ...] = ()
@@ -311,9 +337,44 @@ class ProductPreviewProfile(BaseModel):
     preview_domain_env_keys: tuple[str, ...] = ()
     domain_certificate_type: Literal["none", "letsencrypt"] = "none"
     required_provider_fields: tuple[str, ...] = ()
-    data_transport_mode: Literal["none", "clone", "bootstrap", "migrate_seed", "driver"] = "none"
-    migration_command: str = ""
-    seed_command: str = ""
+    data_transport_mode: Literal["none", "driver"] = "none"
+    transport_extension: Literal["", "verireel-postgres"] = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    transport_database_prefix: str = Field(
+        default="",
+        max_length=40,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    historical_transport: dict[str, str] = Field(
+        default_factory=dict,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"readOnly": True, "x-launchplane-optional-response": True},
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _preserve_stored_transport(cls, value: object, info: ValidationInfo) -> object:
+        if not isinstance(value, dict):
+            return value
+        if not (info.context and info.context.get("stored_product_profile")):
+            return value
+        normalized = dict(value)
+        historical = dict(normalized.get("historical_transport") or {})
+        mode = normalized.get("data_transport_mode", "none")
+        if mode in {"clone", "bootstrap", "migrate_seed"}:
+            historical["data_transport_mode"] = mode
+            normalized["data_transport_mode"] = "none"
+        for field in ("migration_command", "seed_command"):
+            command = normalized.pop(field, "")
+            if isinstance(command, str) and command.strip():
+                historical[field] = command
+                historical.setdefault("data_transport_mode", mode)
+        normalized["historical_transport"] = historical
+        return normalized
 
     @model_validator(mode="before")
     @classmethod
@@ -365,10 +426,18 @@ class ProductPreviewProfile(BaseModel):
                 raise ValueError("product preview profile override_env keys must be non-empty")
             if raw_value is None:
                 raise ValueError("product preview profile override_env values must not be null")
-        if self.data_transport_mode == "none" and (self.migration_command or self.seed_command):
+        if self.transport_extension and self.data_transport_mode != "driver":
+            raise ValueError("preview transport extension requires driver data transport")
+        if self.transport_extension and (
+            not self.app_name_prefix.strip()
+            or not re.fullmatch(r"[a-z][a-z0-9_]*", self.transport_database_prefix)
+        ):
             raise ValueError(
-                "product preview profile migration_command/seed_command require a data transport mode"
+                "declared PostgreSQL transport requires application and safe database prefixes"
             )
+        if self.transport_database_prefix and not self.transport_extension:
+            raise ValueError("preview transport database prefix requires a transport extension")
+
         return self
 
 
@@ -383,7 +452,10 @@ class ProductPromotionWorkflowProfile(BaseModel):
     deploy_reference_input: str = "deploy_reference"
     source_git_ref_input: str = "source_git_ref"
     promotion_intent_input: str = "promotion_intent_id"
-    default_bump: str = "patch"
+    default_bump: str = Field(
+        default="patch",
+        json_schema_extra={"x-launchplane-snapshot-protocol": list(get_args(BumpLevel))},
+    )
 
     @model_validator(mode="after")
     def _validate_workflow(self) -> "ProductPromotionWorkflowProfile":
@@ -413,7 +485,7 @@ class ProductPromotionWorkflowProfile(BaseModel):
         )
         if len(set(input_names)) != len(input_names):
             raise ValueError("product promotion workflow input names must be unique")
-        if self.default_bump.strip() not in {"patch", "minor", "major"}:
+        if self.default_bump.strip() not in get_args(BumpLevel):
             raise ValueError(
                 "product promotion workflow default_bump must be patch, minor, or major"
             )
@@ -629,6 +701,8 @@ class LaunchplaneProductProfileRecord(BaseModel):
             raise ValueError("product profile default_branch cannot contain whitespace")
         if not self.driver_id.strip():
             raise ValueError("product profile requires driver_id")
+        if self.preview.transport_extension and self.driver_id != "generic-web":
+            raise ValueError("declared preview transport requires the generic-web driver")
         self.health_path = self.health_path.strip()
         if self.health_path and not self.health_path.startswith("/"):
             raise ValueError("product profile health_path must start with /")
@@ -645,6 +719,13 @@ class LaunchplaneProductProfileRecord(BaseModel):
                 raise ValueError("enabled product preview requires health_path")
         if self.lifecycle_state != "active" and self.preview.enabled:
             raise ValueError("non-active product profiles cannot retain enabled previews")
+        for lane in self.lanes:
+            if lane.generic_web_extensions.verification_extension and (
+                self.driver_id.strip() != "generic-web" or lane.instance != "testing"
+            ):
+                raise ValueError(
+                    "declared VeriReel testing verification requires a generic-web testing lane"
+                )
         lane_instances = [lane.instance.strip().lower() for lane in self.lanes]
         if len(lane_instances) != len(set(lane_instances)):
             raise ValueError("product profile lane instances must be unique")
@@ -665,6 +746,11 @@ class LaunchplaneProductProfileRecord(BaseModel):
     @property
     def is_active(self) -> bool:
         return self.lifecycle_state == "active"
+
+    def odoo_replacement_proof_required(self, lane: ProductLaneProfile) -> bool:
+        return lane.odoo_data_policy.destructive_replacement_proof_required or (
+            self.production_use == "live" and lane.instance == "prod"
+        )
 
     def validate_write_contract(self) -> "LaunchplaneProductProfileRecord":
         for lane in self.lanes:

@@ -10,6 +10,8 @@ the plan on its request.
 
 from __future__ import annotations
 
+from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
+
 from control_plane.event_testing_deploy import event_testing_deploy_request
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.lane_movement import (
@@ -179,6 +181,7 @@ from control_plane.product_repository_identity import (
     product_repository_identity_from_inventory,
     resolve_product_repository_identity,
 )
+from control_plane.workflows.generic_web_deploy import GenericWebDeployStore
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
     DurableProviderOperationStore,
@@ -482,6 +485,33 @@ def reconcile_testing_target(
         repository_id=repository_id,
         transport=transport,
     )
+    if (
+        isinstance(desired, VerifiedGenericWebBuild)
+        and (
+            profile.driver_id == "verireel"
+            or declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE)
+        )
+        and plan.get("reason") == "already_deployed"
+    ):
+        from control_plane.workflows.verireel_testing_post_deploy import (
+            recorded_verireel_testing_qualification,
+        )
+
+        lane = next(lane for lane in profile.lanes if lane.instance == TESTING_INSTANCE)
+        qualification = recorded_verireel_testing_qualification(
+            cast(GenericWebDeployStore, record_store),
+            _current_testing_deployment_id(record_store=record_store, lane=lane),
+            desired.image_reference,
+            desired.manifest.source_commit,
+            _generic_web_testing_authority(record_store=record_store, lane=lane),
+        )
+        if qualification == "fail":
+            plan.update(post_deploy_status="fail", reason="testing_qualification_failed")
+            return ReconcileOutcome(
+                plan, error="This testing deployment failed product qualification."
+            )
+        if qualification != "pass":
+            plan.update(action="deploy", reason="testing_qualification_missing")
     if desired is None or plan["action"] != "deploy":
         return ReconcileOutcome(plan)
     if isinstance(desired, VerifiedGenericWebBuild):
@@ -697,6 +727,7 @@ def _deploy_generic_web_testing(
             trace_id=trace_id,
             deploy_provider=provider,
             retain_event_request=True,
+            post_deploy_authority_digest=authority,
         )
         execution_lock = (
             record_store.testing_replacement_execution_lock(
@@ -903,6 +934,11 @@ def _generic_web_testing_authority(
                 "target": target_authority,
                 "provider_target": provider_authority,
                 "target_id": target_id_authority,
+                **(
+                    {"application_lifecycle": lane.generic_web_extensions.model_dump(mode="json")}
+                    if lane.generic_web_extensions.configured
+                    else {}
+                ),
                 "settings": sorted(settings, key=lambda record: json.dumps(record, sort_keys=True)),
                 "secrets": {
                     key: {
@@ -1109,6 +1145,7 @@ PLAN_BLOCKER_DESCRIPTIONS: dict[str, str] = {
     "volume_authority_unresolved": (
         "Launchplane could not resolve the lane's stored Odoo volume settings."
     ),
+    "backup_restore_proof_required": "Destructive replacement needs exact verified backup and restore proof.",
     "prelaunch_rebuild_policy_refused": "The lane's prelaunch rebuild policy refused the request.",
     "volume_env_keys_missing": "The current target is missing required Odoo volume settings.",
     "volume_authority_drift": (

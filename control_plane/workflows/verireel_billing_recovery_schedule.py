@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Literal
 
 import click
 
 from control_plane.dokploy import api as dokploy_api
+from control_plane.cron import cron_matches_utc as cron_matches_utc
+from control_plane.cron import validate_cron_expression
 
 
 VeriReelRecoveryScheduleInstance = Literal["testing", "prod", "preview"]
@@ -40,61 +41,13 @@ def recovery_schedule_command(instance: VeriReelRecoveryScheduleInstance) -> str
     )
 
 
-def cron_matches_utc(expression: str, scheduled_at: datetime) -> bool:
-    fields = expression.split()
-    if len(fields) != 5:
-        raise ValueError("Dokploy cron expressions must have five fields.")
-    minute, hour, day_of_month, month, day_of_week = fields
-    return (
-        _cron_field_matches(minute, scheduled_at.minute, minimum=0, maximum=59)
-        and _cron_field_matches(hour, scheduled_at.hour, minimum=0, maximum=23)
-        and _cron_field_matches(day_of_month, scheduled_at.day, minimum=1, maximum=31)
-        and _cron_field_matches(month, scheduled_at.month, minimum=1, maximum=12)
-        and _cron_field_matches(day_of_week, (scheduled_at.weekday() + 1) % 7, minimum=0, maximum=6)
-    )
-
-
 def _validate_cron_expression(expression: str) -> None:
-    fields = expression.split()
-    if len(fields) != 5:
-        raise click.ClickException(
-            "VeriReel billing-recovery cron expression must have five fields."
-        )
     try:
-        for field, minimum, maximum in zip(
-            fields,
-            (0, 0, 1, 1, 0),
-            (59, 23, 31, 12, 6),
-            strict=True,
-        ):
-            _cron_field_matches(field, minimum, minimum=minimum, maximum=maximum)
+        validate_cron_expression(expression)
     except (TypeError, ValueError) as error:
         raise click.ClickException(
-            f"Invalid VeriReel billing-recovery cron expression: {expression!r}."
+            f"Invalid VeriReel billing-recovery cron expression: {expression!r}. {error}"
         ) from error
-
-
-def _cron_field_matches(field: str, value: int, *, minimum: int, maximum: int) -> bool:
-    if "," in field:
-        parts = field.split(",")
-        if any(not part for part in parts):
-            raise ValueError(f"Invalid cron list: {field!r}")
-        return any(
-            _cron_field_matches(part, value, minimum=minimum, maximum=maximum) for part in parts
-        )
-    if field == "*":
-        return True
-    if field.startswith("*/"):
-        step = int(field[2:])
-        if step < 1 or step > maximum - minimum + 1:
-            raise ValueError(f"Invalid cron step: {field!r}")
-        return (value - minimum) % step == 0
-    if not field.isdecimal():
-        raise ValueError(f"Unsupported cron field: {field!r}")
-    expected_value = int(field)
-    if not minimum <= expected_value <= maximum:
-        raise ValueError(f"Cron field is outside its range: {field!r}")
-    return value == expected_value
 
 
 def _schedule_payload(

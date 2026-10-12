@@ -2,6 +2,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -20,12 +21,13 @@ from control_plane.launchplane_reconcile_authorization import (
     build_launchplane_reconcile_authorization,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import LaunchplaneProductProfileRow, PostgresRecordStore
 from control_plane.testing_replacement_recovery import (
     TestingRecoveryStore,
     guard_testing_replacement,
     inspect_testing_replacement,
     recover_stranded_testing_replacements,
+    testing_replacement_recovery_read,
 )
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerStore,
@@ -61,6 +63,227 @@ class _FilesystemServiceStore(FilesystemRecordStore):
 
 
 class TestingReplacementRecoveryTests(unittest.TestCase):
+    def test_inspection_deadline_refuses_before_another_provider_read(self) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            with guard_testing_replacement(
+                store, operation, "worker", lambda _: None
+            ) as checkpoint:
+                checkpoint("preparing")
+                fenced = self.fence(store)
+            with (
+                patch("control_plane.testing_replacement_recovery.monotonic", return_value=101),
+                patch(
+                    "control_plane.testing_replacement_recovery.source.read_dokploy_config",
+                    return_value=("https://provider.test", "fixture-token"),
+                ),
+                patch.object(api, "dokploy_request") as provider_read,
+                self.assertRaises(TimeoutError),
+            ):
+                inspect_testing_replacement(fenced, root, deadline_at=100)
+            provider_read.assert_not_called()
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+                fenced,
+            )
+
+    def test_classification_invalidates_agreement_after_inspection_race(self) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            with guard_testing_replacement(
+                store, operation, "worker", lambda _: None
+            ) as checkpoint:
+                checkpoint("preparing")
+                fenced = self.fence(store)
+
+            def inspect(*args: object, **kwargs: object) -> dict[str, str]:
+                getattr(store, "write_dokploy_target_id_record")(
+                    DokployTargetIdRecord(
+                        context="cm",
+                        instance="testing",
+                        target_id="changed",
+                        updated_at=stamp(),
+                    )
+                )
+                return {"state": "quiescent_safe_to_retry"}
+
+            with patch(
+                "control_plane.testing_replacement_recovery.inspect_testing_replacement",
+                side_effect=inspect,
+            ):
+                view = testing_replacement_recovery_read(store, fenced, root)
+            self.assertEqual(view["reason"], "recovery_operation_or_binding_changed")
+            self.assertIsNone(view["binding_matches"])
+            self.assertEqual(view["provider_effects"], "unknown")
+            self.assertFalse(view["safe_to_release"])
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+                fenced,
+            )
+
+    def test_classification_reports_persisted_absence_without_provider_read_or_retirement(
+        self,
+    ) -> None:
+        for store, root in self.stores():
+            self.running(store)
+            operation = self.fence(store)
+            with patch.object(api, "dokploy_request") as provider_read:
+                view = testing_replacement_recovery_read(store, operation, root)
+            self.assertEqual(view["journal"], "absent")
+            self.assertEqual(view["reason"], "recovery_journal_absent")
+            self.assertEqual(view["provider_effects"], "unknown")
+            self.assertFalse(view["safe_to_release"])
+            provider_read.assert_not_called()
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+                operation,
+            )
+
+    def test_classification_excludes_worker_and_reports_journal_eligibility_without_mutation(
+        self,
+    ) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            with guard_testing_replacement(
+                store, operation, "worker", lambda _: None
+            ) as checkpoint:
+                checkpoint("preparing")
+                fenced = self.fence(store)
+                view = testing_replacement_recovery_read(store, fenced, root)
+                self.assertEqual(view["reason"], "recovery_execution_exclusion_unavailable")
+            with self.provider():
+                view = testing_replacement_recovery_read(store, fenced, root)
+            self.assertEqual(view["status"], "eligible")
+            self.assertTrue(view["attempt_matches"])
+            self.assertTrue(view["binding_matches"])
+            self.assertEqual(view["provider_effects"], "quiescent_observed")
+            self.assertFalse(view["safe_to_release"])
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+                fenced,
+            )
+            self.assertNotIn("compose-123", str(view))
+            self.assertFalse(getattr(store, "list_product_reconcile_requests")(product="site"))
+
+    def test_classification_refuses_changed_binding_unacknowledged_and_unknown_effects(
+        self,
+    ) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            with guard_testing_replacement(
+                store, operation, "worker", lambda _: None
+            ) as checkpoint:
+                checkpoint("preparing")
+                fenced = self.fence(store)
+            assert fenced.recovery_journal is not None
+            from control_plane.contracts.testing_replacement_recovery import (
+                TestingReplacementEffect,
+            )
+
+            variants = (
+                (
+                    fenced.recovery_journal.model_copy(update={"attempt": 2}),
+                    "recovery_attempt_changed",
+                ),
+                (
+                    fenced.recovery_journal.model_copy(update={"target_fingerprint": "changed"}),
+                    "recovery_binding_changed",
+                ),
+                (
+                    fenced.recovery_journal.model_copy(
+                        update={
+                            "effects": (
+                                TestingReplacementEffect(
+                                    reference="private",
+                                    path="/api/compose.deploy",
+                                    dispatched_at=stamp(),
+                                ),
+                            )
+                        }
+                    ),
+                    "recovery_dispatch_unacknowledged",
+                ),
+                (
+                    fenced.recovery_journal.model_copy(
+                        update={
+                            "effects": (
+                                TestingReplacementEffect(
+                                    reference="private",
+                                    path="records_commit",
+                                    dispatched_at=stamp(),
+                                    acknowledged=True,
+                                ),
+                            )
+                        }
+                    ),
+                    "recovery_effect_unsupported",
+                ),
+            )
+            for journal, reason in variants:
+                changed = fenced.model_copy(update={"recovery_journal": journal})
+                getattr(store, "write_odoo_stable_target_replacement_operation_record")(changed)
+                with patch.object(api, "dokploy_request") as provider_read:
+                    view = testing_replacement_recovery_read(store, changed, root)
+                self.assertEqual(view["reason"], reason)
+                provider_read.assert_not_called()
+                self.assertEqual(
+                    store.read_odoo_stable_target_replacement_operation_record(
+                        operation.operation_id
+                    ),
+                    changed,
+                )
+                self.assertNotIn("private", str(view))
+
+    def test_recovery_preserves_stored_preview_transport_compatibility(self) -> None:
+        for mode, command in (("none", ""), ("bootstrap", "/app/seed")):
+            for store, root in self.stores():
+                with self.subTest(mode=mode, backend=type(store).__name__):
+                    profile = store.read_product_profile_record("site")
+                    payload = profile.model_dump(mode="json")
+                    payload["preview"].update(
+                        data_transport_mode=mode, migration_command="", seed_command=command
+                    )
+                    if isinstance(store, FilesystemRecordStore):
+                        path = store.write_product_profile_record(profile)
+                        path.write_text(json.dumps(payload))
+                    else:
+                        assert isinstance(store, PostgresRecordStore)
+                        with store._session_factory() as session:
+                            row = session.get(LaunchplaneProductProfileRow, profile.product)
+                            assert row is not None
+                            row.payload = payload
+                            session.commit()
+                    operation = self.running(store)
+                    with guard_testing_replacement(store, operation, "worker", lambda _: None):
+                        with patch.object(api, "_dokploy_request", return_value={}):
+                            api.dokploy_request(
+                                host="https://provider.test",
+                                token="fixture-token",
+                                path="/api/compose.update",
+                                method="POST",
+                                payload={"composeId": "compose-123", "env": "FIXTURE=value"},
+                            )
+                        self.fence(store)
+                    with self.provider():
+                        self.assertEqual(
+                            recover_stranded_testing_replacements(store, root),
+                            (operation.operation_id,),
+                        )
+                    self.assertEqual(
+                        store.read_odoo_stable_target_replacement_operation_record(
+                            operation.operation_id
+                        ).status,
+                        "cancelled",
+                    )
+                    historical = store.read_product_profile_record(
+                        "site"
+                    ).preview.historical_transport
+                    if command:
+                        self.assertEqual(historical["seed_command"], command)
+                        self.assertEqual(historical["data_transport_mode"], mode)
+                    else:
+                        self.assertFalse(historical)
+
     def stores(self) -> Iterator[tuple[TestingRecoveryStore, Path]]:
         with TemporaryDirectory() as directory:
             root = Path(directory)

@@ -39,6 +39,10 @@ from control_plane.owner_secret_inputs import (
     resolve_owner_secret_submission,
 )
 from fastapi.responses import JSONResponse, RedirectResponse
+from control_plane.contracts.stored_record_snapshot import (
+    STORED_RECORD_SNAPSHOT_ROUTE,
+    StoredRecordSnapshotResponse,
+)
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from requests.exceptions import RequestException
@@ -924,6 +928,9 @@ from control_plane.workflows.launchplane_self_deploy import (
     execute_launchplane_self_deploy,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.http_routes.product_generic_web_transition import (
+    register_product_generic_web_transition_routes,
+)
 from control_plane.http_routes.product_display_name import register_product_display_name_routes
 from control_plane.http_routes.product_website_cleanup import (
     register_product_website_cleanup_routes,
@@ -4244,6 +4251,7 @@ def create_launchplane_fastapi_app(
                 shared_record_store.close()
 
     app = _LaunchplaneFastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
+    app.state.authz_policy_runtime = resolved_authz_policy_runtime
     app.add_middleware(BoundedRequestBodyMiddleware)
     enforce_human_policy_revalidation = False
 
@@ -5323,6 +5331,34 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Workflow cannot reconcile Launchplane VeriReel workers.",
             )
+
+    def read_stored_record_snapshot(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> StoredRecordSnapshotResponse:
+        trace_id = next_trace_id()
+        require_launchplane_service_read_authorization(identity=identity, trace_id=trace_id)
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Stored-record snapshots require database-backed storage.",
+            )
+        try:
+            snapshot = record_store.export_stored_record_snapshot()
+        except (ValueError, SQLAlchemyError) as error:
+            from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
+
+            diagnostics = snapshot_failure_diagnostics(error)
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="stored_record_snapshot_unavailable",
+                message="A complete scrubbed stored-record snapshot is unavailable.",
+                records={"snapshot_failure": json.dumps(diagnostics, sort_keys=True)},
+            ) from error
+        return StoredRecordSnapshotResponse(trace_id=trace_id, snapshot=snapshot)
 
     def read_launchplane_runtime(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
@@ -12460,6 +12496,16 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="authorization_denied",
                 message="Workflow cannot write the requested product profile.",
+            )
+        if profile.preview.historical_transport:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="unsupported_preview_transport_history",
+                message=(
+                    "Replace preview settings with supported none/driver configuration and omit "
+                    "preview.historical_transport; archived transport intent is read-only."
+                ),
             )
         try:
             profile.validate_write_contract()
@@ -25359,6 +25405,15 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        STORED_RECORD_SNAPSHOT_ROUTE,
+        read_stored_record_snapshot,
+        methods=["GET"],
+        response_model=StoredRecordSnapshotResponse,
+        operation_id="read_stored_record_snapshot",
+        summary="Export a scrubbed snapshot for isolated candidate preflight",
+    )
+
+    app.add_api_route(
         "/v1/service/runtime",
         read_launchplane_runtime,
         methods=["GET"],
@@ -26418,7 +26473,9 @@ def create_launchplane_fastapi_app(
             },
         )
 
-    register_operation_status_read_routes(app, dependencies=read_route_dependencies)
+    register_operation_status_read_routes(
+        app, dependencies=read_route_dependencies, control_plane_root=resolved_control_plane_root
+    )
     register_retirement_record_read_routes(app, dependencies=read_route_dependencies)
     register_protected_artifact_read_routes(
         app,
@@ -28747,6 +28804,11 @@ def create_launchplane_fastapi_app(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
 
+    register_product_generic_web_transition_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+    )
     register_product_display_name_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )

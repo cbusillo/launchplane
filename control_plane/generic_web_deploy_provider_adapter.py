@@ -1,4 +1,3 @@
-import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +6,12 @@ from typing import Protocol, cast
 import click
 from sqlalchemy.exc import SQLAlchemyError
 
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.workflows.generic_web_application_snapshot import (
+    has_recorded_application_lifecycle,
+    generic_web_provider_deployment_record_id,
+    recorded_application_lifecycle,
+)
 from control_plane.contracts.generic_web_deploy_recovery import (
     GenericWebDeployProviderEvidenceClassification,
     GenericWebDeployProviderReadErrorClass,
@@ -43,14 +48,16 @@ from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebResolvedDeployTarget,
     GenericWebRuntimeCloseOutEvidence,
     build_generic_web_provider_reconciliation_key,
+    decode_generic_web_provider_reconciliation_target,
     build_generic_web_provider_target_key,
     default_generic_web_deploy_provider,
     evaluate_generic_web_runtime_close_out,
     generic_web_provider_deployment_succeeded,
     resolve_generic_web_provider_reconciliation_target,
 )
-from control_plane.workflows.odoo_generic_web_post_deploy import (
-    generic_web_post_deploy_executor_for_driver_id,
+from control_plane.workflows.generic_web_post_deploy import (
+    generic_web_post_deploy_authority_digest,
+    generic_web_post_deploy_executor_for_profile,
 )
 
 
@@ -66,7 +73,7 @@ def _string_field(payload: dict[str, object], key: str) -> str:
 
 
 class _DeploymentRecordReader(Protocol):
-    def read_deployment_record(self, record_id: str) -> object: ...
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +101,7 @@ class GenericWebDeployProviderMutationAdapter:
         deploy_provider: GenericWebDeployProvider | None = None,
         recorded_artifact: bool = False,
         retain_event_request: bool = False,
+        post_deploy_authority_digest: str = "",
     ) -> None:
         # Recovery replays a deploy Launchplane reserved; its artifact is a record.
         self._recorded_artifact = recorded_artifact
@@ -108,6 +116,9 @@ class GenericWebDeployProviderMutationAdapter:
             deploy_provider or default_generic_web_deploy_provider()
         )
         self._resolved_deploy_target: GenericWebResolvedDeployTarget | None = None
+        self._qualification_authority_digest = post_deploy_authority_digest
+        self._reconciliation_qualification_digest: str | None = None
+        self._proved_pre_image_operation = ""
         self.execution_check: Callable[[], None] = lambda: None
 
     @property
@@ -120,6 +131,12 @@ class GenericWebDeployProviderMutationAdapter:
 
     def _resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
         if self._resolved_deploy_target is None:
+            if not self._qualification_authority_digest:
+                self._qualification_authority_digest = generic_web_post_deploy_authority_digest(
+                    self._record_store, self._profile, self._lane
+                )
+            if self._reconciliation_qualification_digest is None:
+                self._reconciliation_qualification_digest = self._qualification_authority_digest
             deploy = self._deploy_request.deploy
             self._resolved_deploy_target = self._deploy_provider.resolve_deploy_target(
                 control_plane_root=self._control_plane_root,
@@ -147,6 +164,7 @@ class GenericWebDeployProviderMutationAdapter:
             original_event_deploy=self._deploy_request.model_dump(mode="json")
             if self._retain_event_request
             else None,
+            qualification_authority_digest=self._reconciliation_qualification_digest or "",
         )
 
     def target_key(self) -> str:
@@ -229,6 +247,7 @@ class GenericWebDeployProviderMutationAdapter:
         expected_provider_target_key: str = "",
         legacy_provider_effect_started_at: str = "",
     ) -> _GenericWebDeployProviderInspection:
+        self._proved_pre_image_operation = ""
         evidence = self.inspect_evidence(
             provider_operation_key=provider_operation_key,
             provider_effect_phase=provider_effect_phase,
@@ -240,6 +259,19 @@ class GenericWebDeployProviderMutationAdapter:
         observation = evidence.observation
         resolved_target = evidence.resolved_deploy_target
         if observation.outcome != "present":
+            if (
+                observation.outcome == "absent"
+                and resolved_target is not None
+                and self._retryable_application_attempt(
+                    provider_operation_key, resolved_target, provider_effect_phase
+                )
+            ):
+                return _GenericWebDeployProviderInspection(
+                    observation=observation,
+                    resolved_deploy_target=resolved_target,
+                    retry_safe=True,
+                    provider_evidence="deployment_absent_before_effect",
+                )
             if observation.outcome == "absent" and provider_effect_phase == "deploy_trigger":
                 (
                     legacy_correlation,
@@ -301,12 +333,28 @@ class GenericWebDeployProviderMutationAdapter:
                 provider_evidence="provider_read_failed",
                 provider_read_error_class="target_resolution_failed",
             )
-        post_deploy_unobserved = (
-            generic_web_provider_deployment_succeeded(observation.deployment_status)
-            and generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None
+        post_deploy_unobserved = generic_web_provider_deployment_succeeded(
+            observation.deployment_status
+        ) and (
+            self._lane.generic_web_extensions.configured
+            or generic_web_post_deploy_executor_for_profile(
+                self._profile, instance=self._lane.instance
+            )
+            is not None
         )
         deployment_record_id = self._deployment_record_id(provider_operation_key)
-        if provider_effect_phase.startswith("post_deploy_"):
+        existing = None
+        if callable(getattr(self._record_store, "read_deployment_record", None)):
+            try:
+                existing = cast(_DeploymentRecordReader, self._record_store).read_deployment_record(
+                    deployment_record_id
+                )
+            except FileNotFoundError:
+                pass
+        receipt = recorded_application_lifecycle(existing) if existing else None
+        if receipt is not None:
+            post_deploy_unobserved = receipt.state != "qualified"
+        if provider_effect_phase.startswith(("post_deploy_", "application_")):
             read_deployment_record_value = getattr(
                 self._record_store, "read_deployment_record", None
             )
@@ -323,7 +371,7 @@ class GenericWebDeployProviderMutationAdapter:
                     observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
                     provider_evidence=evidence.provider_evidence,
                 )
-            post_deploy_unobserved = False
+            post_deploy_unobserved = receipt is not None and receipt.state != "qualified"
         return _GenericWebDeployProviderInspection(
             observation=observation,
             resolved_deploy_target=resolved_target,
@@ -370,6 +418,7 @@ class GenericWebDeployProviderMutationAdapter:
         self,
         *,
         resolved_deploy_target: GenericWebResolvedDeployTarget,
+        provider_operation_key: str = "",
     ) -> GenericWebRuntimeCloseOutEvidence | None:
         """Return close-out evidence only when the original image provably runs.
 
@@ -377,7 +426,25 @@ class GenericWebDeployProviderMutationAdapter:
         returns ``None`` so the caller keeps holding the reservation.
         """
 
-        if generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None:
+        if (
+            has_recorded_application_lifecycle(
+                self._record_store,
+                context=self._lane.context,
+                instance=self._lane.instance,
+                deployment_record_id=self._deployment_record_id(provider_operation_key)
+                if provider_operation_key
+                else "",
+                artifact_id=resolved_deploy_target.ship_request.artifact_id,
+                source_git_ref=resolved_deploy_target.ship_request.source_git_ref,
+            )
+            or self._lane.generic_web_extensions.configured
+            or (
+                generic_web_post_deploy_executor_for_profile(
+                    self._profile, instance=self._lane.instance
+                )
+                is not None
+            )
+        ):
             return None
         return self._runtime_close_out_evidence(resolved_deploy_target)
 
@@ -411,6 +478,16 @@ class GenericWebDeployProviderMutationAdapter:
         expected_provider_target_key: str = "",
     ) -> _GenericWebDeployProviderInspection:
         try:
+            snapshot = decode_generic_web_provider_reconciliation_target(reconciliation_key)
+            # Older reservations omit this field. Their key must remain unchanged
+            # even when execution needs a current qualification authority fallback.
+            self._reconciliation_qualification_digest = snapshot.qualification_authority_digest
+            self._qualification_authority_digest = (
+                snapshot.qualification_authority_digest
+                or generic_web_post_deploy_authority_digest(
+                    self._record_store, self._profile, self._lane
+                )
+            )
             deploy = self._deploy_request.deploy
             resolved_target = resolve_generic_web_provider_reconciliation_target(
                 reconciliation_key=reconciliation_key,
@@ -473,13 +550,60 @@ class GenericWebDeployProviderMutationAdapter:
             provider_evidence=provider_evidence,
         )
 
+    def _retryable_application_attempt(
+        self,
+        provider_operation_key: str,
+        target: GenericWebResolvedDeployTarget,
+        phase: str,
+    ) -> bool:
+        if not callable(getattr(self._record_store, "read_deployment_record", None)):
+            return False
+        try:
+            record = cast(_DeploymentRecordReader, self._record_store).read_deployment_record(
+                self._deployment_record_id(provider_operation_key)
+            )
+        except FileNotFoundError:
+            return False
+        receipt = recorded_application_lifecycle(record)
+        matched = (
+            receipt is not None
+            and (
+                (receipt.state == "restored" and record.deploy.status == "fail")
+                or (
+                    receipt.state == "prepared"
+                    and record.deploy.status == "pending"
+                    and phase
+                    in {"", "application_lifecycle_prepared", "application_schedule_quiesce"}
+                )
+            )
+            and (
+                receipt.product,
+                receipt.context,
+                receipt.instance,
+                receipt.provider_id,
+                receipt.target_id,
+                receipt.artifact_id,
+                receipt.source_git_ref,
+            )
+            == (
+                self._profile.product,
+                self._lane.context,
+                self._lane.instance,
+                self._deploy_provider.provider_id,
+                target.resolved_target.target_id,
+                target.ship_request.artifact_id,
+                target.ship_request.source_git_ref,
+            )
+        )
+        if matched:
+            self._proved_pre_image_operation = provider_operation_key
+        return matched
+
     def _deployment_record_id(self, provider_operation_key: str) -> str:
-        digest = hashlib.sha256()
-        digest.update(provider_operation_key.encode())
-        operation_digest = digest.hexdigest()[:24]
-        return (
-            f"deployment-provider-operation-{operation_digest}-"
-            f"{self._lane.context}-{self._lane.instance}"
+        return generic_web_provider_deployment_record_id(
+            provider_operation_key,
+            context=self._lane.context,
+            instance=self._lane.instance,
         )
 
     def apply(
@@ -494,7 +618,10 @@ class GenericWebDeployProviderMutationAdapter:
                 raise ProviderMutationRejectedError(error) from error
             lease.checkpoint_effect(phase)
 
+        proved_pre_image_retry = self._proved_pre_image_operation == provider_operation_key
+        self._proved_pre_image_operation = ""
         try:
+            resolved_target = self._resolve_deploy_target()
             records, result = execute_generic_web_deploy_result(
                 control_plane_root=self._control_plane_root,
                 record_store=self._record_store,
@@ -504,9 +631,12 @@ class GenericWebDeployProviderMutationAdapter:
                 provider_operation_title=provider_operation_title(provider_operation_key),
                 deployment_record_id=self._deployment_record_id(provider_operation_key),
                 deploy_provider=self._deploy_provider,
-                resolved_deploy_target=self._resolve_deploy_target(),
+                post_deploy_authority_digest=self._qualification_authority_digest,
+                resolved_deploy_target=resolved_target,
                 provider_effect_checkpoint=checkpoint,
+                before_records_commit=lambda: checkpoint("records_commit"),
                 recorded_artifact=self._recorded_artifact,
+                proved_pre_image_retry=proved_pre_image_retry,
             )
         except (FileNotFoundError, ValueError) as error:
             raise ProviderMutationRejectedError(error)

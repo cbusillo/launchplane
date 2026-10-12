@@ -227,6 +227,7 @@ PROMOTION_FAILURE_DESCRIPTIONS: dict[str, str] = {
         "The source lane's health check did not pass, so the promotion stopped before deploying."
     ),
     "destination_deploy_failed": "Deploying the artifact to the destination lane failed.",
+    "destination_post_deploy_failed": "The destination application maintenance or schedule qualification did not pass.",
     "destination_health_failed": (
         "The destination lane's health check did not pass after the deploy."
     ),
