@@ -301,9 +301,6 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
     "docker/setup-buildx-action": ActionClassification(
         "Third-party publisher", "container build bootstrap"
     ),
-    "docker/setup-compose-action": ActionClassification(
-        "Third-party publisher", "CI Compose bootstrap"
-    ),
     "github/codeql-action/analyze": ActionClassification(
         "GitHub-maintained", "code scanning analysis"
     ),

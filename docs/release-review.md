@@ -476,7 +476,10 @@ the policy recheck.
 The shared self-deploy route records a database admission fence before changing
 the provider. Its transaction lock also covers backup and Odoo release claims
 (including failure recovery), standalone Odoo testing target replacement claims,
-and generic-web release reservations. A Client can
+and generic-web release reservations. Product-event testing and preview reservations
+share this same fence, including fresh admission, expired-lease retry and
+supersession. Their scope comes from the product reconciler's contract, rather
+than a second operation queue. A Client can
 accept while replacement is preparing; that decision and pending steps remain
 durable, but no new release effect starts behind the fence. Operations admitted
 before it finish their admitted backup, deployment, drill, post-checks or
@@ -505,10 +508,15 @@ The typed Odoo and shared backup queues also contain workflow-started operations
 their claims pause at this worker boundary and resume after replacement. Worker
 debug logs report that pause, and the runtime read exposes its cause. Generic-web
 workflow requests outside Client releases retain their existing reservations;
-this change covers Client-started generic-web releases.
+this boundary covers Client-started generic-web releases and product-event effects.
 An active provider request returns pollable `dispatch_in_progress`, also without
 caching the intermediate response. An expired release lease stays a drain
-blocker: losing its heartbeat does not prove the provider effect ended. Reconcile
+blocker: losing its heartbeat does not prove the provider effect ended. Admitted
+event and Client-release reservations remain blockers in `reconcile_required`
+until terminal settlement. Exact-request replay, expiry reconciliation, provider
+observation, admitted heartbeats and terminal writes remain usable during the
+drain; fresh/retried effects are refused. Matching image/marker startup admits
+only the new worker generation. Reconcile
 that operation through its existing recovery route before replacement.
 The request action tolerates network errors while polling the drain. Its
 latest drain response is retained on timeout; a later failed request clears that

@@ -75,7 +75,10 @@ class ProductGenericWebTransitionPlan(BaseModel):
 def build_generic_web_transition_plan(
     profile: LaunchplaneProductProfileRecord, request: ProductGenericWebTransitionRequest
 ) -> tuple[ProductGenericWebTransitionPlan, LaunchplaneProductProfileRecord]:
-    if not profile.is_active or not product_profile_uses_generic_web_base(profile):
+    legacy_profile = profile.driver_id == "verireel"
+    if not profile.is_active or not (
+        legacy_profile or product_profile_uses_generic_web_base(profile)
+    ):
         raise ValueError("Shared-web transition requires an active generic-web based product.")
     declarations = {(item.context, item.instance): item.extensions for item in request.lanes}
     existing = {(lane.context, lane.instance) for lane in profile.lanes}
@@ -92,6 +95,14 @@ def build_generic_web_transition_plan(
         for lane in lanes
     ):
         raise ValueError("The testing verification extension requires the recorded testing lane.")
+    if legacy_profile and any(
+        lane.instance == "testing"
+        and lane.generic_web_extensions.verification_extension != "verireel-testing"
+        for lane in lanes
+    ):
+        raise ValueError(
+            "The existing lane qualification must have a supported shared-web declaration."
+        )
     preview = profile.preview
     if request.preview is not None:
         preview = preview.model_copy(update=request.preview.model_dump(exclude_unset=True))

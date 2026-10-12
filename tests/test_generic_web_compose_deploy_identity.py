@@ -8,6 +8,7 @@ unknown.
 """
 
 from collections.abc import Callable
+import json
 from pathlib import Path
 from typing import Literal, cast
 import unittest
@@ -24,6 +25,7 @@ from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderMutationUnknownError,
     ProviderOperationLease,
+    provider_operation_title,
 )
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
 from control_plane.workflows.generic_web_deploy import (
@@ -33,6 +35,7 @@ from control_plane.workflows.generic_web_deploy import (
 from control_plane.workflows.generic_web_deploy_provider import (
     DokployGenericWebDeployProvider,
     GenericWebProviderDeploymentObservation,
+    GenericWebProviderDeploymentFailed,
     GenericWebResolvedDeployTarget,
     GenericWebRuntimeArtifactObservation,
 )
@@ -86,6 +89,21 @@ def _wait(
 
 
 class TitledOrSoleNewDeploymentWaitTests(unittest.TestCase):
+    def test_failure_proof_refuses_filtered_or_missing_history(self) -> None:
+        for payload in ({}, {"deployments": [_deployment("failed", status="error"), None]}):
+            with (
+                self.subTest(payload=payload),
+                patch.object(dokploy_api, "dokploy_request", return_value=payload),
+                self.assertRaises(click.ClickException),
+            ):
+                dokploy_api.list_deployments_for_target(
+                    host="host",
+                    token="synthetic",
+                    target_type="compose",
+                    target_id="compose-1",
+                    require_complete=True,
+                )
+
     def test_untitled_sole_new_deployment_is_accepted_once_it_succeeds(self) -> None:
         old = [_deployment("old-1"), _deployment("old-2")]
 
@@ -134,10 +152,16 @@ class TitledOrSoleNewDeploymentWaitTests(unittest.TestCase):
             _wait([listing, listing])
 
     def test_failed_sole_new_deployment_raises_failure(self) -> None:
-        with self.assertRaises(dokploy_api.DokployDeploymentFailed):
-            _wait(
-                [[_deployment("old-1"), _deployment("old-2"), _deployment("new", status="error")]]
-            )
+        failed = _deployment("new", status="error")
+        with self.assertRaises(dokploy_api.DokployDeploymentFailed) as raised:
+            _wait([[_deployment("old-1"), _deployment("old-2"), failed]] * 4)
+        self.assertEqual(raised.exception.deployment, failed)
+
+    def test_failed_untitled_deployment_stays_unknown_when_another_job_appears(self) -> None:
+        failed = [_deployment("old-1"), _deployment("old-2"), _deployment("new", status="error")]
+        with self.assertRaises(click.ClickException) as raised:
+            _wait([failed, failed, [*failed, _deployment("ours", status="running")]] * 2)
+        self.assertNotIsInstance(raised.exception, dokploy_api.DokployDeploymentFailed)
 
 
 def _compose_ship_request() -> tuple[ShipRequest, ResolvedTargetEvidence]:
@@ -418,6 +442,40 @@ class DurableOperationOutcomeTests(unittest.TestCase):
         with self.assertRaises(ProviderMutationUnknownError):
             self._apply(_UntitledComposeProvider(_runtime(target=_OTHER_ARTIFACT)))
 
+    def test_exact_terminal_provider_failure_is_a_durable_failed_result(self) -> None:
+        provider = _UntitledComposeProvider(_runtime(target=_OTHER_ARTIFACT))
+        failed = GenericWebProviderDeploymentObservation(
+            outcome="present",
+            deployment_status="error",
+            deployment_id="provider-failed-attempt",
+            started_at="2026-10-12T12:00:00Z",
+            finished_at="2026-10-12T12:01:00Z",
+        )
+
+        def fail(**kwargs: object) -> None:
+            effect_started = cast(Callable[[], None], kwargs["effect_started"])
+            effect_started()
+            raise GenericWebProviderDeploymentFailed(failed)
+
+        with patch.object(provider, "execute_artifact_deploy", side_effect=fail):
+            outcome = self._apply(provider)
+        self.assertTrue(outcome.durable)
+        self.assertEqual(outcome.response_status_code, 502)
+        result = outcome.response_payload["result"]
+        assert isinstance(result, dict)
+        self.assertEqual(result["deploy_status"], "fail")
+
+    def test_post_trigger_timeout_retains_unknown_outcome(self) -> None:
+        provider = _UntitledComposeProvider(_runtime())
+
+        def timeout(**kwargs: object) -> None:
+            cast(Callable[[], None], kwargs["effect_started"])()
+            raise click.ClickException("Timed out waiting for provider.")
+
+        with patch.object(provider, "execute_artifact_deploy", side_effect=timeout):
+            with self.assertRaises(ProviderMutationUnknownError):
+                self._apply(provider)
+
 
 class _ComposeLegacyProvider(_LegacyFakeGenericWebDeployProvider):
     """A compose target whose deployment is matched only by time, with runtime state."""
@@ -487,6 +545,75 @@ class ComposeReconciliationProofTests(unittest.TestCase):
 
 
 class DokployProviderIdentityTests(unittest.TestCase):
+    def test_dispatch_references_are_persisted_before_the_first_provider_write(self) -> None:
+        profile = _profile()
+        store = _GenericWebDeployStore(profile)
+        provider = _FakeGenericWebDeployProvider()
+        real_provider = DokployGenericWebDeployProvider()
+        adapter = generic_web_deploy_tests.GenericWebDeployTests._provider_mutation_adapter(
+            profile=profile, store=store, provider=provider, deploy_request=_request()
+        )
+        operation = "provider-operation:retained-dispatch"
+        record_id = adapter._deployment_record_id(operation)
+        old = _deployment("old")
+        checked: list[object] = []
+        phases: list[str] = []
+
+        class Lease(_NoopLease):
+            def checkpoint_effect(self, phase: str) -> None:
+                phases.append(phase)
+
+        def before_write(**kwargs: object) -> None:
+            pending = store.read_deployment_record(record_id)
+            evidence = json.loads(pending.post_deploy_update.evidence["provider_dispatch"])
+            target = adapter._resolve_deploy_target()
+            self.assertEqual(pending.resolved_target, target.resolved_target)
+            self.assertEqual(pending.source_git_ref, target.ship_request.source_git_ref)
+            self.assertEqual(pending.deploy.status, "pending")
+            self.assertFalse(phases, "Preparing references must not claim a provider effect.")
+            self.assertEqual(evidence["known_deployment_ids"], [old["deploymentId"]])
+            self.assertEqual(evidence["target_id"], target.resolved_target.target_id)
+            self.assertEqual(evidence["deployment_title"], provider_operation_title(operation))
+            checked.append(evidence)
+            cast(Callable[[str], None], kwargs["before_provider_mutation"])("target_update")
+            cast(Callable[[], None], kwargs["effect_started"])()
+
+        failure = _deployment(
+            "failed-new", status="error", title=provider_operation_title(operation)
+        )
+        with (
+            patch.object(
+                provider,
+                "execute_artifact_deploy",
+                side_effect=real_provider.execute_artifact_deploy,
+            ),
+            patch.object(
+                real_provider, "_read_provider_config", return_value=("host", "synthetic")
+            ),
+            patch.object(dokploy_api, "latest_deployment_for_target", return_value=old),
+            patch(
+                "control_plane.workflows.dokploy_deploy.update_dokploy_target_artifact",
+                side_effect=before_write,
+            ),
+            patch.object(dokploy_api, "trigger_deployment"),
+            patch.object(
+                dokploy_api,
+                "wait_for_target_deployment",
+                side_effect=dokploy_api.DokployDeploymentFailed(
+                    deployment_id=str(failure["deploymentId"]),
+                    deployment_status="error",
+                    message_prefix="Failed",
+                    deployment=failure,
+                ),
+            ),
+        ):
+            outcome = adapter.apply(operation, Lease())
+        self.assertTrue(checked)
+        self.assertTrue(outcome.durable)
+        terminal = store.read_deployment_record(record_id)
+        self.assertEqual(terminal.deploy.deployment_id, failure["deploymentId"])
+        self.assertEqual(terminal.deploy.status, "fail")
+
     @staticmethod
     def _execute(
         target_type: Literal["compose", "application"],

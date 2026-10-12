@@ -117,7 +117,17 @@ reservation. The webhook request never waits on a deploy.
     being announced; the next verified build or an admin deploy records it. A deploy whose
     provider outcome is unknown stays reserved for generic-web deploy recovery
     and fails the reconcile until it settles; one that failed with a recorded
-    result is not retried until a newer build or the lane changes. Changes to
+    result is not retried until a newer build or the lane changes. A complete,
+    correlated terminal provider failure before any application/post-deploy
+    executor runs commits a durable failed result (HTTP 502), including its
+    provider deployment ID and times. Timeouts and incomplete/ambiguous provider
+    evidence remain unknown; a failed untitled job must settle as the sole new
+    deployment just as a successful one does. Before the first provider write,
+    the deploy record retains value-free target/title and pre-dispatch deployment
+    references alongside the reservation's immutable original event request.
+    The self-deploy admission/drain contract is in
+    [release review](release-review.md#a-control-plane-replacement-drains-release-effects-first).
+    Changes to
     the tracked target's source/configuration and provider binding, applicable global/context/lane
     runtime settings, or effective runtime-secret bindings/versions allow a
     real retry of the same digest. Target and settings writes identify their

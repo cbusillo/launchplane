@@ -216,6 +216,7 @@ def execute_dokploy_artifact_deploy(
     before_provider_mutation: Callable[[str], None] | None = None,
     effect_started: Callable[[], None] | None = None,
     accept_sole_new_deployment: bool = False,
+    dispatch_evidence_checkpoint: Callable[[frozenset[str]], None] | None = None,
 ) -> dokploy_api.JsonObject | None:
     """Deploy the artifact and wait for the provider deployment to finish.
 
@@ -231,7 +232,8 @@ def execute_dokploy_artifact_deploy(
         target_type=resolved_target.target_type,
         target_id=resolved_target.target_id,
     )
-    known_deployment_keys: frozenset[str] = frozenset()
+    latest_key = dokploy_api.deployment_key(latest_before)
+    known_deployment_keys = frozenset({latest_key}) if latest_key else frozenset()
     if accept_sole_new_deployment and deployment_title:
         known_deployment_keys = frozenset(
             key
@@ -242,10 +244,13 @@ def execute_dokploy_artifact_deploy(
                     token=token,
                     target_type=resolved_target.target_type,
                     target_id=resolved_target.target_id,
+                    require_complete=True,
                 )
             )
             if key
         )
+    if dispatch_evidence_checkpoint is not None:
+        dispatch_evidence_checkpoint(known_deployment_keys)
     deploy_reference = dokploy_deploy_artifact_reference(
         ship_request=ship_request,
         target_type=resolved_target.target_type,

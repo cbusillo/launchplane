@@ -3849,7 +3849,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("timeout-ms", "${{ inputs['timeout-ms'] }}"),
             ("FROM_INSTANCE", "${{ inputs.from_instance }}"),
             ("TO_INSTANCE", "${{ inputs.to_instance }}"),
-            ("inputs.driver.default", "verireel"),
             ("inputs.from_instance.default", "testing"),
             ("inputs.to_instance.default", "prod"),
         )
@@ -3983,7 +3982,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         path = ".github/workflows/reusable-product-driver-prod-rollback.yml"
         for key, value in (
             ("inputs.timeout-ms.default", "1800000"),
-            ("inputs.driver.default", "verireel"),
             ("inputs.source_channel.default", "testing"),
             ("route-path", "${{ steps.request.outputs.route_path }}"),
             ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
@@ -4019,64 +4017,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("inputs.timeout-ms.default", "42"),
         ):
             with self.subTest(key=key, value=value):
-                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
-
-    def test_product_driver_operation_wrapper_literals_are_exact_path_scoped(
-        self,
-    ) -> None:
-        allowed_cases = (
-            (
-                ".github/workflows/reusable-product-driver-prod-launch-readiness.yml",
-                "instance",
-                "prod",
-            ),
-            (
-                ".github/workflows/reusable-product-driver-testing-reset.yml",
-                "instance",
-                "testing",
-            ),
-            (
-                ".github/workflows/reusable-product-driver-testing-reset.yml",
-                "action",
-                "reset-testing",
-            ),
-            (
-                ".github/workflows/reusable-product-driver-testing-reset.yml",
-                "intent",
-                "stable-testing-reset",
-            ),
-        )
-        for path, key, value in allowed_cases:
-            with self.subTest(path=path, key=key, value=value):
-                self.assertEqual(
-                    _allow_reason(path=path, key=key, value=value),
-                    "thin_connector_input",
-                )
-
-        rejected_cases = (
-            (
-                ".github/workflows/reusable-product-driver-prod-promotion.yml",
-                "instance",
-                "testing",
-            ),
-            (
-                ".github/workflows/reusable-product-driver-prod-launch-readiness.yml",
-                "instance",
-                "testing",
-            ),
-            (
-                ".github/workflows/reusable-product-driver-testing-reset.yml",
-                "action",
-                "drop-prod",
-            ),
-            (
-                ".github/workflows/reusable-product-driver-testing-reset.yml",
-                "intent",
-                "operator-local-reset",
-            ),
-        )
-        for path, key, value in rejected_cases:
-            with self.subTest(path=path, key=key, value=value):
                 self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
 
     def test_workflow_output_references_are_thin_connector_inputs(self) -> None:

@@ -707,18 +707,6 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             ACTION_AUTHZ_BY_ROUTE["/v1/drivers/odoo/artifact-publish"],
             "odoo_artifact_publish.write",
         )
-        self.assertEqual(
-            ACTION_AUTHZ_BY_ROUTE["/v1/drivers/verireel/testing-verification"],
-            "deployment.write",
-        )
-        self.assertEqual(
-            ACTION_AUTHZ_BY_ROUTE["/v1/drivers/verireel/runtime-verification"],
-            "verireel_stable_environment.read",
-        )
-        self.assertEqual(
-            ACTION_AUTHZ_BY_ROUTE["/v1/drivers/verireel/preview-verification"],
-            "preview_generation.write",
-        )
 
     def test_product_site_overview_hides_non_operator_driver_actions(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
@@ -727,7 +715,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                 "product": "verireel",
                 "display_name": "VeriReel",
                 "repository": "every/verireel",
-                "driver_id": "verireel",
+                "driver_id": "generic-web",
                 "image": {"repository": "ghcr.io/every/verireel"},
                 "runtime_port": 3000,
                 "health_path": "/healthz",
@@ -1157,7 +1145,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                 "product": "verireel",
                 "display_name": "VeriReel",
                 "repository": "every/verireel",
-                "driver_id": "verireel",
+                "driver_id": "generic-web",
                 "image": {"repository": "ghcr.io/every/verireel"},
                 "runtime_port": 3000,
                 "health_path": "/healthz",
@@ -1186,11 +1174,10 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         )
 
         actions = {action.action_id: action for action in overview.available_actions}
-        self.assertFalse(actions["prod_deploy"].enabled)
+        self.assertFalse(actions["prod_promotion_workflow"].enabled)
         self.assertFalse(actions["prod_backup_gate"].enabled)
         self.assertFalse(actions["prod_promotion"].enabled)
         self.assertFalse(actions["prod_rollback"].enabled)
-        self.assertIn("prod lane", actions["prod_deploy"].disabled_reasons[0])
 
     def test_product_environment_detail_preserves_disabled_secret_bindings(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

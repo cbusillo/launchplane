@@ -1,3 +1,4 @@
+from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.contracts.record_failures import record_failure_summary
 from collections.abc import Callable
@@ -1423,7 +1424,22 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.request()
         plan = self.reconcile()
         self.store.write_product_profile_record(
-            _generic_web_profile().model_copy(update={"driver_id": "verireel"})
+            _generic_web_profile().model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(
+                            update={
+                                "generic_web_extensions": GenericWebLaneExtensions(
+                                    verification_extension="verireel-testing"
+                                )
+                            }
+                        )
+                        if lane.instance == "testing"
+                        else lane
+                        for lane in _generic_web_profile().lanes
+                    )
+                }
+            )
         )
         return cast(str, plan["deployment_record_id"])
 
@@ -1446,7 +1462,8 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             status="pass",
             evidence={
                 "authority_digest": authority,
-                "driver_id": "verireel",
+                "driver_id": "generic-web",
+                "extension_id": "verireel-testing",
                 "deployment_record_id": context.deployment_record_id,
                 "artifact_id": context.artifact_id,
                 "source_git_ref": context.source_git_ref,
@@ -1615,7 +1632,9 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.assertEqual(self.reconcile()["reason"], "already_deployed")
         qualify.assert_called_once()
 
-    def test_verireel_lost_effect_fence_is_held_without_repeating_post_deploy(self) -> None:
+    def test_interrupted_declared_qualification_is_failed_without_repeating_post_deploy(
+        self,
+    ) -> None:
         from control_plane.provider_operations import ProviderMutationUnknownError
 
         self.prepare_unqualified_verireel_testing()
@@ -1627,7 +1646,9 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.assertEqual(self.run_once().state, "failed")
             self.request()
             repeated = self.run_once()
-        self.assertEqual(repeated.last_plan["deploy_operation_status"], "reconcile_required")
+        self.assertEqual(repeated.last_plan["deploy_operation_status"], "adopted")
+        self.assertEqual(repeated.state, "failed")
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
         qualify.assert_called_once()
 
     def test_declared_generic_web_profile_requalifies_then_reuses_complete_evidence(self) -> None:
@@ -1665,50 +1686,9 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual(repeated.last_plan["reason"], "already_deployed")
         qualify.assert_called_once()
 
-    def test_passed_legacy_testing_is_requalified_after_declaring_shared_lifecycle(self) -> None:
-        from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
-
-        self.prepare_unqualified_verireel_testing()
-        with patch(
-            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
-            side_effect=self._testing_qualification_evidence,
-        ) as qualify:
-            self.request()
-            legacy = self.reconcile()
-            profile = self.store.read_product_profile_record("site")
-            self.store.write_product_profile_record(
-                profile.model_copy(
-                    update={
-                        "driver_id": "generic-web",
-                        "lanes": tuple(
-                            lane.model_copy(
-                                update={
-                                    "generic_web_extensions": GenericWebLaneExtensions(
-                                        verification_extension="verireel-testing"
-                                    )
-                                }
-                            )
-                            if lane.instance == "testing"
-                            else lane
-                            for lane in profile.lanes
-                        ),
-                    }
-                )
-            )
-            self.request()
-            transitioned = self.reconcile()
-            self.request()
-            repeated = self.reconcile()
-        self.assertEqual(transitioned["action"], "deploy")
-        self.assertEqual(transitioned["post_deploy_status"], "pass")
-        self.assertNotEqual(legacy["deployment_record_id"], transitioned["deployment_record_id"])
-        self.assertEqual(repeated["reason"], "already_deployed")
-        self.assertEqual(qualify.call_count, 2)
-
-    def test_a_profile_transition_during_qualification_cannot_credit_the_new_lifecycle(
+    def test_a_runtime_change_during_qualification_cannot_credit_new_authority(
         self,
     ) -> None:
-        from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 
         self.prepare_unqualified_verireel_testing()
         transitioned = False
@@ -1718,23 +1698,14 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             if not transitioned:
                 transitioned = True
                 profile = self.store.read_product_profile_record("site")
-                self.store.write_product_profile_record(
-                    profile.model_copy(
-                        update={
-                            "driver_id": "generic-web",
-                            "lanes": tuple(
-                                lane.model_copy(
-                                    update={
-                                        "generic_web_extensions": GenericWebLaneExtensions(
-                                            verification_extension="verireel-testing"
-                                        )
-                                    }
-                                )
-                                if lane.instance == "testing"
-                                else lane
-                                for lane in profile.lanes
-                            ),
-                        }
+                lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+                self.store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context=lane.context,
+                        instance=lane.instance,
+                        env={"SYNC_INTERVAL_SECONDS": 1800},
+                        updated_at=profile.updated_at,
                     )
                 )
             return self._testing_qualification_evidence(*args)
@@ -1894,7 +1865,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.record_legacy_baseline()
         self.github.add_run(20, DEPLOYABLE)
         self.github.runs[20]["run_started_at"] = "2026-10-08T12:00:00Z"
-        for driver_id in ("generic-web", "verireel"):
+        for driver_id in ("generic-web",):
             with self.subTest(driver_id=driver_id):
                 plan, desired = _plan_testing_target(
                     record_store=self.store,
@@ -3351,6 +3322,33 @@ class FakeGenericWebPreviewDriver:
 
 
 class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
+    def test_director_standing_preview_needs_valid_notes_without_a_client_invitation(self) -> None:
+        payload = _generic_web_preview_profile().model_dump(mode="json")
+        payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
+        payload["release_on_acceptance"] = "director_standing"
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        for body, labels in (
+            ("## Client test notes\nTry the approval buttons.", []),
+            (
+                "## Client test notes\nTry the changed page.",
+                [{"name": "owner-review"}],
+            ),
+        ):
+            with self.subTest(body=body, labels=labels):
+                self.github.pull_request.update(body=body, labels=labels)
+                self.request("preview", 5)
+                result = self.reconcile()
+                self.assertIn(result["action"], ("apply", "none"))
+                self.assertIs(result["owner_review_requested"], False)
+                for comment in self.comments.on(5):
+                    self.assertNotIn("@site-owner", cast(str, comment["body"]))
+        self.github.pull_request["body"] = ""
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["action"], "wait")
+
     def test_reset_preview_head_keeps_the_serving_build(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)

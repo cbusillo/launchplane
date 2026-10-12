@@ -72,7 +72,6 @@
     "lint": {
       "default": "uv run --extra dev ruff check .",
       "changedFiles": "uv run --extra dev ruff check {files}",
-      "odooOwnership": "uv run launchplane odoo-ownership check --workspace-root ..",
       "roleWords": "uv run python scripts/validate_role_words.py"
     },
     "format": {
@@ -180,15 +179,9 @@
     "Reusable Generic Web Preview",
     "Reusable Generic Web Preview Lifecycle",
     "Reusable Generic Web Preview Verification",
-    "Reusable Product Driver Stable Environment",
-    "Reusable Product Driver Runtime Verification",
     "Reusable Product Driver Testing Deploy",
-    "Reusable Product Driver Stable Deploy",
     "Reusable Product Driver App Maintenance",
     "Reusable Product Driver Post Deploy",
-    "Reusable Product Driver Testing Verification",
-    "Reusable Product Driver Testing Reset",
-    "Reusable Product Driver Prod Launch Readiness",
     "Reusable Product Driver Prod Promotion",
     "Reusable Product Driver Prod Rollback",
     "Reusable Preview PR Feedback",

@@ -28,7 +28,7 @@ from control_plane.workflows.generic_web_preview import (
 
 
 def _driver_profile(
-    *, driver_id: str = "verireel", declared_transport: bool = False
+    *, driver_id: str = "generic-web", declared_transport: bool = True
 ) -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
         product="verireel",
@@ -226,7 +226,7 @@ class GenericWebPreviewExtensionTests(unittest.TestCase):
                     anchor_head_sha="a1b2c3d4",
                     image_reference="ghcr.io/cbusillo/verireel-app:pr-42-a1b2c3d4",
                 ),
-                profile=_driver_profile(driver_id="odoo"),
+                profile=_driver_profile(driver_id="odoo", declared_transport=False),
             )
 
 

@@ -68,10 +68,4 @@ def generic_web_post_deploy_executor_for_driver_id(
         )
 
         return execute_odoo_generic_web_post_deploy
-    if driver_id.strip() == "verireel" and instance == "testing":
-        from control_plane.workflows.verireel_testing_post_deploy import (
-            execute_verireel_testing_post_deploy,
-        )
-
-        return execute_verireel_testing_post_deploy
     return None

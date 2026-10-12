@@ -87,9 +87,11 @@ class DokployDeploymentFailed(click.ClickException):
         deployment_id: str,
         deployment_status: str,
         message_prefix: str,
+        deployment: JsonObject | None = None,
     ) -> None:
         self.deployment_id = deployment_id
         self.deployment_status = deployment_status
+        self.deployment = deployment
         super().__init__(f"{message_prefix}: deployment={deployment_id} status={deployment_status}")
 
 
@@ -203,7 +205,7 @@ def deployment_history_for_target(
 
 
 def list_deployments_for_target(
-    *, host: str, token: str, target_type: str, target_id: str
+    *, host: str, token: str, target_type: str, target_id: str, require_complete: bool = False
 ) -> list[JsonObject]:
     if target_type == "compose":
         compose_payload = dokploy_request(
@@ -214,8 +216,19 @@ def list_deployments_for_target(
         )
         compose_payload_as_object = as_json_object(compose_payload)
         if compose_payload_as_object is None:
+            if require_complete:
+                raise click.ClickException("Dokploy deployment history is incomplete.")
             return []
         deployments_payload = compose_payload_as_object.get("deployments")
+        if require_complete:
+            if parse_deployment_history(deployments_payload).state == "unknown":
+                raise click.ClickException("Dokploy deployment history is incomplete.")
+            assert isinstance(deployments_payload, list)
+            deployments = _collect_object_items(deployments_payload)
+            ids = [deployment_key(item) for item in deployments]
+            if not all(ids) or len(set(ids)) != len(ids):
+                raise click.ClickException("Dokploy deployment history is ambiguous.")
+            return deployments
         if not isinstance(deployments_payload, list):
             return []
         return _collect_object_items(deployments_payload)
@@ -984,6 +997,7 @@ def wait_for_titled_or_sole_new_target_deployment(
             token=token,
             target_type=target_type,
             target_id=target_id,
+            require_complete=True,
         )
         titled = [
             deployment
@@ -997,29 +1011,41 @@ def wait_for_titled_or_sole_new_target_deployment(
             and deployment_key(deployment) not in known_deployment_keys
         ]
         candidate = (
-            _latest_deployment_from_list(titled)
+            (
+                titled[0]
+                if len(titled) == 1 and deployment_key(titled[0]) not in known_deployment_keys
+                else None
+            )
             if titled
             else (new_deployments[0] if len(new_deployments) == 1 else None)
         )
         if candidate is not None:
             candidate_status = _deployment_status(candidate)
-            if candidate_status in _DEPLOYMENT_SUCCESS_STATUSES:
+            if candidate_status in _DEPLOYMENT_SUCCESS_STATUSES | _DEPLOYMENT_FAILURE_STATUSES:
                 if titled:
+                    if candidate_status in _DEPLOYMENT_FAILURE_STATUSES:
+                        raise DokployDeploymentFailed(
+                            deployment_id=deployment_key(candidate),
+                            deployment_status=candidate_status,
+                            message_prefix=failure_message_prefix,
+                            deployment=candidate,
+                        )
                     return candidate
                 candidate_key = deployment_key(candidate)
                 if candidate_key != settled_untitled_key:
                     settled_untitled_key = candidate_key
                     settled_since = now
                 if now - settled_since >= untitled_settle_seconds:
+                    if candidate_status in _DEPLOYMENT_FAILURE_STATUSES:
+                        raise DokployDeploymentFailed(
+                            deployment_id=candidate_key,
+                            deployment_status=candidate_status,
+                            message_prefix=failure_message_prefix,
+                            deployment=candidate,
+                        )
                     return candidate
                 time.sleep(3)
                 continue
-            if candidate_status in _DEPLOYMENT_FAILURE_STATUSES:
-                raise DokployDeploymentFailed(
-                    deployment_id=deployment_key(candidate),
-                    deployment_status=candidate_status,
-                    message_prefix=failure_message_prefix,
-                )
         settled_untitled_key = ""
         time.sleep(3)
 
@@ -2033,6 +2059,7 @@ def _wait_for_deployment_status(
                     deployment_id=latest_key,
                     deployment_status=latest_status,
                     message_prefix=failure_message_prefix,
+                    deployment=latest_deployment,
                 )
         time.sleep(3)
 

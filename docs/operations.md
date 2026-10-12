@@ -933,13 +933,6 @@ Current implementation scope:
 - `POST /v1/every-code/notification-policies/apply`
 - `POST /v1/public-ingress/notification-policies/apply`
 - `POST /v1/previews/lifecycle-plan`
-- `POST /v1/drivers/verireel/preview-refresh`
-- `POST /v1/drivers/verireel/preview-destroy`
-- `POST /v1/drivers/verireel/testing-deploy`
-- `POST /v1/drivers/verireel/testing-verification`
-- `POST /v1/drivers/verireel/prod-deploy`
-- `POST /v1/drivers/verireel/prod-promotion`
-- `POST /v1/drivers/verireel/prod-rollback`
 - `POST /v1/drivers/odoo/post-deploy`
 - `POST /v1/drivers/odoo/prod-backup-gate`
 - `POST /v1/drivers/odoo/prod-promotion`
@@ -2298,24 +2291,10 @@ Current derived-state behavior:
   that `context/instance`
 - accepted promotion evidence refreshes destination inventory when the
   promotion record includes valid `deployment_record_id` linkage
-- Launchplane can now execute the first explicit VeriReel driver actions
-  directly: `POST /v1/drivers/verireel/testing-deploy` and
-  `POST /v1/drivers/verireel/prod-deploy` trigger the shared testing and prod
-  deploys, and the promotion / rollback
-  drivers own the remaining stable-lane execution path. The prod-promotion
-  driver writes the promotion record from the backup gate, deploy result,
-  migration result, destination health check, and primitive testing-lane health
-  status sent by the product workflow. The testing-verification route accepts
-  primitive migration, browser verification, and Client-route statuses and
-  updates the existing testing deployment record plus current inventory.
-  VeriReel maintenance operations that need Dokploy authority, such as testing
-  migrations, preview Client-admin verification helpers, reset-testing, and
-  preview inventory, also flow through Launchplane driver routes instead of
-  product-repo workflow secrets. Stable testing/prod base URLs and target
-  identity are resolved from Launchplane's DB-backed target/runtime records
-  through the stable-environment route. Those routes return durable record
-  identifiers, topology metadata, or timing/status for the caller to thread into
-  later verification or promotion evidence.
+- VeriReel uses the declared shared-web lifecycle for deployment, testing qualification,
+  promotion and rollback. See [driver development](driver-development.md)
+  for the extension contract and [event-driven deploys](event-driven-deploys.md)
+  for exact-deployment qualification.
 - Launchplane can also execute the Odoo stable-lane driver path directly:
   `POST /v1/drivers/odoo/prod-promotion-inputs` resolves the current testing
   artifact, source ref, and deterministic backup-gate record ID from DB-backed

@@ -182,7 +182,7 @@ def _first_driver_payload(
     view_payload: DriverContextView, *, driver_id: str
 ) -> dict[str, object] | None:
     for driver_view in view_payload.drivers:
-        if getattr(driver_view, "driver_id", "") == driver_id:
+        if driver_view.driver_id == driver_id or driver_view.descriptor.base_driver_id == driver_id:
             return dict(driver_view.model_dump(mode="json"))
     return None
 
@@ -248,12 +248,12 @@ def _build_data_freshness_report(
             context_name=context_name,
             instance_name=instance_name,
         )
-        driver = _first_driver_payload(view, driver_id="verireel")
+        driver = _first_driver_payload(view, driver_id="generic-web")
         lane_summary = driver.get("lane_summary") if isinstance(driver, dict) else None
         surfaces.append(
             _freshness_surface(
                 name=f"{context_name}/{instance_name}/lane",
-                driver_id="verireel",
+                driver_id="generic-web",
                 raw_value=lane_summary,
             )
         )
@@ -262,7 +262,7 @@ def _build_data_freshness_report(
         record_store=record_store,
         context_name=preview_context_name,
     )
-    preview_driver = _first_driver_payload(preview_view, driver_id="verireel")
+    preview_driver = _first_driver_payload(preview_view, driver_id="generic-web")
     inventory_provenance = (
         preview_driver.get("preview_inventory_provenance")
         if isinstance(preview_driver, dict)
@@ -280,7 +280,7 @@ def _build_data_freshness_report(
             surfaces.append(
                 _freshness_surface(
                     name=f"{preview_context_name}/{preview_id}",
-                    driver_id="verireel",
+                    driver_id="generic-web",
                     raw_value=summary,
                 )
             )
@@ -288,7 +288,7 @@ def _build_data_freshness_report(
         surfaces.append(
             _freshness_surface(
                 name=f"{preview_context_name}/preview-inventory",
-                driver_id="verireel",
+                driver_id="generic-web",
                 raw_value={"provenance": inventory_provenance}
                 if isinstance(inventory_provenance, dict)
                 else None,
