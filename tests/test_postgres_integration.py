@@ -23,7 +23,7 @@ from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import create_engine, event, inspect, select, text, update
+from sqlalchemy import create_engine, event, insert, inspect, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -1319,6 +1319,34 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_snapshot_cursor_cancellation_reports_family_and_closes_transaction(self) -> None:
+        from sqlalchemy import func
+        from control_plane.storage.postgres import LaunchplaneAuthzPolicyRow
+        from control_plane.stored_record_snapshot import (
+            SnapshotUnavailable,
+            _snapshot_cursor,
+            snapshot_failure_diagnostics,
+        )
+
+        with _store_for_fresh_head_database() as store:
+            with store._engine.connect() as connection:
+                connection.execute(text("SET LOCAL statement_timeout = '10ms'"))
+                with self.assertRaises(SnapshotUnavailable) as raised:
+                    with _snapshot_cursor(
+                        connection,
+                        select(func.pg_sleep(0.1)),
+                        lambda reason: SnapshotUnavailable(
+                            reason,
+                            record_family=LaunchplaneAuthzPolicyRow.__tablename__,
+                            rows_exported=0,
+                        ),
+                    ) as rows:
+                        list(rows)
+            diagnostics = snapshot_failure_diagnostics(raised.exception)
+            self.assertEqual(diagnostics["reason"], "snapshot_statement_canceled")
+            self.assertEqual(diagnostics["record_family"], LaunchplaneAuthzPolicyRow.__tablename__)
+            self.assertEqual(store.list_authz_policy_records(), ())
+
     def test_scrubbed_snapshot_restores_in_postgres_and_rejects_stricter_policy(self) -> None:
         from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
         from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -1349,8 +1377,9 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 )
             )
             profile = product_profile_payload()
-            assert isinstance(profile["preview"], dict)
-            profile["preview"]["override_env"] = {"TOKEN": "plaintext-sentinel"}
+            preview = profile["preview"]
+            assert isinstance(preview, dict)
+            preview["override_env"] = {"TOKEN": "plaintext-sentinel"}
             source.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(profile)
             )
@@ -1358,8 +1387,35 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             with source._engine.begin() as connection:
                 payload = source.list_authz_policy_records()[0].model_dump(mode="json")
                 del payload["policy"]["github_actions"][0]["instances"]
+                payload["audit"] = {"private_note": "plaintext-sentinel" * 1000}
                 connection.execute(update(LaunchplaneAuthzPolicyRow).values(payload=payload))
-            snapshot = source.export_stored_record_snapshot()
+                historical = dict(
+                    payload, record_id="historical-fixture", revision=2, status="superseded"
+                )
+                connection.execute(
+                    insert(LaunchplaneAuthzPolicyRow).values(
+                        **{
+                            column.name: historical[column.name]
+                            for column in LaunchplaneAuthzPolicyRow.__table__.c
+                            if column.name != "payload"
+                        },
+                        payload=historical,
+                    )
+                )
+            # Two individually bounded rows exceed the cumulative source limit;
+            # all their historical shape must survive the real PostgreSQL cursor.
+            with source._engine.connect() as connection:
+                source_sizes = [
+                    len(json.dumps(dict(row)).encode())
+                    for row in connection.execute(
+                        select(LaunchplaneAuthzPolicyRow.__table__)
+                    ).mappings()
+                ]
+            byte_bound = max(source_sizes) + 1024
+            self.assertGreater(sum(source_sizes), byte_bound)
+            with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", byte_bound):
+                snapshot = source.export_stored_record_snapshot()
+            self.assertEqual(len(snapshot.tables[LaunchplaneAuthzPolicyRow.__tablename__]), 2)
             self.assertNotIn("plaintext-sentinel", snapshot.model_dump_json())
             with _isolated_postgres_database() as target_url:
                 engine = create_engine(target_url)
