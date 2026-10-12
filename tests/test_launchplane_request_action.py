@@ -180,7 +180,9 @@ process.on('beforeExit', () => {{
                 self.assertNotEqual(result.returncode, 0)
                 calls = json.loads(result.stderr.strip().splitlines()[-1])
                 mutations = [
-                    call for call in calls if urlsplit(call["url"]).hostname == "launchplane.example"
+                    call
+                    for call in calls
+                    if urlsplit(call["url"]).hostname == "launchplane.example"
                 ]
                 self.assertLess(len(mutations), 10)
                 self.assertIsNone(json.loads(response.read_text()))
