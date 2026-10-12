@@ -781,6 +781,53 @@ def _resume_merge_train_controller_state(
             and lease.record.active_phase
         ):
             return None
+        if not repository_policy.stack_child_disposition_label:
+            landing = _merge_train_landing_record_by_id(
+                record_store=landing_store,
+                repository=request.repository,
+                base_branch=request.base_branch,
+                record_id=str(
+                    lease.record.step_payload.get("landing_plan_record_id")
+                    or lease.record.active_record_id
+                ),
+            ) or latest_merge_train_batch_landing_plan_record(
+                record_store=landing_store,
+                repository=request.repository,
+                base_branch=request.base_branch,
+            )
+            if landing is not None and landing.landing_plan.policy_sha256 == policy_sha256:
+                completed = latest_completed_merge_train_batch_landing_plan_record(
+                    record_store=landing_store,
+                    repository=request.repository,
+                    base_branch=request.base_branch,
+                    batch_id=landing.landing_plan.batch_id,
+                    candidate_sha=landing.landing_plan.candidate_sha,
+                    policy_sha256=policy_sha256,
+                )
+                landing = completed or landing
+                if completed is not None:
+                    collapses = stack_collapse_records_for_completed_landing(
+                        record_store=stack_collapse_store,
+                        github_client=github_client,
+                        repository=request.repository,
+                        base_branch=request.base_branch,
+                        landing_plan=landing.landing_plan,
+                        policy_sha256=policy_sha256,
+                    )
+                else:
+                    collapse = latest_merge_train_stack_collapse_plan_record_for_landing(
+                        record_store=stack_collapse_store,
+                        repository=request.repository,
+                        base_branch=request.base_branch,
+                        landing_plan=landing.landing_plan,
+                        policy_sha256=policy_sha256,
+                    )
+                    collapses = (collapse,) if collapse is not None else ()
+                unfinished = tuple(r for r in collapses if r.plan.status != "ready_for_train")
+                if unfinished:
+                    return _stack_disposition_configuration_block(
+                        landing_record=landing, collapse_records=unfinished
+                    )
         return {
             "repository": request.repository,
             "base_branch": request.base_branch,
@@ -1282,8 +1329,8 @@ def _advance_active_landing_record(
         except ValueError as error:
             raise MergeTrainControllerRequestError(str(error)) from error
         if not repository_policy.stack_child_disposition_label:
-            raise ValueError(
-                "merge train stack child disposition requires stack_child_disposition_label policy"
+            return _stack_disposition_configuration_block(
+                landing_record=active_landing_record, collapse_records=(collapse_record,)
             )
     candidate_record = _candidate_record_for_landing_plan(
         record_store=candidate_store,
@@ -1670,20 +1717,9 @@ def _retire_changed_policy_landing(
     retirement_source: str = "policy-changed-landing",
 ) -> dict[str, object]:
     plan = landing_record.landing_plan
-    if (
-        latest_merge_train_stack_collapse_plan_record_for_landing(
-            record_store=stack_collapse_store,
-            repository=request.repository,
-            base_branch=request.base_branch,
-            landing_plan=plan,
-            policy_sha256=plan.policy_sha256,
-        )
-        is not None
-        and retirement_source != "original-review-recovery"
-    ):
-        raise MergeTrainControllerRequestError(
-            "Policy-change recovery of a collapsed stack requires explicit reconciliation."
-        )
+    # Retirement changes no carried branch history. The same exact no-effect
+    # proof below applies to collapsed roots; their obsolete collapse history
+    # remains subject to normal current-policy/original-review recovery.
     candidate_record = _candidate_record_for_landing_plan(
         record_store=candidate_store, landing_plan_record=landing_record
     )
@@ -1907,6 +1943,42 @@ def _finish_retired_policy_landing(
     }
 
 
+def _stack_disposition_configuration_block(
+    *,
+    landing_record: MergeTrainBatchLandingPlanRecord,
+    collapse_records: tuple[MergeTrainStackCollapsePlanRecord, ...],
+) -> dict[str, object]:
+    plan = landing_record.landing_plan
+    reason = (
+        "completed_landing_stack_disposition_not_configured"
+        if _landing_cleanup_allowed(landing_record)
+        else "landing_stack_disposition_not_configured"
+    )
+    return {
+        "repository": plan.repository,
+        "base_branch": plan.base_branch,
+        "mode": "blocked",
+        "controller_action": "block",
+        "reason_code": reason,
+        "controller_reconciliation_status": "required",
+        "reconciliation_detail": reason,
+        "merge_train_batch_landing_plan_record_id": landing_record.record_id,
+        "blocking_reason": {
+            "code": reason,
+            "message": (
+                "Current policy has no stack child disposition label. "
+                "Submit a managed merge-train policy proposal for this target, obtain "
+                "Director approval, then retry the normal controller under the installed policy."
+            ),
+        },
+        "details": {
+            "policy_key": plan.policy_key,
+            "recovery_action": "privileged-policy-propose",
+            "stack_collapse_plan_record_ids": [record.record_id for record in collapse_records],
+        },
+    }
+
+
 def _finish_landed_merge_train_batch(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -1960,9 +2032,10 @@ def _finish_landed_merge_train_batch(
         raise MergeTrainControllerRequestError(
             "ordinary merge train landing does not support stack collapse"
         )
-    if collapse_records and not repository_policy.stack_child_disposition_label:
-        raise MergeTrainControllerRequestError(
-            "merge train stack child disposition requires stack_child_disposition_label policy"
+    unfinished = tuple(r for r in collapse_records if r.plan.status != "ready_for_train")
+    if unfinished and not repository_policy.stack_child_disposition_label:
+        return _stack_disposition_configuration_block(
+            landing_record=landed_record, collapse_records=unfinished
         )
     lease.checkpoint(
         active_action="land_batch",
@@ -2119,9 +2192,8 @@ def _reconcile_completed_landing_after_policy_change(
         record for record in collapse_records if record.plan.status != "ready_for_train"
     )
     if unfinished and not repository_policy.stack_child_disposition_label:
-        return blocked(
-            "completed_landing_stack_disposition_not_configured",
-            "Current policy has no stack child disposition label.",
+        return _stack_disposition_configuration_block(
+            landing_record=landed_record, collapse_records=unfinished
         )
     # Historical plans are evidence of an already-landed effect, never authority
     # for another collapse or merge. Verify every child before any provider write.
