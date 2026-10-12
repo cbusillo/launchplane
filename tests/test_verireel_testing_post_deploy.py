@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from control_plane.workflows.generic_web_post_deploy import (
-    generic_web_post_deploy_executor_for_driver_id,
     generic_web_post_deploy_executor_for_profile,
 )
 
@@ -95,10 +94,18 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
                 {
                     "product": "video",
                     "display_name": "Video",
-                    "driver_id": "verireel",
+                    "driver_id": "generic-web",
                     "repository": "example/video",
                     "image": {"repository": "ghcr.io/example/video"},
-                    "lanes": [{"context": "verireel", "instance": "testing"}],
+                    "lanes": [
+                        {
+                            "context": "verireel",
+                            "instance": "testing",
+                            "generic_web_extensions": {
+                                "verification_extension": "verireel-testing"
+                            },
+                        }
+                    ],
                     "updated_at": "2026-10-12T00:00:00Z",
                     "source": "test",
                 }
@@ -115,12 +122,16 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
 
     def test_only_testing_registers_the_extension(self) -> None:
         self.assertIs(
-            generic_web_post_deploy_executor_for_driver_id("verireel", instance="testing"),
+            generic_web_post_deploy_executor_for_profile(
+                self.store.read_product_profile_record.return_value, instance="testing"
+            ),
             execute_verireel_testing_post_deploy,
         )
         for instance in ("prod", "preview", ""):
             self.assertIsNone(
-                generic_web_post_deploy_executor_for_driver_id("verireel", instance=instance)
+                generic_web_post_deploy_executor_for_profile(
+                    self.store.read_product_profile_record.return_value, instance=instance
+                )
             )
 
     def test_migration_runs_before_product_verification_and_binds_evidence(self) -> None:

@@ -45,7 +45,7 @@ from control_plane.workflows.verireel_app_maintenance import (
     _resolve_stable_testing_base_url,
     execute_verireel_app_maintenance,
 )
-from control_plane.workflows.verireel_rollout import fetch_url_text
+from urllib.request import Request, urlopen
 from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
 from control_plane.provider_operations import ProviderMutationUnknownError
 
@@ -445,10 +445,7 @@ def execute_verireel_testing_post_deploy(
     try:
         profile = record_store.read_product_profile_record(context.product)
         if (
-            (
-                profile.driver_id != "verireel"
-                and not declares_verireel_testing_extension(profile, instance=context.instance)
-            )
+            not declares_verireel_testing_extension(profile, instance=context.instance)
             or context.instance != "testing"
             or not any(
                 lane.context == context.context and lane.instance == context.instance
@@ -511,3 +508,15 @@ def execute_verireel_testing_post_deploy(
         detail = f"Testing qualification failed in {phase}; no passing qualification is recorded."
     evidence["finished_at"] = utc_now_timestamp()
     return PostDeployUpdateEvidence(attempted=True, status=status, detail=detail, evidence=evidence)
+
+
+def fetch_url_text(url: str, *, accept: str) -> tuple[int, str]:
+    request = Request(
+        url,
+        headers={
+            "Accept": accept,
+            "Cache-Control": "no-store",
+        },
+    )
+    with urlopen(request, timeout=15) as response:
+        return response.status, response.read().decode("utf-8")

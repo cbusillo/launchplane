@@ -30,10 +30,6 @@ from control_plane.workflows.preview_lifecycle_cleanup import (
     build_preview_lifecycle_cleanup_record,
 )
 from control_plane.workflows.ship import utc_now_timestamp
-from control_plane.workflows.verireel_preview_driver import (
-    VeriReelPreviewInventoryRequest,
-    execute_verireel_preview_inventory,
-)
 
 
 class PreviewLifecycleCleanupEnvelope(BaseModel):
@@ -231,8 +227,6 @@ def write_preview_lifecycle_cleanup_apply_record(
 def preview_lifecycle_cleanup_driver_id(
     profile: LaunchplaneProductProfileRecord,
 ) -> str:
-    if profile.driver_id == "verireel":
-        return "verireel"
     if _product_driver_compatible(profile=profile, expected_driver_id="generic-web"):
         return "generic-web"
     return ""
@@ -241,7 +235,7 @@ def preview_lifecycle_cleanup_driver_id(
 def preview_lifecycle_cleanup_profile_settings(
     *, record_store: object, product: str
 ) -> tuple[str, str, LaunchplaneProductProfileRecord | None]:
-    cleanup_driver_id = "verireel" if product == "verireel" else ""
+    cleanup_driver_id = ""
     cleanup_slug_template = "pr-{number}"
     read_profile = getattr(record_store, "read_product_profile_record", None)
     if not callable(read_profile):
@@ -323,31 +317,20 @@ def build_preview_lifecycle_sweep(
             entries.append(entry)
             continue
         try:
-            if cleanup_driver_id == "verireel":
-                verireel_inventory_result = execute_verireel_preview_inventory(
-                    control_plane_root=control_plane_root,
-                    request=VeriReelPreviewInventoryRequest(context=profile.preview.context),
-                )
-                inventory_context = verireel_inventory_result.context
-                inventory_source = request.source
-                inventory_slugs = tuple(
-                    item.previewSlug for item in verireel_inventory_result.previews
-                )
-            else:
-                generic_web_inventory_result = execute_generic_web_preview_inventory(
-                    control_plane_root=control_plane_root,
-                    record_store=cast(GenericWebPreviewProfileStore, record_store),
-                    request=GenericWebPreviewInventoryRequest(
-                        product=profile.product,
-                        source=request.source,
-                    ),
-                    profile=profile,
-                )
-                inventory_context = generic_web_inventory_result.context
-                inventory_source = generic_web_inventory_result.source
-                inventory_slugs = tuple(
-                    item.previewSlug for item in generic_web_inventory_result.previews
-                )
+            generic_web_inventory_result = execute_generic_web_preview_inventory(
+                control_plane_root=control_plane_root,
+                record_store=cast(GenericWebPreviewProfileStore, record_store),
+                request=GenericWebPreviewInventoryRequest(
+                    product=profile.product,
+                    source=request.source,
+                ),
+                profile=profile,
+            )
+            inventory_context = generic_web_inventory_result.context
+            inventory_source = generic_web_inventory_result.source
+            inventory_slugs = tuple(
+                item.previewSlug for item in generic_web_inventory_result.previews
+            )
         except click.ClickException as exc:
             entry.update({"status": "fail", "error_message": str(exc)})
             entries.append(entry)

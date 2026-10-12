@@ -1310,10 +1310,6 @@ def _activity_event(
 
 
 def _lane_action_id(*, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile) -> str:
-    if profile.driver_id == "verireel" and lane.instance == "testing":
-        return "testing_deploy"
-    if profile.driver_id == "verireel" and lane.instance == "prod":
-        return "prod_deploy"
     return "stable_deploy"
 
 
@@ -1979,9 +1975,6 @@ def _product_action_authorization_context(
         "/v1/drivers/odoo/prod-backup-gate",
         "/v1/drivers/odoo/prod-promotion",
         "/v1/drivers/odoo/prod-rollback",
-        "/v1/drivers/verireel/prod-deploy",
-        "/v1/drivers/verireel/prod-promotion",
-        "/v1/drivers/verireel/prod-rollback",
     }:
         if _prod_lane_supported(profile):
             return _lane_context_if_present(profile=profile, instance="prod")
@@ -2660,9 +2653,6 @@ def _action_support_reason(
         "/v1/drivers/odoo/prod-backup-gate",
         "/v1/drivers/odoo/prod-promotion",
         "/v1/drivers/odoo/prod-rollback",
-        "/v1/drivers/verireel/prod-deploy",
-        "/v1/drivers/verireel/prod-promotion",
-        "/v1/drivers/verireel/prod-rollback",
     }:
         if not _prod_lane_supported(profile):
             return "Product profile does not define a prod lane."

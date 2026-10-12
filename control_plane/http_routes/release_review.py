@@ -139,8 +139,6 @@ def register_release_review_routes(
                 if candidate.driver_id == "odoo"
                 else ("generic_web_prod_promotion.execute", "generic_web_prod_promotion.dispatch")
             )
-            if candidate.driver_id == "verireel":
-                actions += ("verireel_prod_promotion.execute",)
             promotion_reader = lane is not None and any(
                 common.authorization_allows(
                     identity=identity,

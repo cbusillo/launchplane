@@ -26,7 +26,7 @@ def _binding() -> ProductionBackupGateWorkerRequest:
             product="example-product",
             context="example-product",
             instance="prod",
-            promotion_action="verireel_prod_promotion.execute",
+            promotion_action="generic_web_prod_promotion.execute",
             backup_record_id="backup-example",
         ),
         policy=_policy(),
