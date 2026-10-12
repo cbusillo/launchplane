@@ -310,9 +310,11 @@ responses remain replayable; they do not create new authority. A new attempt
 returns the compatibility error `legacy_backup_migration_conflict` (409); this
 is a permanent refusal, so retrying it cannot migrate authority.
 
-Legacy VeriReel backup dispatch and worker commands also refuse without host
-effects. Capture through `POST /v1/production-backup-gates` after typed policy
-onboarding. Both snapshot and independent backup remain mandatory. Removing
+The legacy VeriReel capture route and delegated executor are removed. Capture
+through `POST /v1/production-backup-gates` after typed policy onboarding. The
+shared queue worker lives in `workflows/production_backup_gate_operation_worker.py`;
+existing `verireel-workers` service/CLI entrypoints remain compatibility wiring
+for that shared queue, including historical operation reads and cancellation. Both snapshot and independent backup remain mandatory. Removing
 obsolete live runtime keys, onboarding production policy and proving a real
 promotion remain separate guarded operations under #2309.
 

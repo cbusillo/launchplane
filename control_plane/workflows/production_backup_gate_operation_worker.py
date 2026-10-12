@@ -10,7 +10,6 @@ from typing import Callable, Protocol
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.verireel_prod_backup_gate import (
     VeriReelProdBackupGateResult,
-    VeriReelProdBackupGateWorkerRequest,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -21,24 +20,23 @@ from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationGuard,
     read_active_authz_policy_record,
 )
-from control_plane.workflows.verireel_prod_backup_gate import (
+from control_plane.workflows.production_backup_gate import (
     _build_backup_gate_record,
     _failed_backup_gate_record,
-    _run_delegated_worker,
 )
 from control_plane.workflows.production_backup_gate import execute_shared_production_backup
 from control_plane.workflows.production_backup_provider import ProductionBackupProviderError
 
-DEFAULT_VERIREEL_BACKUP_GATE_WORKER_LEASE_SECONDS = 300
-DEFAULT_VERIREEL_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS = 60
-DEFAULT_VERIREEL_BACKUP_GATE_WORKER_POLL_SECONDS = 10
-DEFAULT_VERIREEL_BACKUP_GATE_WORKER_ERROR_BACKOFF_SECONDS = 30
-DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS = 3
-DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_CONSECUTIVE_ERRORS = 5
+DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_LEASE_SECONDS = 300
+DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS = 60
+DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_POLL_SECONDS = 10
+DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_ERROR_BACKOFF_SECONDS = 30
+DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_ATTEMPTS = 3
+DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_CONSECUTIVE_ERRORS = 5
 SAFE_BACKUP_GATE_RETRY_PHASES = ("created", "running")
 
 
-class VeriReelProdBackupGateOperationWorkerStore(Protocol):
+class ProductionBackupGateOperationWorkerStore(Protocol):
     def write_verireel_prod_backup_gate_operation_record(
         self, record: VeriReelProdBackupGateOperationRecord
     ) -> Path | None: ...
@@ -108,7 +106,7 @@ class VeriReelProdBackupGateOperationWorkerStore(Protocol):
 
 
 @dataclass(frozen=True)
-class VeriReelProdBackupGateWorkerResult:
+class ProductionBackupGateOperationWorkerResult:
     status: str
     operation_id: str = ""
     recovered_operation_ids: tuple[str, ...] = ()
@@ -116,7 +114,7 @@ class VeriReelProdBackupGateWorkerResult:
 
 
 @dataclass(frozen=True)
-class VeriReelProdBackupGateOperationLeaseSummary:
+class ProductionBackupGateOperationLeaseSummary:
     operation_id: str
     product: str
     context: str
@@ -133,7 +131,7 @@ class VeriReelProdBackupGateOperationLeaseSummary:
 
 
 @dataclass(frozen=True)
-class VeriReelProdBackupGateWorkerStatus:
+class ProductionBackupGateOperationWorkerStatus:
     status: str
     recorded_at: str
     pending_count: int
@@ -141,11 +139,11 @@ class VeriReelProdBackupGateWorkerStatus:
     stalled_count: int
     terminal_count: int
     counts_by_status: dict[str, int]
-    operations: tuple[VeriReelProdBackupGateOperationLeaseSummary, ...]
+    operations: tuple[ProductionBackupGateOperationLeaseSummary, ...]
 
 
 @dataclass(frozen=True)
-class VeriReelProdBackupGateWorkerLoopResult:
+class ProductionBackupGateOperationWorkerLoopResult:
     status: str
     iterations: int
     worked_count: int
@@ -154,32 +152,32 @@ class VeriReelProdBackupGateWorkerLoopResult:
 
 
 @dataclass(frozen=True)
-class VeriReelProdBackupGateReconcileResult:
+class ProductionBackupGateOperationReconcileResult:
     reconciled_operation_ids: tuple[str, ...]
 
 
-def run_verireel_prod_backup_gate_operation_worker_once(
+def run_production_backup_gate_operation_worker_once(
     *,
-    record_store: VeriReelProdBackupGateOperationWorkerStore,
+    record_store: ProductionBackupGateOperationWorkerStore,
     control_plane_root_path: Path,
     lease_owner: str,
-    lease_seconds: int = DEFAULT_VERIREEL_BACKUP_GATE_WORKER_LEASE_SECONDS,
-    heartbeat_seconds: int = DEFAULT_VERIREEL_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS,
-    max_attempts: int = DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
-) -> VeriReelProdBackupGateWorkerResult:
+    lease_seconds: int = DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_LEASE_SECONDS,
+    heartbeat_seconds: int = DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS,
+    max_attempts: int = DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+) -> ProductionBackupGateOperationWorkerResult:
     normalized_lease_owner = lease_owner.strip()
     if not normalized_lease_owner:
-        raise ValueError("VeriReel prod backup gate worker requires lease_owner.")
+        raise ValueError("Production backup gate worker requires lease_owner.")
     if lease_seconds < 1:
-        raise ValueError("VeriReel prod backup gate worker lease_seconds must be positive.")
+        raise ValueError("Production backup gate worker lease_seconds must be positive.")
     if heartbeat_seconds < 1:
-        raise ValueError("VeriReel prod backup gate worker heartbeat_seconds must be positive.")
+        raise ValueError("Production backup gate worker heartbeat_seconds must be positive.")
     if heartbeat_seconds >= lease_seconds:
         raise ValueError(
-            "VeriReel prod backup gate worker heartbeat_seconds must be less than lease_seconds."
+            "Production backup gate worker heartbeat_seconds must be less than lease_seconds."
         )
     if max_attempts < 1:
-        raise ValueError("VeriReel prod backup gate worker max_attempts must be positive.")
+        raise ValueError("Production backup gate worker max_attempts must be positive.")
     now = _utc_now_timestamp()
     recovered_operation_ids = (
         record_store.recover_expired_verireel_prod_backup_gate_operation_records(
@@ -195,7 +193,7 @@ def run_verireel_prod_backup_gate_operation_worker_once(
         claimed_at=claim_started_at,
     )
     if operation is None:
-        return VeriReelProdBackupGateWorkerResult(
+        return ProductionBackupGateOperationWorkerResult(
             status="idle",
             recovered_operation_ids=recovered_operation_ids,
         )
@@ -207,7 +205,7 @@ def run_verireel_prod_backup_gate_operation_worker_once(
         lease_seconds=lease_seconds,
         heartbeat_seconds=heartbeat_seconds,
     )
-    return VeriReelProdBackupGateWorkerResult(
+    return ProductionBackupGateOperationWorkerResult(
         status="worked",
         operation_id=operation.operation_id,
         recovered_operation_ids=recovered_operation_ids,
@@ -215,14 +213,14 @@ def run_verireel_prod_backup_gate_operation_worker_once(
     )
 
 
-def reconcile_stale_verireel_prod_backup_gate_operation_records(
+def reconcile_stale_production_backup_gate_operation_records(
     *,
-    record_store: VeriReelProdBackupGateOperationWorkerStore,
-    max_attempts: int = DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+    record_store: ProductionBackupGateOperationWorkerStore,
+    max_attempts: int = DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
     now: str | None = None,
-) -> VeriReelProdBackupGateReconcileResult:
+) -> ProductionBackupGateOperationReconcileResult:
     if max_attempts < 1:
-        raise ValueError("VeriReel prod backup gate worker max_attempts must be positive.")
+        raise ValueError("Production backup gate worker max_attempts must be positive.")
     reconciled_at = now or _utc_now_timestamp()
     reconciled_operation_ids = (
         record_store.recover_expired_verireel_prod_backup_gate_operation_records(
@@ -231,34 +229,34 @@ def reconcile_stale_verireel_prod_backup_gate_operation_records(
             max_attempts=max_attempts,
         )
     )
-    return VeriReelProdBackupGateReconcileResult(reconciled_operation_ids=reconciled_operation_ids)
+    return ProductionBackupGateOperationReconcileResult(
+        reconciled_operation_ids=reconciled_operation_ids
+    )
 
 
-def run_verireel_prod_backup_gate_operation_worker_loop(
+def run_production_backup_gate_operation_worker_loop(
     *,
-    record_store: VeriReelProdBackupGateOperationWorkerStore,
+    record_store: ProductionBackupGateOperationWorkerStore,
     control_plane_root_path: Path,
     lease_owner: str,
-    lease_seconds: int = DEFAULT_VERIREEL_BACKUP_GATE_WORKER_LEASE_SECONDS,
-    heartbeat_seconds: int = DEFAULT_VERIREEL_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS,
-    max_attempts: int = DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
-    poll_seconds: int = DEFAULT_VERIREEL_BACKUP_GATE_WORKER_POLL_SECONDS,
-    error_backoff_seconds: int = DEFAULT_VERIREEL_BACKUP_GATE_WORKER_ERROR_BACKOFF_SECONDS,
-    max_consecutive_errors: int = DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_CONSECUTIVE_ERRORS,
+    lease_seconds: int = DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_LEASE_SECONDS,
+    heartbeat_seconds: int = DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS,
+    max_attempts: int = DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+    poll_seconds: int = DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_POLL_SECONDS,
+    error_backoff_seconds: int = DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_ERROR_BACKOFF_SECONDS,
+    max_consecutive_errors: int = DEFAULT_PRODUCTION_BACKUP_GATE_WORKER_MAX_CONSECUTIVE_ERRORS,
     stop_event: Event | None = None,
     max_iterations: int | None = None,
-    iteration_callback: Callable[[VeriReelProdBackupGateWorkerResult], None] | None = None,
-) -> VeriReelProdBackupGateWorkerLoopResult:
+    iteration_callback: Callable[[ProductionBackupGateOperationWorkerResult], None] | None = None,
+) -> ProductionBackupGateOperationWorkerLoopResult:
     if poll_seconds < 1:
-        raise ValueError("VeriReel prod backup gate worker poll_seconds must be positive.")
+        raise ValueError("Production backup gate worker poll_seconds must be positive.")
     if error_backoff_seconds < 1:
-        raise ValueError("VeriReel prod backup gate worker error_backoff_seconds must be positive.")
+        raise ValueError("Production backup gate worker error_backoff_seconds must be positive.")
     if max_consecutive_errors < 1:
-        raise ValueError(
-            "VeriReel prod backup gate worker max_consecutive_errors must be positive."
-        )
+        raise ValueError("Production backup gate worker max_consecutive_errors must be positive.")
     if max_iterations is not None and max_iterations < 1:
-        raise ValueError("VeriReel prod backup gate worker max_iterations must be positive.")
+        raise ValueError("Production backup gate worker max_iterations must be positive.")
     worker_stop_event = stop_event or Event()
     iterations = 0
     worked_count = 0
@@ -269,7 +267,7 @@ def run_verireel_prod_backup_gate_operation_worker_loop(
         if max_iterations is not None and iterations >= max_iterations:
             break
         try:
-            result = run_verireel_prod_backup_gate_operation_worker_once(
+            result = run_production_backup_gate_operation_worker_once(
                 record_store=record_store,
                 control_plane_root_path=control_plane_root_path,
                 lease_owner=lease_owner,
@@ -280,7 +278,7 @@ def run_verireel_prod_backup_gate_operation_worker_loop(
         except Exception:
             error_count += 1
             consecutive_errors += 1
-            logging.exception("VeriReel prod backup gate worker iteration failed.")
+            logging.exception("Production backup gate worker iteration failed.")
             if consecutive_errors >= max_consecutive_errors:
                 raise
             worker_stop_event.wait(timeout=float(error_backoff_seconds))
@@ -294,7 +292,7 @@ def run_verireel_prod_backup_gate_operation_worker_loop(
             continue
         idle_count += 1
         worker_stop_event.wait(timeout=float(poll_seconds))
-    return VeriReelProdBackupGateWorkerLoopResult(
+    return ProductionBackupGateOperationWorkerLoopResult(
         status="stopped" if worker_stop_event.is_set() else "completed",
         iterations=iterations,
         worked_count=worked_count,
@@ -303,16 +301,14 @@ def run_verireel_prod_backup_gate_operation_worker_loop(
     )
 
 
-def build_verireel_prod_backup_gate_operation_worker_status(
+def build_production_backup_gate_operation_worker_status(
     *,
-    record_store: VeriReelProdBackupGateOperationWorkerStore,
+    record_store: ProductionBackupGateOperationWorkerStore,
     now: str | None = None,
     recent_terminal_limit: int = 10,
-) -> VeriReelProdBackupGateWorkerStatus:
+) -> ProductionBackupGateOperationWorkerStatus:
     if recent_terminal_limit < 0:
-        raise ValueError(
-            "VeriReel prod backup gate worker recent_terminal_limit cannot be negative."
-        )
+        raise ValueError("Production backup gate worker recent_terminal_limit cannot be negative.")
     recorded_at = now or _utc_now_timestamp()
     active_records = record_store.list_verireel_prod_backup_gate_operation_records(
         statuses=("pending", "running")
@@ -330,7 +326,7 @@ def build_verireel_prod_backup_gate_operation_worker_status(
     stalled_count = sum(1 for summary in summaries if summary.lease_expired)
     pending_count = sum(1 for summary in summaries if summary.status == "pending")
     running_count = sum(1 for summary in summaries if summary.status == "running")
-    return VeriReelProdBackupGateWorkerStatus(
+    return ProductionBackupGateOperationWorkerStatus(
         status="stalled" if stalled_count else "ok",
         recorded_at=recorded_at,
         pending_count=pending_count,
@@ -346,7 +342,7 @@ def build_verireel_prod_backup_gate_operation_worker_status(
 
 def _execute_operation(
     *,
-    record_store: VeriReelProdBackupGateOperationWorkerStore,
+    record_store: ProductionBackupGateOperationWorkerStore,
     control_plane_root_path: Path,
     operation: VeriReelProdBackupGateOperationRecord,
     lease_owner: str,
@@ -383,7 +379,7 @@ def _execute_operation(
         )
         if marked_operation is None:
             logging.error(
-                "VeriReel prod backup gate operation %s lost its lease before backup execution.",
+                "Production backup gate operation %s lost its lease before backup execution.",
                 operation.operation_id,
             )
             return False
@@ -418,15 +414,7 @@ def _execute_operation(
                 record_progress=record_progress,
             )
         else:
-            worker_result = _run_delegated_worker(
-                control_plane_root=control_plane_root_path,
-                request=VeriReelProdBackupGateWorkerRequest(
-                    context=running_operation.context,
-                    instance=running_operation.instance,
-                    backup_record_id=running_operation.backup_record_id,
-                    timeout_seconds=running_operation.request.timeout_seconds,
-                ),
-            )
+            raise ProductionBackupProviderError("legacy_backup_execution_retired")
         backup_gate_record = _build_backup_gate_record(
             request=running_operation.request,
             worker_result=worker_result,
@@ -447,7 +435,7 @@ def _execute_operation(
         )
     except DurableOperationAuthorizationDeniedError as error:
         logging.warning(
-            "VeriReel prod backup gate operation %s was denied before provider mutation: %s",
+            "Production backup gate operation %s was denied before provider mutation: %s",
             operation.operation_id,
             error,
         )
@@ -470,15 +458,13 @@ def _execute_operation(
         )
     except Exception as error:
         logging.exception(
-            "VeriReel prod backup gate operation %s failed before producing a result.",
+            "Production backup gate operation %s failed before producing a result.",
             operation.operation_id,
         )
         error_code = (
-            (
-                str(error)
-                if isinstance(error, ProductionBackupProviderError)
-                else "backup_preflight_unavailable"
-            )
+            str(error)
+            if isinstance(error, ProductionBackupProviderError)
+            else "backup_preflight_unavailable"
             if operation.binding is not None
             else ""
         )
@@ -504,7 +490,7 @@ def _execute_operation(
         heartbeat_thread.join(timeout=max(float(heartbeat_seconds), 1.0))
     if heartbeat_lost_event.is_set():
         logging.error(
-            "VeriReel prod backup gate operation %s lost its lease before terminal write.",
+            "Production backup gate operation %s lost its lease before terminal write.",
             operation.operation_id,
         )
     return record_store.complete_verireel_prod_backup_gate_operation_with_backup_gate_record(
@@ -540,7 +526,7 @@ def _terminal_operation(
 
 def _start_heartbeat(
     *,
-    record_store: VeriReelProdBackupGateOperationWorkerStore,
+    record_store: ProductionBackupGateOperationWorkerStore,
     operation_id: str,
     lease_owner: str,
     lease_seconds: int,
@@ -568,7 +554,7 @@ def _start_heartbeat(
 
 def _heartbeat_loop(
     *,
-    record_store: VeriReelProdBackupGateOperationWorkerStore,
+    record_store: ProductionBackupGateOperationWorkerStore,
     operation_id: str,
     lease_owner: str,
     lease_seconds: int,
@@ -591,7 +577,7 @@ def _heartbeat_loop(
 
 def _lease_summary(
     *, record: VeriReelProdBackupGateOperationRecord, recorded_at: str
-) -> VeriReelProdBackupGateOperationLeaseSummary:
+) -> ProductionBackupGateOperationLeaseSummary:
     heartbeat_age_seconds: int | None = None
     if record.heartbeat_at:
         heartbeat_age_seconds = max(
@@ -607,7 +593,7 @@ def _lease_summary(
         and record.lease_expires_at
         and record.lease_expires_at < recorded_at
     )
-    return VeriReelProdBackupGateOperationLeaseSummary(
+    return ProductionBackupGateOperationLeaseSummary(
         operation_id=record.operation_id,
         product=record.product,
         context=record.context,

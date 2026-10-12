@@ -33,8 +33,8 @@ from control_plane.product_owner_setting import ProductOwnerIdentity, updated_pr
 from control_plane.release_review import build_release_review
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_promotion_backup import GENERIC_WEB_PROMOTION_BACKUP_ACTION
-from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
-    run_verireel_prod_backup_gate_operation_worker_once,
+from control_plane.workflows.production_backup_gate_operation_worker import (
+    run_production_backup_gate_operation_worker_once,
 )
 from tests.test_generic_web_promotion import (
     _ProductionProvider,
@@ -255,7 +255,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             # Real backup captures take longer than a second. Preserve ordering
             # for the two fast stub captures without a wall-clock sleep.
             patch(
-                "control_plane.workflows.verireel_prod_backup_gate_operation_worker._utc_now_timestamp",
+                "control_plane.workflows.production_backup_gate_operation_worker._utc_now_timestamp",
                 side_effect=lambda: datetime.now(UTC).isoformat(),
             ),
             patch(
@@ -270,7 +270,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 side_effect=BackupHost().run,
             ),
         ):
-            result = run_verireel_prod_backup_gate_operation_worker_once(
+            result = run_production_backup_gate_operation_worker_once(
                 record_store=self.store, control_plane_root_path=self.root, lease_owner="test"
             )
         self.assertTrue(result.terminal_write_committed)
@@ -819,7 +819,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.assertEqual(self.provider.deployed_artifacts, [])
 
     @patch(
-        "control_plane.workflows.verireel_prod_backup_gate_operation_worker._utc_now_timestamp",
+        "control_plane.workflows.production_backup_gate_operation_worker._utc_now_timestamp",
         side_effect=lambda: datetime.now(UTC).isoformat(),
     )
     def test_changed_notes_while_waiting_get_fresh_acceptance_and_backup(self, _clock: Any) -> None:

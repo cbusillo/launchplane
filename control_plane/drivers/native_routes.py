@@ -63,7 +63,6 @@ from control_plane.verireel_nonprod_http import (
     _VERIREEL_TESTING_DEPLOY_ROUTE,
 )
 from control_plane.verireel_prod_http import (
-    _VERIREEL_PROD_BACKUP_GATE_ROUTE,
     _VERIREEL_PROD_DEPLOY_ROUTE,
     _VERIREEL_PROD_PROMOTION_ROUTE,
     _VERIREEL_PROD_ROLLBACK_ROUTE,
@@ -103,7 +102,6 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         _VERIREEL_TESTING_DEPLOY_ROUTE.route_path,
         _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path,
         _VERIREEL_APP_MAINTENANCE_ROUTE.route_path,
-        _VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path,
         _VERIREEL_PROD_DEPLOY_ROUTE.route_path,
         _VERIREEL_PROD_PROMOTION_ROUTE.route_path,
         _VERIREEL_PROD_ROLLBACK_ROUTE.route_path,

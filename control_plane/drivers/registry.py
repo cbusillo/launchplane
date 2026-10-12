@@ -883,7 +883,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             capability_id="stable_promotion",
             label="Stable promotion",
             description="Capture backup evidence, promote testing to prod, and roll back prod to stored artifacts.",
-            actions=("prod_backup_gate", "prod_promotion", "prod_rollback"),
+            actions=("prod_promotion", "prod_rollback"),
             panels=("promotion_evidence", "backup_evidence"),
         ),
         DriverCapabilityDescriptor(
@@ -952,16 +952,6 @@ VERIREEL_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/verireel/prod-deploy",
             authz_action="verireel_prod_deploy.execute",
             writes_records=("deployment", "inventory", "release_tuple"),
-        ),
-        _action(
-            "prod_backup_gate",
-            "Capture prod backup gate",
-            "Capture backup evidence before a prod-changing action.",
-            safety="safe_write",
-            scope="instance",
-            route_path="/v1/drivers/verireel/prod-backup-gate",
-            authz_action="verireel_prod_backup_gate.execute",
-            writes_records=("backup_gate",),
         ),
         _action(
             "prod_promotion",
@@ -1086,6 +1076,8 @@ def list_driver_descriptors() -> tuple[DriverDescriptor, ...]:
 
 
 def instance_scoped_driver_authz_actions() -> frozenset[str]:
+    # The retired capture action still scopes historical grants and cancellation.
+    # Recognizing it here does not register an executable capture route.
     return frozenset(
         authz_action
         for descriptor in list_driver_descriptors()
@@ -1093,7 +1085,7 @@ def instance_scoped_driver_authz_actions() -> frozenset[str]:
         if action.scope == "instance"
         for authz_action in (action.authz_action, *action.alternate_authz_actions)
         if authz_action
-    )
+    ) | frozenset({"verireel_prod_backup_gate.execute"})
 
 
 def operational_readiness_driver_authz_actions() -> frozenset[str]:
