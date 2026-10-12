@@ -14,7 +14,11 @@ from control_plane.contracts.production_backup_gate import (
     ProductionBackupGateRequest,
     ProductionBackupGateWorkerRequest,
 )
-from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateWorkerResult
+from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.verireel_prod_backup_gate import (
+    VeriReelProdBackupGateRequest,
+    VeriReelProdBackupGateWorkerResult,
+)
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
@@ -202,4 +206,51 @@ def _execute_shared_production_backup(
         finished_at=result.finished_at,
         evidence=result.evidence,
         detail=result.error_code,
+    )
+
+
+def _build_backup_gate_record(
+    *,
+    request: VeriReelProdBackupGateRequest | ProductionBackupGateRequest,
+    worker_result: VeriReelProdBackupGateWorkerResult,
+) -> BackupGateRecord:
+    evidence = dict(worker_result.evidence)
+    if worker_result.snapshot_name and "snapshot_name" not in evidence:
+        evidence["snapshot_name"] = worker_result.snapshot_name
+    if worker_result.status == "fail" and worker_result.detail:
+        evidence.setdefault("error_message", worker_result.detail)
+    return BackupGateRecord(
+        record_id=request.backup_record_id,
+        context=request.context,
+        instance=request.instance,
+        created_at=worker_result.finished_at or utc_now_timestamp(),
+        source="launchplane-production-backup-gate"
+        if isinstance(request, ProductionBackupGateRequest)
+        else "launchplane-verireel-prod-backup-gate",
+        required=True,
+        status="pass" if worker_result.status == "pass" else "fail",
+        evidence=evidence,
+    )
+
+
+def _failed_backup_gate_record(
+    *,
+    request: VeriReelProdBackupGateRequest | ProductionBackupGateRequest,
+    error_message: str,
+    evidence: dict[str, str] | None = None,
+) -> BackupGateRecord:
+    return BackupGateRecord(
+        record_id=request.backup_record_id,
+        context=request.context,
+        instance=request.instance,
+        created_at=utc_now_timestamp(),
+        source="launchplane-production-backup-gate"
+        if isinstance(request, ProductionBackupGateRequest)
+        else "launchplane-verireel-prod-backup-gate",
+        required=True,
+        status="fail",
+        evidence={
+            **(evidence or {}),
+            **({"error_message": error_message} if error_message else {}),
+        },
     )
