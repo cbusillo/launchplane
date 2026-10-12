@@ -585,6 +585,12 @@ class ProductOnboardingTests(unittest.TestCase):
             rollback_payload_path = (
                 temporary_directory / "launchplane-self-deploy-rollback-payload.json"
             )
+            declared_env = {}
+            for key, value in cast(dict[str, object], rollback_step.data.get("env", {})).items():
+                if isinstance(value, str):
+                    resolved = value.replace("${{ runner.temp }}", str(temporary_directory))
+                    if "${{" not in resolved:
+                        declared_env[key] = resolved
 
             def render_rollback(operation: str) -> subprocess.CompletedProcess[str]:
                 output_file = temporary_directory / "github-output.txt"
@@ -597,6 +603,7 @@ class ProductOnboardingTests(unittest.TestCase):
                     env={
                         "PATH": os.environ["PATH"],
                         "HOME": str(temporary_directory),
+                        **declared_env,
                         "BOOTSTRAP_SECRET_OPERATION": operation,
                         "ORDINARY_AGENT_WORKERS": "preserve",
                         "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "absent",

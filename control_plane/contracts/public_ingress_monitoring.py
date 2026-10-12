@@ -119,13 +119,22 @@ PublicIngressTlsNameMatchSource = Literal["san", "subject", "none"]
 PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service", "profile_intent"]
 
 PUBLIC_TLS_EXPIRING_DAYS = 14
-PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS = 30 * 60
-PUBLIC_HTTP_STALE_AFTER_SECONDS = PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS
+PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS = 60
+TESTING_HEALTH_MONITOR_INTERVAL_SECONDS = 5 * 60
 PUBLIC_TLS_STALE_AFTER_SECONDS = 2 * 60 * 60
 PUBLIC_INGRESS_DEFAULT_REMINDER_INTERVAL_SECONDS = 6 * 60 * 60
 PUBLIC_INGRESS_MIN_REMINDER_INTERVAL_SECONDS = 15 * 60
 PUBLIC_INGRESS_MAX_REMINDER_INTERVAL_SECONDS = 7 * 24 * 60 * 60
 MONITOR_CADENCE_CHECK_PREFIX = "monitor-cadence:"
+
+
+def health_monitor_interval_seconds(instance: str) -> int:
+    """Stable testing lanes use the slower cadence; other lanes use production cadence."""
+    return (
+        TESTING_HEALTH_MONITOR_INTERVAL_SECONDS
+        if instance == "testing"
+        else PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS
+    )
 
 
 def monitored_check_identity(check_name: str) -> tuple[PublicIngressCheckKind, str] | None:

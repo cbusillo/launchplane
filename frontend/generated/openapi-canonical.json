@@ -12030,9 +12030,31 @@
             "title": "Completion Grace Seconds",
             "type": "integer"
           },
+          "instance": {
+            "default": "prod",
+            "enum": [
+              "prod",
+              "testing"
+            ],
+            "title": "Instance",
+            "type": "string"
+          },
           "interval_seconds": {
             "title": "Interval Seconds",
             "type": "integer"
+          },
+          "lane_changes": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/MonitorLaneChange"
+            },
+            "title": "Lane Changes",
+            "type": "array"
+          },
+          "lane_changes_truncated": {
+            "default": false,
+            "title": "Lane Changes Truncated",
+            "type": "boolean"
           },
           "next_end_slot": {
             "anyOf": [
@@ -19031,6 +19053,33 @@
           "completed_at"
         ],
         "title": "MonitorCompletionReceipt",
+        "type": "object"
+      },
+      "MonitorLaneChange": {
+        "properties": {
+          "completion": {
+            "$ref": "#/components/schemas/MonitorCompletionReceipt"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "completion"
+        ],
+        "title": "MonitorLaneChange",
         "type": "object"
       },
       "MonitorSlotEvidence": {
@@ -29032,6 +29081,46 @@
         "title": "ProductDesiredTopology",
         "type": "object"
       },
+      "ProductDisplayNameRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "display_name",
+          "reason"
+        ],
+        "title": "ProductDisplayNameRequest",
+        "type": "object"
+      },
       "ProductEnvironmentConfigStatus": {
         "additionalProperties": false,
         "properties": {
@@ -32796,7 +32885,8 @@
               "owner",
               "image-repository",
               "production-use",
-              "website-cleanup"
+              "website-cleanup",
+              "display-name"
             ],
             "title": "Field",
             "type": "string"
@@ -81343,6 +81433,7 @@
                 "additionalProperties": false,
                 "properties": {
                   "base_url": {
+                    "default": "",
                     "title": "Base Url",
                     "type": "string"
                   },
@@ -81387,7 +81478,6 @@
                   "product",
                   "context",
                   "instance",
-                  "base_url",
                   "reason"
                 ],
                 "title": "ProductStableLaneRepairRequest",
@@ -81571,6 +81661,137 @@
           }
         },
         "summary": "Read a Launchplane product profile"
+      }
+    },
+    "/v1/product-profiles/{product}/display-name": {
+      "post": {
+        "operationId": "apply_product_display_name",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductDisplayNameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Preview or change a product display name"
       }
     },
     "/v1/product-profiles/{product}/image-repository": {
@@ -81768,7 +81989,8 @@
                 "owner",
                 "image-repository",
                 "production-use",
-                "website-cleanup"
+                "website-cleanup",
+                "display-name"
               ],
               "title": "Field",
               "type": "string"
@@ -88855,6 +89077,20 @@
             }
           },
           {
+            "in": "query",
+            "name": "instance",
+            "required": false,
+            "schema": {
+              "default": "prod",
+              "enum": [
+                "prod",
+                "testing"
+              ],
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,
@@ -92343,6 +92579,7 @@
     "/v1/privileged-operations/plans/{operation_id}/approve": "approve_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
     "/v1/product-profiles/health-monitoring/apply": "apply_product_health_monitoring",
+    "/v1/product-profiles/{product}/display-name": "apply_product_display_name",
     "/v1/product-profiles/{product}/image-repository": "apply_product_image_repository",
     "/v1/product-profiles/{product}/owner": "apply_product_owner",
     "/v1/product-profiles/{product}/production-use": "apply_product_production_use",

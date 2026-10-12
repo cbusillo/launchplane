@@ -927,6 +927,7 @@ from control_plane.workflows.launchplane_self_deploy import (
     execute_launchplane_self_deploy,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.http_routes.product_display_name import register_product_display_name_routes
 from control_plane.http_routes.product_website_cleanup import (
     register_product_website_cleanup_routes,
 )
@@ -5362,6 +5363,7 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
         slots: Annotated[int, Query(ge=1, le=48)] = 6,
         end_slot: Annotated[int | None, Query(ge=0)] = None,
+        instance: Literal["prod", "testing"] = "prod",
     ) -> HealthMonitorStatusResponse:
         trace_id = next_trace_id()
         require_launchplane_service_read_authorization(identity=identity, trace_id=trace_id)
@@ -5378,6 +5380,7 @@ def create_launchplane_fastapi_app(
                 now=datetime.now(timezone.utc).timestamp(),
                 slots=slots,
                 end_slot=end_slot,
+                instance=instance,
             )
         except HealthMonitorSlotRangeError as error:
             raise _launchplane_http_error(
@@ -28879,6 +28882,10 @@ def create_launchplane_fastapi_app(
     )
 
     register_import_override_reconcile_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
+    )
+
+    register_product_display_name_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
 

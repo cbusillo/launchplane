@@ -1,18 +1,20 @@
 """Read bounded, persisted scheduler receipts without running the monitor."""
 
 from datetime import datetime, timezone
+from typing import Literal
 
 from pydantic import BaseModel
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.health_monitor_scheduler import (
-    MONITOR_COMPLETION_GRACE_SECONDS,
-    MONITOR_INTERVAL_SECONDS,
     MONITOR_RECEIPT_FINGERPRINT,
     _ROUTE,
     _SCOPE,
     monitor_slot,
+    monitor_key,
+    monitor_lane_key,
 )
+from control_plane.contracts.public_ingress_monitoring import health_monitor_interval_seconds
 from control_plane.storage.postgres import PostgresRecordStore
 
 
@@ -31,6 +33,13 @@ class MonitorSlotEvidence(BaseModel):
     healthy_report: MonitorCompletionReceipt | None
 
 
+class MonitorLaneChange(BaseModel):
+    product: str
+    context: str
+    instance: str
+    completion: MonitorCompletionReceipt
+
+
 class HealthMonitorStatus(BaseModel):
     observed_at: str
     interval_seconds: int
@@ -38,6 +47,9 @@ class HealthMonitorStatus(BaseModel):
     activation: MonitorCompletionReceipt | None
     slots: list[MonitorSlotEvidence]
     next_end_slot: int | None
+    instance: Literal["prod", "testing"] = "prod"
+    lane_changes: list[MonitorLaneChange] = []
+    lane_changes_truncated: bool = False
 
 
 class HealthMonitorStatusResponse(BaseModel):
@@ -65,25 +77,34 @@ def _receipt(record: LaunchplaneIdempotencyRecord | None) -> MonitorCompletionRe
 
 
 def read_health_monitor_status(
-    store: PostgresRecordStore, *, now: float, slots: int = 6, end_slot: int | None = None
+    store: PostgresRecordStore,
+    *,
+    now: float,
+    slots: int = 6,
+    end_slot: int | None = None,
+    instance: Literal["prod", "testing"] = "prod",
 ) -> HealthMonitorStatus:
-    current_slot = monitor_slot(now)
+    interval = health_monitor_interval_seconds(instance)
+    current_slot = monitor_slot(now, instance)
     last_slot = current_slot if end_slot is None else end_slot
     if not 1 <= slots <= 48 or not 0 <= last_slot <= current_slot:
         raise HealthMonitorSlotRangeError("Read at most 48 current or historical scheduler slots")
 
     def read(key: str) -> MonitorCompletionReceipt | None:
         return _receipt(
-            store.read_idempotency_record(scope=_SCOPE, route_path=_ROUTE, idempotency_key=key)
+            store.read_idempotency_record(
+                scope=_SCOPE, route_path=_ROUTE, idempotency_key=monitor_key(key, instance)
+            )
         )
 
     activation_record = store.read_idempotency_record(
-        scope=_SCOPE, route_path=_ROUTE, idempotency_key="enabled"
+        scope=_SCOPE, route_path=_ROUTE, idempotency_key=monitor_key("enabled", instance)
     )
     activation = _receipt(activation_record)
     activation_slot = (
         monitor_slot(
-            datetime.fromisoformat(activation_record.created_at.replace("Z", "+00:00")).timestamp()
+            datetime.fromisoformat(activation_record.created_at.replace("Z", "+00:00")).timestamp(),
+            instance,
         )
         if activation is not None and activation_record is not None
         else None
@@ -91,8 +112,8 @@ def read_health_monitor_status(
     first_slot = max(activation_slot or 0, last_slot - slots + 1)
     evidence = []
     for slot in range(last_slot, first_slot - 1, -1):
-        scheduled = slot * MONITOR_INTERVAL_SECONDS
-        deadline = scheduled + MONITOR_COMPLETION_GRACE_SECONDS
+        scheduled = slot * interval
+        deadline = scheduled + interval
         completion = read(str(slot))
         completed_seconds = (
             datetime.fromisoformat(completion.completed_at.replace("Z", "+00:00")).timestamp()
@@ -114,10 +135,33 @@ def read_health_monitor_status(
                 healthy_report=read(f"watch:{slot}:False"),
             )
         )
+    changes = []
+    for profile in store.list_product_profile_records():
+        for lane in profile.lanes:
+            if (lane.instance == "testing") != (instance == "testing"):
+                continue
+            receipt = _receipt(
+                store.read_idempotency_record(
+                    scope=_SCOPE,
+                    route_path=_ROUTE,
+                    idempotency_key="change:"
+                    + monitor_lane_key((profile.product, lane.context, lane.instance)),
+                )
+            )
+            if receipt is not None:
+                changes.append(
+                    MonitorLaneChange(
+                        product=profile.product,
+                        context=lane.context,
+                        instance=lane.instance,
+                        completion=receipt,
+                    )
+                )
+    changes.sort(key=lambda change: change.completion.completed_at, reverse=True)
     return HealthMonitorStatus(
         observed_at=_timestamp(now),
-        interval_seconds=MONITOR_INTERVAL_SECONDS,
-        completion_grace_seconds=MONITOR_COMPLETION_GRACE_SECONDS,
+        interval_seconds=interval,
+        completion_grace_seconds=interval,
         activation=activation,
         slots=evidence,
         next_end_slot=(
@@ -125,4 +169,7 @@ def read_health_monitor_status(
             if activation_slot is not None and first_slot > activation_slot and evidence
             else None
         ),
+        instance=instance,
+        lane_changes=changes[:48],
+        lane_changes_truncated=len(changes) > 48,
     )

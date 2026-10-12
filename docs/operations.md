@@ -1526,15 +1526,37 @@ rule counts, managed IDs and hashes, compact diffs, and redacted audit evidence;
 they do not echo workflow refs, human logins, Director-agent subjects, or the full
 policy body.
 
+### Lane Health Monitoring
+
 Lane health monitoring is Launchplane-owned synthetic monitoring for
 generic-web stable lanes, including drivers that inherit generic-web behavior.
-The Launchplane service owns the recurring schedule: it starts one run per
-30-minute UTC slot, polling every 30 seconds, independently of GitHub cron.
+The Launchplane service owns the recurring schedule: production lanes run in
+one-minute UTC slots and testing lanes in five-minute slots, independently of
+GitHub cron. Separate workers and renewed leases isolate the two cadences.
+Other declared stable-lane instances use the production cadence. Each scheduled
+batch runs at most 16 probes concurrently, retaining existing per-request
+timeouts and reusing the same bound for identity-confirmation retries. Manual
+runs retain sequential probing unless their caller explicitly selects concurrency.
 The service lifespan starts and stops the scheduler; DB-backed completion records
 survive restarts, and a renewed DB lease serializes replicas across slots.
 Shutdown cancels before the next probe or incident update and interrupts the
 runtime-identity confirmation wait. In-flight requests finish under their existing
 timeouts; cancelled batches do not count as completed scheduled runs.
+Committed product-profile, inventory/deploy, runtime-setting, secret-version,
+private-endpoint, route and provider-target changes wake the local scheduler.
+Five-second polling also detects changes committed by another process, including
+deploy-fence recovery. Only changed lanes are probed between scheduled runs.
+Persisted authority digests suppress duplicate change runs across replicas and
+restarts; a change during a probe remains due on the next pass. Sensor writes
+and scheduler receipts do not wake another probe. Probes retain their existing
+timeouts and the single runtime-identity confirmation wait, so a slow/failing
+batch can miss its deadline; expired evidence stays stale. Batch latency and
+polling drift can create stale intervals between completions: expiry is not
+extended to hide those gaps. Qualify actual completion latency and storage growth
+on the deployed service before starting a continuous-green observation clock.
+Probe leases expire after 30 seconds and renew every 10 seconds so a dead worker
+does not retain a production slot for two minutes. The watchdog reads lane
+profiles independently of the broader settings/secret authority digests.
 The service uses the same monitor, recorded lane intent, notification policies,
 and managed secrets as manual runs, with no caller credential or new grant.
 The `Public Ingress Monitor` workflow remains a manual admin rerun and best-effort
@@ -1544,16 +1566,18 @@ completion. They call `POST /v1/products/public-ingress-monitor/run-once` throug
 GitHub OIDC and are authorized in the Launchplane service context.
 
 A separate watchdog checks completion deadlines, including while a probe is
-blocked. Five minutes after a slot begins, an unfinished run opens a distinct
+blocked. One cadence interval after a slot begins, an unfinished run opens a distinct
 `monitor_run_missed` incident for each incident-eligible check; it does not claim
 that the site failed or replace a site's existing incident. Cadence incidents
 use `monitor-cadence:<kind>:<name>` check names and each underlying check's
 existing notification destinations, including narrowly check-scoped policies.
-A completed scheduled run resolves the cadence incident. The first activation
-gets a five-minute grace period; subsequent restarts check the persisted start
+A completed current scheduled run resolves the cadence incident. The first activation
+gets one cadence interval of grace; subsequent restarts check the persisted start
 and completion evidence before probing, so downtime does not reset the deadline.
-Completion records use mutation scope `launchplane:health-monitor-scheduler`,
-route `service:health-monitor-scheduler`, and the UTC epoch slot as idempotency key.
+Completion records use mutation scope `launchplane:health-monitor-scheduler:v2`
+and route `service:health-monitor-scheduler`; testing slot keys are namespaced
+separately. The v2 activation starts a new evidence epoch: older half-hour
+receipts remain in storage but cannot prove the faster schedule.
 Service logs identify completed and missed slots; incident and notification
 records show alert and recovery delivery.
 Watchdog reporting has its own renewed lease and DB-backed per-slot receipts,
@@ -1561,14 +1585,18 @@ so replicas and restarts share miss/recovery delivery state.
 
 Read persisted clock evidence with `GET /v1/service/health-monitor/status`
 under the [existing service-read authority](service-boundary.md). `slots` selects one to
-48 UTC half-hour slots (six by default), newest first; pass the returned
+48 UTC slots (six by default), newest first. `instance=prod` (default) reads
+the production cadence; `instance=testing` reads the testing cadence. Pass the returned
 `next_end_slot` as `end_slot` to read an earlier window across service restarts.
 Paging stops at the persisted activation slot; when activation is unavailable,
 no automatic continuation is offered. Explicit historical windows can still be
 requested, and missing activation is not proof the scheduler is disabled.
 The database-backed response includes activation, scheduled starts, completion
 deadlines, completion times and record IDs, on-time completion, and separate
-missed/healthy watchdog report receipts. A missing receipt is `null`, never
+missed/healthy watchdog report receipts. `lane_changes` provides the latest
+on-change completion for each lane, newest first, bounded to 48 entries with
+an explicit truncation flag; authority digests and settings are not returned.
+A missing receipt is `null`, never
 proof of completion or delivery. This GET starts no monitor or watchdog pass
 and changes no record. Other idempotency scopes, leases, keys and payloads are
 not exposed. A watchdog receipt proves its reporting callback completed; verify
@@ -2007,6 +2035,50 @@ product/runtime truth from checked-in catalogs.
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from the runner that executes the
 deploy workflow. Use a Launchplane `GET /v1/health` endpoint reachable from that
 runner rather than an internal-only provider hostname.
+
+After the self-deploy request leaves its legitimate release drain, the workflow
+allows the existing provider/worker stop budget while the old API still serves.
+Successful completion of the deploy request clears its outage window before
+replacement verification starts, preserving that worker/provider wait.
+The first API outage starts a two-minute observation window. When the forward
+deployment marker appears, image and health checks share its remaining deadline;
+if no outage was observed, that marker starts the window. This also handles a
+same-image redeploy. A continuously unavailable API during the request has that
+shorter limit, while successful draining responses reset it and preserve the
+full release-drain budget. In-flight requests are bounded; this is health-based
+failure detection, not evidence of container restarts or a startup cause.
+OIDC failures before sending a request and non-JSON ingress 404 route misses
+after a known pre-effect drain preserve that drain proof and its full wait.
+Gateway failures may follow a dispatched POST with a lost reply, so they start
+the short window and clear earlier drain proof. A later auth refusal cannot
+downgrade an already dispatched or uncertain attempt. These proof changes apply
+only to the opted-in self-deploy polling path. The alert and rollback share the same
+dispatch-proof decoder, including authentication refusals and a request that
+could not be prepared before any Launchplane attempt.
+A later authoritative `draining` response restores pre-effect proof because the
+server replays dispatched results. An unexpected decoder failure retains the
+existing conservative service-rollback attempt.
+After the forward marker is observed, a nearly expired window permits a bounded
+fifteen-second image confirmation and at least one health probe. Healthy results
+permit the same bounded allowance for each final identity check. Persistent
+unhealthiness does not restart the observation window. The Q197 window applies
+during startup migrations as well as ordinary startup; Compose's healthcheck
+schedule does not extend it.
+
+Before replacement, the workflow validates the already-approved existing
+Launchplane Discord sender supplied as `DISCORD_LAUNCHPLANE_WEBHOOK`. An absent
+or invalid sender stops before dispatch; bind that same sender through the
+approved workflow configuration before enabling this path. Do not generate a
+new sender or grant provider access. On a possibly dispatched replacement
+failure, the workflow reports the image, bounded HTTP/health results, run link
+and manual break-glass workflow link before attempting its existing service
+rollback. Explicit pre-effect refusals and an unfinished drain do not page for
+break-glass. The alert does not include response bodies, endpoint URLs or
+startup logs. Sending failures fail visibly without printing the webhook.
+When available, the previous image is included for the manual recovery input.
+The break-glass link opens manual dispatch; a pending protected approval exists
+only after an admin dispatches that recovery. No recovery is dispatched by the
+reporter, and manual break-glass credentials remain behind their approval gate.
 
 The manual Merge Train Policy Import workflow uses GitHub OIDC with
 `merge_train.policy_import` authority for product/context `launchplane`. It does

@@ -475,13 +475,18 @@ the policy recheck.
 
 The shared self-deploy route records a database admission fence before changing
 the provider. Its transaction lock also covers backup and Odoo release claims
-(including failure recovery) and generic-web release reservations. A Client can
+(including failure recovery), standalone Odoo testing target replacement claims,
+and generic-web release reservations. A Client can
 accept while replacement is preparing; that decision and pending steps remain
 durable, but no new release effect starts behind the fence. Operations admitted
 before it finish their admitted backup, deployment, drill, post-checks or
 compensation and commit normally. Separately queued Odoo compensation remains
 durable and resumes on replacement workers if it was not yet admitted. The API
-remains available during this drain. Completed step IDs
+remains available during this drain. Admitted standalone testing replacements
+also block dispatch until their terminal worker write commits; pending replacements
+wait for matching replacement startup, and old workers stay fenced. Testing
+replacements retain their existing lane ownership, authorization and uncertain-effect
+reconciliation rules. Production release and backup gates are unchanged. Completed step IDs
 are reused after replacement, so polling or a worker restart cannot duplicate
 their effects. The release read explains the pause; the engineering runtime read
 exposes `runtime.release_drain` and its running operation IDs.
@@ -589,6 +594,9 @@ both drivers, starts a separate replacement API process through its factory-stor
 lifespan and health read, reopens worker storage, resumes the drill once, and preserves failed
 forward outcomes after automatic recovery. PostgreSQL integration separately
 proves both admission-versus-drain race orders with real database locks.
+`tests.test_testing_replacement_redeploy` additionally signals a separate Odoo worker
+process during an admitted synthetic testing replacement and checks its terminal
+commit before self-deploy dispatch becomes available.
 The local rehearsal uses synthetic providers and SQLite; its API starts in a
 new process while the test reopens worker storage.
 
