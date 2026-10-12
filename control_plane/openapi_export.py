@@ -231,6 +231,7 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
         "apply_product_environment_config"
     ),
     "/v1/product-profiles/{product}/owner": "apply_product_owner",
+    "/v1/product-profiles/health-monitoring/apply": "apply_product_health_monitoring",
     "/v1/product-profiles/{product}/image-repository": "apply_product_image_repository",
     "/v1/product-profiles/{product}/production-use": "apply_product_production_use",
     "/v1/product-profiles/{product}/website-cleanup": "apply_product_website_cleanup",
