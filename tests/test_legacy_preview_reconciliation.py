@@ -27,6 +27,8 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewInventoryResult,
     GenericWebPreviewDestroyResult,
+    _build_preview_runtime_identity,
+    resolve_generic_web_preview_slug,
 )
 from control_plane.workflows.preview_lifecycle_cleanup import build_preview_lifecycle_cleanup_record
 from tests.http_app_test_support import _local_operator_bearer_config
@@ -207,8 +209,14 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(self.store.read_preview_record(self.preview.preview_id), changed)
 
-    async def test_historical_generations_survive_reconciliation(self) -> None:
-        generation = PreviewGenerationRecord(
+    def historical_generation(self) -> PreviewGenerationRecord:
+        slug = resolve_generic_web_preview_slug(
+            profile=self.profile,
+            preview_slug="",
+            anchor_pr_number=self.preview.anchor_pr_number,
+            label="Reconciliation",
+        )
+        return PreviewGenerationRecord(
             generation_id="historical-generation",
             preview_id=self.preview.preview_id,
             sequence=1,
@@ -217,6 +225,13 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
             requested_at=self.preview.created_at,
             finished_at=self.preview.created_at,
             resolved_manifest_fingerprint="historical-manifest",
+            runtime_identity=_build_preview_runtime_identity(
+                profile=self.profile,
+                preview_slug=slug,
+                image_reference="ghcr.io/example/site@sha256:" + "b" * 64,
+                anchor_head_sha="a" * 40,
+                deployed_at=self.preview.created_at,
+            ),
             anchor_summary=PreviewPullRequestSummary.model_validate(
                 {
                     "repo": self.profile.repository,
@@ -226,6 +241,9 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         )
+
+    async def test_historical_generations_survive_reconciliation(self) -> None:
+        generation = self.historical_generation()
         self.store.write_preview_generation_record(generation)
         self.store.write_preview_record(
             self.preview.model_copy(
@@ -247,6 +265,31 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.store.read_preview_generation_record(generation.generation_id), generation
         )
+
+    async def test_historical_runtime_for_another_preview_refuses_inspection(self) -> None:
+        generation = self.historical_generation()
+        assert generation.runtime_identity is not None
+        for field, value in (
+            ("product", "other-site"),
+            ("context", "other-preview-context"),
+            ("instance", "pr-2"),
+            ("preview_id", "pr-2"),
+        ):
+            with self.subTest(field=field):
+                changed = generation.model_copy(
+                    update={
+                        "runtime_identity": generation.runtime_identity.model_copy(
+                            update={field: value}
+                        )
+                    }
+                )
+                self.store.write_preview_generation_record(changed)
+                response = await self.call("inspect")
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id), self.preview
+                )
+                self.search.assert_not_called()
 
     async def test_authority_change_at_atomic_commit_refuses_apply(self) -> None:
         plan = await self.plan()
