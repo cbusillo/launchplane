@@ -33289,6 +33289,16 @@
             "title": "Environment",
             "type": "string"
           },
+          "health_provenance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DataProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "health_status": {
             "default": "skipped",
             "enum": [
