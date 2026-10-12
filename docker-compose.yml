@@ -3,6 +3,9 @@ services:
     image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
     pull_policy: always
     restart: unless-stopped
+    depends_on:
+      launchplane-browser:
+        condition: service_healthy
     # LAUNCHPLANE_DATABASE_URL reaches startup through .env, never command arguments.
     env_file:
       - .env
@@ -14,6 +17,7 @@ services:
       LAUNCHPLANE_SERVICE_HOST: 0.0.0.0
       LAUNCHPLANE_SERVICE_PORT: 8080
       LAUNCHPLANE_STATE_DIR: /app/runtime
+      LAUNCHPLANE_BROWSER_WS_ENDPOINT: ws://launchplane-browser:3000/
     healthcheck:
       test:
         - CMD
@@ -37,6 +41,43 @@ services:
     networks:
       - default
       - launchplane-external-network
+      - launchplane-browser-network
+
+  launchplane-browser:
+    image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
+    pull_policy: always
+    restart: unless-stopped
+    init: true
+    user: launchplane-browser
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    # No env_file, credential source, runtime volume, host socket or published port.
+    environment:
+      HOME: /tmp
+    command:
+      - /app/.venv/bin/playwright
+      - run-server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "3000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - 'import socket; socket.create_connection(("127.0.0.1", 3000), timeout=3).close()'
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - launchplane-browser-network
 
   launchplane-odoo-workers:
     image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
@@ -150,6 +191,7 @@ services:
       - launchplane-external-network
 
 networks:
+  launchplane-browser-network: {}
   launchplane-external-network:
     name: ${LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK:?Missing LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK}
     external: true

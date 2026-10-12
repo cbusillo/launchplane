@@ -4,20 +4,32 @@ from __future__ import annotations
 
 import json
 from http.client import HTTPException
+import hashlib
 import logging
+import os
 from pathlib import Path
 import re
+from secrets import randbelow
+import sys
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 from typing import Literal
 from typing import cast
+from typing import Protocol
 
 import click
-from playwright.sync_api import Page, expect, sync_playwright
+from playwright.sync_api import (
+    Browser,
+    BrowserType,
+    Page,
+    expect,
+    sync_playwright,
+)
 
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence, ReleaseStatus
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebPostDeployContext,
@@ -33,8 +45,63 @@ from control_plane.workflows.verireel_app_maintenance import (
     execute_verireel_app_maintenance,
 )
 from control_plane.workflows.verireel_rollout import fetch_url_text
+from control_plane.provider_operations import ProviderMutationUnknownError
 
 _LOGGER = logging.getLogger(__name__)
+MAX_TRANSIENT_QUALIFICATION_ATTEMPTS = 3
+
+
+class TestingProductCheckFailed(click.ClickException):
+    pass
+
+
+class TestingQualificationInventoryStore(Protocol):
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory: ...
+
+
+def previous_transient_attempts(store: object, context: GenericWebPostDeployContext) -> int:
+    try:
+        inventory = cast(TestingQualificationInventoryStore, store).read_environment_inventory(
+            context_name=context.context, instance_name=context.instance
+        )
+    except FileNotFoundError:
+        return 0
+    if (
+        inventory.artifact_identity is None
+        or inventory.artifact_identity.artifact_id != context.artifact_id
+        or inventory.source_git_ref != context.source_git_ref
+        or inventory.post_deploy_update.evidence.get("failure_kind") != "transient"
+    ):
+        return 0
+    return int(inventory.post_deploy_update.evidence.get("transient_attempts", "0"))
+
+
+def fixture_email(deployment_record_id: str) -> str:
+    return f"e2e-{hashlib.sha256(deployment_record_id.encode()).hexdigest()[:24]}@example.com"
+
+
+def launch_testing_browser(chromium: BrowserType) -> Browser:
+    endpoint = os.environ.get("LAUNCHPLANE_BROWSER_WS_ENDPOINT", "").strip()
+    if endpoint:
+        return chromium.connect(endpoint)
+    if sys.platform == "linux":
+        raise click.ClickException("Testing verification needs the isolated browser service.")
+    environment: dict[str, str | float | bool] = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+    }
+    return chromium.launch(chromium_sandbox=True, env=environment)
+
+
+def checkpoint_testing_effect(guard: GenericWebPostDeployGuard, phase: str) -> None:
+    try:
+        guard.checkpoint_effect(phase)
+    except Exception as error:
+        raise ProviderMutationUnknownError(
+            "Testing qualification lost its effect fence."
+        ) from error
 
 
 def recorded_verireel_testing_qualification(
@@ -64,6 +131,12 @@ def recorded_verireel_testing_qualification(
         record.post_deploy_update.status == "fail"
         and evidence.get("authority_digest") == authority_digest
     ):
+        if (
+            evidence.get("failure_kind") == "transient"
+            and evidence.get("cleanup_status") != "fail"
+            and int(evidence.get("transient_attempts", "0")) < MAX_TRANSIENT_QUALIFICATION_ATTEMPTS
+        ):
+            return "missing"
         return "fail"
     if record.post_deploy_update.status == "pass" and all(
         evidence.get(key) == "pass"
@@ -118,7 +191,7 @@ def assert_verireel_testing_identity(base_url: str, context: GenericWebPostDeplo
             }.items()
         )
     ):
-        raise click.ClickException("Testing runtime does not match this exact deployment.")
+        raise TestingProductCheckFailed("Testing runtime does not match this exact deployment.")
 
 
 def wait_for_verireel_testing_identity(
@@ -129,8 +202,17 @@ def wait_for_verireel_testing_identity(
         try:
             assert_verireel_testing_identity(base_url, context)
             return
-        except (click.ClickException, HTTPError, URLError, HTTPException, TimeoutError, ValueError):
+        except (
+            click.ClickException,
+            HTTPError,
+            URLError,
+            HTTPException,
+            OSError,
+            ValueError,
+        ) as error:
             if time.monotonic() >= deadline:
+                if isinstance(error, TestingProductCheckFailed):
+                    raise
                 raise click.ClickException("Testing did not start this exact deployment in time.")
             time.sleep(min(2, max(0, deadline - time.monotonic())))
 
@@ -139,6 +221,7 @@ def _maintenance(
     root: Path,
     context: GenericWebPostDeployContext,
     guard: GenericWebPostDeployGuard,
+    *,
     action: VeriReelAppMaintenanceAction,
     intent: VeriReelAppMaintenanceIntent,
     email: str = "",
@@ -147,7 +230,7 @@ def _maintenance(
     _, application_id = _resolve_stable_testing_application(control_plane_root=root)
     if application_id != context.target_id:
         raise click.ClickException("Testing maintenance target changed during deployment.")
-    guard.checkpoint_effect(f"post_deploy_{action}")
+    checkpoint_testing_effect(guard, f"post_deploy_{action}")
     result = execute_verireel_app_maintenance(
         control_plane_root=root,
         request=VeriReelAppMaintenanceRequest.model_validate(
@@ -167,16 +250,18 @@ def _maintenance(
 def _goto(page: Page, base_url: str, path: str) -> None:
     response = page.goto(f"{base_url}{path}", wait_until="domcontentloaded")
     if response is None or response.status >= 400:
-        raise click.ClickException("Testing product route failed.")
+        raise TestingProductCheckFailed("Testing product route failed.")
     if urlparse(page.url).netloc != urlparse(base_url).netloc:
-        raise click.ClickException("Testing product route left the recorded origin.")
+        raise TestingProductCheckFailed("Testing product route left the recorded origin.")
 
 
 def verification_path(base_url: str, href: str) -> str:
     base = urlparse(base_url)
     link = urlparse(urljoin(f"{base_url}/", href))
     if (link.scheme, link.netloc) != (base.scheme, base.netloc) or not link.path.startswith("/v/"):
-        raise click.ClickException("Testing QR did not expose a verification path on this lane.")
+        raise TestingProductCheckFailed(
+            "Testing QR did not expose a verification path on this lane."
+        )
     return link.path + (f"?{link.query}" if link.query else "")
 
 
@@ -188,12 +273,13 @@ def verify_verireel_testing_product(
     evidence: dict[str, str],
 ) -> None:
     stamp = uuid4().hex
-    email = f"e2e-{stamp}@example.com"
+    email = fixture_email(context.deployment_record_id)
+    evidence["fixture_email"] = email
     public_label = f"Launchplane testing {stamp}"
     destination = f"https://example.com/watch/{stamp}"
     # A disposable application fixture only; no operator credential is created.
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+        browser = launch_testing_browser(playwright.chromium)
         try:
             with browser.new_context() as browser_context:
                 page = browser_context.new_page()
@@ -204,8 +290,10 @@ def verify_verireel_testing_product(
                     page.wait_for_load_state("networkidle")
                     page.get_by_label("Creator name").fill("Launchplane testing")
                     page.get_by_label("Email").fill(email)
-                    page.get_by_placeholder("Create a strong password").fill("Quartz!Canopy$79M")
-                    guard.checkpoint_effect("post_deploy_fixture_signup")
+                    page.get_by_placeholder("Create a strong password").fill(
+                        "Quartz!Canopy$" + "-".join(str(randbelow(10)) for _ in range(18))
+                    )
+                    checkpoint_testing_effect(guard, "post_deploy_fixture_signup")
                     page.get_by_role(
                         "button", name=re.compile("create account and choose a plan", re.I)
                     ).click()
@@ -214,26 +302,31 @@ def verify_verireel_testing_product(
                     # Exercise creator denial before turning this fixture into an admin.
                     for path in ("/site-config", "/site-config/billing"):
                         _goto(page, base_url, path)
-                        if urlparse(page.url).path == path:
-                            raise click.ClickException("Creator reached a protected admin route.")
+                        if urlparse(page.url).path in {path, "/sign-in", "/sign-up"}:
+                            raise TestingProductCheckFailed(
+                                "Creator admin denial did not preserve its session."
+                            )
+                        expect(page.get_by_text(email, exact=False).first).to_be_visible(
+                            timeout=30_000
+                        )
                     _maintenance(
                         root,
                         context,
                         guard,
-                        "grant-sponsored",
-                        "stable-testing-remote-e2e-grant-sponsored",
-                        email,
+                        action="grant-sponsored",
+                        intent="stable-testing-remote-e2e-grant-sponsored",
+                        email=email,
                     )
                     _goto(page, base_url, "/dashboard")
                     page.get_by_label("Video label").fill(f"Launchplane creator {stamp}")
                     page.get_by_label("Public verification label").fill(public_label)
                     page.get_by_label("Destination URL").fill(destination)
-                    guard.checkpoint_effect("post_deploy_fixture_qr")
+                    checkpoint_testing_effect(guard, "post_deploy_fixture_qr")
                     page.get_by_role(
                         "button", name=re.compile("create verification qr", re.I)
                     ).click()
                     link = page.locator("a[href*='/v/']").last
-                    expect(link).to_be_visible()
+                    expect(link).to_be_visible(timeout=30_000)
                     href = link.get_attribute("href") or ""
                     # Only this fixture's QR can qualify; never inspect another user's record.
                     path = verification_path(base_url, href)
@@ -241,26 +334,50 @@ def verify_verireel_testing_product(
                         public_page = public_context.new_page()
                         public_page.set_default_timeout(30_000)
                         _goto(public_page, base_url, path)
-                        expect(public_page.get_by_text(public_label, exact=False)).to_be_visible()
+                        expect(public_page.get_by_text(public_label, exact=False)).to_be_visible(
+                            timeout=30_000
+                        )
                         expect(
                             public_page.get_by_role("link", name=destination, exact=True)
-                        ).to_be_visible()
+                        ).to_be_visible(timeout=30_000)
                     assert_verireel_testing_identity(base_url, context)
                     evidence["creator_verification_status"] = "pass"
                     _maintenance(
-                        root, context, guard, "promote-owner", "owner-route-promote-owner", email
+                        root,
+                        context,
+                        guard,
+                        action="promote-owner",
+                        intent="owner-route-promote-owner",
+                        email=email,
                     )
                     for path in ("/site-config", "/site-config/billing"):
                         _goto(page, base_url, path)
                         if urlparse(page.url).path != path:
-                            raise click.ClickException("Admin could not reach the protected route.")
+                            raise TestingProductCheckFailed(
+                                "Admin could not reach the protected route."
+                            )
+                        heading = (
+                            "controls and defaults"
+                            if path == "/site-config"
+                            else "billing diagnostics"
+                        )
+                        expect(
+                            page.get_by_role(
+                                "heading", name=re.compile(rf"(Admin|Owner) {heading}", re.I)
+                            )
+                        ).to_be_visible(timeout=30_000)
                         assert_verireel_testing_identity(base_url, context)
                     evidence["admin_verification_status"] = "pass"
                 finally:
                     # The existing cleanup intent also removes sponsored creator fixtures.
                     evidence["cleanup_status"] = "fail"
                     _maintenance(
-                        root, context, guard, "delete-user", "owner-route-delete-user", email
+                        root,
+                        context,
+                        guard,
+                        action="delete-user",
+                        intent="owner-route-delete-user",
+                        email=email,
                     )
                     evidence["cleanup_status"] = "pass"
         finally:
@@ -298,12 +415,15 @@ def execute_verireel_testing_post_deploy(
         ):
             raise click.ClickException("VeriReel qualification requires its recorded testing lane.")
         evidence["authority_digest"] = testing_qualification_authority(record_store, context)
+        evidence["fixture_email"] = fixture_email(context.deployment_record_id)
         base_url = _resolve_stable_testing_base_url(control_plane_root=control_plane_root)
         phase = "runtime_identity"
         wait_for_verireel_testing_identity(base_url, context)
         phase = "migration"
         evidence["migration_status"] = "fail"
-        _maintenance(control_plane_root, context, guard, "migrate", "stable-testing-migration")
+        _maintenance(
+            control_plane_root, context, guard, action="migrate", intent="stable-testing-migration"
+        )
         evidence["migration_status"] = "pass"
         phase = "product_verification"
         evidence["creator_verification_status"] = "fail"
@@ -324,11 +444,22 @@ def execute_verireel_testing_post_deploy(
             )
         status = "pass"
         detail = "Testing migrations and creator/admin verification passed; fixture removed."
+    except ProviderMutationUnknownError:
+        raise
     except Exception as error:
         _LOGGER.warning(
             "VeriReel testing qualification failed in %s (%s)", phase, type(error).__name__
         )
         status = "fail"
+        evidence["failure_kind"] = (
+            "product_check"
+            if isinstance(error, TestingProductCheckFailed) or evidence["cleanup_status"] == "fail"
+            else "transient"
+        )
+        if evidence["failure_kind"] == "transient":
+            evidence["transient_attempts"] = str(
+                previous_transient_attempts(record_store, context) + 1
+            )
         detail = f"Testing qualification failed in {phase}; no passing qualification is recorded."
     evidence["finished_at"] = utc_now_timestamp()
     return PostDeployUpdateEvidence(attempted=True, status=status, detail=detail, evidence=evidence)

@@ -24,6 +24,9 @@ from control_plane.workflows.verireel_testing_post_deploy import (
     verify_verireel_testing_product,
     wait_for_verireel_testing_identity,
     verification_path,
+    launch_testing_browser,
+    fixture_email,
+    checkpoint_testing_effect,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 
@@ -99,7 +102,7 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
     def test_migration_runs_before_product_verification_and_binds_evidence(self) -> None:
         events: list[str] = []
 
-        def migrate(*args: object) -> None:
+        def migrate(*_args: object, **_kwargs: object) -> None:
             events.append("migration")
 
         def verify(*args: object) -> None:
@@ -171,9 +174,95 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(self.execute().status, "fail")
-            self.context = context("prod")
+        maintain.assert_not_called()
+
+    def test_production_lane_is_refused_before_identity_reads_or_maintenance(self) -> None:
+        from control_plane.contracts.product_profile_record import ProductLaneProfile
+
+        profile = self.store.read_product_profile_record.return_value
+        self.store.read_product_profile_record.return_value = profile.model_copy(
+            update={
+                "lanes": (*profile.lanes, ProductLaneProfile(context="verireel", instance="prod")),
+            }
+        )
+        self.context = context("prod")
+        with (
+            patch("control_plane.workflows.verireel_testing_post_deploy._maintenance") as maintain,
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.wait_for_verireel_testing_identity"
+            ) as identity,
+        ):
             self.assertEqual(self.execute().status, "fail")
         maintain.assert_not_called()
+        identity.assert_not_called()
+
+    def test_remote_browser_receives_no_control_plane_credentials(self) -> None:
+        chromium = Mock()
+        endpoint = "ws://browser.example.test:3000/"
+        with patch.dict(
+            "os.environ",
+            {
+                "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "private-fixture",
+                "LAUNCHPLANE_BROWSER_WS_ENDPOINT": endpoint,
+            },
+        ):
+            launch_testing_browser(chromium)
+        chromium.connect.assert_called_once_with(endpoint)
+        chromium.launch.assert_not_called()
+
+    def test_linux_refuses_to_render_inside_the_credentialed_service(self) -> None:
+        chromium = Mock()
+        with (
+            patch.dict("os.environ", {"LAUNCHPLANE_BROWSER_WS_ENDPOINT": ""}),
+            patch("control_plane.workflows.verireel_testing_post_deploy.sys.platform", "linux"),
+        ):
+            with self.assertRaises(click.ClickException):
+                launch_testing_browser(chromium)
+        chromium.launch.assert_not_called()
+
+    def test_lost_lease_is_an_unknown_effect_instead_of_a_cached_failure(self) -> None:
+        from control_plane.provider_operations import ProviderMutationUnknownError
+
+        with self.assertRaises(ProviderMutationUnknownError):
+            checkpoint_testing_effect(
+                GenericWebPostDeployGuard(
+                    provider_effect_checkpoint=Mock(side_effect=RuntimeError("lease lost")),
+                ),
+                "post_deploy_fixture_signup",
+            )
+
+    def test_fixture_identity_is_available_even_if_cleanup_cannot_continue(self) -> None:
+        browser = MagicMock()
+        page = browser.new_context.return_value.__enter__.return_value.new_page.return_value
+        page.wait_for_load_state.side_effect = RuntimeError("signup failed")
+        evidence: dict[str, str] = {}
+        with (
+            patch("control_plane.workflows.verireel_testing_post_deploy.sync_playwright"),
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.launch_testing_browser",
+                return_value=browser,
+            ),
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy.assert_verireel_testing_identity"
+            ),
+            patch("control_plane.workflows.verireel_testing_post_deploy._goto"),
+            patch(
+                "control_plane.workflows.verireel_testing_post_deploy._maintenance",
+                side_effect=click.ClickException("cleanup failed"),
+            ),
+        ):
+            with self.assertRaises(click.ClickException):
+                verify_verireel_testing_product(
+                    Path("."),
+                    self.context,
+                    GenericWebPostDeployGuard(),
+                    "https://video.test",
+                    evidence,
+                )
+        self.assertEqual(
+            evidence["fixture_email"], fixture_email(self.context.deployment_record_id)
+        )
+        self.assertEqual(evidence["cleanup_status"], "fail")
 
     def test_startup_connection_close_is_polled_before_any_mutation(self) -> None:
         with (
@@ -244,6 +333,6 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
                     "https://video.test",
                     evidence,
                 )
-        self.assertEqual(maintain.call_args.args[3], "delete-user")
+        self.assertEqual(maintain.call_args.kwargs["action"], "delete-user")
         self.assertEqual(evidence["cleanup_status"], "pass")
         browser.close.assert_called_once()

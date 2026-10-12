@@ -147,7 +147,12 @@ reservation. The webhook request never waits on a deploy.
     artifact to run the testing-only post-deploy extension. Passing qualification
     then stops at `already_deployed`. A failed qualification with unchanged
     stored lane authority remains failed; a supported configuration repair can
-    permit a fresh attempt. Interrupted effects retain the existing provider
+    permit a fresh attempt. Transient infrastructure failures get bounded fresh
+    attempts through the same deploy lifecycle. A cleanup failure remains failed,
+    with the reserved fixture email recorded for the existing maintenance cleanup
+    intent. An administrator can retry the exact verified artifact using the
+    existing testing deploy surface after resolving the recorded failure; no grant
+    is added for a retry. Interrupted effects retain the existing provider
     reservation and generic-web recovery path. No new caller capability or
     product-repository call-in is involved. Production and rollback do not select
     this extension.

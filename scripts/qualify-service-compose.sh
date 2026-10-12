@@ -72,11 +72,13 @@ DOCKER_IMAGE_REFERENCE="$image" LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK=unused-fixt
   jq --arg image "$image" --arg postgres_image "$postgres_image" --arg env_file "$fixture_dir/.env" '
     {services: (.services | with_entries(select(.key == "launchplane" or
       .key == "launchplane-odoo-workers" or .key == "launchplane-verireel-workers" or
-      .key == "launchplane-ordinary-agent-workers") |
+      .key == "launchplane-ordinary-agent-workers" or .key == "launchplane-browser") |
       .value.image = $image | .value.pull_policy = "never" | .value.restart = "no" |
       .value.deploy.replicas = 1 |
-      .value.env_file = [$env_file] | .value.networks = ["qualification"] |
-      .value.environment.DOCKER_IMAGE_REFERENCE = $image)),
+      .value.networks = ["qualification"] |
+      if .key == "launchplane-browser" then . else
+        .value.env_file = [$env_file] | .value.environment.DOCKER_IMAGE_REFERENCE = $image
+      end)),
       volumes: .volumes, networks: {qualification: {internal: true}}} |
     .services.postgres = {
       image: $postgres_image, pull_policy: "never", networks: ["qualification"],
