@@ -68,7 +68,11 @@ rehearsal's containers, anonymous volumes and network. The workflow also runs
 always-cleanup using the exact current job's resource label, covering forced
 termination without sweeping other jobs' resources. Qualification uses its own
 temporary registry config and removes it; persistent runner credentials stay
-untouched. The job summary retains the safe result, never the snapshot.
+untouched. Qualification and the mandatory gate use the same job-token login
+and fresh Docker context; the existing image-build login is unchanged. Verify
+that this context reaches the actual deployment runner's intended Docker daemon.
+A passing rehearsal on a different daemon cannot qualify that runner. The job
+summary retains the safe result, never the snapshot.
 
 Snapshots expire after five minutes. The shared workflow wrapper bounds image
 pulls and the complete rehearsal to 240 seconds, then allows 15 seconds before
@@ -87,7 +91,8 @@ default branch with `stored_record_preflight_only=true` and an immutable
 job authenticates the existing image read, fetches the supported scrubbed export
 and runs the rehearsal on the actual deploy runner. Both deployment jobs are
 excluded in this mode. Verify its per-family counts, bounds and successful
-runner result before routing the mandatory deploy gate PR. A refused read is
+runner result before routing the mandatory deploy gate PR. Qualification and
+manual deploys validate the same bootstrap image repository and immutable digest. A refused read is
 reported as missing standing authority; this mode creates no new grant. Landing both in one batch would require a route the old service lacks.
 This ordered capability rollout supplies a supported way to keep deploying.
 

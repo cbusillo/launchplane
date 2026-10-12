@@ -20,7 +20,9 @@ network="$project"
 database="$project-db"
 candidate="$project-candidate"
 owner="${LAUNCHPLANE_PREFLIGHT_OWNER:-$project}"
-owner_label="launchplane.stored-record-preflight.owner=$owner"
+# shellcheck source=scripts/deploy/preflight-resource-owner.sh
+source "$(dirname "${BASH_SOURCE[0]}")/preflight-resource-owner.sh"
+owner_label="$(preflight_owner_label "$owner")"
 cleanup() {
   docker rm -fv "$candidate" "$database" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true

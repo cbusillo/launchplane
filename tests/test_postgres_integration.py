@@ -1325,6 +1325,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         from control_plane.stored_record_preflight import check_restored_records, restore_snapshot
         from control_plane.storage.postgres import LaunchplaneAuthzPolicyRow
         from tests.support.profiles import product_profile_payload
+        from tests.test_postgres_store import _merge_train_run_record
         from pydantic import ValidationError
 
         with _store_for_fresh_head_database() as source:
@@ -1353,6 +1354,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             source.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(profile)
             )
+            source.write_merge_train_run_record(_merge_train_run_record())
             with source._engine.begin() as connection:
                 payload = source.list_authz_policy_records()[0].model_dump(mode="json")
                 del payload["policy"]["github_actions"][0]["instances"]
@@ -1366,6 +1368,11 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 target = PostgresRecordStore(database_url=target_url)
                 self.addCleanup(target.close)
                 self.assertEqual(revision, target.schema_revision())
+                restored_run = target.list_merge_train_run_records()[0]
+                self.assertNotEqual(
+                    restored_run.selected_pr_number,
+                    source.list_merge_train_run_records()[0].selected_pr_number,
+                )
                 with TemporaryDirectory() as directory:
                     check_restored_records(target, state_dir=Path(directory))
                     with patch(
