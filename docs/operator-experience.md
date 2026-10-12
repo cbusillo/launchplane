@@ -618,6 +618,11 @@ diff. **Apply no-website cleanup** atomically clears lane base/health URLs,
 disables and clears public HTTP checks, and records the existing
 `public_website=none` fact. Private endpoints/checks, Client, production use,
 release holds, provider records and historical observations are preserved.
+Withdraw only obsolete URLs: these fields also supply release testing links,
+URL-based public promotion probes, Odoo URL-based diagnostics and ingress route
+edits. Private endpoints remain the source for private monitoring. This control
+does not introduce a private production-promotion adapter; existing gated-release
+readiness remains a separate requirement before releasing a private product.
 Private failures, identity mismatch, incidents and expired evidence still block
 green. This is a profile declaration, not a runtime setting or deployment.
 

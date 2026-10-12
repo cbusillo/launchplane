@@ -11,7 +11,11 @@ from control_plane.product_website_cleanup import (
     build_website_cleanup,
 )
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
-from control_plane.storage.postgres import PostgresRecordStore, ProductProfileCompareWriteResult
+from control_plane.storage.postgres import (
+    DbOnlyMutationPreflightResult,
+    PostgresRecordStore,
+    ProductProfileCompareWriteResult,
+)
 from tests.http_app_test_support import (
     _RejectingVerifier,
     _AsgiResponse,
@@ -150,6 +154,22 @@ class WebsiteCleanupHttpTests(unittest.IsolatedAsyncioTestCase):
         replay = await self.post(body, "cleanup")
         self.assertTrue(replay.json()["replayed"])
         self.assertEqual(replay.json()["original_trace_id"], applied.json()["trace_id"])
+        # Simulate the original commit arriving after the retry's first preflight.
+        original_preflight = self.store.prepare_db_only_mutation
+        calls = 0
+
+        def late_commit(**kwargs: Any) -> DbOnlyMutationPreflightResult:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return DbOnlyMutationPreflightResult(status="missing")
+            return original_preflight(**kwargs)
+
+        with patch.object(self.store, "prepare_db_only_mutation", side_effect=late_commit):
+            late_replay = await self.post(body, "cleanup")
+        self.assertEqual(late_replay.status_code, 202, late_replay.text)
+        self.assertTrue(late_replay.json()["replayed"])
+        self.assertEqual(late_replay.json()["original_trace_id"], applied.json()["trace_id"])
         conflict = await self.post({**body, "reason": "Different request"}, "cleanup")
         self.assertEqual(conflict.json()["error"]["code"], "idempotency_key_reused")
         for field, key, expected in (

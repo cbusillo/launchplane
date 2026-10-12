@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-for (const outcome of ["applied", "lost-response", "stale", "denied", "storage-failure"] as const) {
+for (const outcome of ["applied", "lost-response", "lost-response-stale", "stale", "denied", "storage-failure"] as const) {
   test(`No-website cleanup ${outcome}: reviewed atomic request and recovery @responsive`, async ({ page }, testInfo) => {
     await page.goto("/ui/products/atlas-commerce?fixture=products");
     const { products, fixtureIdentity } = await page.evaluate(async () => {
@@ -32,11 +32,11 @@ for (const outcome of ["applied", "lost-response", "stale", "denied", "storage-f
       }
       if (body.mode === "apply") {
         sent.push({ key: route.request().headers()["idempotency-key"], body });
-        if (outcome === "stale") {
+        if (outcome === "stale" || outcome === "lost-response-stale" && sent.length > 1) {
           await route.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "stale", message: "Profile changed. Preview again." } } }); return;
         }
         publicWebsite = "none";
-        if (outcome === "lost-response") { await route.abort("failed"); return; }
+        if (outcome === "lost-response" || outcome === "lost-response-stale") { await route.abort("failed"); return; }
       }
       await route.fulfill({ status: 202, json: { status: "accepted", trace_id: "cleanup", records: { product_profile: "atlas-commerce" }, result: {
         product: "atlas-commerce", public_website_after: "none", changed: true,
@@ -90,10 +90,22 @@ for (const outcome of ["applied", "lost-response", "stale", "denied", "storage-f
     if (outcome === "stale") {
       await expect(panel).toContainText("Profile changed. Preview again.");
       await expect(preview).toBeEnabled();
-    } else if (outcome === "lost-response") {
+      await expect(apply).toBeDisabled();
+    } else if (outcome === "lost-response" || outcome === "lost-response-stale") {
       await expect(preview).toBeDisabled();
+      if (outcome === "lost-response-stale") {
+        await panel.getByRole("button", { name: "Retry original cleanup", exact: true }).click();
+        await expect(panel).toContainText("Profile changed. Preview again.");
+        await expect(preview).toBeDisabled();
+        await expect(panel.getByLabel("Change reason")).toBeDisabled();
+        expect(sent[1]).toEqual(sent[0]);
+      }
       // Lost reviewed draft must still recover only through a completed receipt.
-      await page.evaluate(() => sessionStorage.removeItem("launchplane:product-profile-draft:atlas-commerce:website-cleanup"));
+      await page.evaluate(() => {
+        const keys = Object.keys(sessionStorage).filter(key => key.startsWith("launchplane:product-profile-draft:") && key.endsWith(":website-cleanup"));
+        if (keys.length !== 1) throw new Error("The reviewed cleanup draft was not preserved before Apply.");
+        sessionStorage.removeItem(keys[0]);
+      });
       await page.reload();
       panel = page.getByRole("region", { name: "Public website", exact: true });
       const check = panel.getByRole("button", { name: "Check original operation", exact: true });
@@ -105,7 +117,7 @@ for (const outcome of ["applied", "lost-response", "stale", "denied", "storage-f
       await expect(panel).toContainText("Original cleanup completed.");
       await panel.getByLabel("Change reason").fill("A fresh reviewed request after receipt recovery.");
       await expect(panel.getByRole("button", { name: "Preview no-website cleanup", exact: true })).toBeEnabled();
-      expect(sent).toHaveLength(1);
+      expect(sent).toHaveLength(outcome === "lost-response-stale" ? 2 : 1);
     } else {
       await expect(panel).toContainText("Applied and read back: no public website.");
       await expect(apply).toBeDisabled();

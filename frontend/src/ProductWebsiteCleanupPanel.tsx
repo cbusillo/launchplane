@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Globe } from "lucide-react";
-import { applyProductWebsiteCleanup, LaunchplaneApiError, readProductProfile, readProductProfileMutationReceipt } from "./api";
+import { applyProductWebsiteCleanup, readProductProfile, readProductProfileMutationReceipt } from "./api";
 import { recoverBrowserOperationState } from "./browser-operation";
 import { type DevFixtureMode } from "./dev-fixture-loader";
 import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
@@ -61,13 +61,19 @@ export function ProductWebsiteCleanupPanel({ product, fixtureMode, onSaved }: {
   const apply = useBrowserOperationController<CleanupRequest, AcceptedEvidenceResponse>({
     scope,
     execute: (request, options) => applyProductWebsiteCleanup(product, request, options),
-    failureCertainty: (failure, dispatched) => dispatched && failure instanceof LaunchplaneApiError &&
-      failure.statusCode === 409 && failure.code === "stale" ? "settled" : productConfigFailureCertainty(failure, dispatched),
+    failureCertainty: productConfigFailureCertainty,
     failureFor: productConfigOperationFailure,
   });
   const busy = checking || isOperationBusy(preview.state) || isOperationBusy(apply.state);
   const locked = busy || apply.state.requiresIdempotencyContinuity;
   const matches = Boolean(review && review.request.reason === reason.trim());
+
+  useEffect(() => {
+    if (apply.state.failure?.code === "stale" && !apply.state.requiresIdempotencyContinuity) {
+      setReview(null);
+      try { sessionStorage.removeItem(storageKey); } catch { /* A settled refusal has no recovery draft. */ }
+    }
+  }, [apply.state.failure, apply.state.requiresIdempotencyContinuity, storageKey]);
 
   async function refresh(signal: AbortSignal): Promise<boolean> {
     const payload = await readProductProfile(product, signal);
@@ -147,6 +153,7 @@ export function ProductWebsiteCleanupPanel({ product, fixtureMode, onSaved }: {
     <header className="product-config-panel-header"><span aria-hidden="true"><Globe /></span><div>
       <p className="eyebrow">Product profile</p><h2 id="product-website-cleanup-title">Public website</h2>
       <p>For a product with no website, review and withdraw its stale public URLs and public HTTP checks together. Private endpoints, checks, Client and release settings are preserved.</p>
+      <p>Withdraw only obsolete URLs. This also removes release testing links and URLs used by public probes, Odoo URL-based diagnostics and ingress route edits.</p>
     </div></header>
     <p>Current: {current === null ? fixtureMode ? "Unavailable in fixtures" : "Reading profile…" : current === "none" ? "No public website" : "Public website required"}</p>
     {current !== "none" && current !== null && !eligible ? <p>Cleanup requires private monitoring intent on every recorded lane. Public or unknown intent needs review.</p> : null}

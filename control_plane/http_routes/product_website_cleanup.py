@@ -60,9 +60,8 @@ def register_product_website_cleanup_routes(
         fingerprint = request_fingerprint(
             {"route": ROUTE, "product": product, "request": body.model_dump(mode="json")}
         )
-        if body.mode == "apply":
-            if not key:
-                refusal(400, "idempotency_key_required", "Apply requires an Idempotency-Key.")
+
+        def prepare_apply() -> AcceptedEvidenceResponse | None:
             preflight = record_store.prepare_db_only_mutation(
                 scope=idempotency_scope(identity),
                 route_path=ROUTE,
@@ -80,6 +79,16 @@ def register_product_website_cleanup_routes(
                 refusal(409, "mutation_in_progress", "Keep the original operation key and retry.")
             if preflight.status == "reconcile_required":
                 refusal(409, "mutation_reconciliation_required", "Check the original operation.")
+            if preflight.status not in {"missing", "released"}:
+                raise RuntimeError("Unsupported cleanup mutation preflight status.")
+            return None
+
+        if body.mode == "apply":
+            if not key:
+                refusal(400, "idempotency_key_required", "Apply requires an Idempotency-Key.")
+            replay = prepare_apply()
+            if replay is not None:
+                return replay
         try:
             profile = record_store.read_product_profile_record(product)
         except FileNotFoundError:
@@ -95,6 +104,10 @@ def register_product_website_cleanup_routes(
                 result=plan.model_dump(mode="json"),
             )
         if body.reviewed_plan_sha256 != plan.plan_sha256:
+            # A same-key original can commit between preflight and this read.
+            replay = prepare_apply()
+            if replay is not None:
+                return replay
             refusal(409, "stale", "The profile or reviewed request changed. Preview again.")
         if plan.changed:
             replacement = replacement.model_copy(
@@ -149,6 +162,8 @@ def register_product_website_cleanup_routes(
         }
         if result.status in failures:
             refusal(*failures[result.status])
+        if result.status != "written":
+            raise RuntimeError("Unsupported cleanup compare-and-write status.")
         return response
 
     app.add_api_route(
