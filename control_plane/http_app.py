@@ -704,6 +704,7 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.product_retirement import (
     ProductRetirementIdentity,
     ProductRetirementRequest,
+    ProductRetirementPreviewPlan,
 )
 from control_plane.contracts.detached_application_retirement import (
     DetachedApplicationRetirementIdentity,
@@ -1504,6 +1505,9 @@ class AuthSessionResponse(BaseModel):
     trace_id: str
     identity: GitHubHumanIdentityResponse
     csrf_token: str
+    is_administrator: bool = Field(
+        default=False, json_schema_extra={"x-launchplane-optional-response": True}
+    )
 
 
 class AuthSessionRequiredResponse(BaseModel):
@@ -3462,6 +3466,8 @@ def require_ingress_edge_endpoint_read_store(record_store: object) -> _IngressEd
 def canonical_request_payload_for_idempotency(
     *, route_path: str, payload: dict[str, object]
 ) -> dict[str, object]:
+    if route_path == _PRODUCT_RETIREMENT_ROUTE and payload.get("include_previews") is False:
+        payload = {key: value for key, value in payload.items() if key != "include_previews"}
     if route_path not in {
         "/v1/drivers/generic-web/preview-destroy",
     }:
@@ -4745,6 +4751,9 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             identity=human_identity_response(session.identity),
             csrf_token=human_session_manager.csrf_token(session),
+            is_administrator=resolved_authz_policy_runtime.policy.names_administrator(
+                session.identity
+            ),
         )
 
     def reject_github_oauth_not_configured(trace_id: str) -> JSONResponse:
@@ -22816,7 +22825,7 @@ def create_launchplane_fastapi_app(
     async def execute_product_retirement(
         request: Request,
         retirement_request: ProductRetirementRequest,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -22828,6 +22837,25 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="idempotency_key_required",
                 message="Product retirement requires Idempotency-Key.",
+            )
+        if isinstance(
+            identity, GitHubHumanIdentity
+        ) and not resolved_authz_policy_runtime.policy.names_administrator(identity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Browser retirement requires the signed-in administrator.",
+            )
+        if retirement_request.include_previews and (
+            not isinstance(identity, GitHubHumanIdentity)
+            or not resolved_authz_policy_runtime.policy.names_administrator(identity)
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Retiring a product with its previews requires a signed-in administrator.",
             )
         action = (
             "product_retirement.plan"
@@ -22967,6 +22995,26 @@ def create_launchplane_fastapi_app(
                             observed_at=requested_at,
                         )
                     )
+                preview_plans: tuple[ProductRetirementPreviewPlan, ...] = ()
+                if retirement_request.include_previews:
+                    from control_plane.product_retirement_previews import plan_product_previews
+
+                    preview_plans = await asyncio.to_thread(
+                        plan_product_previews,
+                        store=cast(PostgresRecordStore, retirement_store),
+                        profile=bound.profile,
+                        root=resolved_control_plane_root,
+                        observed_at=requested_at,
+                    )
+                    current_bound = (
+                        control_plane_product_retirement.bind_product_retirement_authority(
+                            record_store=retirement_store, request=retirement_request
+                        )
+                    )
+                    if control_plane_product_retirement.authority_snapshot(
+                        current_bound
+                    ) != control_plane_product_retirement.authority_snapshot(bound):
+                        raise ValueError("Product retirement authority changed during planning.")
                 plan = control_plane_product_retirement.build_product_retirement_plan_record(
                     request=retirement_request,
                     identity=actor_identity,
@@ -22975,6 +23023,7 @@ def create_launchplane_fastapi_app(
                     requested_at=requested_at,
                     bound=bound,
                     observation=observation,
+                    preview_plans=preview_plans,
                 )
                 retirement_store.write_product_retirement_record(plan)
                 persisted_plans = retirement_store.list_product_retirement_records(
@@ -23021,7 +23070,9 @@ def create_launchplane_fastapi_app(
             # The durable runner owns replay and uncertain-completion reconciliation.
             check_replay=False,
             request_payload=retirement_request.model_dump(
-                mode="json", exclude={"no_target"} if not retirement_request.no_target else set()
+                mode="json",
+                exclude=({"no_target"} if not retirement_request.no_target else set())
+                | ({"include_previews"} if not retirement_request.include_previews else set()),
             ),
         )
         if replayed_response is not None:

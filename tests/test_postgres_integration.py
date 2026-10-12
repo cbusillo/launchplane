@@ -16,6 +16,7 @@ import threading
 import time
 from typing import Any
 import unittest
+from tests import test_product_retirement_previews as integrated_retirement_tests
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -954,6 +955,16 @@ def _owner_acceptance_system_event(
         source_event_id=source_event_id,
         reason="PostgreSQL subject sequence integration evidence.",
     )
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresIntegratedProductRetirementTests(
+    integrated_retirement_tests.IntegratedProductRetirementTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
 
 
 class RealPostgresLegacyPreviewReconciliationTests(

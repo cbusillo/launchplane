@@ -193,6 +193,7 @@ export type AuthSessionRequiredResponse = {
 export type AuthSessionResponse = {
     csrf_token: string;
     identity: GitHubHumanIdentityResponse;
+    is_administrator?: boolean;
     status: 'ok';
     trace_id: string;
 };
@@ -3800,6 +3801,21 @@ export type ProductReconcileRequestsResponse = {
     trace_id: string;
 };
 
+export type ProductRetirementRequest = {
+    confirmation?: string;
+    expected_target_sha256?: string;
+    include_previews?: boolean;
+    instance: string;
+    mode?: 'plan' | 'apply';
+    no_target?: boolean;
+    product: string;
+    reason: string;
+    related_issue: string;
+    reviewed_plan_record_id?: string;
+    reviewed_plan_sha256?: string;
+    schema_version?: 1;
+};
+
 export type ProductReviewCarry = {
     comparison_base_sha: string;
     head_sha: string;
@@ -6772,6 +6788,35 @@ export type ApplyProductWebsiteCleanupResponses = {
 };
 
 export type ApplyProductWebsiteCleanupResponse = ApplyProductWebsiteCleanupResponses[keyof ApplyProductWebsiteCleanupResponses];
+
+export type ExecuteProductRetirementData = {
+    body: ProductRetirementRequest;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/product-retirement';
+};
+
+export type ExecuteProductRetirementErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ExecuteProductRetirementError = ExecuteProductRetirementErrors[keyof ExecuteProductRetirementErrors];
+
+export type ExecuteProductRetirementResponses = {
+    202: AcceptedEvidenceResponse;
+};
+
+export type ExecuteProductRetirementResponse = ExecuteProductRetirementResponses[keyof ExecuteProductRetirementResponses];
 
 export type WriteProductReviewDecisionData = {
     body: ProductReviewDecisionEnvelope;
