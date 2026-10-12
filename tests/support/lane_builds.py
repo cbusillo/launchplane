@@ -9,10 +9,18 @@ from control_plane.build_provenance import BUILD_WORKFLOW_PATH
 
 
 class LaneBuildGitHub:
-    def __init__(self, repository: str, image_repository: str, digests: dict[str, str]) -> None:
+    def __init__(
+        self,
+        repository: str,
+        image_repository: str,
+        digests: dict[str, str],
+        *,
+        tags: dict[str, tuple[str, ...]] | None = None,
+    ) -> None:
         self.repository = repository
         self.image_repository = image_repository
         self.digests = digests
+        self.tags = tags or {}
         self.commits = list(digests)
         self.runs = {index + 1: commit for index, commit in enumerate(self.commits)}
         self.repository_id = 1
@@ -81,6 +89,7 @@ class LaneBuildGitHub:
                         "image": {
                             "repository": self.image_repository,
                             "digest": self.digests[commit],
+                            **({"tags": self.tags[commit]} if commit in self.tags else {}),
                         },
                     }
                 ),
