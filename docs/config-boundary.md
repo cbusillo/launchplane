@@ -75,10 +75,13 @@ retired with ordinary-agent delivery (see [DIRECTION.md](../DIRECTION.md)).
 See [Client review](owner-acceptance.md) and
 [release review](release-review.md).
 
-The Launchplane self-deploy workflow has a manual `omit_every_code_env`
-compatibility input for the one deploy that teaches an older running service to
-accept the Every Code env keys. Leave it unset for normal deploys so the service
-and worker keep the shared token/webhook secret in sync.
+The Launchplane self-deploy workflow no longer reads Actions secrets or variables
+for retired Every Code credentials. It does not install or synchronize those
+credentials. Existing service-host values are preserved by the self-deploy
+request's normal merge behavior; full runtime retirement remains in
+[#1313](https://github.com/cbusillo/launchplane/issues/1313). The Actions inventory
+and Chris's manual settings cleanup are tracked in
+[#3452](https://github.com/cbusillo/launchplane/issues/3452).
 
 The manual `omit_terminal_agent_env` compatibility input omits terminal-agent
 read credentials. Director-agent write credentials use the separate
