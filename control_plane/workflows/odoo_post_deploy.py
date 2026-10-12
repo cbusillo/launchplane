@@ -19,6 +19,7 @@ from control_plane.contracts.public_hosts import resolve_public_base_url
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
 from control_plane.contracts.odoo_target_replacement_failures import (
     OdooProviderEffectUncertainError,
+    OdooProviderSafetyRefusedError,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy import api as dokploy_api
@@ -300,6 +301,8 @@ def execute_odoo_post_deploy(
                 allow_historical_contract=allow_historical_sender_contract,
             )
     except (click.ClickException, OSError) as error:
+        if isinstance(error, OdooProviderSafetyRefusedError):
+            raise
         determinate_failure = isinstance(
             error,
             (

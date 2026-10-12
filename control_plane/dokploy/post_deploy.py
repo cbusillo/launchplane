@@ -922,6 +922,7 @@ def run_compose_odoo_backup_gate(
     filestore_path: str,
     backup_root: str,
     timeout_seconds: int | None = None,
+    before_provider_mutation: Callable[[str], None] | None = None,
 ) -> api.JsonObject:
     normalized_backup_nonce = backup_nonce.strip()
     if not normalized_backup_nonce:
@@ -986,6 +987,8 @@ def run_compose_odoo_backup_gate(
         "enabled": False,
         "timezone": "UTC",
     }
+    if before_provider_mutation is not None:
+        before_provider_mutation("backup_schedule_upsert")
     schedule = api.upsert_dokploy_schedule(
         host=host,
         token=token,
@@ -1005,6 +1008,8 @@ def run_compose_odoo_backup_gate(
         token=token,
         schedule_id=schedule_id,
     )
+    if before_provider_mutation is not None:
+        before_provider_mutation("backup_schedule_trigger")
     wait_result = api.trigger_dokploy_schedule_and_wait(
         host=host,
         token=token,
@@ -1065,6 +1070,7 @@ def run_compose_odoo_backup_verification(
     manifest_path: str,
     capture_evidence: Mapping[str, str] | None = None,
     timeout_seconds: int | None = None,
+    before_provider_mutation: Callable[[str], None] | None = None,
 ) -> api.JsonObject:
     normalized_verification_nonce = verification_nonce.strip()
     if not normalized_verification_nonce:
@@ -1123,6 +1129,8 @@ def run_compose_odoo_backup_verification(
         "enabled": False,
         "timezone": "UTC",
     }
+    if before_provider_mutation is not None:
+        before_provider_mutation("backup_verification_schedule_upsert")
     schedule = api.upsert_dokploy_schedule(
         host=host,
         token=token,
@@ -1140,6 +1148,8 @@ def run_compose_odoo_backup_verification(
         token=token,
         schedule_id=schedule_id,
     )
+    if before_provider_mutation is not None:
+        before_provider_mutation("backup_verification_schedule_trigger")
     wait_result = api.trigger_dokploy_schedule_and_wait(
         host=host,
         token=token,

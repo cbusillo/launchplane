@@ -113,8 +113,6 @@ class OdooStableTargetReplacementRequest(BaseModel):
     artifact_id: str = ""
     source_git_ref: str = ""
     expected_current_artifact_id: str = ""
-    backup_record_id: str = ""
-    verification_record_id: str = ""
 
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooStableTargetReplacementRequest":
@@ -124,8 +122,6 @@ class OdooStableTargetReplacementRequest(BaseModel):
         self.artifact_id = self.artifact_id.strip()
         self.source_git_ref = self.source_git_ref.strip()
         self.expected_current_artifact_id = self.expected_current_artifact_id.strip()
-        self.backup_record_id = self.backup_record_id.strip()
-        self.verification_record_id = self.verification_record_id.strip()
 
         if not self.product:
             raise ValueError("Odoo stable target replacement requires product.")

@@ -6,6 +6,7 @@ import re
 import secrets as python_secrets
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol, cast
+from collections.abc import Callable
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -100,8 +101,8 @@ class OdooProdBackupGateRequest(BaseModel):
         self.backup_record_id = self.backup_record_id.strip()
         if not self.context:
             raise ValueError("Odoo prod backup gate requires context.")
-        if self.instance != "prod":
-            raise ValueError("Odoo prod backup gate requires instance 'prod'.")
+        if self.instance not in {"prod", "testing"}:
+            raise ValueError("Odoo backup gate requires a stable prod or testing instance.")
         if not self.backup_record_id:
             raise ValueError("Odoo prod backup gate requires backup_record_id.")
         return self
@@ -137,8 +138,8 @@ class OdooProdBackupVerificationRequest(BaseModel):
         self.backup_record_id = self.backup_record_id.strip()
         if not self.context:
             raise ValueError("Odoo prod backup verification requires context.")
-        if self.instance != "prod":
-            raise ValueError("Odoo prod backup verification requires instance 'prod'.")
+        if self.instance not in {"prod", "testing"}:
+            raise ValueError("Odoo backup verification requires a stable prod or testing instance.")
         if not _BACKUP_PATH_COMPONENT_PATTERN.fullmatch(self.backup_record_id):
             raise ValueError("Odoo prod backup verification requires a path-safe backup_record_id.")
         return self
@@ -279,7 +280,9 @@ def _runtime_values(
         ) from error
 
 
-def _backup_paths(*, runtime_values: dict[str, str], backup_record_id: str) -> dict[str, str]:
+def odoo_backup_paths_from_runtime(
+    *, runtime_values: dict[str, str], backup_record_id: str
+) -> dict[str, str]:
     database_name = runtime_values.get("ODOO_DB_NAME", "").strip()
     if not _BACKUP_PATH_COMPONENT_PATTERN.fullmatch(database_name):
         raise click.ClickException(
@@ -477,6 +480,8 @@ def execute_odoo_prod_backup_gate(
     control_plane_root: Path,
     record_store: object,
     request: OdooProdBackupGateRequest,
+    runtime_values: dict[str, str] | None = None,
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> OdooProdBackupGateResult:
     typed_record_store = _require_record_store(record_store)
     target_definition = _read_target_definition(
@@ -484,12 +489,16 @@ def execute_odoo_prod_backup_gate(
         context=request.context,
         instance=request.instance,
     )
-    runtime_values = _runtime_values(
-        control_plane_root=control_plane_root,
-        context=request.context,
-        instance=request.instance,
+    runtime_values = (
+        runtime_values
+        if runtime_values is not None
+        else _runtime_values(
+            control_plane_root=control_plane_root,
+            context=request.context,
+            instance=request.instance,
+        )
     )
-    evidence = _backup_paths(
+    evidence = odoo_backup_paths_from_runtime(
         runtime_values=runtime_values,
         backup_record_id=request.backup_record_id,
     )
@@ -512,6 +521,7 @@ def execute_odoo_prod_backup_gate(
             filestore_path=evidence["filestore_path"],
             backup_root=evidence["backup_root"],
             timeout_seconds=request.timeout_seconds,
+            before_provider_mutation=provider_effect_checkpoint,
         )
         try:
             capture_evidence = OdooProdBackupCaptureEvidence.model_validate(raw_capture_evidence)
@@ -573,6 +583,8 @@ def execute_odoo_prod_backup_verification(
     control_plane_root: Path,
     record_store: object,
     request: OdooProdBackupVerificationRequest,
+    runtime_values: dict[str, str] | None = None,
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> OdooProdBackupVerificationResult:
     typed_record_store = _require_verification_record_store(record_store)
     target_definition = _read_target_definition(
@@ -580,12 +592,16 @@ def execute_odoo_prod_backup_verification(
         context=request.context,
         instance=request.instance,
     )
-    runtime_values = _runtime_values(
-        control_plane_root=control_plane_root,
-        context=request.context,
-        instance=request.instance,
+    runtime_values = (
+        runtime_values
+        if runtime_values is not None
+        else _runtime_values(
+            control_plane_root=control_plane_root,
+            context=request.context,
+            instance=request.instance,
+        )
     )
-    expected_paths = _backup_paths(
+    expected_paths = odoo_backup_paths_from_runtime(
         runtime_values=runtime_values,
         backup_record_id=request.backup_record_id,
     )
@@ -615,6 +631,7 @@ def execute_odoo_prod_backup_verification(
                 if key in OdooProdBackupCaptureEvidence.model_fields and key != "backup_nonce"
             },
             timeout_seconds=request.timeout_seconds,
+            before_provider_mutation=provider_effect_checkpoint,
         )
         if (
             raw_evidence.pop("verification_nonce", None) != verification_nonce

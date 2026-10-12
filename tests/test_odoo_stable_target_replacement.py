@@ -63,6 +63,10 @@ from control_plane import runtime_platform_credentials
 from control_plane import secrets as control_plane_secrets
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.runtime_environments import SiteRuntimeEnvironment
+from control_plane.workflows.odoo_prod_backup_gate import (
+    BACKUP_GATE_SOURCE,
+    BACKUP_VERIFICATION_SOURCE,
+)
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.product_reconcile import (
@@ -190,6 +194,9 @@ class _Store:
             if runtime_environment_records is not None
             else _runtime_environment_records_for_profile(self.profile)
         )
+
+    def write_backup_gate_record(self, record: BackupGateRecord) -> None:
+        self.backup_records[record.record_id] = record
 
     def read_backup_gate_record(self, record_id: str) -> BackupGateRecord:
         if record_id not in self.backup_records:
@@ -1568,7 +1575,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     target_id_record=_target_id_record(),
                 ),
                 request=OdooStableTargetReplacementRequest(
-                    product="odoo-tenant-cm", instance="testing"
+                    product="odoo-tenant-cm", instance="testing", allow_empty_data=True
                 ),
                 dokploy_request=cast(DokployRequest, _request),
             )
@@ -3073,6 +3080,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         post_deploy_results: tuple[OdooPostDeployResult, ...],
         protected: bool = False,
         live: bool = False,
+        test_instance: str = "prod",
         mutate_before_restore: Callable[[_Store], None] | None = None,
         supply_proof: bool = True,
         mutate_proof: Callable[[_Store], None] | None = None,
@@ -3083,6 +3091,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             profile.production_use = "live"
         if protected:
             profile.lanes[0].odoo_data_policy.data_authority = "authoritative"
+        profile.lanes[0].instance = test_instance
         manifest = _artifact_manifest(
             artifact_id="artifact-opw-testing",
             source_commit="0f9a123",
@@ -3096,11 +3105,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         store = _Store(
             profile=profile,
-            target_record=_opw_target_record(),
-            target_id_record=_opw_target_id_record(),
+            target_record=_opw_target_record().model_copy(update={"instance": test_instance}),
+            target_id_record=_opw_target_id_record().model_copy(update={"instance": test_instance}),
             inventory=EnvironmentInventory(
                 context="opw",
-                instance="prod",
+                instance=test_instance,
                 artifact_identity=ArtifactIdentityReference(artifact_id="artifact-opw-testing"),
                 source_git_ref="0f9a123",
                 deploy=DeploymentEvidence(
@@ -3115,28 +3124,42 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             artifact_manifest=manifest,
             odoo_instance_override_record=override_record,
         )
-        backup_id = ""
-        verification_id = ""
-        if protected and supply_proof:
-            # Use the existing coherent restore fixture, rebinding it to this
-            # lane's exact database and paths rather than faking a passing check.
-            from tests.test_odoo_prod_backup_restore import _Store as RestoreStore
+        if protected or live:
+            from tests.test_odoo_prod_backup_restore import BACKUP_ROOT, FILESTORE_PATH
 
-            fixture = RestoreStore()
-            records = list(fixture.backup_records.values())
-            backup_id, verification_id = (record.record_id for record in records)
-            database_name = _DATABASE_ENV["ODOO_DB_NAME"]
-            for record in records:
-                record.context = "opw"
-                record.evidence = {
-                    key: value.replace("example_prod", database_name)
-                    for key, value in record.evidence.items()
+            store.runtime_environment_records[0].env["ODOO_BACKUP_ROOT"] = BACKUP_ROOT + "/"
+            store.runtime_environment_records[0].env["ODOO_FILESTORE_PATH"] = (
+                " " + FILESTORE_PATH + "/ "
+            )
+
+        def capture_provider(**kwargs: object) -> dict[str, object]:
+            from tests.test_odoo_prod_backup_gate import _passing_backup_capture_evidence
+
+            evidence = _passing_backup_capture_evidence()
+            evidence.update(
+                {key: kwargs[key] for key in ("backup_nonce", "backup_record_id", "database_name")}
+            )
+            return evidence if supply_proof else {}
+
+        def verify_provider(**kwargs: object) -> dict[str, object]:
+            from tests.test_odoo_prod_backup_gate import _passing_verification_evidence
+
+            evidence = _passing_verification_evidence()
+            evidence.update(
+                {
+                    key: kwargs[key]
+                    for key in ("verification_nonce", "backup_record_id", "database_name")
                 }
-            store.backup_records = {record.record_id: record for record in records}
-            runtime = store.runtime_environment_records[0]
-            runtime.env["ODOO_BACKUP_ROOT"] = "/volumes/data/backups/launchplane"
-            if mutate_proof is not None:
-                mutate_proof(store)
+            )
+            return evidence
+
+        def checkpoint(phase: str) -> None:
+            if phase == "target_replacement_raw_source":
+                if mutate_proof is not None:
+                    mutate_proof(store)
+                if mutate_before_write is not None:
+                    mutate_before_write(store)
+
         persisted_env = ""
         resolved_env = dict(_UPSTREAM_RESTORE_ENV)
 
@@ -3162,6 +3185,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             persisted_env = env_text
 
         with (
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_gate",
+                side_effect=capture_provider,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_verification",
+                side_effect=verify_provider,
+            ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
@@ -3229,19 +3260,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 record_store=store,
                 request=OdooStableTargetReplacementApplyRequest(
                     product="odoo-tenant-opw",
-                    instance="prod",
+                    instance=test_instance,
                     allow_empty_data=True,
                     data_source_mode="upstream_restore",
                     confirmation="restore opw upstream",
-                    backup_record_id=backup_id,
-                    verification_record_id=verification_id,
                 ),
                 dokploy_request=cast(DokployRequest, _request),
-                provider_effect_checkpoint=(
-                    (lambda _phase: mutate_before_write(store))
-                    if mutate_before_write is not None
-                    else None
-                ),
+                provider_effect_checkpoint=checkpoint,
             )
 
         return result, post_deploy, verify, store
@@ -3276,13 +3301,25 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self,
     ) -> None:
         def wrong_lane(store: _Store) -> None:
-            list(store.backup_records.values())[0].context = "another-lane"
+            next(
+                record
+                for record in store.backup_records.values()
+                if record.source == BACKUP_GATE_SOURCE
+            ).context = "another-lane"
 
         def wrong_backup(store: _Store) -> None:
-            list(store.backup_records.values())[1].evidence["backup_record_id"] = "another-backup"
+            next(
+                record
+                for record in store.backup_records.values()
+                if record.source == BACKUP_VERIFICATION_SOURCE
+            ).evidence["backup_record_id"] = "another-backup"
 
         def failed_integrity(store: _Store) -> None:
-            list(store.backup_records.values())[1].evidence["pg_restore_status"] = "fail"
+            next(
+                record
+                for record in store.backup_records.values()
+                if record.source == BACKUP_VERIFICATION_SOURCE
+            ).evidence["pg_restore_status"] = "fail"
 
         for supply, mutation in (
             (False, None),
@@ -3291,28 +3328,27 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             (True, failed_integrity),
         ):
             with self.subTest(supply=supply, mutation=mutation):
-                with self.assertRaises(OdooTargetReplacementStageError) as caught:
-                    self._apply_upstream_restore(
-                        override_record=None,
-                        post_deploy_results=(
-                            OdooPostDeployResult(
-                                context="opw",
-                                instance="prod",
-                                phase="restore",
-                                post_deploy_status="pass",
-                            ),
-                        ),
-                        protected=True,
-                        supply_proof=supply,
-                        mutate_proof=mutation,
-                    )
-                self.assertEqual(
-                    caught.exception.code, "plan_not_ready.backup_restore_proof_required"
+                result, restore, verify, store = self._apply_upstream_restore(
+                    override_record=None,
+                    post_deploy_results=(),
+                    protected=True,
+                    supply_proof=supply,
+                    mutate_proof=mutation,
                 )
+                self.assertEqual(result.deploy_status, "fail")
+                self.assertEqual(result.error_code, "deploy_blocked.backup_restore_proof_required")
+                restore.assert_not_called()
+                verify.assert_not_called()
+                self.assertEqual(store.environment_inventories, [])
+                self.assertIn(result.runtime_source["backup_record_id"], store.backup_records)
 
     def test_authoritative_replacement_rechecks_proof_at_first_provider_write(self) -> None:
         def invalidate(store: _Store) -> None:
-            list(store.backup_records.values())[1].status = "fail"
+            next(
+                record
+                for record in store.backup_records.values()
+                if record.source == BACKUP_VERIFICATION_SOURCE
+            ).status = "fail"
 
         result, restore, verify, store = self._apply_upstream_restore(
             override_record=None,
@@ -3326,18 +3362,57 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         verify.assert_not_called()
         self.assertEqual(store.environment_inventories, [])
 
-    def test_live_production_replacement_requires_proof_even_with_restorable_policy(self) -> None:
-        with self.assertRaises(OdooTargetReplacementStageError) as caught:
+    def test_live_production_replacement_captures_proof_with_restorable_policy(self) -> None:
+        passed = OdooPostDeployResult(
+            context="opw", instance="prod", phase="restore", post_deploy_status="pass"
+        )
+        result, restore, _verify, store = self._apply_upstream_restore(
+            override_record=None,
+            post_deploy_results=(passed,),
+            live=True,
+        )
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertIn(result.runtime_source["backup_record_id"], store.backup_records)
+        self.assertTrue(restore.call_args.kwargs["run_destructive_restore"])
+
+    def test_authoritative_testing_replacement_captures_and_verifies_its_backup(self) -> None:
+        passed = OdooPostDeployResult(
+            context="opw", instance="testing", phase="restore", post_deploy_status="pass"
+        )
+        result, _restore, _verify, store = self._apply_upstream_restore(
+            override_record=None,
+            post_deploy_results=(passed,),
+            protected=True,
+            test_instance="testing",
+        )
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(
+            store.backup_records[result.runtime_source["backup_record_id"]].instance, "testing"
+        )
+
+    def test_each_replacement_captures_new_proof(self) -> None:
+        passed = OdooPostDeployResult(
+            context="opw", instance="prod", phase="restore", post_deploy_status="pass"
+        )
+        results = [
             self._apply_upstream_restore(
-                override_record=None,
-                post_deploy_results=(),
-                live=True,
-            )
-        self.assertEqual(caught.exception.code, "plan_not_ready.backup_restore_proof_required")
+                override_record=None, post_deploy_results=(passed,), protected=True
+            )[0]
+            for _ in range(2)
+        ]
+        self.assertTrue(all(result.deploy_status == "pass" for result in results))
+        self.assertNotEqual(
+            results[0].runtime_source["backup_record_id"],
+            results[1].runtime_source["backup_record_id"],
+        )
 
     def test_replacement_stops_if_proof_changes_between_deploy_and_restore(self) -> None:
         def change_proof(store: _Store) -> None:
-            list(store.backup_records.values())[1].evidence["database_dump_sha256"] = "d" * 64
+            next(
+                record
+                for record in store.backup_records.values()
+                if record.source == BACKUP_VERIFICATION_SOURCE
+            ).evidence["database_dump_sha256"] = "d" * 64
 
         observed: list[_Store] = []
 

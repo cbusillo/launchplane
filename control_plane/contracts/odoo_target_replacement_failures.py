@@ -6,6 +6,13 @@ description and env-key names; never the check's message, which can carry
 provider text that names targets, hosts and databases.
 """
 
+import click
+
+
+class OdooProviderSafetyRefusedError(click.ClickException):
+    """A typed precondition refused a provider effect; preserve its reason."""
+
+
 DEPLOY_BLOCKED_PREFIX = "deploy_blocked."
 # Any other failure inside the deploy step, after the checks passed.
 DEPLOY_FAILED_CODE = "deploy_failed"

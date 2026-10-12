@@ -3036,16 +3036,19 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   instance overrides or website bootstrap data are missing. Launchplane re-reads
   the provider target environment after writing it and fails the operation if
   the typed payload or assertion flags did not persist.
-- Destructive target replacement (`empty` or `upstream_restore`) on an
-  authoritative Odoo lane or a Live product's prod lane consumes exact `backup_record_id` and
-  `verification_record_id` inputs. Capture with the Odoo backup-gate workflow,
-  then run its backup-verification workflow; pass both record IDs to the
-  replacement plan/apply request (or the rehearsal plan CLI's corresponding
-  options). The shared restore validator checks lane, source, backup binding,
-  paths, nonce, hashes, integrity checks and staging-space evidence. Replacement
-  re-reads proof before its first provider write and before the restore schedule,
-  and records the consumed IDs and hashes. The existing verified production
-  backup restore workflow remains the supported recovery path.
+- Before destructive target replacement (`empty` or `upstream_restore`) on an
+  authoritative Odoo lane or a Live product's prod lane, replacement captures a
+  fresh logical backup and verifies it through the shared Odoo backup workflows.
+  It generates its own unique record IDs: caller-supplied historical proof cannot
+  substitute for that capture. The shared restore validator checks lane, source,
+  backup binding, normalized paths, nonce, hashes, integrity and staging space.
+  Replacement re-reads the exact proof before target writes and each restore
+  schedule effect, and records the consumed IDs and hashes. Backup capture and
+  verification support both stable `prod` and `testing` lanes and preserve the
+  operation's authorization/lease checkpoints. Missing backup runtime settings
+  block the plan; capture or verification failure stops before target mutation.
+  The existing production backup restore workflow continues to support recovery
+  from an intentionally older verified backup.
 - `requires_backup_before_destroy` and `requires_restore_proof` are retired
   display-only settings. Historical profiles remain readable, but those fields
   are discarded when read and cannot waive protection. Data authority owns

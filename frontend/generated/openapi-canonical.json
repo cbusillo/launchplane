@@ -63488,11 +63488,6 @@
                         "title": "Artifact Id",
                         "type": "string"
                       },
-                      "backup_record_id": {
-                        "default": "",
-                        "title": "Backup Record Id",
-                        "type": "string"
-                      },
                       "confirmation": {
                         "default": "",
                         "title": "Confirmation",
@@ -63569,11 +63564,6 @@
                           }
                         ],
                         "title": "Timeout Seconds"
-                      },
-                      "verification_record_id": {
-                        "default": "",
-                        "title": "Verification Record Id",
-                        "type": "string"
                       },
                       "verify_canonical": {
                         "default": true,
@@ -63724,11 +63714,6 @@
                         "title": "Artifact Id",
                         "type": "string"
                       },
-                      "backup_record_id": {
-                        "default": "",
-                        "title": "Backup Record Id",
-                        "type": "string"
-                      },
                       "confirmation": {
                         "default": "",
                         "title": "Confirmation",
@@ -63775,11 +63760,6 @@
                           "replace-and-cutover"
                         ],
                         "title": "Strategy",
-                        "type": "string"
-                      },
-                      "verification_record_id": {
-                        "default": "",
-                        "title": "Verification Record Id",
                         "type": "string"
                       }
                     },
