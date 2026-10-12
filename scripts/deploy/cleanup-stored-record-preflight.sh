@@ -26,8 +26,6 @@ done
 
 # Qualification uses the job token in its own temporary registry config. Never
 # alter the persistent runner's Docker credentials.
-if [[ -n "${DOCKER_CONFIG:-}" && -n "${RUNNER_TEMP:-}" &&
-      "$DOCKER_CONFIG" == "$RUNNER_TEMP"/launchplane-preflight-registry-* ]]; then
-  rm -f -- "$DOCKER_CONFIG/config.json"
-  if [[ -d "$DOCKER_CONFIG" ]]; then rmdir -- "$DOCKER_CONFIG"; fi
-fi
+registry_config="$(preflight_registry_config_path)"
+rm -f -- "$registry_config/config.json"
+if [[ -d "$registry_config" ]]; then rmdir -- "$registry_config"; fi

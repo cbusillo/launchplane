@@ -8,3 +8,8 @@ preflight_owner_label() {
   fi
   printf 'launchplane.stored-record-preflight.owner=%s' "$owner"
 }
+
+preflight_registry_config_path() {
+  preflight_owner_label "${LAUNCHPLANE_PREFLIGHT_OWNER:?exact rehearsal owner required}" >/dev/null
+  printf '%s/launchplane-preflight-registry-%s' "${RUNNER_TEMP:?runner temporary directory required}" "$LAUNCHPLANE_PREFLIGHT_OWNER"
+}
