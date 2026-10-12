@@ -5371,6 +5371,7 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
         slots: Annotated[int, Query(ge=1, le=48)] = 6,
         end_slot: Annotated[int | None, Query(ge=0)] = None,
+        instance: Literal["prod", "testing"] = "prod",
     ) -> HealthMonitorStatusResponse:
         trace_id = next_trace_id()
         require_launchplane_service_read_authorization(identity=identity, trace_id=trace_id)
@@ -5387,6 +5388,7 @@ def create_launchplane_fastapi_app(
                 now=datetime.now(timezone.utc).timestamp(),
                 slots=slots,
                 end_slot=end_slot,
+                instance=instance,
             )
         except HealthMonitorSlotRangeError as error:
             raise _launchplane_http_error(
