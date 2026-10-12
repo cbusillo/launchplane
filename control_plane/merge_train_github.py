@@ -3411,6 +3411,11 @@ class GitHubMergeTrainSnapshotReader:
             and profile.owner.review_label.strip().casefold()
             in {label.casefold() for label in labels}
         )
+        # The recorded Director-standing mode supplies acceptance. Test notes
+        # must not invent a second Client decision/check for these products.
+        profiles = tuple(
+            profile for profile in profiles if profile.release_on_acceptance != "director_standing"
+        )
         dependency_only = (
             bool(profiles)
             and pull_request is not None
