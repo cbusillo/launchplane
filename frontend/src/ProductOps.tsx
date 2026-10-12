@@ -21,7 +21,7 @@ import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { environmentEvidenceDeadlines, environmentOperationalTone, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { environmentEvidenceDeadlines, environmentOperationalTone, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -390,12 +390,10 @@ function ProductWorkspace({
   const testing = environmentByName(product, "testing");
   const production = environmentByName(product, "prod");
   const incompleteEvidence =
-    product.trust_state === "missing" ||
-    product.trust_state === "stale" ||
     environments.length === 0 ||
     environments.some(
       (environment) =>
-        environment.trust_state === "missing" || environment.trust_state === "stale",
+        ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)),
     );
 
   useEffect(() => {
@@ -422,6 +420,7 @@ function ProductWorkspace({
               {product.display_name}
             </h1>
             <EvidenceBadge
+              qualifier="All evidence"
               state={product.trust_state}
               timestamp={evidenceTimestamp(product.provenance)}
             />
@@ -458,8 +457,8 @@ function ProductWorkspace({
           <div>
             <strong>Operational evidence is incomplete</strong>
             <p>
-              Launchplane shows only recorded product state. Missing or stale lane
-              evidence is not replaced with inferred health.
+              Launchplane shows recorded product state. Incomplete or negative health
+              observations need review before relying on this lane.
             </p>
           </div>
         </div>
@@ -685,6 +684,7 @@ function EnvironmentRow({
         </div>
         <EvidenceBadge
           compact
+          qualifier="All evidence"
           state={environment.trust_state}
           timestamp={evidenceTimestamp(environment.provenance)}
         />
@@ -723,9 +723,9 @@ function EnvironmentRow({
           </small>
         </div>
         <div>
-          <dt>Evidence updated</dt>
+          <dt>Runtime evidence updated</dt>
           <dd>{formatEvidenceTime(environment.provenance)}</dd>
-          <small>{trustLabel(environment.trust_state)}</small>
+          <small>{trustLabel(environment.provenance.freshness_status)}</small>
         </div>
       </dl>
       <AppLink
@@ -919,7 +919,7 @@ function SignalTile({
     <div className="signal-tile" data-state={state} data-tone={tone}>
       <span>{label}</span>
       <strong>{value}</strong>
-      <small>{detail ?? trustLabel(state)}</small>
+      <small>{detail ?? trustLabel(tone === "verified" ? "verified" : state)}</small>
     </div>
   );
 }
@@ -928,10 +928,12 @@ export function EvidenceBadge({
   compact = false,
   state,
   timestamp = "",
+  qualifier = "",
 }: {
   compact?: boolean;
   state: TrustState;
   timestamp?: string;
+  qualifier?: string;
 }) {
   return (
     <span
@@ -941,7 +943,7 @@ export function EvidenceBadge({
       title={timestamp ? `${trustLabel(state)} · ${formatTime(timestamp)}` : trustLabel(state)}
     >
       <span aria-hidden="true" />
-      <strong>{trustLabel(state)}</strong>
+      <strong>{qualifier ? `${qualifier} · ` : ""}{trustLabel(state)}</strong>
       {!compact && timestamp ? <small>{formatTime(timestamp)}</small> : null}
     </span>
   );
@@ -1151,7 +1153,7 @@ function nextSafeInspection(
   if (incomplete) {
     return {
       title: `Inspect ${environmentLabel(incomplete.environment)} evidence`,
-      detail: `The lane is ${trustLabel(incomplete.trust_state).toLowerCase()}. Confirm freshness and missing records before relying on its state.`,
+      detail: `The combined lane and topology evidence is ${trustLabel(incomplete.trust_state).toLowerCase()}. Inspect observations and route records; the health signal separately requires fresh observations.`,
       targetId: `lane-${safeAnchor(incomplete.environment)}`,
     };
   }
@@ -1209,12 +1211,12 @@ export function signalHeadline(environment: ProductEnvironmentSummary | null, to
     return "Needs attention";
   }
   if (tone === "warning") {
-    return "Review warning";
+    return environment ? publicObservationGap(expireEnvironmentEvidence(environment).topology) ?? "Review warning" : "Review warning";
   }
-  if (!environment || environment.trust_state === "missing") {
+  if (!environment || tone === "missing") {
     return "Evidence missing";
   }
-  if (environment.trust_state === "unsupported") {
+  if (tone === "unsupported") {
     return "Unsupported";
   }
   const status = environment.public_ingress.status.toLowerCase();

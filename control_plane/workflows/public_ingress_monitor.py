@@ -51,6 +51,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     monitored_check_identity,
     PUBLIC_TLS_EXPIRING_DAYS,
     PUBLIC_TLS_STALE_AFTER_SECONDS,
+    PublicIngressRouteBindingSourceKind,
     PublicIngressCheckKind,
     PublicIngressFailureCode,
     PublicIngressIncidentEvent,
@@ -105,6 +106,7 @@ from control_plane.notifications import (
 from control_plane.outbound_http import PublicHttpDestinationError
 from control_plane.outbound_http import PublicTlsProbeResult
 from control_plane.outbound_http import probe_public_tls
+from control_plane.contracts.product_topology_read_model import product_lane_public_domains
 from control_plane.outbound_http import request_private_http
 from control_plane.workflows.generic_web_deploy_provider import (
     decode_generic_web_provider_reconciliation_target,
@@ -129,9 +131,6 @@ DEPLOY_FENCE_RECONCILE_GRACE = timedelta(minutes=15)
 # and the public route can still answer from the previous container for a few
 # seconds. A mismatch is probed once more after this delay before it counts.
 RUNTIME_IDENTITY_CONFIRMATION_DELAY_SECONDS = 30
-
-
-PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service"]
 
 
 class PublicIngressMonitorStore(Protocol):
@@ -260,6 +259,7 @@ class PublicIngressMonitorTarget:
     resolution_failure_summary: str = ""
     tls_domain_name: str = ""
     tls_domain_role: Literal["primary", "alias"] = "primary"
+    tls_route_binding_status: Literal["active", "disabled", "missing"] = "missing"
     tls_owner: RouteBindingTlsOwner = "none"
     tls_ingress_provider: str = ""
     tls_termination_kind: RouteBindingTerminationKind = "none"
@@ -2798,17 +2798,53 @@ def _tls_monitor_targets(
     ):
         return ()
     list_route_bindings = getattr(record_store, "list_route_binding_records", None)
-    if not callable(list_route_bindings):
-        return ()
-    route_bindings = list_route_bindings(
-        product=profile.product,
-        context_name=lane.context,
-        instance_name=lane.instance,
-        status="active",
-        limit=1,
+    route_bindings = (
+        list_route_bindings(
+            product=profile.product,
+            context_name=lane.context,
+            instance_name=lane.instance,
+            limit=1,
+        )
+        if callable(list_route_bindings)
+        else ()
     )
     route_binding = next(iter(route_bindings), None)
     if route_binding is None or not isinstance(route_binding, EnvironmentRouteBindingRecord):
+        if profile.production_use != "live" or profile.public_website == "none":
+            return ()
+        return tuple(
+            PublicIngressMonitorTarget(
+                product=profile.product,
+                repository=profile.repository,
+                driver_id=profile.driver_id,
+                context=lane.context,
+                instance=lane.instance,
+                base_url="",
+                health_url="",
+                check_name=build_public_ingress_tls_check_name(domain.domain_name),
+                check_kind="tls",
+                profile_sha256=product_profile_record_sha256(profile),
+                monitoring_intent=lane.health_monitoring.monitoring_intent,
+                incident_eligible=product_lane_monitoring_incident_eligible(
+                    monitoring_intent=lane.health_monitoring.monitoring_intent,
+                    check_kind="tls",
+                ),
+                expected_runtime_identity=None,
+                require_runtime_identity=False,
+                tls_domain_name=domain.domain_name,
+                tls_domain_role=domain.role,
+                route_binding_sha256="missing",
+                tls_source_kind="profile_intent",
+                tls_source_label="Product-profile public domain intent; route authority is absent.",
+                tls_source_record_ids=(profile.product,),
+                tls_refreshed_at=profile.updated_at,
+                tls_recorded_at=profile.updated_at,
+                tls_freshness_status="missing",
+            )
+            for domain in product_lane_public_domains(lane)
+            if domain.tls_expected
+        )
+    if route_binding.status == "disabled" and profile.production_use != "live":
         return ()
     targets: list[PublicIngressMonitorTarget] = []
     for domain in route_binding.domains:
@@ -2835,6 +2871,7 @@ def _tls_monitor_targets(
                 require_runtime_identity=False,
                 tls_domain_name=domain.domain_name,
                 tls_domain_role=domain.role,
+                tls_route_binding_status=route_binding.status,
                 tls_owner=route_binding.tls.owner,
                 tls_ingress_provider=route_binding.ingress.provider,
                 tls_termination_kind=route_binding.ingress.termination_kind,
@@ -2892,7 +2929,7 @@ def _tls_observation(
         recorded=PublicIngressTlsRecordedEvidence(
             domain_name=public_name,
             domain_role=target.tls_domain_role,
-            route_binding_status="active",
+            route_binding_status=target.tls_route_binding_status,
             owner=target.tls_owner,
             ingress_provider=target.tls_ingress_provider,
             termination_kind=target.tls_termination_kind,

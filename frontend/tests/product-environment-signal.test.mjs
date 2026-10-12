@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence } from "../src/product-environment-signal.ts";
+import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, publicObservationGap } from "../src/product-environment-signal.ts";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 Object.defineProperty(globalThis, "window", { configurable: true, value: { location: { search: "" } } });
@@ -21,8 +21,7 @@ function environment() {
   freshen(lane.topology);
   lane.warnings = [];
   lane.topology.warnings = [];
-  lane.topology.observed.tls_domains = [];
-  lane.topology.observed.placement.runtime_identity_status = "unchecked";
+  lane.topology.observed.placement.runtime_identity_status = "match";
   lane.health_monitoring.checks = [structuredClone(lane.health_monitoring.checks[0])];
   const check = lane.health_monitoring.checks[0];
   check.probe_effective = true;
@@ -61,14 +60,15 @@ test("informational topology stays visible without blocking current verification
   assert.equal(environmentOperationalTone(lane), "warning");
 });
 
-test("no website never bypasses health, identity, placement or applicable topology gates", () => {
+test("no website never bypasses health or runtime identity", () => {
   const lane = environment();
   lane.topology.desired.public_website = "none";
+  lane.health_monitoring.checks[0].kind = "private_http";
   lane.topology.warnings = [{ code: "public_website_not_applicable", severity: "info", scope: "authority", detail: "No public website declared.", domain_name: "" }];
   assert.equal(environmentOperationalTone(lane), "verified");
   for (const state of ["missing", "unsupported"]) {
     lane.trust_state = state;
-    assert.notEqual(environmentOperationalTone(lane), "verified");
+    assert.equal(environmentOperationalTone(lane), "verified");
   }
   lane.trust_state = "recorded";
   lane.health_monitoring.checks[0].probe_effective = false;
@@ -78,7 +78,7 @@ test("no website never bypasses health, identity, placement or applicable topolo
   assert.equal(environmentOperationalTone(lane), "danger");
   lane.topology.observed.placement.runtime_identity_status = "match";
   lane.topology.warnings.push({ code: "stale_route_authority", severity: "error", scope: "authority", detail: "Stale authority", domain_name: "" });
-  assert.equal(environmentOperationalTone(lane), "danger");
+  assert.equal(environmentOperationalTone(lane), "verified");
 });
 
 test("negative TLS remains blocking beside informational evidence", () => {
@@ -159,7 +159,7 @@ test("product and lane badges expire together with the signal", () => {
 });
 
 
-test("route proof expires before still-fresh health and identity", () => {
+test("route proof expiry stays diagnostic while health and identity remain fresh", () => {
   const lane = environment();
   const deadline = Date.now();
   const sourceTrust = lane.topology.provider_recorded.trust_state;
@@ -168,8 +168,51 @@ test("route proof expires before still-fresh health and identity", () => {
   const expired = expireEnvironmentEvidence(lane, deadline + 1);
   assert.equal(expired.topology.provider_recorded.trust_state, "stale");
   assert.equal(expired.health_monitoring.checks[0].trust_state, "verified");
-  assert.equal(environmentOperationalTone(lane, deadline + 1), "warning");
+  assert.equal(environmentOperationalTone(lane, deadline + 1), "verified");
   assert.equal(lane.topology.provider_recorded.trust_state, sourceTrust);
+});
+
+test("missing and expired route authority cannot hide verified public health", () => {
+  for (const trust_state of ["missing", "stale"]) {
+    const lane = environment();
+    lane.trust_state = trust_state;
+    lane.topology.provider_recorded.trust_state = trust_state;
+    lane.topology.provider_recorded.provenance.stale_after = new Date(Date.now() - 1).toISOString();
+    const warning = { code: trust_state === "missing" ? "missing_route_authority" : "stale_route_authority", severity: "error", scope: "authority", detail: "Route proof unavailable", domain_name: "" };
+    lane.topology.warnings = [warning];
+    lane.warnings = [warning.detail];
+    assert.equal(environmentOperationalTone(lane), "verified");
+    lane.health_monitoring.checks[0].status = "fail";
+    assert.equal(environmentOperationalTone(lane), "danger");
+  }
+});
+
+test("a required public website cannot use private health as its public proof", () => {
+  const lane = environment();
+  lane.health_monitoring.checks[0].kind = "private_http";
+  assert.equal(environmentOperationalTone(lane), "warning");
+});
+
+test("fresh passing HTTP cannot make absent runtime identity green", () => {
+  for (const status of ["unchecked", "missing", "unverifiable"]) {
+    const lane = environment();
+    lane.topology.observed.placement.runtime_identity_status = status;
+    assert.equal(environmentOperationalTone(lane), "warning");
+  }
+});
+
+test("public green requires fresh DNS, named TLS and the expected public runtime", () => {
+  for (const update of [
+    { tls_domains: [] },
+    { tls_domains: environment().topology.observed.tls_domains.map(domain => ({ ...domain, validated_address_count: 0 })) },
+    { tls_domains: environment().topology.observed.tls_domains.map(domain => ({ ...domain, public_name_match: false })) },
+    { tls_domains: environment().topology.observed.tls_domains.map(domain => ({ ...domain, days_remaining: null })) },
+    { ingress: { ...environment().topology.observed.ingress, runtime_identity_status: "unchecked" } },
+  ]) {
+    const lane = environment();
+    Object.assign(lane.topology.observed, update);
+    assert.notEqual(environmentOperationalTone(lane), "verified");
+  }
 });
 
 test("TLS proof expires independently and an old response cannot restore it", () => {
@@ -212,3 +255,13 @@ test("expired negative TLS observations remain failures", () => {
   lane.topology.observed.tls_domains = [domain];
   assert.equal(environmentOperationalTone(lane), "danger");
 });
+
+ test("incomplete public observations expose a diagnostic while fresh evidence has no gap", () => {
+  const lane = environment();
+  assert.equal(publicObservationGap(lane.topology), null);
+  lane.topology.observed.ingress.runtime_identity_status = "unchecked";
+  assert.ok(publicObservationGap(lane.topology));
+  lane.topology.observed.ingress.runtime_identity_status = "match";
+  lane.topology.desired.domains = [];
+  assert.ok(publicObservationGap(lane.topology));
+ });

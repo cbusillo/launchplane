@@ -548,6 +548,35 @@ class _TopologyStore:
 
 
 class ProductTopologyReadModelTests(unittest.TestCase):
+    def test_profile_intent_tls_proof_is_verified_without_route_authority(self) -> None:
+        profile = _strict_public_profile().model_copy(update={"production_use": "live"})
+        payload = _tls_observation(
+            status="valid", recorded_source_kind="profile_intent"
+        ).model_dump(mode="json")
+        payload["targets"][0]["tls"]["recorded"].update(
+            route_binding_status="missing",
+            owner="none",
+            ingress_provider="",
+            termination_kind="none",
+            freshness_status="missing",
+            provider_evidence={},
+            stale_after="",
+        )
+        observation = PublicIngressObservationRecord.model_validate(payload)
+        topology = build_product_environment_topology(
+            record_store=_TopologyStore(route_binding=None, observations=(observation,)),
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=_lane_summary(),
+            now=_NOW,
+        )
+        self.assertEqual(topology.provider_recorded.tls.trust_state, "missing")
+        observed = topology.observed.tls_domains[0]
+        self.assertEqual(observed.trust_state, "verified")
+        self.assertTrue(observed.public_name_match)
+        self.assertGreater(observed.validated_address_count, 0)
+        self.assertEqual(observed.domain_name, profile.lanes[0].base_url.removeprefix("https://"))
+
     def test_no_website_requires_a_stored_declaration_not_private_monitoring_alone(self) -> None:
         payload = _profile().model_dump(mode="json")
         payload["lanes"][0].update(
