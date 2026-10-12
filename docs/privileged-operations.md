@@ -32,7 +32,11 @@ separate concrete administrator confirmation and governed installation.
 Ordinary-agent delivery preparation and activation planning are removed.
 Historical activation records remain readable, but cannot be planned, approved,
 canceled, or revoked through the service. Schema-3 policy parsing and maintenance
-remain available for existing records. Remaining deletion is tracked by
+remain available for existing records. Exact removal of an ordinary rule through
+the existing managed-policy reconciliation path remains the policy stop: new
+worker authorization fails when its bound rule is absent. This source retirement
+assumes the completed Q91 access and pilot qualification; it adds no grant or
+policy mutation. Remaining deletion is tracked by
 [launchplane#2437](https://github.com/cbusillo/launchplane/issues/2437).
 
 

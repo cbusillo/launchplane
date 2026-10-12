@@ -141,7 +141,7 @@ class PrivilegedOperationPlanEnvelope(BaseModel):
             and self.request.ordinary_agent_preparation_context is not None
         ):
             raise ValueError(
-                "Ordinary-agent policy preparation context is accepted only by its dedicated endpoint."
+                "Historical ordinary-agent preparation context cannot be submitted as a new proposal."
             )
         if self.descriptor_id == "managed-merge-train-policy-import" and not isinstance(
             self.request, ManagedMergeTrainPolicyImportProposalInput
@@ -152,7 +152,7 @@ class PrivilegedOperationPlanEnvelope(BaseModel):
             and self.request.preparation_context is not None
         ):
             raise ValueError(
-                "Merge-train target preparation context is accepted only by its dedicated endpoint."
+                "Historical target preparation context cannot be submitted as a new proposal."
             )
         if self.descriptor_id == "ordinary-agent-delivery-activation" and not isinstance(
             self.request,
@@ -232,7 +232,7 @@ class PrivilegedPolicyOperationAgentProposalEnvelope(BaseModel):
             and self.request.ordinary_agent_preparation_context is not None
         ):
             raise ValueError(
-                "Ordinary-agent policy preparation context is accepted only by its dedicated endpoint."
+                "Historical ordinary-agent preparation context cannot be submitted as a new proposal."
             )
         if self.descriptor_id == "managed-merge-train-policy-import" and not isinstance(
             self.request, ManagedMergeTrainPolicyImportProposalInput
@@ -243,7 +243,7 @@ class PrivilegedPolicyOperationAgentProposalEnvelope(BaseModel):
             and self.request.preparation_context is not None
         ):
             raise ValueError(
-                "Merge-train target preparation context is accepted only by its dedicated endpoint."
+                "Historical target preparation context cannot be submitted as a new proposal."
             )
         return self
 

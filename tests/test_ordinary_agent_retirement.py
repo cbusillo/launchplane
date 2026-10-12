@@ -39,6 +39,11 @@ class OrdinaryAgentRetirementTests(unittest.IsolatedAsyncioTestCase):
                         ("POST", "/v1/agent/ordinary-agent-enrollments/missing/claim"),
                         ("POST", "/v1/agent/ordinary-agent-session-proposals"),
                         ("POST", "/v1/agent/ordinary-agent-jobs"),
+                        ("POST", "/v1/agent/ordinary-agent-session-proposals/missing/cancel"),
+                        ("GET", "/v1/ordinary-agent-jobs/agent_test/missing"),
+                        ("POST", "/v1/ordinary-agent-operations/agent_test/missing/approve"),
+                        ("POST", "/v1/ordinary-agent-operations/agent_test/missing/cancel"),
+                        ("POST", "/v1/ordinary-agent-sessions/agent_test/missing/revoke"),
                         ("GET", "/v1/ordinary-agent-operations/agent_test/missing"),
                         ("POST", "/v1/ordinary-agent-connections/agent_test/disconnect"),
                         (

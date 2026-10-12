@@ -979,11 +979,11 @@ def _build_privileged_operation_semantic_review(
             rollback=PrivilegedOperationSemanticReviewRollback(
                 rollback_class="activation_revoke",
                 summary=(
-                    "Stopping later requires a separate review."
+                    "Retired delivery history is read-only; current stop authority remains in managed policy."
                     if isinstance(
                         record.evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence
                     )
-                    else "Stopping is permanent for this setup. Starting again requires a new reviewed setup."
+                    else "This records the historical stop; new delivery setup is retired."
                 ),
             ),
             evidence=PrivilegedOperationSemanticReviewEvidence(

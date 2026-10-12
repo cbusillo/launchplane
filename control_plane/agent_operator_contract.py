@@ -497,13 +497,6 @@ def build_agent_operator_contract(
         operation_id = operation.get("operationId")
         if not isinstance(operation_id, str) or not operation_id:
             raise AgentOperatorContractError(f"Missing operation ID: {spec.method} {spec.path}")
-        if (
-            "private_agent_client" in spec.supported_surfaces
-            and operation.get("x-launchplane-response-custody") != "private-client-only"
-        ):
-            raise AgentOperatorContractError(
-                "Private client operation lacks response custody metadata"
-            )
         normalized_operation = _normalize_operation(operation, components, {})
         parameter_names = {
             str(parameter.get("name", "")).lower()
