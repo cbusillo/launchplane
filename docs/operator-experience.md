@@ -760,3 +760,12 @@ fixture mode, which cannot supply authoritative service evidence.
 Leaving the panel cancels its receipt check and profile refresh. A late response
 from an unmounted panel cannot reconcile or clear a later operation's stored key
 or reviewed request. Return to the product to check the retained original again.
+
+## Sidebar lane status
+
+The product sidebar shows Testing then Production with saturated state icons:
+check for healthy, triangle for warning or stale evidence, x for failure, question
+mark for unverified evidence, and minus for absent or unsupported lanes. Hover
+labels and the accessible status name identify the lane, state and known
+diagnostic failure layers. Colors are tuned separately for light and dark themes;
+the sidebar uses the same operational health calculation as the product view.

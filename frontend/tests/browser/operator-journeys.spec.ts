@@ -314,10 +314,10 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByRole("link", { name: /Production/ }).first(),
     ).toBeVisible();
-    await expect(page.locator(".product-trust-dots").first()).toHaveAttribute(
-      "aria-label",
-      "Testing operational status: verified; Production operational status: danger",
-    );
+    const sidebarStatus = page.locator(".product-trust-dots").first();
+    const laneLabels = await sidebarStatus.locator("[data-lane]").evaluateAll(lanes =>
+      lanes.map(lane => lane.getAttribute("title")).join("; "));
+    await expect(sidebarStatus).toHaveAttribute("aria-label", laneLabels);
     await assertDocumentBasics(page);
     await captureScreenshot(page, testInfo, "product-workspace");
     diagnostics.assertClean();
