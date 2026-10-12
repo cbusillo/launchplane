@@ -248,7 +248,9 @@ class GenericWebDeployProviderMutationAdapter:
             if (
                 observation.outcome == "absent"
                 and resolved_target is not None
-                and self._restored_application_attempt(provider_operation_key, resolved_target)
+                and self._retryable_application_attempt(
+                    provider_operation_key, resolved_target, provider_effect_phase
+                )
             ):
                 return _GenericWebDeployProviderInspection(
                     observation=observation,
@@ -524,10 +526,11 @@ class GenericWebDeployProviderMutationAdapter:
             provider_evidence=provider_evidence,
         )
 
-    def _restored_application_attempt(
+    def _retryable_application_attempt(
         self,
         provider_operation_key: str,
         target: GenericWebResolvedDeployTarget,
+        phase: str,
     ) -> bool:
         if not callable(getattr(self._record_store, "read_deployment_record", None)):
             return False
@@ -540,8 +543,14 @@ class GenericWebDeployProviderMutationAdapter:
         receipt = recorded_application_lifecycle(record)
         return (
             receipt is not None
-            and receipt.state == "restored"
-            and record.deploy.status == "fail"
+            and (
+                (receipt.state == "restored" and record.deploy.status == "fail")
+                or (
+                    receipt.state == "prepared"
+                    and record.deploy.status == "pending"
+                    and phase in {"application_lifecycle_prepared", "application_schedule_quiesce"}
+                )
+            )
             and (
                 receipt.product,
                 receipt.context,

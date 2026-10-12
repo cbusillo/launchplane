@@ -603,6 +603,70 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             ).retry_safe
         )
 
+        provider.observation = GenericWebProviderDeploymentObservation(
+            outcome="present",
+            deployment_status="success",
+            deployment_id="retried",
+            started_at=utc_now_timestamp(),
+            finished_at=utc_now_timestamp(),
+        )
+        outcome = adapter.apply(operation, Mock(spec=ProviderOperationLease))
+        self.assertTrue(outcome.durable)
+        self.assertEqual(
+            cast(dict[str, object], outcome.response_payload["result"])["deploy_status"], "pass"
+        )
+
+    def test_adapter_resumes_an_interruption_after_quiescence_before_any_image_effect(self) -> None:
+        from control_plane.provider_operations import ProviderOperationLease
+
+        self._api_context()
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        store = _GenericWebDeployStore(profile)
+        provider = _LifecycleDeployProvider(
+            target_id="app-123",
+            observation=GenericWebProviderDeploymentObservation(outcome="absent"),
+        )
+        adapter = GenericWebDeployProviderMutationAdapter(
+            control_plane_root=Path("."),
+            record_store=store,
+            deploy_request=GenericWebDeployEnvelope(product=profile.product, deploy=_request()),
+            profile=profile,
+            lane=lane,
+            trace_id="paused-before-image",
+            deploy_provider=provider,
+        )
+        operation = "paused-before-image"
+        with patch.object(
+            provider, "execute_artifact_deploy", side_effect=SystemExit("interrupted")
+        ):
+            with self.assertRaises(SystemExit):
+                adapter.apply(operation, Mock(spec=ProviderOperationLease))
+        self.assertFalse(self.schedules["billing-recovery"]["enabled"])
+        inspection = adapter.inspect(
+            provider_operation_key=operation,
+            provider_effect_phase="application_schedule_quiesce",
+            reconciliation_key=adapter.reconciliation_key(),
+        )
+        self.assertTrue(inspection.retry_safe)
+        self.assertFalse(
+            adapter.inspect(
+                provider_operation_key=operation,
+                provider_effect_phase="application_maintenance_execute",
+                reconciliation_key=adapter.reconciliation_key(),
+            ).retry_safe
+        )
+        provider.observation = GenericWebProviderDeploymentObservation(
+            outcome="present",
+            deployment_status="success",
+            deployment_id="resumed",
+            started_at=utc_now_timestamp(),
+            finished_at=utc_now_timestamp(),
+        )
+        self.assertTrue(adapter.apply(operation, Mock(spec=ProviderOperationLease)).durable)
+        self.assertTrue(self.schedules["billing-recovery"]["enabled"])
+
     def test_unsupported_lifecycle_provider_refuses_before_deploy(self) -> None:
         profile = _profile()
         lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
