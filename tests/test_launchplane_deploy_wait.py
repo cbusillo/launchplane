@@ -7,8 +7,28 @@ import unittest
 
 import yaml
 
+from control_plane.deploy_failure_alert import REPLACEMENT_TIMEOUT_SECONDS
+
 
 class LaunchplaneDeployWaitTests(unittest.TestCase):
+    def test_replacement_budget_is_independent_of_worker_stop_grace(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "scripts/deploy/resolve-wait-timeout.py"
+        with TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(script),
+                    "--replacement",
+                    "--compose-file",
+                    str(Path(directory) / "missing.yml"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(int(result.stdout), REPLACEMENT_TIMEOUT_SECONDS)
+
     def test_completed_release_drain_excludes_only_release_workers_from_observation(self) -> None:
         script = Path(__file__).resolve().parents[1] / "scripts/deploy/resolve-wait-timeout.py"
         with TemporaryDirectory() as directory:

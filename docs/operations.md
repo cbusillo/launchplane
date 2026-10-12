@@ -2008,6 +2008,27 @@ product/runtime truth from checked-in catalogs.
 deploy workflow. Use a Launchplane `GET /v1/health` endpoint reachable from that
 runner rather than an internal-only provider hostname.
 
+After the self-deploy request leaves its legitimate release drain, forward
+replacement verification shares a two-minute deadline across image, marker and
+health checks. A continuously unavailable API during the request also has that
+shorter limit, while successful draining responses reset it and preserve the
+full release-drain budget. In-flight requests are bounded; this is health-based
+failure detection, not evidence of container restarts or a startup cause.
+
+Before replacement, the workflow validates the already-approved existing
+Launchplane Discord sender supplied as `DISCORD_LAUNCHPLANE_WEBHOOK`. An absent
+or invalid sender stops before dispatch; bind that same sender through the
+approved workflow configuration before enabling this path. Do not generate a
+new sender or grant provider access. On a possibly dispatched replacement
+failure, the workflow reports the image, bounded HTTP/health results, run link
+and manual break-glass workflow link before attempting its existing service
+rollback. Explicit pre-effect refusals and an unfinished drain do not page for
+break-glass. The alert does not include response bodies, endpoint URLs or
+startup logs. Sending failures fail visibly without printing the webhook.
+The break-glass link opens manual dispatch; a pending protected approval exists
+only after an admin dispatches that recovery. No recovery is dispatched by the
+reporter, and manual break-glass credentials remain behind their approval gate.
+
 The manual Merge Train Policy Import workflow uses GitHub OIDC with
 `merge_train.policy_import` authority for product/context `launchplane`. It does
 not inherit Launchplane self-deploy authority; use that workflow for DB-backed

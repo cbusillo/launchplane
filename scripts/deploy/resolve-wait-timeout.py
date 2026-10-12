@@ -8,6 +8,8 @@ import re
 
 import yaml
 
+from control_plane.deploy_failure_alert import REPLACEMENT_TIMEOUT_SECONDS
+
 
 def duration_seconds(value: str) -> int:
     if re.fullmatch(r"(?:[0-9]+(?:\.[0-9]+)?[hms])+", value) is None:
@@ -51,7 +53,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compose-file", type=Path, default=Path("docker-compose.yml"))
     parser.add_argument("--release-drain-complete", action="store_true")
+    parser.add_argument("--replacement", action="store_true")
     args = parser.parse_args()
+    if args.replacement:
+        print(REPLACEMENT_TIMEOUT_SECONDS)
+        return
     print(
         wait_timeout(
             args.compose_file,

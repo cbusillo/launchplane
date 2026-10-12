@@ -200,7 +200,7 @@ jobs:
 
       - name: Request provider-target operation
         id: provider_target_request
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@ba9180e88cc58794e28c8b5243acc5d8a049951e # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dafddbd943b4bd6041c1f433ab460555d4304555 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
