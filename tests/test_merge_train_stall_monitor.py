@@ -31,8 +31,9 @@ def _time(seconds: int) -> str:
 
 
 class StallObservationTests(TestCase):
+    @staticmethod
     def observe(
-        self, previous: MergeTrainStallObservation, seconds: int, **kwargs: object
+        previous: MergeTrainStallObservation, seconds: int, **kwargs: object
     ) -> MergeTrainStallObservation:
         defaults = {"progress_key": "observe:record:head", "ready": ("7:head",), "busy": True}
         return observe_stall(previous=previous, now=_time(seconds), **{**defaults, **kwargs})  # type: ignore[arg-type]
@@ -74,7 +75,7 @@ class StallMonitorTests(TestCase):
         policy = _policy_record(
             (
                 snapshot.repository,
-                MergeTrainSchedulerPolicy(enabled=True, mutate=True, runner_mode="controller"),
+                MergeTrainSchedulerPolicy(enabled=True, mutate=True),
             )
         )
         client, reporter = Mock(), Mock()
@@ -150,7 +151,7 @@ class StallMonitorTests(TestCase):
         policy = _policy_record(
             (
                 snapshot.repository,
-                MergeTrainSchedulerPolicy(enabled=True, mutate=True, runner_mode="controller"),
+                MergeTrainSchedulerPolicy(enabled=True, mutate=True),
             )
         )
         client, reporter = Mock(), Mock()
@@ -214,7 +215,7 @@ class StallMonitorTests(TestCase):
         policy = _policy_record(
             (
                 snapshot.repository,
-                MergeTrainSchedulerPolicy(enabled=True, mutate=True, runner_mode="controller"),
+                MergeTrainSchedulerPolicy(enabled=True, mutate=True),
             )
         )
         client = Mock()
@@ -296,7 +297,6 @@ class StallMonitorTests(TestCase):
                 MergeTrainSchedulerPolicy(
                     enabled=True,
                     mutate=True,
-                    runner_mode="controller",
                 ),
             )
         )
@@ -382,7 +382,7 @@ class StallMonitorTests(TestCase):
 
     def test_deliberate_dry_run_and_level1_targets_do_not_start_alert_clocks(self) -> None:
         for scheduler in (
-            MergeTrainSchedulerPolicy(enabled=True, mutate=False, runner_mode="controller"),
+            MergeTrainSchedulerPolicy(enabled=True),
             MergeTrainSchedulerPolicy(enabled=True, mutate=True, runner_mode="level1"),
         ):
             with self.subTest(scheduler=scheduler), TemporaryDirectory() as directory:
@@ -414,7 +414,7 @@ class StallMonitorTests(TestCase):
             policy = _policy_record(
                 (
                     record.repository,
-                    MergeTrainSchedulerPolicy(enabled=True, mutate=True, runner_mode="controller"),
+                    MergeTrainSchedulerPolicy(enabled=True, mutate=True),
                 )
             )
             with (

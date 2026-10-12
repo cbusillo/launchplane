@@ -133,7 +133,8 @@ class GitHubStallReporter:
             matches = [
                 item
                 for item in items
-                if STALL_ISSUE_MARKER in str(item.get("body", ""))
+                if isinstance(item.get("body"), str)
+                and STALL_ISSUE_MARKER in cast(str, item["body"])
                 and cast(dict[str, object], item["user"]).get("type") == "Bot"
             ]
             if len(matches) > 1:
@@ -157,7 +158,8 @@ class GitHubStallReporter:
             self.transport.request(method="GET", path=f"{self.path}/issues/{number}"),
         )
         if (
-            STALL_ISSUE_MARKER not in str(existing.get("body", ""))
+            not isinstance(existing.get("body"), str)
+            or STALL_ISSUE_MARKER not in cast(str, existing["body"])
             or cast(dict[str, object], existing["user"]).get("type") != "Bot"
         ):
             raise ValueError("Stall issue ownership changed.")
