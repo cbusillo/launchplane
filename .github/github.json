@@ -85,6 +85,7 @@
       "frontend": "pnpm --dir frontend validate",
       "container": "docker build -t launchplane-ci:test .",
       "ordinaryWorkerCompose": "bash scripts/qualify-ordinary-agent-compose.sh launchplane-ci:test",
+      "testingBrowser": "bash scripts/qualify-testing-browser.sh launchplane-ci:test",
       "serviceCompose": "bash scripts/qualify-service-compose.sh launchplane-ci:test \"${LAUNCHPLANE_CI_POSTGRES_IMAGE:?set from the top-level env in .github/workflows/ci.yml}\""
     },
     "openapi": {
@@ -186,7 +187,6 @@
     "Reusable Product Driver Post Deploy",
     "Reusable Product Driver Testing Verification",
     "Reusable Product Driver Testing Reset",
-    "Reusable Product Driver Prod Backup Gate",
     "Reusable Product Driver Prod Launch Readiness",
     "Reusable Product Driver Prod Promotion",
     "Reusable Product Driver Prod Rollback",

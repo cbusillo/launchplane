@@ -179,6 +179,7 @@ from control_plane.product_repository_identity import (
     product_repository_identity_from_inventory,
     resolve_product_repository_identity,
 )
+from control_plane.workflows.generic_web_deploy import GenericWebDeployStore
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
     DurableProviderOperationStore,
@@ -482,6 +483,30 @@ def reconcile_testing_target(
         repository_id=repository_id,
         transport=transport,
     )
+    if (
+        isinstance(desired, VerifiedGenericWebBuild)
+        and profile.driver_id == "verireel"
+        and plan.get("reason") == "already_deployed"
+    ):
+        from control_plane.workflows.verireel_testing_post_deploy import (
+            recorded_verireel_testing_qualification,
+        )
+
+        lane = next(lane for lane in profile.lanes if lane.instance == TESTING_INSTANCE)
+        qualification = recorded_verireel_testing_qualification(
+            cast(GenericWebDeployStore, record_store),
+            _current_testing_deployment_id(record_store=record_store, lane=lane),
+            desired.image_reference,
+            desired.manifest.source_commit,
+            _generic_web_testing_authority(record_store=record_store, lane=lane),
+        )
+        if qualification == "fail":
+            plan.update(post_deploy_status="fail", reason="testing_qualification_failed")
+            return ReconcileOutcome(
+                plan, error="This testing deployment failed product qualification."
+            )
+        if qualification != "pass":
+            plan.update(action="deploy", reason="testing_qualification_missing")
     if desired is None or plan["action"] != "deploy":
         return ReconcileOutcome(plan)
     if isinstance(desired, VerifiedGenericWebBuild):

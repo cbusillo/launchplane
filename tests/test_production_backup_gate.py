@@ -10,24 +10,21 @@ from unittest.mock import patch
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
-import click
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.production_backup_gate import ProductionBackupGateWorkerResult
 from control_plane.contracts.production_backup_failures import known_backup_failure_code
 from control_plane.http_routes.production_backup_gate import _response
-from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateRequest
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_backup_gate import (
     enqueue_production_backup_gate,
     execute_shared_production_backup,
 )
 from control_plane.workflows.production_backup_provider import ProductionBackupProviderError
-from control_plane.workflows.verireel_prod_backup_gate import enqueue_verireel_prod_backup_gate
-from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
-    run_verireel_prod_backup_gate_operation_worker_loop,
-    run_verireel_prod_backup_gate_operation_worker_once,
+from control_plane.workflows.production_backup_gate_operation_worker import (
+    run_production_backup_gate_operation_worker_loop,
+    run_production_backup_gate_operation_worker_once,
 )
 from tests.support.durable_operations import (
     durable_operation_authorization_payload,
@@ -134,7 +131,7 @@ class ProductionBackupGateTests(unittest.TestCase):
                 },
             ),
             patch(
-                "control_plane.workflows.verireel_prod_backup_gate_operation_worker.read_active_authz_policy_record",
+                "control_plane.workflows.production_backup_gate_operation_worker.read_active_authz_policy_record",
                 side_effect=lambda _store: current_policy,
             ),
             patch(
@@ -142,7 +139,7 @@ class ProductionBackupGateTests(unittest.TestCase):
                 side_effect=host.run,
             ),
         ):
-            result = run_verireel_prod_backup_gate_operation_worker_once(
+            result = run_production_backup_gate_operation_worker_once(
                 record_store=self.store,
                 control_plane_root_path=self.root,
                 lease_owner="test-worker",
@@ -208,13 +205,6 @@ class ProductionBackupGateTests(unittest.TestCase):
                 operation_key="caller|duplicate",
             )
         self.assertEqual(self.store.read_backup_gate_record(operation.backup_record_id), evidence)
-        with self.assertRaisesRegex(click.ClickException, "another backup scope or provider"):
-            enqueue_verireel_prod_backup_gate(
-                record_store=self.store,
-                request=VeriReelProdBackupGateRequest(backup_record_id=operation.backup_record_id),
-                authorization=self.authorization,
-            )
-        self.assertEqual(self.store.read_backup_gate_record(operation.backup_record_id), evidence)
 
     def test_shutdown_finishes_admitted_capture_and_claims_no_next_capture(self) -> None:
         operations = [
@@ -250,7 +240,7 @@ class ProductionBackupGateTests(unittest.TestCase):
                 side_effect=finish_capture,
             ),
         ):
-            result = run_verireel_prod_backup_gate_operation_worker_loop(
+            result = run_production_backup_gate_operation_worker_loop(
                 record_store=self.store,
                 control_plane_root_path=self.root,
                 lease_owner="draining-worker",
@@ -297,17 +287,13 @@ class ProductionBackupGateTests(unittest.TestCase):
                     evidence=evidence,
                 ),
             ),
-            patch(
-                "control_plane.workflows.verireel_prod_backup_gate_operation_worker._run_delegated_worker"
-            ) as legacy,
         ):
-            result = run_verireel_prod_backup_gate_operation_worker_once(
+            result = run_production_backup_gate_operation_worker_once(
                 record_store=self.store,
                 control_plane_root_path=self.root,
                 lease_owner="test-worker",
             )
         self.assertTrue(result.terminal_write_committed)
-        legacy.assert_not_called()
         persisted = self.store.read_verireel_prod_backup_gate_operation_record(
             operation.operation_id
         )
@@ -345,7 +331,7 @@ class ProductionBackupGateTests(unittest.TestCase):
                 ),
             ) as provider,
         ):
-            run_verireel_prod_backup_gate_operation_worker_once(
+            run_production_backup_gate_operation_worker_once(
                 record_store=self.store,
                 control_plane_root_path=self.root,
                 lease_owner="test-worker",
@@ -356,6 +342,59 @@ class ProductionBackupGateTests(unittest.TestCase):
         )
         self.assertEqual(provider.call_args.kwargs["ssh_private_key"], "worker-private")
         self.assertEqual(provider.call_args.kwargs["ssh_known_hosts"], "worker-hosts")
+
+    def test_shared_capture_cannot_publish_after_losing_its_lease(self) -> None:
+        operation = enqueue_production_backup_gate(
+            record_store=self.store,
+            request=self.binding.request,
+            authorization=self.authorization,
+            operation_key="caller|lost-lease",
+        )
+
+        def capture_then_lose_lease(
+            *args: object, **kwargs: object
+        ) -> ProductionBackupGateWorkerResult:
+            current = self.store.read_verireel_prod_backup_gate_operation_record(
+                operation.operation_id
+            )
+            self.store.write_verireel_prod_backup_gate_operation_record(
+                current.model_copy(update={"lease_owner": "replacement-worker"})
+            )
+            return ProductionBackupGateWorkerResult(
+                status="pass",
+                started_at=current.started_at,
+                finished_at=current.updated_at,
+                evidence={"capture_status": "verified"},
+            )
+
+        with (
+            patch(
+                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                return_value={
+                    "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "fixture-key",
+                    "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "fixture-hosts",
+                },
+            ),
+            patch(
+                "control_plane.workflows.production_backup_gate.execute_production_backup_provider",
+                side_effect=capture_then_lose_lease,
+            ) as capture,
+        ):
+            result = run_production_backup_gate_operation_worker_once(
+                record_store=self.store,
+                control_plane_root_path=self.root,
+                lease_owner="original-worker",
+            )
+        capture.assert_called_once()
+        self.assertFalse(result.terminal_write_committed)
+        persisted = self.store.read_verireel_prod_backup_gate_operation_record(
+            operation.operation_id
+        )
+        self.assertEqual(persisted.status, "running")
+        self.assertEqual(persisted.lease_owner, "replacement-worker")
+        self.assertIsNone(persisted.result)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_backup_gate_record(operation.backup_record_id)
 
     def test_retired_binding_blocks_worker_before_provider(self) -> None:
         operation = enqueue_production_backup_gate(
@@ -374,7 +413,7 @@ class ProductionBackupGateTests(unittest.TestCase):
         with patch(
             "control_plane.workflows.production_backup_gate.execute_production_backup_provider"
         ) as provider:
-            result = run_verireel_prod_backup_gate_operation_worker_once(
+            result = run_production_backup_gate_operation_worker_once(
                 record_store=self.store,
                 control_plane_root_path=self.root,
                 lease_owner="test-worker",

@@ -996,7 +996,11 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
-                    return_value=self._compose_target(self._BOOTSTRAP_ENV),
+                    return_value=self._compose_target(
+                        self._BOOTSTRAP_ENV
+                        + "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN=old-worker-token\n"
+                        + "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET=preserved-webhook-secret\n"
+                    ),
                 ),
                 patch(
                     "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
@@ -1008,7 +1012,10 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                 response = await _post_launchplane_self_deploy(
                     app,
                     self._payload(
-                        oauth_env={"LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example"}
+                        oauth_env={
+                            "LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example",
+                            "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "new-worker-token",
+                        }
                     ),
                     idempotency_key="launchplane-self-deploy:test",
                 )
@@ -1031,6 +1038,12 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
             updated_env_text,
         )
         self.assertIn("LAUNCHPLANE_PUBLIC_URL=https://launchplane.example", updated_env_text)
+        self.assertIn("LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN=new-worker-token", updated_env_text)
+        self.assertNotIn("LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN=old-worker-token", updated_env_text)
+        self.assertIn(
+            "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET=preserved-webhook-secret",
+            updated_env_text,
+        )
         trigger_mock.assert_called_once_with(
             host="https://dokploy.example.com",
             token="token-123",

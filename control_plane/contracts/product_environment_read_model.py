@@ -1980,7 +1980,6 @@ def _product_action_authorization_context(
         "/v1/drivers/odoo/prod-promotion",
         "/v1/drivers/odoo/prod-rollback",
         "/v1/drivers/verireel/prod-deploy",
-        "/v1/drivers/verireel/prod-backup-gate",
         "/v1/drivers/verireel/prod-promotion",
         "/v1/drivers/verireel/prod-rollback",
     }:
@@ -2662,7 +2661,6 @@ def _action_support_reason(
         "/v1/drivers/odoo/prod-promotion",
         "/v1/drivers/odoo/prod-rollback",
         "/v1/drivers/verireel/prod-deploy",
-        "/v1/drivers/verireel/prod-backup-gate",
         "/v1/drivers/verireel/prod-promotion",
         "/v1/drivers/verireel/prod-rollback",
     }:
