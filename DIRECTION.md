@@ -53,8 +53,7 @@ checks, automatic rollback. Who accepts a release is set in
 accepting is a production action: the review says so in plain words, the
 decision stays bound to the exact candidate it reviewed, an admin can hold
 releases without editing a record, and an admin override is still a hand
-promotion. A Client's issue or comment never merges, promotes, or counts as
-acceptance. Admin is a permission, not a role; the Director normally holds it.
+promotion. Admin is a permission, not a role; the Director normally holds it.
 
 ## Stop Boundaries
 
