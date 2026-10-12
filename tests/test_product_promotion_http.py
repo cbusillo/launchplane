@@ -672,6 +672,60 @@ class ProductPromotionStatusTests(unittest.TestCase):
                 self.assertEqual(redeployed.source.health_status, "skipped")
                 self.assertFalse(redeployed.workflow_live.enabled)
 
+    def test_health_only_check_uses_the_other_probe_identity_and_cannot_replace_it(self) -> None:
+        store = _MonitoredPromotionStore()
+        lane = store.profile.lanes[0]
+        health_only = lane.health_monitoring.checks[0].model_copy(
+            update={"name": "public-root", "require_runtime_identity": False}
+        )
+        lane = lane.model_copy(
+            update={
+                "health_monitoring": lane.health_monitoring.model_copy(
+                    update={"checks": (*lane.health_monitoring.checks, health_only)}
+                )
+            }
+        )
+        store.profile = store.profile.model_copy(update={"lanes": (lane, store.profile.lanes[1])})
+        passed = store.observations[0].model_copy(
+            update={
+                "record_id": "public-root-observation",
+                "check_name": health_only.name,
+                "targets": (
+                    PublicIngressTargetObservation(
+                        target="base_url",
+                        url=lane.base_url,
+                        status="pass",
+                        summary="Public page is healthy.",
+                    ),
+                ),
+            }
+        )
+        store.observations.append(passed)
+        _, _, status = _status(store)
+        self.assertTrue(status.direct_dry_run.enabled)
+        self.assertEqual(status.source.health_status, "pass")
+        self.assertEqual(status.source.runtime_identity_status, "match")
+
+        store.observations[-1] = passed.model_copy(
+            update={"observed_at": (NOW - timedelta(hours=1)).isoformat()}
+        )
+        _, _, stale = _status(store)
+        self.assertFalse(stale.workflow_live.enabled)
+        self.assertEqual(stale.source.runtime_identity_status, "match")
+
+        store.observations[-1] = passed
+        lane = lane.model_copy(
+            update={
+                "health_monitoring": lane.health_monitoring.model_copy(
+                    update={"checks": (health_only,)}
+                )
+            }
+        )
+        store.profile = store.profile.model_copy(update={"lanes": (lane, store.profile.lanes[1])})
+        _, _, no_identity = _status(store)
+        self.assertFalse(no_identity.workflow_live.enabled)
+        self.assertEqual(no_identity.source.runtime_identity_status, "unchecked")
+
     def test_equivalent_monitor_refresh_preserves_the_reviewed_promotion_fingerprint(self) -> None:
         store = _MonitoredPromotionStore(old_inventory=True)
         _, _, before = _status(store)

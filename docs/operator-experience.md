@@ -483,7 +483,9 @@ Both testing and production must have fresh, healthy evidence bound to
 matching generated runtime identity. For lanes with effective monitoring,
 promotion status uses the same current runtime verifier as the Products page;
 monitor evidence must follow the current profile, deployment and private
-endpoint configuration, and every effective check must pass. Deploy inventory
+endpoint configuration, and every effective check must pass. Each check follows
+its configured identity requirement; the lane still needs a current matching
+runtime-identity probe even when other checks supply only health. Deploy inventory
 still owns the artifact and source revision, but its age and historical health
 do not override current monitor verification. Missing, expired or mismatched
 monitor evidence cannot fall back to a passing deploy check. Lanes without
