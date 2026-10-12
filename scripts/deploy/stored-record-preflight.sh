@@ -15,7 +15,7 @@ if [[ ! -f "$snapshot_file" ]]; then
   exit 1
 fi
 snapshot_file="$(realpath "$snapshot_file")"
-project="launchplane-snapshot-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+project="launchplane-snapshot-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 network="$project"
 database="$project-db"
 candidate="$project-candidate"
@@ -23,14 +23,14 @@ cleanup() {
   docker rm -fv "$candidate" "$database" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
-trap 'exit 124' TERM INT
 
 # Pulls happen outside the rehearsal network. Startup/migrations/record loads
 # have only a private DB peer; no host socket, published ports or live volumes.
 docker pull "$image_reference" >/dev/null
 docker pull "$postgres_image" >/dev/null
 docker network create --internal "$network" >/dev/null
+trap cleanup EXIT
+trap 'exit 124' TERM INT
 docker run -d --name "$database" --network "$network" --network-alias snapshot-db \
   --memory 1g --cpus 2 --pids-limit 256 \
   --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,size=768m,mode=0700 \

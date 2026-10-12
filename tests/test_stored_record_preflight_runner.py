@@ -42,6 +42,9 @@ fi
 exit 0
 """)
             docker.chmod(0o755)
+            unavailable_uuidgen = root / "uuidgen"
+            unavailable_uuidgen.write_text("#!/bin/bash\nexit 127\n")
+            unavailable_uuidgen.chmod(0o755)
             snapshot = root / "snapshot.json"
             snapshot.write_text("{}")
             log = root / "commands.log"
