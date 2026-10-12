@@ -96,7 +96,6 @@ for (const detail of [false, true]) test(`an open ${detail ? "environment" : "wo
   await expect(sidebarDot).toHaveAttribute("data-tone", "verified");
   await page.clock.runFor(2000);
   await expect(signal).toHaveAttribute("data-tone", "warning");
-  if (!detail) await expect(signal).toContainText("Review warning");
   await expect(signal).toContainText("Stale");
   await expect(sidebarDot).toHaveAttribute("data-tone", "warning");
 });

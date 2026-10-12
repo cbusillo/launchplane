@@ -105,6 +105,8 @@ export function publicObservationGap(topology: Topology): string | null {
   if (ingress.runtime_identity_status !== "match") return "Public runtime identity unverified";
   const expectedTls = topology.desired.domains.filter(domain => domain.tls_expected);
   if (!expectedTls.length) return "Public HTTPS domain missing";
+  if (topology.observed.tls_domains.some(observed => ["expiring", "unknown", "unsupported"].includes(observed.status)))
+    return "Public TLS needs review";
   return expectedTls.every(expected =>
     topology.observed.tls_domains.some(observed =>
       observed.domain_name === expected.domain_name && observed.status === "valid" &&

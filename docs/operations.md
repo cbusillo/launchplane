@@ -1706,7 +1706,7 @@ policy identities, outbox payloads, provider operation details, target URLs,
 and provider error text.
 
 TLS observations reuse the same monitor run, record family, and incident
-lifecycle. For each active environment route binding, Launchplane probes one
+lifecycle. For each active environment route binding, and each disabled binding on a Live product, Launchplane probes one
 TLS target per bound domain so primary names and aliases are recorded
 independently. A Live product without a route binding also gets TLS probes from
 its stored HTTPS lane URL domains, using the same desired-domain projection as

@@ -420,7 +420,7 @@ function ProductWorkspace({
               {product.display_name}
             </h1>
             <EvidenceBadge
-              qualifier="Stored topology"
+              qualifier="All evidence"
               state={product.trust_state}
               timestamp={evidenceTimestamp(product.provenance)}
             />
@@ -684,7 +684,7 @@ function EnvironmentRow({
         </div>
         <EvidenceBadge
           compact
-          qualifier="Stored topology"
+          qualifier="All evidence"
           state={environment.trust_state}
           timestamp={evidenceTimestamp(environment.provenance)}
         />
@@ -723,9 +723,9 @@ function EnvironmentRow({
           </small>
         </div>
         <div>
-          <dt>Stored topology updated</dt>
+          <dt>Runtime evidence updated</dt>
           <dd>{formatEvidenceTime(environment.provenance)}</dd>
-          <small>{trustLabel(environment.trust_state)}</small>
+          <small>{trustLabel(environment.provenance.freshness_status)}</small>
         </div>
       </dl>
       <AppLink
@@ -1153,7 +1153,7 @@ function nextSafeInspection(
   if (incomplete) {
     return {
       title: `Inspect ${environmentLabel(incomplete.environment)} evidence`,
-      detail: `Stored topology is ${trustLabel(incomplete.trust_state).toLowerCase()}. Confirm route authority before a managed route change; current health is evaluated from fresh observations.`,
+      detail: `The combined lane and topology evidence is ${trustLabel(incomplete.trust_state).toLowerCase()}. Inspect observations and route records; the health signal separately requires fresh observations.`,
       targetId: `lane-${safeAnchor(incomplete.environment)}`,
     };
   }
