@@ -27,6 +27,41 @@ class MergeTrainControllerReconciliationRequiredError(RuntimeError):
     pass
 
 
+MergeTrainObservedCheckStatus = Literal["not_observed", "unknown", "pending", "pass", "fail"]
+
+
+class MergeTrainControllerLastResult(BaseModel):
+    """One pass's bounded evidence. It is never admission or landing authority."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str = Field(max_length=256)
+    base_branch: str = Field(max_length=256)
+    policy_key: str = Field(max_length=256)
+    policy_sha256: str = Field(max_length=256)
+    pass_started_at: str = Field(max_length=64)
+    observed_at: str = Field(max_length=64)
+    trace_id: str = Field(max_length=256)
+    action: str = Field(max_length=128)
+    reason_code: str = Field(max_length=128)
+    record_id: str = Field(default="", max_length=256)
+    source_failed_record_id: str = Field(default="", max_length=256)
+    candidate_batch_id: str = Field(default="", max_length=256)
+    recovery_kind: str = Field(default="", max_length=128)
+    candidate_sha: str = Field(default="", max_length=128)
+    observed_candidate_sha: str = Field(default="", max_length=128)
+    base_sha: str = Field(default="", max_length=128)
+    candidate_checks_status: MergeTrainObservedCheckStatus = "not_observed"
+    base_checks_status: MergeTrainObservedCheckStatus = "not_observed"
+    check_retry_of: str = Field(default="", max_length=256)
+    infrastructure_retry_of: str = Field(default="", max_length=256)
+    batch_body_retry_of: str = Field(default="", max_length=256)
+    reconciliation_required: bool = False
+    semantic_progress_at: str = Field(default="", max_length=64)
+    next_actor: Literal["controller", "provider", "repository_agent"] = "controller"
+    next_observation: str = Field(max_length=256)
+
+
 class MergeTrainControllerStateRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -57,6 +92,8 @@ class MergeTrainControllerStateRecord(BaseModel):
     last_transition_at: str = ""
     reconciliation_status: MergeTrainControllerReconciliationStatus = "clean"
     reconciliation_detail: str = ""
+    last_result: MergeTrainControllerLastResult | None = None
+    semantic_progress_key: str = ""
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeTrainControllerStateRecord":
