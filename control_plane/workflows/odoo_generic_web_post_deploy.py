@@ -21,9 +21,17 @@ _ODOO_GENERIC_WEB_POST_DEPLOY_DRIVERS = frozenset({"odoo"})
 
 def generic_web_post_deploy_executor_for_driver_id(
     driver_id: str,
+    *,
+    instance: str = "",
 ) -> GenericWebPostDeployExecutor | None:
     if driver_id.strip() in _ODOO_GENERIC_WEB_POST_DEPLOY_DRIVERS:
         return execute_odoo_generic_web_post_deploy
+    if driver_id.strip() == "verireel" and instance == "testing":
+        from control_plane.workflows.verireel_testing_post_deploy import (
+            execute_verireel_testing_post_deploy,
+        )
+
+        return execute_verireel_testing_post_deploy
     return None
 
 

@@ -142,6 +142,15 @@ reservation. The webhook request never waits on a deploy.
     `deploy_status`, `post_deploy_status` and `deployment_record_id`, never the
     driver's message; a refusal's reason goes to the worker log only. A product on any other driver is held with
     `no_reconcile_deploy_for_driver`.
+    For VeriReel testing, a matching image without deployment-bound migration and
+    creator/admin qualification gets one normal deploy of that same verified
+    artifact to run the testing-only post-deploy extension. Passing qualification
+    then stops at `already_deployed`. A failed qualification with unchanged
+    stored lane authority remains failed; a supported configuration repair can
+    permit a fresh attempt. Interrupted effects retain the existing provider
+    reservation and generic-web recovery path. No new caller capability or
+    product-repository call-in is involved. Production and rollback do not select
+    this extension.
   - If the lane is busy, the reconcile stays pending and runs again after it.
   - While the testing lane is held for staff testing, the reconcile records
     its plan as held (`action: wait`, reason `staff_testing`) and deploys

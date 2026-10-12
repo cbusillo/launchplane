@@ -88,6 +88,15 @@ the underlying image deploy as `pass` and the post-deploy evidence as `fail`.
 Launchplane wires this extension for Odoo profiles when they execute generic-web
 deploy or rollback apply, so Odoo can reuse common provider deployment while its
 post-deploy maintenance remains explicit driver behavior.
+VeriReel's generic-web extension is selected only for testing deploys. It runs
+the existing `stable-testing-migration` maintenance intent, then verifies a
+disposable creator's QR/public flow, creator denial of admin pages, and the admin
+pages after the existing smoke-maintenance intent elevates that fixture. Cleanup
+uses the existing test-account deletion intent. The deployment's
+`post_deploy_update.evidence` binds migration, creator, admin and cleanup statuses
+to the deployment ID, immutable artifact and source revision; all must pass.
+The service image includes the matching Playwright headless Chromium binary.
+See [event-driven deploys](event-driven-deploys.md) for requalification and replay.
 Do not move a product apply route onto generic deploy until its remaining
 release, backup, promotion, migration, and post-deploy invariants are either
 represented in generic contracts or still explicitly wrapped by the product

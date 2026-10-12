@@ -300,7 +300,10 @@ class GenericWebDeployProviderMutationAdapter:
             )
         post_deploy_unobserved = (
             generic_web_provider_deployment_succeeded(observation.deployment_status)
-            and generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None
+            and generic_web_post_deploy_executor_for_driver_id(
+                self._profile.driver_id, instance=self._lane.instance
+            )
+            is not None
         )
         deployment_record_id = self._deployment_record_id(provider_operation_key)
         if provider_effect_phase.startswith("post_deploy_"):
@@ -374,7 +377,12 @@ class GenericWebDeployProviderMutationAdapter:
         returns ``None`` so the caller keeps holding the reservation.
         """
 
-        if generic_web_post_deploy_executor_for_driver_id(self._profile.driver_id) is not None:
+        if (
+            generic_web_post_deploy_executor_for_driver_id(
+                self._profile.driver_id, instance=self._lane.instance
+            )
+            is not None
+        ):
             return None
         return self._runtime_close_out_evidence(resolved_deploy_target)
 

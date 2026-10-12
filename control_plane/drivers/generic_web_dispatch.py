@@ -235,8 +235,10 @@ _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE = _DriverRouteExecutionMetadata(
 
 def _generic_web_post_deploy_executor_for_profile(
     profile: LaunchplaneProductProfileRecord,
+    *,
+    instance: str = "",
 ) -> GenericWebPostDeployExecutor | None:
-    return generic_web_post_deploy_executor_for_driver_id(profile.driver_id)
+    return generic_web_post_deploy_executor_for_driver_id(profile.driver_id, instance=instance)
 
 
 def _stable_verification_health_evidence(
