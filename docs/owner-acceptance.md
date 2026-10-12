@@ -6,9 +6,9 @@ title: Client Review and Retired Acceptance History
 
 Products recorded with `release_on_acceptance: director_standing` do not wait
 for a Client-preview check at merge admission or receive preview-review invitations,
-even when the PR has test notes
-or an old review label. The Director's standing direction supplies acceptance;
-engineering checks still apply. Production release remains on the gated path
+even when the PR has test notes or an old review label. The Director's standing
+direction supplies acceptance; note validation and engineering checks still
+apply. Production release remains on the gated path
 described in [release-review.md](release-review.md), including its checklist-note validation.
 
 The Client named on the product profile reviews a preview at `/ui/owner-review`.

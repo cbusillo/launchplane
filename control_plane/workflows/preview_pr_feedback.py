@@ -326,8 +326,6 @@ def pull_request_client_review(
     from control_plane.client_test_notes import ClientTestNotesRequired, change_client_review
     from control_plane.client_release_repositories import recorded_train_candidate
 
-    if director_standing:
-        return False
     reference = github_pull_request_reference(pr_url=anchor_pr_url)
     if reference is None:
         raise ValueError("Client review requires a pull request reference.")
@@ -354,6 +352,7 @@ def pull_request_client_review(
         body=str(payload.get("body") or ""),
         labels=labels,
         review_label=label,
+        director_standing=director_standing,
     )
     base = payload.get("base")
     if not intent.explicit_override and recorded_train_candidate(

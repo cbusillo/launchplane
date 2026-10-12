@@ -6,6 +6,27 @@ from control_plane.client_test_notes import change_client_review, client_test_no
 
 
 class ClientTestNotesTests(unittest.TestCase):
+    def test_director_standing_preserves_note_validation_and_dependency_exemption(self) -> None:
+        for notes in ("", "Nothing for the Client to test", "Try the new buttons."):
+            with self.subTest(notes=notes):
+                intent = change_client_review(
+                    body="## Client test notes\n" + notes,
+                    labels=("owner-review",),
+                    review_label="owner-review",
+                    director_standing=True,
+                )
+                self.assertFalse(intent.review_required)
+                self.assertEqual(intent.error, client_test_notes(notes).error)
+        intent = change_client_review(
+            body="Bumps a dependency.",
+            labels=(),
+            review_label="owner-review",
+            director_standing=True,
+            pure_dependency_update=True,
+        )
+        self.assertFalse(intent.review_required)
+        self.assertFalse(intent.error)
+
     def test_real_notes_request_review_without_a_label(self) -> None:
         intent = change_client_review(
             body="## Client test notes\nTry the new price list.",
@@ -156,7 +177,8 @@ class ClientTestNotesTests(unittest.TestCase):
             self.assertFalse(read(store))
             with self.assertRaises(ClientTestNotesRequired):
                 read()
-            self.assertFalse(read(director_standing=True))
+            with self.assertRaises(ClientTestNotesRequired):
+                read(director_standing=True)
             payload["body"] = "## Client test notes\nTry the price list."
             payload["base"] = {"ref": "other-base"}
             self.assertTrue(read(store))
