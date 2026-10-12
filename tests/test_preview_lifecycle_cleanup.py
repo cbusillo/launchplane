@@ -118,6 +118,8 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                     "context": profile.preview.context,
                     "driver_id": profile.driver_id,
                     "cleanup_driver_id": "generic-web",
+                    "held_reservations": [],
+                    "held_reservations_truncated": False,
                     "status": "fail",
                     "error_message": message,
                 }

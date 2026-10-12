@@ -7616,6 +7616,7 @@ class PostgresRecordStore(HumanSessionStore):
             record.provider_target_key,
             record.provider_effect_phase,
             record.provider_effect_started_at,
+            record.original_intent,
             record.created_at,
         )
 
@@ -7970,6 +7971,28 @@ class PostgresRecordStore(HumanSessionStore):
                 for row in session.scalars(statement)
             )
 
+    def list_held_odoo_preview_reservations(
+        self, *, product: str, limit: int = 101
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
+        from control_plane.product_reconcile import reconcile_reservation_scope
+
+        return self._list_models(
+            model_type=LaunchplaneIdempotencyRecord,
+            orm_model=LaunchplaneIdempotencyRow,
+            filters=(
+                LaunchplaneIdempotencyRow.route_path == ODOO_PREVIEW_APPLY_ROUTE,
+                LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
+                or_(
+                    LaunchplaneIdempotencyRow.scope == reconcile_reservation_scope(product),
+                    LaunchplaneIdempotencyRow.payload["original_intent"]["product"].as_string()
+                    == product,
+                ),
+            ),
+            order_by=(LaunchplaneIdempotencyRow.record_id,),
+            limit=min(max(limit, 1), 1001),
+        )
+
     def lookup_existing_mutation_reservation(
         self,
         *,
@@ -8205,6 +8228,7 @@ class PostgresRecordStore(HumanSessionStore):
         lease_seconds: int = 300,
         reconciliation_key: str = "",
         provider_target_key: str = "",
+        original_intent: dict[str, Any] | None = None,
     ) -> MutationReservationResult:
         return self._reserve_mutation(
             scope=scope,
@@ -8215,6 +8239,7 @@ class PostgresRecordStore(HumanSessionStore):
             lease_seconds=lease_seconds,
             reconciliation_key=reconciliation_key,
             provider_target_key=provider_target_key,
+            original_intent=original_intent,
             retry_missing_collision=True,
         )
 
@@ -8280,6 +8305,7 @@ class PostgresRecordStore(HumanSessionStore):
         reconciliation_key: str,
         provider_target_key: str,
         retry_missing_collision: bool,
+        original_intent: dict[str, Any] | None = None,
     ) -> MutationReservationResult:
         normalized_scope = scope.strip()
         normalized_route_path = route_path.strip()
@@ -8318,6 +8344,7 @@ class PostgresRecordStore(HumanSessionStore):
                     reserved_at=observed_at,
                     reconciliation_key=reconciliation_key,
                     provider_target_key=normalized_provider_target_key,
+                    original_intent=original_intent,
                 )
                 session.add(self._idempotency_row(reservation))
                 session.commit()
@@ -8365,6 +8392,7 @@ class PostgresRecordStore(HumanSessionStore):
                         lease_seconds=lease_seconds,
                         reconciliation_key=reconciliation_key,
                         provider_target_key=provider_target_key,
+                        original_intent=original_intent,
                         retry_missing_collision=False,
                     )
                 raise insert_error
@@ -8931,7 +8959,9 @@ class PostgresRecordStore(HumanSessionStore):
                     status="not_reconcile_required",
                     record=current_record,
                 )
-            if not self._mutation_reservation_matches(current_record, reservation):
+            if (
+                reservation.original_intent and current_record != reservation
+            ) or not self._mutation_reservation_matches(current_record, reservation):
                 return MutationReservationAdoptionResult(
                     status="reservation_mismatch",
                     record=current_record,
@@ -9059,6 +9089,7 @@ class PostgresRecordStore(HumanSessionStore):
         minimum_expired_seconds: int,
         reconciliation_key: str,
         provider_target_key: str,
+        original_intent: dict[str, Any] | None = None,
     ) -> MutationReconciliationSupersessionResult:
         normalized_response_trace_id = response_trace_id.strip()
         normalized_reconciliation_key = reconciliation_key.strip()
@@ -9105,7 +9136,9 @@ class PostgresRecordStore(HumanSessionStore):
                         status="not_reconcile_required",
                         record=current_record,
                     )
-                if not self._mutation_reservation_matches(current_record, reservation):
+                if (
+                    reservation.original_intent and current_record != reservation
+                ) or not self._mutation_reservation_matches(current_record, reservation):
                     return MutationReconciliationSupersessionResult(
                         status="reservation_mismatch",
                         record=current_record,
@@ -9157,6 +9190,7 @@ class PostgresRecordStore(HumanSessionStore):
                     reserved_at=observed_at,
                     reconciliation_key=normalized_reconciliation_key,
                     provider_target_key=normalized_provider_target_key,
+                    original_intent=original_intent,
                 )
                 self._sync_idempotency_row(row, superseded_record)
                 session.add(self._idempotency_row(replacement))

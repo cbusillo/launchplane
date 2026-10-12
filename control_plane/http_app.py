@@ -26676,6 +26676,11 @@ def create_launchplane_fastapi_app(
         read_identity=read_every_code_worker_read_identity,
     )
     register_preview_record_read_routes(app, dependencies=read_route_dependencies)
+    from control_plane.http_routes.preview_reservations import (
+        register_preview_reservation_read_routes,
+    )
+
+    register_preview_reservation_read_routes(app, dependencies=read_route_dependencies)
 
     register_inventory_operation_read_routes(app, dependencies=read_route_dependencies)
 

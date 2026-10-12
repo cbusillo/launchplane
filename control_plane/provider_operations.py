@@ -175,6 +175,7 @@ class DurableProviderOperationStore(Protocol):
         lease_seconds: int = ...,
         reconciliation_key: str = ...,
         provider_target_key: str = ...,
+        original_intent: dict[str, object] | None = ...,
     ) -> MutationReservationResult: ...
 
     def complete_mutation_reservation(
@@ -230,6 +231,7 @@ class DurableProviderOperationStore(Protocol):
         minimum_expired_seconds: int,
         reconciliation_key: str,
         provider_target_key: str,
+        original_intent: dict[str, object] | None = None,
     ) -> MutationReconciliationSupersessionResult: ...
 
     def release_reserved_mutation(
@@ -414,6 +416,7 @@ def run_durable_provider_operation(
     heartbeat_interval_seconds: float | None = None,
     target_supersession: ProviderTargetSupersession | None = None,
     allow_mutation: bool = True,
+    original_intent: dict[str, object] | None = None,
 ) -> DurableProviderOperationResult:
     """Run or observe a fenced operation.
 
@@ -446,11 +449,20 @@ def run_durable_provider_operation(
             lease_seconds=lease_seconds,
             reconciliation_key=reconciliation_key,
             provider_target_key=provider_target_key,
+            **({"original_intent": original_intent} if original_intent else {}),
         )
 
     reservation_result = reserve()
     decision = reservation_result.status
     reservation = reservation_result.record
+
+    if (
+        reservation is not None
+        and decision not in {"target_busy", "replayed"}
+        and reservation.original_intent
+        and original_intent != reservation.original_intent
+    ):
+        return DurableProviderOperationResult("conflict", reservation, 409, {})
 
     if (
         allow_mutation
@@ -473,6 +485,7 @@ def run_durable_provider_operation(
             minimum_expired_seconds=target_supersession.minimum_expired_seconds,
             reconciliation_key=reconciliation_key,
             provider_target_key=provider_target_key,
+            **({"original_intent": original_intent} if original_intent else {}),
         )
         if supersession.status == "acquired" and supersession.record is not None:
             decision = "acquired"

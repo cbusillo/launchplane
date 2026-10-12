@@ -293,6 +293,16 @@ def build_preview_lifecycle_sweep(
             "driver_id": profile.driver_id,
             "cleanup_driver_id": cleanup_driver_id,
         }
+        from control_plane.preview_reservation_recovery import (
+            classify_preview_reservation,
+            held_preview_reservations,
+        )
+
+        holds = held_preview_reservations(record_store, product=profile.product)
+        entry["held_reservations"] = [
+            classify_preview_reservation(record, profile=profile) for record in holds[:100]
+        ]
+        entry["held_reservations_truncated"] = len(holds) > 100
         if profile.product in denied_actions:
             entry.update(
                 {
@@ -302,6 +312,13 @@ def build_preview_lifecycle_sweep(
                         f"{denied_actions[profile.product]} on this product."
                     ),
                 }
+            )
+            entries.append(entry)
+            continue
+        if holds and request.apply:
+            entry.update(
+                status="blocked",
+                error_message="Held previews require original-intent recovery before cleanup apply.",
             )
             entries.append(entry)
             continue
@@ -407,6 +424,9 @@ def build_preview_lifecycle_sweep(
                 "error_message": cleanup_record.error_message,
             }
         )
+        if holds:
+            entry["status"] = "blocked"
+            entry["error_message"] = "Held preview reservations require original-intent recovery."
         entries.append(entry)
     status = "pass"
     for entry in entries:

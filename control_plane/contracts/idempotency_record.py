@@ -31,6 +31,7 @@ class LaunchplaneIdempotencyRecord(BaseModel):
     provider_target_key: str = ""
     provider_effect_phase: str = ""
     provider_effect_started_at: str = ""
+    original_intent: dict[str, Any] = Field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
     response_status_code: int | None = Field(default=None, ge=100, le=599)
@@ -192,6 +193,7 @@ def build_launchplane_mutation_reservation(
     reserved_at: str,
     reconciliation_key: str = "",
     provider_target_key: str = "",
+    original_intent: dict[str, Any] | None = None,
 ) -> LaunchplaneIdempotencyRecord:
     normalized_scope = _normalize_required(scope, "Mutation reservation requires scope.")
     normalized_route_path = _normalize_required(
@@ -217,6 +219,7 @@ def build_launchplane_mutation_reservation(
         lease_expires_at=lease_expires_at,
         reconciliation_key=reconciliation_key,
         provider_target_key=provider_target_key,
+        original_intent=original_intent or {},
         created_at=reserved_at,
         updated_at=reserved_at,
     )

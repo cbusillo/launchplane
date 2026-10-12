@@ -29,7 +29,6 @@ class DeployFailureAlertTests(unittest.TestCase):
             self.assertTrue(replacement_may_have_dispatched(response))
             for body in (
                 {"result": {"deploy_state": "draining"}},
-                {"error": {"code": "self_deploy_drain_timeout"}},
                 {"error": {"code": "self_deploy_fence_conflict"}},
                 {"error": {"code": "authorization_denied"}},
                 {"error": {"code": "authentication_required"}},
@@ -43,6 +42,48 @@ class DeployFailureAlertTests(unittest.TestCase):
                         sender.assert_not_called()
             response.write_text("null")
             self.assertTrue(replacement_may_have_dispatched(response))
+
+    def test_drain_timeout_alerts_without_claiming_dispatch_or_forwarding_private_blockers(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            response = Path(directory) / "response.json"
+            response.write_text(
+                json.dumps(
+                    {
+                        "error": {
+                            "code": "self_deploy_drain_timeout",
+                            "message": "private-coordinates",
+                            "blocking": ["private-key"],
+                        }
+                    }
+                )
+            )
+            environment = {
+                "SELF_DEPLOY_RESPONSE_FILE": str(response),
+                "DEPLOYED_IMAGE_REFERENCE": "registry.example/service@sha256:" + "a" * 64,
+                "DISCORD_LAUNCHPLANE_WEBHOOK": "https://discord.com/api/webhooks/example/sender",
+                "GITHUB_SERVER_URL": "https://forge.example",
+                "GITHUB_REPOSITORY": "example/service",
+                "GITHUB_RUN_ID": "1234",
+                "LAUNCHPLANE_DEPLOY_HEALTH_URLS": "https://health.example",
+            }
+            self.assertFalse(replacement_may_have_dispatched(response))
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch("control_plane.deploy_failure_alert.health_results", return_value=[]),
+                patch("control_plane.deploy_failure_alert.post_discord_webhook") as sender,
+            ):
+                self.assertTrue(send_failure_alert())
+            payload = sender.call_args.args[1]
+            self.assertIn("drain", payload["embeds"][0]["title"])
+            self.assertNotIn("private-", json.dumps(payload))
+            self.assertTrue(
+                any(
+                    "deploy-launchplane.yml" in field["value"]
+                    for field in payload["embeds"][0]["fields"]
+                )
+            )
 
     def test_health_evidence_never_returns_urls_bodies_or_exception_values(self) -> None:
         unexpected = MagicMock()
