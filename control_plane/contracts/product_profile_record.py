@@ -313,7 +313,9 @@ class ProductPreviewProfile(BaseModel):
     required_provider_fields: tuple[str, ...] = ()
     data_transport_mode: Literal["none", "driver"] = "none"
     historical_transport: dict[str, str] = Field(
-        default_factory=dict, json_schema_extra={"readOnly": True}
+        default_factory=dict,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"readOnly": True},
     )
 
     @model_validator(mode="before")
@@ -321,9 +323,10 @@ class ProductPreviewProfile(BaseModel):
     def _preserve_stored_transport(cls, value: object, info: ValidationInfo) -> object:
         if not isinstance(value, dict):
             return value
-        if not (info.context and info.context.get("stored_product_profile")):
+        if info.context and info.context.get("product_profile_input"):
             if value.get("historical_transport"):
                 raise ValueError("historical preview transport is storage-owned")
+        if not (info.context and info.context.get("stored_product_profile")):
             return value
         normalized = dict(value)
         historical = dict(normalized.get("historical_transport") or {})

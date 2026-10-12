@@ -1155,15 +1155,7 @@ def evaluate_generic_web_preview_readiness(
             product=request.product,
         )
     checks: list[GenericWebPreviewReadinessCheck] = []
-    if resolved_profile.preview.historical_transport or (
-        resolved_profile.preview.data_transport_mode == "driver"
-    ):
-        reason = (
-            "Saved preview transport intent was never implemented; replace the preview settings "
-            "with supported none/driver configuration before refreshing."
-            if resolved_profile.preview.historical_transport
-            else "Driver transport readiness requires executed driver refresh evidence."
-        )
+    if resolved_profile.preview.historical_transport:
         return GenericWebPreviewReadinessResult(
             readiness_status="blocked",
             checked_at=checked_at,
@@ -1177,7 +1169,12 @@ def evaluate_generic_web_preview_readiness(
             transport=_transport_summary(profile=resolved_profile),
             checks=(
                 GenericWebPreviewReadinessCheck(
-                    check_id="transport_compatibility", status="blocked", message=reason
+                    check_id="transport_compatibility",
+                    status="blocked",
+                    message=(
+                        "Saved preview transport intent was never implemented; replace the preview "
+                        "settings with supported none/driver configuration before refreshing."
+                    ),
                 ),
             ),
         )

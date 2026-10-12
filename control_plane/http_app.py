@@ -12444,7 +12444,9 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             )
         try:
-            profile = LaunchplaneProductProfileRecord.model_validate(raw_payload)
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                raw_payload, context={"product_profile_input": True}
+            )
         except ValidationError as error:
             raise _launchplane_http_error(
                 status_code=400,
