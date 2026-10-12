@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 import unittest
@@ -14,9 +15,11 @@ from tests.test_production_backup_authority import _dry_run_envelope
 from control_plane.action_effects import ACTION_EFFECTS, AGENT_READ_ROLE_ACTION
 from control_plane.authz_scope import exclusively_instance_scoped_authz_actions
 from control_plane.contracts.agent_write_intent import _INTENT_AUTHZ_ACTIONS
+from control_plane.contracts.authz_denial_record import build_authz_denial_record
 from control_plane.drivers.registry import list_driver_descriptors
 from control_plane.service_auth import (
     AuthorizationTarget,
+    AuthzEvaluation,
     LaunchplaneAuthzPolicy,
     LocalOperatorIdentity,
     LocalOperatorPolicyRule,
@@ -641,6 +644,41 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(response.status_code, 403, response.text)
                 self.assertNotIn(repository, response.text)
+
+    async def test_denial_explanation_resolves_the_actual_context_owner(self) -> None:
+        foreign = LaunchplaneProductProfileRecord.model_validate(
+            product_profile_payload("foreign-site")
+        )
+        with _database_app(reader_policy()) as (store, record, app):
+            store.write_product_profile_record(foreign)
+            now = datetime.now(timezone.utc)
+            denial = build_authz_denial_record(
+                trace_id="mixed-scope-denial",
+                recorded_at=now.isoformat(),
+                expires_at=(now + timedelta(days=1)).isoformat(),
+                route_path="/v1/service/runtime",
+                evaluation=AuthzEvaluation(
+                    decision="denied",
+                    reason_code="no_matching_grant",
+                    principal_type="local_operator",
+                    action="inventory.read",
+                    product="launchplane",
+                    context=foreign.lanes[0].context,
+                    target_scope="context",
+                    instance_specified=False,
+                ),
+                policy_record_id=record.record_id,
+                policy_revision=record.revision,
+                policy_sha256=record.policy_sha256,
+            )
+            store.write_authz_denial_record(denial)
+            async with lifespan_client(app) as client:
+                response = await client.get(
+                    f"/v1/authz-diagnostics/denials/{denial.trace_id}",
+                    headers={"Authorization": "Bearer reader-token"},
+                )
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertNotIn(foreign.lanes[0].context, response.text)
 
     async def test_denied_intent_cannot_introduce_an_aggregate_product_scope(self) -> None:
         with _database_app(reader_policy()) as (store, _, app):

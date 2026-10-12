@@ -20114,10 +20114,20 @@ def create_launchplane_fastapi_app(
             action=AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ) and not active_record.policy.agent_read_role_allows(
-            identity=identity,
-            product=denial_record.product,
-            context=denial_record.context,
+        ) and not (
+            active_record.policy.agent_read_role_allows(
+                identity=identity,
+                product=denial_record.product,
+                context=denial_record.context,
+            )
+            and resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action=AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
+                product="launchplane"
+                if denial_record.context in ("", _LAUNCHPLANE_SERVICE_CONTEXT)
+                else denial_record.product,
+                context=denial_record.context,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
