@@ -9777,13 +9777,14 @@ class PostgresRecordStore(HumanSessionStore):
         if not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update(skip_locked=True)
         with self._session_factory() as session:
-            if self.database_url.startswith("sqlite"):
-                self._lock_odoo_stable_lane(
-                    session,
-                    product="",
-                    context="",
-                    instance="",
+            from control_plane.service_deploy_drain import admission_allowed, lock
+
+            lock(self, session)
+            if not admission_allowed(session, self._database_mutation_timestamp(session)):
+                logging.getLogger(__name__).debug(
+                    "Odoo testing replacement claims paused for Launchplane replacement."
                 )
+                return None
             for row in session.scalars(statement).all():
                 record = self._read_payload(
                     model_type=OdooStableTargetReplacementOperationRecord,
