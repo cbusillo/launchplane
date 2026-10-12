@@ -17372,6 +17372,11 @@
             "title": "Progress Since",
             "type": "string"
           },
+          "queue_suspended": {
+            "default": false,
+            "title": "Queue Suspended",
+            "type": "boolean"
+          },
           "ready_since": {
             "additionalProperties": {
               "type": "string"
@@ -17401,6 +17406,7 @@
         "required": [
           "progress_key",
           "progress_since",
+          "queue_suspended",
           "ready_since",
           "reasons",
           "suspected_signals"
@@ -17460,6 +17466,22 @@
             "title": "Observed At",
             "type": "string"
           },
+          "published_issue_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published Issue Number"
+          },
+          "published_reason_sha256": {
+            "default": "",
+            "title": "Published Reason Sha256",
+            "type": "string"
+          },
           "repository": {
             "title": "Repository",
             "type": "string"
@@ -17474,6 +17496,8 @@
           "notified_key",
           "observations",
           "observed_at",
+          "published_issue_number",
+          "published_reason_sha256",
           "repository"
         ],
         "title": "MergeTrainStallRecord",

@@ -6,7 +6,7 @@ from control_plane.contracts.repository_inventory import normalize_repository
 
 
 class MergeTrainStallWorkflow(BaseModel):
-    """Existing sender's repository/ref, supplied by the active policy record."""
+    """Existing sender's repository/ref from Launchplane runtime settings."""
 
     model_config = ConfigDict(extra="forbid")
     repository: str
@@ -25,6 +25,7 @@ class MergeTrainStallObservation(BaseModel):
     ready_since: dict[str, str] = Field(default_factory=dict)
     reasons: tuple[str, ...] = ()
     suspected_signals: tuple[str, ...] = ()
+    queue_suspended: bool = False
 
 
 class MergeTrainStallRecord(BaseModel):
@@ -35,6 +36,8 @@ class MergeTrainStallRecord(BaseModel):
     issue_number: int | None = None
     issue_state: Literal["open", "closed"] = "closed"
     issue_body_sha256: str = ""
+    published_reason_sha256: str = ""
+    published_issue_number: int | None = None
     notification_key: str = ""
     notified_key: str = ""
     delivery_error: str = ""

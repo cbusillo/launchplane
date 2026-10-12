@@ -1589,6 +1589,7 @@ export type MergeTrainServiceAuthz = {
 export type MergeTrainStallObservation = {
     progress_key: string;
     progress_since: string;
+    queue_suspended: boolean;
     ready_since: {
         [key: string]: string;
     };
@@ -1607,6 +1608,8 @@ export type MergeTrainStallRecord = {
         [key: string]: MergeTrainStallObservation;
     };
     observed_at: string;
+    published_issue_number: number | null;
+    published_reason_sha256: string;
     repository: string;
 };
 

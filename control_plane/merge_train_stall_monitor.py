@@ -25,6 +25,7 @@ from control_plane.merge_train import build_merge_train_dry_run_result
 from control_plane.merge_train_github import GitHubMergeTrainClient, UrllibMergeTrainGitHubTransport
 from control_plane.merge_train_github_token import resolve_merge_train_github_token
 from control_plane.merge_train_policy_source import resolve_merge_train_policy_record
+from control_plane.merge_train_release_hold import merge_train_release_hold_reader
 from control_plane.workflows.ship import utc_now_timestamp
 
 STALL_SECONDS = 30 * 60
@@ -203,7 +204,7 @@ def _issue_body(record: MergeTrainStallRecord) -> str:
                 for key, since in sorted(observation.ready_since.items())
             )
     if not any(item.reasons for item in record.observations.values()):
-        lines.append("Resolved: the train progressed and no stall condition remains.")
+        lines.append("Resolved: no actionable stall condition remains.")
     lines.extend(
         [
             "",
@@ -231,6 +232,7 @@ def run_stall_monitor_pass(
         ):
             targets.setdefault(target.repository.lower(), []).append(target)
     stall_store = cast(StallStore, store)
+    release_hold_reader = merge_train_release_hold_reader(store)
     for repository, policies in targets.items():
         try:
             with stall_store.merge_train_stall_lock(repository=repository):
@@ -240,6 +242,7 @@ def run_stall_monitor_pass(
                 except FileNotFoundError:
                     record = MergeTrainStallRecord(repository=repository, observed_at=observed_at)
                 observations: dict[str, MergeTrainStallObservation] = {}
+                release_held = bool(release_hold_reader and release_hold_reader(repository))
                 for target in policies:
                     token = resolve_merge_train_github_token(
                         source=target.github_token,
@@ -249,6 +252,7 @@ def run_stall_monitor_pass(
                     client = GitHubMergeTrainClient(
                         transport=UrllibMergeTrainGitHubTransport(token=token)
                     )
+                    client.begin_snapshot_pass(policy=target, read_only=True)
                     snapshot = client.read_merge_train_snapshot(
                         repository=repository, base_branch=target.base_branch
                     )
@@ -277,9 +281,9 @@ def run_stall_monitor_pass(
                     ]
                     state_signature = (
                         (
-                            state.active_action or state.last_action,
-                            state.active_phase or state.last_phase,
-                            state.active_record_id or state.last_record_id,
+                            state.last_action,
+                            state.last_phase,
+                            state.last_record_id,
                         )
                         if state
                         else ()
@@ -290,6 +294,12 @@ def run_stall_monitor_pass(
                     previous = record.observations.get(
                         target.base_branch, MergeTrainStallObservation()
                     )
+                    if release_held or previous.queue_suspended:
+                        # A recorded release intentionally prevents landing. Do
+                        # not charge its duration to the queue's stall clocks.
+                        previous = previous.model_copy(
+                            update={"progress_since": observed_at, "ready_since": {}}
+                        )
                     # Participating in a progressing candidate resets that member's
                     # wait; another change joining the queue does not reset older waits.
                     participating = (
@@ -326,21 +336,22 @@ def run_stall_monitor_pass(
                         previous=previous,
                         now=observed_at,
                         progress_key=progress_key,
-                        ready=ready,
-                        busy=bool(ready or current or (state and state.lease_owner)),
+                        ready=() if release_held else ready,
+                        busy=not release_held
+                        and bool(ready or current or (state and state.lease_owner)),
                         orphaned_lease=bool(
                             state
                             and state.lease_owner
                             and _age(observed_at, state.lease_expires_at) >= 0
                         ),
                         recovered_failure=recovered,
-                    )
-                previous_reasons = {
-                    base: item.reasons for base, item in record.observations.items() if item.reasons
-                }
+                    ).model_copy(update={"queue_suspended": release_held})
                 current_reasons = {
                     base: item.reasons for base, item in observations.items() if item.reasons
                 }
+                reason_digest = hashlib.sha256(
+                    json.dumps(current_reasons, sort_keys=True).encode()
+                ).hexdigest()
                 record = record.model_copy(
                     update={"observations": observations, "observed_at": observed_at}
                 )
@@ -356,14 +367,15 @@ def run_stall_monitor_pass(
                     number = reporter.publish(record, body, stalled=stalled)
                 except Exception as error:
                     updates: dict[str, object] = {"delivery_error": type(error).__name__}
-                    if isinstance(error, MergeTrainGitHubError) and error.status_code == 404:
-                        updates.update({"issue_number": None, "notification_key": ""})
+                    if isinstance(error, MergeTrainGitHubError) and error.status_code in {404, 410}:
+                        updates.update({"issue_number": None})
                     stall_store.write_merge_train_stall_record(record.model_copy(update=updates))
                     continue
                 next_state = "open" if stalled else "closed"
                 if number is not None and (
                     record.issue_state != next_state
-                    or (stalled and previous_reasons != current_reasons)
+                    or record.published_issue_number != number
+                    or (stalled and record.published_reason_sha256 != reason_digest)
                     or (stalled and not record.notification_key)
                 ):
                     record = record.model_copy(
@@ -378,6 +390,8 @@ def run_stall_monitor_pass(
                         "issue_number": number,
                         "issue_state": next_state,
                         "issue_body_sha256": body_digest,
+                        "published_issue_number": number,
+                        "published_reason_sha256": reason_digest,
                         "delivery_error": "",
                     }
                 )
