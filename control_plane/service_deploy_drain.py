@@ -130,6 +130,7 @@ def _running_operations(session: Any) -> tuple[str, ...]:
         LaunchplaneIdempotencyRow,
         LaunchplaneOdooProdPromotionOperationRow,
         LaunchplaneOdooProdRollbackOperationRow,
+        LaunchplaneOdooStableTargetReplacementOperationRow,
         LaunchplaneVeriReelProdBackupGateOperationRow,
     )
 
@@ -137,6 +138,7 @@ def _running_operations(session: Any) -> tuple[str, ...]:
     for row_type in (
         LaunchplaneOdooProdPromotionOperationRow,
         LaunchplaneOdooProdRollbackOperationRow,
+        LaunchplaneOdooStableTargetReplacementOperationRow,
         LaunchplaneVeriReelProdBackupGateOperationRow,
     ):
         ids.extend(
