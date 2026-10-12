@@ -199,6 +199,8 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/production-backup-authority/apply": "apply_production_backup_authority",
     # POST carries the original typed request for an inert receipt lookup.
     "/v1/service/delivery/apply-receipt": "read_service_delivery_apply_receipt",
+    "/v1/product-profiles/stable-lane-repair/apply": "apply_product_stable_lane_repair",
+    "/v1/product-profiles/expected-config/apply": "apply_product_expected_config",
     "/v1/service/github-delivery/configuration": "configure_launchplane_github_delivery",
     "/v1/service/github-delivery/token-retirement": "retire_service_github_tokens",
     "/v1/privileged-operations/authorization-candidates/prepare": (

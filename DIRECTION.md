@@ -11,12 +11,11 @@ Launchplane is the small control layer that lets agents build, preview,
 deploy, promote, back up, restore, and merge every product, and record a
 Client's accept-or-reject decision. A live site is the production lane of a
 product recorded as live. A product is recorded as live when its Client uses
-production for real business; a missing or wrong record does not override
-the overall direction's stop on Client business systems.
+production for real business.
 
 Judge every change by one question: can a product be maintained without
 anyone touching Launchplane? Work that adds upkeep to Launchplane itself needs
-a strong reason. Prefer deleting a concept to adding one.
+a strong reason.
 
 A product repository builds its own artifacts from its own files, with
 provenance Launchplane can verify; it never calls Launchplane, and Launchplane
@@ -31,20 +30,12 @@ GitHub through Launchplane's own names for things (a change, a comment, a
 check result, a merge); old code moves over only when other work touches it.
 Adding another host is its own milestone, when the Director chooses it.
 
-Launchplane needs no caller grant for the work it starts from source-control
-events (verifying a build and deploying it to that site's previews and testing
-lane) or from a Client's recorded release acceptance (the gated promotion).
-Requests from people or other agents still need grants. This does not replace
-the Director's approval at a stop boundary, a Client's release acceptance, or
-a backup gate.
-
 Code and tests are upkeep. A change that deletes code or tests without losing
 a behavior needs no other reason. A test earns its place by catching a real
 regression, not by restating the code or its wording.
 
 Only an admin or Launchplane merges. Clients can veto a change, never merge
-one. The merge train is the delivery path; when the train itself is broken,
-merge through the protected branch and record why in the pull request.
+one.
 
 Launchplane records each product's Client and runs every production release
 through the same gated path: verified backup, release record, post-deploy
@@ -53,8 +44,7 @@ checks, automatic rollback. Who accepts a release is set in
 accepting is a production action: the review says so in plain words, the
 decision stays bound to the exact candidate it reviewed, an admin can hold
 releases without editing a record, and an admin override is still a hand
-promotion. A Client's issue or comment never merges, promotes, or counts as
-acceptance. Admin is a permission, not a role; the Director normally holds it.
+promotion. Admin is a permission, not a role; the Director normally holds it.
 
 ## Stop Boundaries
 

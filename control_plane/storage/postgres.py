@@ -37143,6 +37143,15 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def read_public_ingress_observation_record(
+        self, record_id: str
+    ) -> PublicIngressObservationRecord:
+        return self._read_model(
+            model_type=PublicIngressObservationRecord,
+            orm_model=LaunchplanePublicIngressObservationRow,
+            filters=(LaunchplanePublicIngressObservationRow.record_id == record_id,),
+        )
+
     def list_public_ingress_observation_records(
         self,
         *,

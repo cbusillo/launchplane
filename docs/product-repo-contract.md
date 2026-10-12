@@ -358,11 +358,54 @@ A product repo is approved when all of these are true:
 ## Odoo Ownership Regression Check
 
 Launchplane owns the Odoo ownership-boundary regression check. Run it from a
-workspace that contains `launchplane` and the Odoo sibling repos:
+workspace with explicit repository roots and family intent. Repeat `--repository`
+for every root in the caller's complete requested coverage:
 
 ```bash
-uv run launchplane odoo-ownership check --workspace-root ..
+uv run launchplane odoo-ownership check --workspace-root .. \
+  --repository odoo-tenant-example tenant \
+  --repository /path/to/image-checkout image
 ```
+
+There is no default repository catalog or name-based family discovery. Families
+are `tenant`, `image`, `shared_addons`, `devkit`, and `retired`; they select the
+existing generic rules. Relative roots resolve under `--workspace-root`
+(default: Launchplane's parent); absolute roots support independent worktrees.
+An existing checkout uses the same explicit input as a newly added tenant.
+Omitting all roots, repeating a root, or providing an unknown family is an
+input error. A pass applies only to the requested roots, never to all enrolled
+products; the caller supplies that complete list from its authoritative inventory.
+
+Text and JSON output report each requested root and family, whether coverage
+completed, and scanned and omitted file counts. Missing/non-directory roots,
+failed traversal, linked source directories, nonregular source files, and
+unreadable supported source files fail the check rather
+than silently passing. Root-level files use the same rules as nested files.
+Counts exclude unsupported file suffixes, ignored generated directories, and
+known local metadata (`.DS_Store`, `.coverage`, AppleDouble `._*` files), and
+private `.env`/`.env.*` inputs. Generated environments include `.venv`, `venv`,
+and `.tox`. Gitignored source scripts remain checked; a gitignore is not an
+ownership exemption;
+`omitted_file_count` counts supported files exempted by the existing path rules
+(docs, tests, addons, or explicit Python policy exceptions). An empty directory
+reports complete coverage with zero scanned files.
+
+Python callers supply `repo_policies` explicitly to
+`scan_odoo_ownership_boundaries`, using `OdooOwnershipRepoPolicy` for each root
+and family. The existing `allowed_path_globs` field supports scoped exceptions
+for a caller's reviewed transitional cleanup; it is never filled from a
+repository-name catalog. The CLI supplies the same explicit exceptions through
+repeatable `--allow-path ROOT GLOB`; ROOT must exactly match a requested ROOT.
+For example, `--repository odoo-devkit devkit --allow-path odoo-devkit
+odoo_devkit/workspace_surface.py` scopes an exception to that requested checkout.
+An exception is reported as omitted coverage, not checked source.
+
+This is a caller-scoped audit, not a whole-inventory CI lint gate. The caller's
+explicit request owns its coverage; build the complete ROOT/FAMILY inputs from
+the inventory being audited and retain them with the results. Launchplane does
+not infer local checkouts or auxiliary image/addon/devkit families from product
+names. The `.github/github.json` documentation route points here rather than
+publishing a second invocation or repository inventory.
 
 The check is intentionally narrow. It allows product-owned source, tests,
 artifact publishing, GHCR login, devkit local build/runtime behavior, and thin

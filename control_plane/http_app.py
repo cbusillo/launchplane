@@ -12623,7 +12623,7 @@ def create_launchplane_fastapi_app(
 
     async def apply_product_expected_config(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -14854,7 +14854,7 @@ def create_launchplane_fastapi_app(
 
     async def apply_product_stable_lane_repair(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -23191,6 +23191,7 @@ def create_launchplane_fastapi_app(
                     label=owner_profile.owner.review_label,
                     record_store=record_store,
                     client_set=owner_profile.owner.is_set,
+                    director_standing=owner_profile.release_on_acceptance == "director_standing",
                 )
                 if owner_review_requested and owner_profile.owner.is_set:
                     owner_login = owner_profile.owner.github_login

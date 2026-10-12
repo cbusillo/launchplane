@@ -38,6 +38,7 @@ CLIENT_STATUS = "launchplane/owner-review"
 
 def _review_store(*, review_label: str = "owner-review") -> Any:
     profile = SimpleNamespace(
+        release_on_acceptance="held",
         is_active=True,
         repository=REPOSITORY,
         owner=SimpleNamespace(review_label=review_label, is_set=True),
