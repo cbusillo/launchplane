@@ -1480,7 +1480,6 @@ export type MergeTrainLatestDryRunSummary = {
 export type MergeTrainPolicyOutput = {
     policies: Array<MergeTrainRepositoryPolicyOutput>;
     schema_version: number;
-    stall_alert_workflow?: MergeTrainStallWorkflow | null;
 };
 
 export type MergeTrainPolicyRecordOutput = {
@@ -1594,6 +1593,7 @@ export type MergeTrainStallObservation = {
         [key: string]: string;
     };
     reasons: Array<string>;
+    suspected_signals: Array<string>;
 };
 
 export type MergeTrainStallRecord = {
@@ -1607,11 +1607,6 @@ export type MergeTrainStallRecord = {
         [key: string]: MergeTrainStallObservation;
     };
     observed_at: string;
-    repository: string;
-};
-
-export type MergeTrainStallWorkflow = {
-    ref: string;
     repository: string;
 };
 

@@ -24,6 +24,7 @@ class MergeTrainStallObservation(BaseModel):
     progress_since: str = ""
     ready_since: dict[str, str] = Field(default_factory=dict)
     reasons: tuple[str, ...] = ()
+    suspected_signals: tuple[str, ...] = ()
 
 
 class MergeTrainStallRecord(BaseModel):

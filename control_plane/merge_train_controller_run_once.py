@@ -5310,8 +5310,12 @@ def _plan_failed_candidate_replacement(
         # A separate ref keeps the retry from rediscovering the failed run and batch PR.
         check_retry = reason_code == "candidate_checks_recovered"
         suffix, retry_field = retry_kind
-        retry_identity = hashlib.sha256(active_candidate_record.record_id.encode()).hexdigest()[:12]
-        batch_id = candidate.batch_id + "-" + suffix + "-" + retry_identity
+        retry_identity = (
+            "-" + hashlib.sha256(active_candidate_record.record_id.encode()).hexdigest()[:12]
+            if check_retry
+            else ""
+        )
+        batch_id = candidate.batch_id + retry_identity + "-" + suffix
         candidate = MergeTrainBatchCandidate.model_validate(
             {
                 **candidate.model_dump(),

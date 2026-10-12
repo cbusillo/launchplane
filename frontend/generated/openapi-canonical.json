@@ -18395,17 +18395,6 @@
             "minimum": 1.0,
             "title": "Schema Version",
             "type": "integer"
-          },
-          "stall_alert_workflow": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/MergeTrainStallWorkflow"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -18429,17 +18418,6 @@
             "minimum": 1.0,
             "title": "Schema Version",
             "type": "integer"
-          },
-          "stall_alert_workflow": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/MergeTrainStallWorkflow"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -19200,6 +19178,14 @@
             },
             "title": "Reasons",
             "type": "array"
+          },
+          "suspected_signals": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Suspected Signals",
+            "type": "array"
           }
         },
         "title": "MergeTrainStallObservation",
@@ -19269,27 +19255,6 @@
           "observed_at"
         ],
         "title": "MergeTrainStallRecord",
-        "type": "object"
-      },
-      "MergeTrainStallWorkflow": {
-        "additionalProperties": false,
-        "description": "Existing sender's repository/ref, supplied by the active policy record.",
-        "properties": {
-          "ref": {
-            "minLength": 1,
-            "title": "Ref",
-            "type": "string"
-          },
-          "repository": {
-            "title": "Repository",
-            "type": "string"
-          }
-        },
-        "required": [
-          "repository",
-          "ref"
-        ],
-        "title": "MergeTrainStallWorkflow",
         "type": "object"
       },
       "MergeTrainStructuralCandidateResult": {
@@ -73805,17 +73770,6 @@
                         "minimum": 1,
                         "title": "Schema Version",
                         "type": "integer"
-                      },
-                      "stall_alert_workflow": {
-                        "anyOf": [
-                          {
-                            "$ref": "#/$defs/MergeTrainStallWorkflow"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ],
-                        "x-launchplane-optional-response": true
                       }
                     },
                     "required": [
@@ -74027,27 +73981,6 @@
                       }
                     },
                     "title": "MergeTrainServiceAuthz",
-                    "type": "object"
-                  },
-                  "MergeTrainStallWorkflow": {
-                    "additionalProperties": false,
-                    "description": "Existing sender's repository/ref, supplied by the active policy record.",
-                    "properties": {
-                      "ref": {
-                        "minLength": 1,
-                        "title": "Ref",
-                        "type": "string"
-                      },
-                      "repository": {
-                        "title": "Repository",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "repository",
-                      "ref"
-                    ],
-                    "title": "MergeTrainStallWorkflow",
                     "type": "object"
                   },
                   "ProviderCodeScanningToolExpectationV1": {

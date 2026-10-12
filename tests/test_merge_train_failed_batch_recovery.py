@@ -1355,12 +1355,10 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 side_effect=MergeTrainGitHubError("provider unavailable", status_code=503),
             ),
         ):
-            result = self._reflow(
-                FilesystemRecordStore(state_dir=Path(directory)),
-                self.candidate.model_copy(update={"check_retry_of": "earlier-failure"}),
-                observe_checks=True,
-            )
-        self.assertEqual(result["reason_code"], "candidate_checks_recovered")
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            self._reflow(store, self.candidate, observe_checks=True)
+            result = self._reflow(store, self.candidate, observe_checks=True)
+        self.assertEqual(result["reason_code"], "candidate_check_retry_used")
         self.assertFalse(
             MergeTrainBatchCandidate.model_validate(result["candidate"]).batch_body_retry_of
         )

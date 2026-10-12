@@ -53,10 +53,14 @@ class StallObservationTests(TestCase):
         idle = self.observe(moved, STALL_SECONDS + 1, ready=(), busy=False)
         self.assertFalse(idle.reasons)
 
-    def test_expired_lease_and_recovered_failure_need_no_extra_thirty_minute_wait(self) -> None:
+    def test_transient_lease_and_recovery_signals_confirm_on_the_next_pass(self) -> None:
         result = self.observe(
             MergeTrainStallObservation(), 0, orphaned_lease=True, recovered_failure=True
         )
+        self.assertFalse(result.reasons)
+        transient = self.observe(result, 300)
+        self.assertFalse(transient.reasons)
+        result = self.observe(result, 300, orphaned_lease=True, recovered_failure=True)
         self.assertIn("lease_without_live_heartbeat", result.reasons)
         self.assertIn("candidate_failed_after_passing_rerun", result.reasons)
 
@@ -75,17 +79,6 @@ class StallMonitorTests(TestCase):
                 MergeTrainSchedulerPolicy(enabled=True, mutate=True, runner_mode="controller"),
             )
         )
-        policy = policy.model_copy(
-            update={
-                "policy": policy.policy.model_copy(
-                    update={
-                        "stall_alert_workflow": MergeTrainStallWorkflow(
-                            repository="example/control", ref="main"
-                        )
-                    }
-                )
-            }
-        )
         client = Mock()
         client.read_merge_train_snapshot.return_value = snapshot
         reporter = Mock()
@@ -99,6 +92,10 @@ class StallMonitorTests(TestCase):
             patch(
                 "control_plane.merge_train_stall_monitor.resolve_merge_train_github_token",
                 return_value="test-token",
+            ),
+            patch(
+                "control_plane.merge_train_stall_monitor.resolve_stall_workflow",
+                return_value=MergeTrainStallWorkflow(repository="example/control", ref="main"),
             ),
             patch(
                 "control_plane.merge_train_stall_monitor.resolve_merge_train_policy_record",
@@ -144,6 +141,112 @@ class StallMonitorTests(TestCase):
             self.assertFalse(reporter.publish.call_args.kwargs["stalled"])
             self.assertEqual(reporter.notify.call_count, 2)
 
+    def test_issue_body_progress_does_not_repeat_discord_and_publish_failure_is_visible(
+        self,
+    ) -> None:
+        from control_plane.merge_train_github import MergeTrainGitHubError
+
+        snapshot = _FakeExpandedMergeTrainSnapshotReader(
+            transport=object()
+        ).read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+        )
+        policy = _policy_record(
+            (
+                snapshot.repository,
+                MergeTrainSchedulerPolicy(
+                    enabled=True,
+                    mutate=True,
+                    runner_mode="controller",
+                ),
+            )
+        )
+        client, reporter = Mock(), Mock()
+        reporter.publish.return_value = 91
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.merge_train_stall_monitor.GitHubMergeTrainClient",
+                return_value=client,
+            ),
+            patch(
+                "control_plane.merge_train_stall_monitor.resolve_merge_train_github_token",
+                return_value="test-token",
+            ),
+            patch(
+                "control_plane.merge_train_stall_monitor.resolve_stall_workflow",
+                return_value=MergeTrainStallWorkflow(repository="example/control", ref="main"),
+            ),
+            patch(
+                "control_plane.merge_train_stall_monitor.resolve_merge_train_policy_record",
+                return_value=policy,
+            ),
+        ):
+            root = Path(directory)
+            store = FilesystemRecordStore(root)
+            for seconds, base in (
+                (0, "base-a"),
+                (STALL_SECONDS, "base-b"),
+                (STALL_SECONDS + 300, "base-c"),
+            ):
+                client.read_merge_train_snapshot.return_value = snapshot.model_copy(
+                    update={"base_sha": base}
+                )
+                run_stall_monitor_pass(
+                    store=store,
+                    root=root,
+                    now=lambda: _time(seconds),
+                    reporter_factory=lambda **_: reporter,
+                )
+            reporter.notify.assert_called_once()
+            self.assertEqual(reporter.publish.call_count, 2)
+            reporter.publish.side_effect = MergeTrainGitHubError("issue missing", status_code=404)
+            run_stall_monitor_pass(
+                store=store,
+                root=root,
+                now=lambda: _time(STALL_SECONDS + 600),
+                reporter_factory=lambda **_: reporter,
+            )
+            missing = store.read_merge_train_stall_record(snapshot.repository)
+            self.assertIsNone(missing.issue_number)
+            self.assertTrue(missing.delivery_error)
+            reporter.publish.side_effect = None
+            reporter.publish.return_value = 92
+            run_stall_monitor_pass(
+                store=store,
+                root=root,
+                now=lambda: _time(STALL_SECONDS + 900),
+                reporter_factory=lambda **_: reporter,
+            )
+            self.assertEqual(
+                store.read_merge_train_stall_record(snapshot.repository).issue_number, 92
+            )
+            self.assertEqual(reporter.notify.call_count, 2)
+
+    def test_deliberate_dry_run_and_level1_targets_do_not_start_alert_clocks(self) -> None:
+        for scheduler in (
+            MergeTrainSchedulerPolicy(enabled=True, mutate=False, runner_mode="controller"),
+            MergeTrainSchedulerPolicy(enabled=True, mutate=True, runner_mode="level1"),
+        ):
+            with self.subTest(scheduler=scheduler), TemporaryDirectory() as directory:
+                root = Path(directory)
+                store = FilesystemRecordStore(root)
+                policy = _policy_record(("example/repo", scheduler))
+                with (
+                    patch(
+                        "control_plane.merge_train_stall_monitor.resolve_merge_train_policy_record",
+                        return_value=policy,
+                    ),
+                    patch(
+                        "control_plane.merge_train_stall_monitor.resolve_merge_train_github_token"
+                    ) as resolve,
+                ):
+                    run_stall_monitor_pass(store=store, root=root)
+                resolve.assert_not_called()
+                with self.assertRaises(FileNotFoundError):
+                    store.read_merge_train_stall_record("example/repo")
+
     def test_unreadable_evidence_cannot_close_existing_incident(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -152,7 +255,12 @@ class StallMonitorTests(TestCase):
                 repository="example/repo", observed_at=_time(0), issue_number=5, issue_state="open"
             )
             store.write_merge_train_stall_record(record)
-            policy = _policy_record((record.repository, MergeTrainSchedulerPolicy(enabled=True)))
+            policy = _policy_record(
+                (
+                    record.repository,
+                    MergeTrainSchedulerPolicy(enabled=True, mutate=True, runner_mode="controller"),
+                )
+            )
             with (
                 patch(
                     "control_plane.merge_train_stall_monitor.resolve_merge_train_policy_record",

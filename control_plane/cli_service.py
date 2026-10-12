@@ -607,7 +607,7 @@ def service_merge_train_workers_run(
     monitor.start()
     try:
         run_merge_train_scheduler_loop(
-            record_store=_store(state_dir=state_dir, database_url=database_url),
+            record_store=record_store,
             control_plane_root=control_plane_root or _control_plane_root(),
             interval_seconds=interval_seconds,
             stop_event=stop_event,

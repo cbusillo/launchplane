@@ -12,6 +12,8 @@ from typing import Protocol, cast
 from urllib.parse import quote
 
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
+from control_plane import runtime_environments
+from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.contracts.merge_train_stall import (
     MergeTrainStallObservation,
@@ -26,6 +28,8 @@ from control_plane.merge_train_policy_source import resolve_merge_train_policy_r
 from control_plane.workflows.ship import utc_now_timestamp
 
 STALL_SECONDS = 30 * 60
+STALL_WORKFLOW_REPOSITORY_KEY = "LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REPOSITORY"
+STALL_WORKFLOW_REF_KEY = "LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REF"
 STALL_ISSUE_MARKER = "<!-- launchplane:merge-train-stall -->"
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,16 +68,33 @@ def observe_stall(
         reasons.append("controller_unchanged")
     if any(_age(now, started) >= STALL_SECONDS for started in ready_since.values()):
         reasons.append("ready_change_not_moving")
+    signals: list[str] = []
     if orphaned_lease:
-        reasons.append("lease_without_live_heartbeat")
+        signals.append("lease_without_live_heartbeat")
     if recovered_failure:
-        reasons.append("candidate_failed_after_passing_rerun")
+        signals.append("candidate_failed_after_passing_rerun")
+    # The controller may be between release/recovery passes. Confirm transient
+    # signals in the next independent observation before waking people.
+    if not changed:
+        reasons.extend(signal for signal in signals if signal in previous.suspected_signals)
     return MergeTrainStallObservation(
         progress_key=progress_key,
         progress_since=since,
         ready_since=ready_since,
         reasons=tuple(reasons),
+        suspected_signals=tuple(signals),
     )
+
+
+def resolve_stall_workflow(root: Path) -> MergeTrainStallWorkflow | None:
+    definition = runtime_environments.load_runtime_environment_definition(control_plane_root=root)
+    context = definition.contexts.get("launchplane")
+    values = {**definition.shared_env, **(context.shared_env if context else {})}
+    repository = str(values.get(STALL_WORKFLOW_REPOSITORY_KEY, "")).strip()
+    ref = str(values.get(STALL_WORKFLOW_REF_KEY, "")).strip()
+    if not repository and not ref:
+        return None
+    return MergeTrainStallWorkflow(repository=repository, ref=ref)
 
 
 class GitHubStallReporter:
@@ -203,7 +224,11 @@ def run_stall_monitor_pass(
     policy_record = resolve_merge_train_policy_record(store)
     targets: dict[str, list[MergeTrainRepositoryPolicy]] = {}
     for target in policy_record.policy.policies:
-        if target.scheduler.enabled:
+        if (
+            target.scheduler.enabled
+            and target.scheduler.mutate
+            and target.scheduler.runner_mode == "controller"
+        ):
             targets.setdefault(target.repository.lower(), []).append(target)
     stall_store = cast(StallStore, store)
     for repository, policies in targets.items():
@@ -310,6 +335,12 @@ def run_stall_monitor_pass(
                         ),
                         recovered_failure=recovered,
                     )
+                previous_reasons = {
+                    base: item.reasons for base, item in record.observations.items() if item.reasons
+                }
+                current_reasons = {
+                    base: item.reasons for base, item in observations.items() if item.reasons
+                }
                 record = record.model_copy(
                     update={"observations": observations, "observed_at": observed_at}
                 )
@@ -320,12 +351,20 @@ def run_stall_monitor_pass(
                 stall_store.write_merge_train_stall_record(record)
                 if not stalled and record.issue_number is None:
                     continue
-                reporter = reporter_factory(root=root, repository=repository)
-                number = reporter.publish(record, body, stalled=stalled)
+                try:
+                    reporter = reporter_factory(root=root, repository=repository)
+                    number = reporter.publish(record, body, stalled=stalled)
+                except Exception as error:
+                    updates: dict[str, object] = {"delivery_error": type(error).__name__}
+                    if isinstance(error, MergeTrainGitHubError) and error.status_code == 404:
+                        updates.update({"issue_number": None, "notification_key": ""})
+                    stall_store.write_merge_train_stall_record(record.model_copy(update=updates))
+                    continue
                 next_state = "open" if stalled else "closed"
                 if number is not None and (
                     record.issue_state != next_state
-                    or (stalled and record.issue_body_sha256 != body_digest)
+                    or (stalled and previous_reasons != current_reasons)
+                    or (stalled and not record.notification_key)
                 ):
                     record = record.model_copy(
                         update={
@@ -344,21 +383,19 @@ def run_stall_monitor_pass(
                 )
                 stall_store.write_merge_train_stall_record(record)
                 if record.notification_key != record.notified_key:
-                    workflow = policy_record.policy.stall_alert_workflow
-                    if workflow is None:
-                        record = record.model_copy(
-                            update={"delivery_error": "stall_alert_workflow_not_configured"}
-                        )
-                    else:
-                        try:
+                    try:
+                        workflow = resolve_stall_workflow(root)
+                        if workflow is None:
+                            record = record.model_copy(
+                                update={"delivery_error": "stall_alert_workflow_not_configured"}
+                            )
+                        else:
                             reporter.notify(record, workflow)
                             record = record.model_copy(
                                 update={"notified_key": record.notification_key}
                             )
-                        except Exception as error:
-                            record = record.model_copy(
-                                update={"delivery_error": type(error).__name__}
-                            )
+                    except Exception as error:
+                        record = record.model_copy(update={"delivery_error": type(error).__name__})
                     stall_store.write_merge_train_stall_record(record)
         except Exception as error:
             # Missing evidence never resolves an incident or stops other targets.

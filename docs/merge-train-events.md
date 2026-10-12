@@ -54,7 +54,7 @@ records and the existing service-worker and GitHub sweep entrypoints.
 ## Stall monitoring
 
 The merge-train worker starts an independent monitor thread. Every five minutes
-it reads each enabled target's live queue, candidate records and controller lease.
+it reads each enabled mutating controller target's live queue, candidate records and controller lease.
 Observation clocks live in `launchplane_merge_train_stalls`, independently of
 controller leases and heartbeat updates; restarting the worker preserves them.
 
@@ -62,9 +62,10 @@ An unchanged controller phase with work for at least thirty minutes, or an
 eligible change with no progress for that interval, raises an incident. A new
 queue arrival does not reset an older change's wait. Progress by a candidate
 resets its participating changes' waits. An expired held lease has no live lease
-heartbeat and is reported immediately; the monitor does not inspect a process on
-another host. A failed candidate whose exact-head checks have passed on rerun is
-also reported immediately if recovery has not yet cleared it.
+heartbeat and is reported after a second consecutive observation; the monitor does not
+inspect a process on another host. A failed candidate whose exact-head checks
+have passed on rerun is similarly confirmed on the next pass if recovery has
+not yet cleared it. This gives normal lease renewal/recovery a pass to settle.
 
 The existing delivery App creates or updates one bot-owned `Merge train stalled`
 issue in each affected repository. It stays open while any monitored base has a
@@ -74,21 +75,20 @@ repository-scoped database lock prevent routine duplicate issues. This is the
 Supervisor's durable attention record; the monitor never merges, resets a lease,
 reruns checks, grants access or changes readiness labels.
 
-Discord stays with the existing Launchplane sender. Set `stall_alert_workflow`
-on the active merge-train policy through the existing reviewed policy-import
-path to the repository and ref containing `merge-train-stall-alert.yml`, for
-example this synthetic input:
-
-```json
-{"stall_alert_workflow": {"repository": "example/control-plane", "ref": "main"}}
-```
+Discord stays with the existing Launchplane sender. Put
+`LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REPOSITORY` and
+`LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REF` in Launchplane's shared runtime settings
+for its `launchplane` context, through the existing runtime-environment record
+admin path. They select the repository and ref containing
+`merge-train-stall-alert.yml`. They are notification routing, independent of
+train policy and candidate digests; changing them never retires train work.
 
 The workflow uses the existing `DISCORD_LAUNCHPLANE_WEBHOOK`; no webhook is copied
 to service records and no new credential or grant is created. Existing delivery
 App purposes `release_record` and `workflow_dispatch` deliver the issue and
 dispatch respectively. A missing route or refused dispatch remains recorded in
 `delivery_error`, with notification pending for a later pass. Discord reports
-incident changes and resolution with the issue link, never provider payloads,
+opening, changes in stall reasons, and resolution with the issue link, never provider payloads,
 token values or error messages. Confirmed dispatch proves dispatch, not Discord
 receipt; workflow failure stays visible in Actions. An uncertain dispatch can
 repeat a notification with the same transition identity.
