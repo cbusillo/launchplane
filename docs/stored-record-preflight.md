@@ -100,7 +100,9 @@ default branch with `stored_record_preflight_only=true` and an immutable
 `image_reference`, using the installed protected-workflow helper. This read-only
 job authenticates the existing image read, fetches the supported scrubbed export
 and runs the rehearsal on the actual deploy runner. Both deployment jobs are
-excluded in this mode. Verify its per-family counts, bounds and successful
+excluded in this mode. Read-only qualification has its own workflow concurrency
+group, so a later self-deploy run cannot displace its pending run. Replacements
+retain their existing serialized group. Verify its per-family counts, bounds and successful
 runner result before routing the mandatory deploy gate PR. Qualification and
 manual deploys validate the same bootstrap image repository and immutable digest. A refused read is
 reported as missing standing authority; this mode creates no new grant. Landing both in one batch would require a route the old service lacks.

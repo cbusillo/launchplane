@@ -87,7 +87,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: launchplane-deploy
+  group: ${{ inputs.stored_record_preflight_only && 'launchplane-stored-record-preflight' || 'launchplane-deploy' }}
   cancel-in-progress: false
 
 jobs:
