@@ -4342,6 +4342,8 @@ class _ClaimOrderStore:
         self.claims: list[str] = []
 
     def __getattr__(self, name: str) -> object:
+        if name == "list_odoo_stable_target_replacement_operation_records":
+            return lambda **_kwargs: ()
         if name.startswith("recover_expired_"):
             return lambda **_kwargs: ()
         if name.startswith("claim_next_"):
