@@ -8,7 +8,7 @@ from datetime import (
 )
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 from click import ClickException
@@ -1167,7 +1167,7 @@ class FastApiLaunchplaneSelfDeployTests(unittest.IsolatedAsyncioTestCase):
                     app, payload, idempotency_key="deadline"
                 )
                 self.assertEqual(response.status_code, 202, response.text)
-                deadline = str(read_status(store)["drain_deadline_at"])
+                deadline = cast(str, read_status(store)["drain_deadline_at"])
                 with patch.object(store, "_database_mutation_timestamp", return_value=deadline):
                     for _ in range(2):
                         response = await _post_launchplane_self_deploy(

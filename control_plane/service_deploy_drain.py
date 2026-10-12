@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
@@ -269,12 +269,12 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
                 "blocks_drain": not execution_excluded,
             }
         )
-    return tuple(sorted(observations, key=lambda item: str(item["operation_id"])))
+    return tuple(sorted(observations, key=lambda item: cast(str, item["operation_id"])))
 
 
 def _running_operations(store: Any, session: Any, now: str) -> tuple[str, ...]:
     return tuple(
-        str(item["operation_id"])
+        cast(str, item["operation_id"])
         for item in _operation_observations(store, session, now)
         if item["blocks_drain"]
     )
