@@ -362,7 +362,7 @@ def run_stall_monitor_pass(
                 body_digest = hashlib.sha256(body.encode()).hexdigest()
                 # Preserve the observation clock even if issue delivery is unavailable.
                 stall_store.write_merge_train_stall_record(record)
-                if not stalled and record.issue_number is None:
+                if not stalled and record.issue_number is None and not record.delivery_error:
                     continue
                 try:
                     reporter = reporter_factory(root=root, repository=repository)
@@ -398,7 +398,7 @@ def run_stall_monitor_pass(
                     }
                 )
                 stall_store.write_merge_train_stall_record(record)
-                if record.notification_key != record.notified_key:
+                if number is not None and record.notification_key != record.notified_key:
                     try:
                         workflow = resolve_stall_workflow(root)
                         if workflow is None:

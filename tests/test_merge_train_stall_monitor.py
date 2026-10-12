@@ -430,6 +430,77 @@ class StallMonitorTests(TestCase):
                 run_stall_monitor_pass(store=store, root=root)
             self.assertEqual(store.read_merge_train_stall_record(record.repository), record)
 
+    def test_lost_create_reply_is_reconciled_after_train_recovers(self) -> None:
+        snapshot = (
+            _FakeExpandedMergeTrainSnapshotReader(transport=object())
+            .read_merge_train_snapshot(repository="example/repo", base_branch="main")
+            .model_copy(update={"pull_requests": ()})
+        )
+        policy = _policy_record(
+            (snapshot.repository, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        )
+        client, reporter = Mock(), Mock()
+        client.read_merge_train_snapshot.return_value = snapshot
+        reporter.publish.return_value = 91
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.merge_train_stall_monitor.resolve_merge_train_policy_record",
+                return_value=policy,
+            ),
+            patch(
+                "control_plane.merge_train_stall_monitor.GitHubMergeTrainClient",
+                return_value=client,
+            ),
+            patch(
+                "control_plane.merge_train_stall_monitor.resolve_merge_train_github_token",
+                return_value="test-token",
+            ),
+            patch(
+                "control_plane.merge_train_stall_monitor.resolve_stall_workflow",
+                return_value=MergeTrainStallWorkflow(repository="example/control", ref="main"),
+            ),
+        ):
+            root = Path(directory)
+            store = FilesystemRecordStore(root)
+            store.write_merge_train_stall_record(
+                MergeTrainStallRecord(
+                    repository=snapshot.repository,
+                    observed_at=_time(0),
+                    delivery_error="TimeoutError",
+                )
+            )
+            run_stall_monitor_pass(
+                store=store,
+                root=root,
+                now=lambda: _time(300),
+                reporter_factory=lambda **_: reporter,
+            )
+            reporter.publish.assert_called_once()
+            self.assertFalse(reporter.publish.call_args.kwargs["stalled"])
+            recovered = store.read_merge_train_stall_record(snapshot.repository)
+            self.assertEqual(recovered.issue_number, 91)
+            self.assertEqual(recovered.issue_state, "closed")
+            self.assertFalse(recovered.delivery_error)
+            # If no creation actually occurred, there is no issue link to send.
+            store.write_merge_train_stall_record(
+                MergeTrainStallRecord(
+                    repository=snapshot.repository,
+                    observed_at=_time(0),
+                    delivery_error="TimeoutError",
+                    notification_key="pending-dispatch",
+                )
+            )
+            reporter.publish.return_value = None
+            reporter.notify.reset_mock()
+            run_stall_monitor_pass(
+                store=store,
+                root=root,
+                now=lambda: _time(600),
+                reporter_factory=lambda **_: reporter,
+            )
+            reporter.notify.assert_not_called()
+
     def test_database_storage_survives_restart(self) -> None:
         with TemporaryDirectory() as directory:
             url = _sqlite_database_url(Path(directory) / "state.db")
