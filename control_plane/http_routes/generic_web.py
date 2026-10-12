@@ -1325,7 +1325,7 @@ def build_generic_web_write_route_handlers(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> GenericWebProdPromotionResponse | JSONResponse:
         trace_id = dependencies.next_trace_id()
-        if isinstance(identity, TerminalAgentIdentity) and not promotion_request.promotion.dry_run:
+        if isinstance(identity, TerminalAgentIdentity):
             raise dependencies.http_error(
                 status_code=403,
                 trace_id=trace_id,

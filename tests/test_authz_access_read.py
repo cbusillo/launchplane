@@ -881,7 +881,7 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
-    async def test_non_administrator_cannot_use_granted_candidate_preview_action(self) -> None:
+    async def test_authorized_operator_previews_candidate_without_policy_write(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
                 "schema_version": 2,
@@ -901,14 +901,6 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
                 with (
                     patch.object(
                         store,
-                        "list_authz_policy_records",
-                        create=True,
-                        side_effect=AssertionError(
-                            "non-administrator preview must not read DB policy"
-                        ),
-                    ),
-                    patch.object(
-                        store,
                         "write_authz_denial_record",
                         create=True,
                         side_effect=AssertionError(
@@ -922,8 +914,8 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
                         json={"candidate_policy": {"schema_version": 2}},
                     )
 
-        self.assertEqual(response.status_code, 403, response.text)
-        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(tuple(store.list_authz_policy_records()), (_record,))
 
     async def test_candidate_preview_rechecks_fresh_database_policy_without_denial_write(
         self,

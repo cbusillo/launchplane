@@ -83,7 +83,7 @@ authorization membership rather than complete coverage.
 ## Standing Agent Read And Plan Permission
 
 `agent.read` is a DB rule action, not an identity shortcut or an installed
-default. A schema-2 or schema-3 local-operator or terminal-agent rule names exact
+default. A schema-2 or schema-3 `local_operator` or `terminal_agent` rule names exact
 subjects, token labels and products; wildcard agent or product selectors are
 rejected. Context and instance selectors retain their existing matching rules.
 Use separate context and instance rules when both scopes are needed. A new
@@ -93,19 +93,20 @@ product is included through an explicitly reviewed policy change.
 of `read`, `plan` and `write`. Only declared reads and qualified plans inherit
 `agent.read`, within the matching rule's product, context and instance scope.
 Unknown actions fail closed. Existing enumerated permissions are preserved;
-`launchplane_service.read` does not become a standing role. Policy refresh and
+Existing `launchplane_service.read` grants keep their original surfaces; they
+do not inherit authority for other read actions. Policy refresh and
 revocation apply to the role on every request, as to other DB grants.
 
 Pure dry runs and inert evidence can use this role. Queuing execution, taking
 leases, creating operative plans, revealing credentials and copying secret
 values retain separate write or explicit source permissions. Existing terminal
-credential transport restrictions remain; the local-operator transport covers
+credential transport restrictions remain; the `local_operator` transport covers
 the Director's full planning surface. A Client's own agent can use the same
 product-scoped model later; no Client-agent access is installed by source code.
 
 Product reads authorize the returned product. Profile lists filter role access
 per returned profile; saved Client reviews resolve the repository's product.
-Dokploy dry runs use the recorded context owner, and ingress plans validate the
+Dokploy dry runs use the recorded product owning the context, and ingress plans validate the
 product lane's domains and remove provider configuration fields that can contain
 credentials. Service metadata and global policy history require their own
 Launchplane product scope. The Delivery selector GET uses ordinary DB read

@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import unittest
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import patch, PropertyMock
 from pydantic import ValidationError
 
 from tests.support.ingress import _FakeNpmplusIngressClient, _npmplus_ingress_route_payload
@@ -33,6 +33,8 @@ from tests.test_service_github_delivery_controls import (
     seed_metadata,
 )
 from tests.test_authz_administration_read import _database_app
+from tests.support.profiles import product_profile_payload
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 
 
 def reader_policy(*, product: str = "") -> LaunchplaneAuthzPolicy:
@@ -79,7 +81,7 @@ class ActionEffectTests(unittest.TestCase):
                 arguments = [*definition.args.posonlyargs, *definition.args.args]
                 bound = bool(arguments and arguments[0].arg in {"self", "cls"})
                 for index, argument in enumerate(arguments):
-                    if "action" in argument.arg:
+                    if re.search(r"(?:^|_)actions?(?:_|$)", argument.arg):
                         slots = positions.setdefault(definition.name, set())
                         slots.add(index)
                         if bound and index:
@@ -87,7 +89,9 @@ class ActionEffectTests(unittest.TestCase):
         for path in paths:
             for node in ast.walk(ast.parse(path.read_text())):
                 value = None
-                if isinstance(node, ast.keyword) and "action" in (node.arg or ""):
+                if isinstance(node, ast.keyword) and re.search(
+                    r"(?:^|_)actions?(?:_|$)", node.arg or ""
+                ):
                     value = node.value
                 elif isinstance(node, ast.Call) and node.args:
                     name = (
@@ -158,9 +162,7 @@ class ActionEffectTests(unittest.TestCase):
             )
             with (
                 patch("tests.test_action_effects.__file__", str(root / "tests" / "gate.py")),
-                self.assertRaisesRegex(
-                    AssertionError, "Undeclared authorization actions"
-                ) as result,
+                self.assertRaises(AssertionError) as result,
             ):
                 self.test_every_source_authorization_action_declares_an_effect()
             for action in unknown_actions:
@@ -278,6 +280,120 @@ class ActionEffectTests(unittest.TestCase):
 
 
 class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_role_reads_redacted_metadata_but_retains_mixed_route_restrictions(
+        self,
+    ) -> None:
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import BearerIdentityConfig
+        from tests.http_app_test_support import _RejectingVerifier
+        from tests.test_repository_inventory_http import _payload
+
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            terminal_agents=tuple(
+                TerminalAgentPolicyRule.model_validate(
+                    {**rule.model_dump(), "contexts": ("launchplane", "sample-testing")}
+                )
+                for rule in reader_policy().local_operators
+            ),
+        )
+        with _database_app(policy) as (store, _, _):
+            seed_metadata(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-token",
+                    terminal_agent_subject="record-reader",
+                    terminal_agent_token_label="record-reader-label",
+                ),
+            )
+            async with lifespan_client(app) as client:
+                for path in (
+                    SERVICE_GITHUB_DELIVERY_ROUTE,
+                    "/v1/authz-policies/active",
+                    "/v1/privileged-operations/plans?descriptor_id=managed-authz-policy-set",
+                ):
+                    response = await client.get(
+                        path, headers={"Authorization": "Bearer terminal-token"}
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertNotIn("record-reader-label", response.text)
+                denied = await client.post(
+                    "/v1/repository-inventory/apply",
+                    headers={"Authorization": "Bearer terminal-token"},
+                    json=_payload(),
+                )
+                self.assertEqual(denied.status_code, 403, denied.text)
+
+    async def test_context_reads_authorize_the_record_product_without_service_scope_escape(
+        self,
+    ) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+        from tests.test_authz_administration_read import _record
+
+        with _database_app(reader_policy()) as (store, policy_record, app):
+            profiles = tuple(
+                LaunchplaneProductProfileRecord.model_validate(product_profile_payload(product))
+                for product in ("sample", "foreign-site")
+            )
+            for profile in profiles:
+                store.write_product_profile_record(profile)
+                lane = profile.lanes[0]
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context=lane.context,
+                        instance=lane.instance,
+                        env={"SITE_LABEL": profile.product, "API_TOKEN": "test-secret-value"},
+                        updated_at=profile.updated_at,
+                    )
+                )
+            async with lifespan_client(app) as client:
+                for profile in profiles:
+                    lane = profile.lanes[0]
+                    result = await client.get(
+                        f"/v1/contexts/{lane.context}/instances/{lane.instance}/runtime-settings",
+                        headers={"Authorization": "Bearer reader-token"},
+                    )
+                    self.assertEqual(
+                        result.status_code, 200 if profile.product == "sample" else 403, result.text
+                    )
+                    self.assertNotIn("test-secret-value", result.text)
+                    if result.status_code == 200:
+                        self.assertEqual(
+                            result.json()["settings"][0]["values"], {"SITE_LABEL": profile.product}
+                        )
+                with patch.object(
+                    store,
+                    "export_stored_record_snapshot",
+                    side_effect=AssertionError("No cross-product export"),
+                ):
+                    denied = await client.get(
+                        "/v1/service/stored-record-snapshot",
+                        headers={"Authorization": "Bearer reader-token"},
+                    )
+                    self.assertEqual(denied.status_code, 403, denied.text)
+                revoked = LaunchplaneAuthzPolicy(schema_version=2)
+                outcome = store.compare_and_write_authz_policy_record(
+                    expected_record=policy_record,
+                    replacement_record=_record(policy=revoked, revision=2),
+                )
+                self.assertEqual(outcome.status, "written")
+                lane = profiles[0].lanes[0]
+                with patch.object(
+                    type(store),
+                    "database_dialect_name",
+                    new_callable=PropertyMock,
+                    return_value="postgresql",
+                ):
+                    denied = await client.get(
+                        f"/v1/contexts/{lane.context}/instances/{lane.instance}/runtime-settings",
+                        headers={"Authorization": "Bearer reader-token"},
+                    )
+                self.assertEqual(denied.status_code, 403, denied.text)
+
     async def test_dokploy_plan_uses_the_context_owner_and_keeps_apply_authority(self) -> None:
         from tests.test_product_review import _profile
 
@@ -304,11 +420,19 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                         "/v1/dokploy-targets/setup", headers=headers, json=request
                     )
                     self.assertEqual(response.status_code, 202, response.text)
-                    for changes in ({"context": "other-context"}, {"mode": "apply"}):
+                    for changes in (
+                        {"context": "other-context"},
+                        {"mode": "apply"},
+                        {"operation": "adopt", "target_id": "foreign-target"},
+                        {"project_id": "foreign-project"},
+                    ):
+                        changed_request = {**request, **changes}
+                        if changed_request["operation"] == "adopt":
+                            changed_request.pop("runtime_port")
                         denied = await client.post(
                             "/v1/dokploy-targets/setup",
                             headers=headers,
-                            json={**request, **changes},
+                            json=changed_request,
                         )
                         self.assertEqual(denied.status_code, 403, denied.text)
                 self.assertEqual(planner.call_count, 1)
@@ -389,6 +513,13 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         with _database_app(reader_policy()) as (store, _, app):
             seed_metadata(store)
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                {
+                    **product_profile_payload("sample"),
+                    "lanes": [{"context": "sample", "instance": "testing"}],
+                }
+            )
+            store.write_product_profile_record(profile)
             headers = {"Authorization": "Bearer reader-token"}
             before = store.list_secret_records()
             with patch.object(
@@ -397,7 +528,10 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                 async with lifespan_client(app) as client:
                     result = await client.get(SERVICE_GITHUB_DELIVERY_ROUTE, headers=headers)
                     self.assertEqual(result.status_code, 200, result.text)
-                    self.assertEqual(result.json()["app_id"], "76")
+                    expected = store.list_runtime_environment_records(
+                        scope="context", context_name="launchplane"
+                    )[0].env["LAUNCHPLANE_DELIVERY_GITHUB_APP_ID"]
+                    self.assertEqual(result.json()["app_id"], expected)
                     denied = await client.post(
                         SERVICE_TOKEN_RETIREMENT_ROUTE,
                         headers=headers,
@@ -515,6 +649,9 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(denied.status_code, 400, denied.text)
                 self.assertEqual(ingress.calls, ["list"])
                 envelope = _dry_run_envelope()
+                from tests.test_production_backup_authority import _profile as backup_profile
+
+                store.write_product_profile_record(backup_profile())
                 response = await client.post(
                     "/v1/production-backup-authority/apply",
                     headers=headers,

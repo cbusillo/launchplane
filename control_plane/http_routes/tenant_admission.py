@@ -865,7 +865,7 @@ def register_tenant_admission_write_routes(
     ) -> TenantRepositoryClassificationApplyResponse:
         trace_id = dependencies.next_trace_id()
 
-        if envelope.mode == "apply" and isinstance(identity, TerminalAgentIdentity):
+        if isinstance(identity, TerminalAgentIdentity):
             raise dependencies.http_error(
                 status_code=403,
                 trace_id=trace_id,

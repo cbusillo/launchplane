@@ -56,7 +56,6 @@ from control_plane.privileged_operation_registry import (
     PrivilegedOperationPlannerError,
     PrivilegedOperationPlanningStoreError,
     read_privileged_operation_descriptor,
-    list_privileged_operation_descriptors,
 )
 from control_plane.privileged_operation_service import (
     DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
@@ -75,7 +74,7 @@ from control_plane.privileged_operation_service import (
     revoke_privileged_operation,
     require_privileged_operation_store,
 )
-from control_plane.action_effects import agent_read_role_covers
+from control_plane.action_effects import AGENT_READ_ROLE_ACTION, agent_read_role_covers
 from control_plane.service_auth import (
     AuthorizationTarget,
     GitHubHumanIdentity,
@@ -343,12 +342,16 @@ def register_privileged_operation_routes(
         trace_id: str,
         descriptor_id: PrivilegedOperationDescriptorId,
     ) -> None:
-        if agent_read_role_covers(action) and dependencies.common.authorization_allows(
-            identity=identity,
-            action=action,
-            product="launchplane",
-            context="launchplane",
-            target=AuthorizationTarget(scope="global"),
+        if (
+            isinstance(identity, LocalOperatorIdentity | TerminalAgentIdentity)
+            and agent_read_role_covers(action)
+            and dependencies.common.authorization_allows(
+                identity=identity,
+                action=AGENT_READ_ROLE_ACTION,
+                product="launchplane",
+                context="launchplane",
+                target=AuthorizationTarget(scope="global"),
+            )
         ):
             return
         try:
@@ -579,15 +582,15 @@ def register_privileged_operation_routes(
     def read_record_identity(
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.common.read_identity)],
     ) -> LaunchplaneIdentity:
-        if not isinstance(identity, GitHubHumanIdentity) and not any(
-            dependencies.common.authorization_allows(
+        if not isinstance(identity, GitHubHumanIdentity | LocalOperatorIdentity) and not (
+            isinstance(identity, TerminalAgentIdentity)
+            and dependencies.common.authorization_allows(
                 identity=identity,
-                action=descriptor.human_read_action,
+                action=AGENT_READ_ROLE_ACTION,
                 product="launchplane",
                 context="launchplane",
                 target=AuthorizationTarget(scope="global"),
             )
-            for descriptor in list_privileged_operation_descriptors()
         ):
             raise dependencies.common.http_error(
                 status_code=403,

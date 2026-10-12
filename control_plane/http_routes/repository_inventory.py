@@ -175,7 +175,7 @@ def register_repository_inventory_write_routes(
     ) -> RepositoryInventoryApplyResponse:
         trace_id = dependencies.next_trace_id()
         if (
-            (envelope.mode == "apply" and isinstance(identity, TerminalAgentIdentity))
+            isinstance(identity, TerminalAgentIdentity)
             or not dependencies.authorization_allows(
                 identity=identity,
                 action=REPOSITORY_INVENTORY_WRITE_ACTION

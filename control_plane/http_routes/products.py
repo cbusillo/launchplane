@@ -1276,6 +1276,19 @@ def register_product_environment_read_routes(
             context=LAUNCHPLANE_SERVICE_CONTEXT,
             inherit_agent_read_role=False,
         )
+        if (
+            not service_reader
+            and identity is not None
+            and not common.read_role_products(
+                identity=identity, context=LAUNCHPLANE_SERVICE_CONTEXT
+            )
+        ):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot list the requested products.",
+            )
         normalized_driver_id = driver_id.strip()
         try:
             profile_store = require_product_profile_list_store(record_store)

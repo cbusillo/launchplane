@@ -1,3 +1,4 @@
+from control_plane.action_effects import AGENT_READ_ROLE_ACTION, agent_read_role_covers
 import asyncio
 import hashlib
 import json
@@ -3959,6 +3960,7 @@ class LaunchplaneAuthzPolicyRuntime:
         revision: int = 0,
     ) -> None:
         self._policy = policy
+        self._context_product_resolver: Callable[[str], str] | None = None
         self._policy_sha256 = policy_sha256 or authz_policy_sha256(policy)
         self._source = source.strip() or "bootstrap"
         self._record_id = record_id.strip()
@@ -3984,6 +3986,30 @@ class LaunchplaneAuthzPolicyRuntime:
     def revision(self) -> int:
         return self._revision
 
+    def configure_context_product_resolver(self, resolver: Callable[[str], str]) -> None:
+        self._context_product_resolver = resolver
+
+    def read_role_products(self, *, identity: LaunchplaneIdentity, context: str) -> frozenset[str]:
+        rules = (
+            self.policy.local_operators
+            if isinstance(identity, LocalOperatorIdentity)
+            else self.policy.terminal_agents
+            if isinstance(identity, TerminalAgentIdentity)
+            else ()
+        )
+        return frozenset(
+            product
+            for rule in rules
+            if AGENT_READ_ROLE_ACTION in rule.actions
+            for product in rule.products
+            if self.policy.allows(
+                identity=identity,
+                action=AGENT_READ_ROLE_ACTION,
+                product=product,
+                context=context,
+            )
+        )
+
     def allows(
         self,
         *,
@@ -3994,13 +4020,34 @@ class LaunchplaneAuthzPolicyRuntime:
         target: AuthorizationTarget | None = None,
         inherit_agent_read_role: bool = True,
     ) -> bool:
-        return self._policy.allows(
+        if self.policy.allows(
             identity=identity,
             action=action,
             product=product,
             context=context,
             target=target,
-            inherit_agent_read_role=inherit_agent_read_role,
+            inherit_agent_read_role=False,
+        ):
+            return True
+        if not inherit_agent_read_role or not agent_read_role_covers(action):
+            return False
+        returned_product = product
+        if context and context != _LAUNCHPLANE_SERVICE_CONTEXT:
+            if self._context_product_resolver is None:
+                return False
+            try:
+                owner = self._context_product_resolver(context)
+            except (TypeError, RuntimeError, SQLAlchemyError):
+                return False
+            if not owner or (product != _LAUNCHPLANE_SERVICE_CONTEXT and product != owner):
+                return False
+            returned_product = owner
+        return self.policy.allows(
+            identity=identity,
+            action=action,
+            product=returned_product,
+            context=context,
+            target=target,
         )
 
     def policy_record(self, *, updated_at: str) -> LaunchplaneAuthzPolicyRecord:
@@ -4380,6 +4427,10 @@ def create_launchplane_fastapi_app(
         if shared_record_store is None:
             raise RuntimeError("Launchplane record store is not initialized.")
         return shared_record_store
+
+    resolved_authz_policy_runtime.configure_context_product_resolver(
+        lambda context: _lane_setup_context_owner(record_store=get_record_store(), context=context)
+    )
 
     def github_id_owns_active_product(github_id: int) -> bool:
         if github_id <= 0:
@@ -5147,6 +5198,7 @@ def create_launchplane_fastapi_app(
         get_record_store=get_record_store,
         next_trace_id=next_trace_id,
         authorization_allows=resolved_authz_policy_runtime.allows,
+        read_role_products=resolved_authz_policy_runtime.read_role_products,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
     )
@@ -5233,7 +5285,7 @@ def create_launchplane_fastapi_app(
             requested_context: str,
             requested_instances: tuple[str, ...],
         ) -> bool:
-            return resolved_authz_policy_runtime.policy.allows(
+            return resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action=requested_action,
                 product=requested_product,
@@ -5259,7 +5311,7 @@ def create_launchplane_fastapi_app(
         identity: LaunchplaneIdentity,
         trace_id: str,
     ) -> None:
-        if resolved_authz_policy_runtime.policy.allows(
+        if resolved_authz_policy_runtime.allows(
             identity=identity,
             action="launchplane_service.read",
             product="launchplane",
@@ -5277,7 +5329,7 @@ def create_launchplane_fastapi_app(
     def require_launchplane_service_reconcile_authorization(
         *, identity: LaunchplaneIdentity, trace_id: str
     ) -> None:
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="launchplane_service.reconcile_odoo_workers",
             product="launchplane",
@@ -5293,7 +5345,7 @@ def create_launchplane_fastapi_app(
     def require_launchplane_service_verireel_reconcile_authorization(
         *, identity: LaunchplaneIdentity, trace_id: str
     ) -> None:
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="launchplane_service.reconcile_verireel_workers",
             product="launchplane",
@@ -5319,6 +5371,45 @@ def create_launchplane_fastapi_app(
                 code="database_storage_required",
                 message="Stored-record snapshots require database-backed storage.",
             )
+        if not resolved_authz_policy_runtime.allows(
+            identity=identity,
+            action="launchplane_service.read",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            inherit_agent_read_role=False,
+        ):
+            profiles = record_store.list_product_profile_records()
+            if any(
+                not resolved_authz_policy_runtime.allows(
+                    identity=identity,
+                    action="product_profile.read",
+                    product=profile.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                )
+                for profile in profiles
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Snapshot includes products outside this reader's scope.",
+                )
+            if any(
+                not resolved_authz_policy_runtime.allows(
+                    identity=identity,
+                    action="inventory.read",
+                    product="launchplane",
+                    context=inventory.context,
+                    target=AuthorizationTarget(scope="instance", instances=(inventory.instance,)),
+                )
+                for inventory in record_store.list_environment_inventory()
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Snapshot includes inventory outside this reader's scope.",
+                )
         try:
             snapshot = record_store.export_stored_record_snapshot()
         except (ValueError, SQLAlchemyError) as error:
@@ -5593,7 +5684,7 @@ def create_launchplane_fastapi_app(
     def require_work_graph_rank_authorization(
         *, identity: LaunchplaneIdentity, trace_id: str, message: str
     ) -> None:
-        if resolved_authz_policy_runtime.policy.allows(
+        if resolved_authz_policy_runtime.allows(
             identity=identity,
             action="work_graph.rank",
             product="launchplane",
@@ -5610,7 +5701,7 @@ def create_launchplane_fastapi_app(
     def require_work_graph_issue_inbox_reconcile_authorization(
         *, identity: LaunchplaneIdentity, trace_id: str, action: str
     ) -> None:
-        if resolved_authz_policy_runtime.policy.allows(
+        if resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product="launchplane",
@@ -6113,7 +6204,7 @@ def create_launchplane_fastapi_app(
             )
         except ValueError as error:
             raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=repository_policy.service_authz.action,
             product=repository_policy.service_authz.product,
@@ -6332,7 +6423,7 @@ def create_launchplane_fastapi_app(
                 message=str(error).strip()
                 or "Merge train controller request could not be completed.",
             ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=repository_policy.service_authz.action,
             product=repository_policy.service_authz.product,
@@ -7781,7 +7872,7 @@ def create_launchplane_fastapi_app(
         action = (
             "product_config.apply" if settings_request.mode == "apply" else "product_config.plan"
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=settings_request.product,
@@ -7962,7 +8053,7 @@ def create_launchplane_fastapi_app(
             )
         target = AuthorizationTarget(scope="instance", instances=(instance,))
         if not any(
-            resolved_authz_policy_runtime.policy.allows(
+            resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action=allowed_action,
                 product=product,
@@ -9342,7 +9433,7 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message="Operation is not supported by this cancellation route.",
             )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=operation.product,
@@ -10651,7 +10742,7 @@ def create_launchplane_fastapi_app(
         payload_fingerprint = idempotency_request_fingerprint(
             route_path=_LAUNCHPLANE_SELF_DEPLOY_ROUTE, payload=raw_payload
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="launchplane_service_deploy.execute",
             product=self_deploy_request.product,
@@ -10846,7 +10937,7 @@ def create_launchplane_fastapi_app(
             )
         except ValueError as error:
             raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=repository_policy.service_authz.action,
             product=repository_policy.service_authz.product,
@@ -11047,7 +11138,7 @@ def create_launchplane_fastapi_app(
             )
         except ValueError as error:
             raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=repository_policy.service_authz.action,
             product=repository_policy.service_authz.product,
@@ -11268,7 +11359,7 @@ def create_launchplane_fastapi_app(
             )
         except ValueError as error:
             raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=repository_policy.service_authz.action,
             product=repository_policy.service_authz.product,
@@ -11429,7 +11520,7 @@ def create_launchplane_fastapi_app(
             )
         except ValueError as error:
             raise merge_train_invalid_request_error(trace_id=trace_id, error=error) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=repository_policy.service_authz.action,
             product=repository_policy.service_authz.product,
@@ -11540,7 +11631,7 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         intent_authz_action = authz_action_for_agent_write_intent(intent_request.intent)
-        authorized = resolved_authz_policy_runtime.policy.allows(
+        authorized = resolved_authz_policy_runtime.allows(
             identity=identity,
             action=intent_authz_action,
             product=intent_request.product,
@@ -11548,7 +11639,7 @@ def create_launchplane_fastapi_app(
         )
         planning_authorized = (
             intent_request.mode == "dry_run"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="agent_write_intent.plan",
                 product=intent_request.product,
@@ -11560,7 +11651,7 @@ def create_launchplane_fastapi_app(
             secret_authz_action = agent_write_intent_secret_action(intent_request)
             authorized = authorized and (
                 planning_authorized
-                or resolved_authz_policy_runtime.policy.allows(
+                or resolved_authz_policy_runtime.allows(
                     identity=identity,
                     action=secret_authz_action,
                     product=intent_request.product,
@@ -11632,7 +11723,7 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="every_code_work_request.write",
             product="launchplane",
@@ -11720,7 +11811,7 @@ def create_launchplane_fastapi_app(
             else None
         )
         if identity is not None:
-            if not resolved_authz_policy_runtime.policy.allows(
+            if not resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="every_code_work_request.claim",
                 product="launchplane",
@@ -11919,7 +12010,7 @@ def create_launchplane_fastapi_app(
                 code="unauthorized",
                 message="Every Code stale recovery requires authorization.",
             )
-        if identity is not None and not resolved_authz_policy_runtime.policy.allows(
+        if identity is not None and not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="every_code_work_request.update",
             product="launchplane",
@@ -11993,7 +12084,7 @@ def create_launchplane_fastapi_app(
             else None
         )
         if identity is not None:
-            if not resolved_authz_policy_runtime.policy.allows(
+            if not resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="every_code_work_request.update",
                 product="launchplane",
@@ -12123,7 +12214,7 @@ def create_launchplane_fastapi_app(
             else None
         )
         if identity is not None:
-            if not resolved_authz_policy_runtime.policy.allows(
+            if not resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="every_code_work_request.rerun",
                 product="launchplane",
@@ -12426,7 +12517,7 @@ def create_launchplane_fastapi_app(
         instance_name: str,
         message: str,
     ) -> None:
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=product,
@@ -12472,7 +12563,7 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_profile.write",
             product=profile.product,
@@ -12643,14 +12734,14 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Product expected config request failed validation.",
             ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_profile.expected_config.apply",
             product=expected_config_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ) and not (
             expected_config_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="product_profile.expected_config.plan",
                 product=expected_config_request.product,
@@ -12909,7 +13000,7 @@ def create_launchplane_fastapi_app(
             if health_monitoring_request.mode == "apply"
             else "product_profile.health_monitoring.plan"
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=health_monitoring_request.product,
@@ -13235,14 +13326,14 @@ def create_launchplane_fastapi_app(
                 message="Product owner request failed validation.",
             ) from error
         normalized_product = product.strip()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_profile.write",
             product=normalized_product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ) and not (
             owner_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="product_profile.plan",
                 product=normalized_product,
@@ -13520,14 +13611,14 @@ def create_launchplane_fastapi_app(
                 message="Product image repository request failed validation.",
             ) from error
         normalized_product = product.strip()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_profile.write",
             product=normalized_product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ) and not (
             image_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="product_profile.plan",
                 product=normalized_product,
@@ -13779,14 +13870,14 @@ def create_launchplane_fastapi_app(
                 message="Product production use request failed validation.",
             ) from error
         normalized_product = product.strip()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_profile.write",
             product=normalized_product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ) and not (
             production_use_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="product_profile.plan",
                 product=normalized_product,
@@ -14048,7 +14139,7 @@ def create_launchplane_fastapi_app(
             if prelaunch_rebuild_request.mode == "apply"
             else "product_profile.prelaunch_rebuild.plan"
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=prelaunch_rebuild_request.product,
@@ -14354,14 +14445,14 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Product preview TLS request failed validation.",
             ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_profile.preview_tls.apply",
             product=preview_tls_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ) and not (
             preview_tls_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="product_profile.preview_tls.plan",
                 product=preview_tls_request.product,
@@ -14634,14 +14725,14 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Product repository identity request failed validation.",
             ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_profile.write",
             product=identity_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ) and not (
             identity_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="product_profile.plan",
                 product=identity_request.product,
@@ -14925,14 +15016,14 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Product stable lane repair request failed validation.",
             ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_onboarding.apply",
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ) and not (
             repair_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="product_onboarding.plan",
                 product="launchplane",
@@ -15832,7 +15923,7 @@ def create_launchplane_fastapi_app(
             if product_config_request.mode == "apply"
             else "product_config.plan"
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=product_config_request.product,
@@ -16024,14 +16115,14 @@ def create_launchplane_fastapi_app(
                 scope="instance" if instance else "context",
                 instances=(instance,) if instance else (),
             )
-            return resolved_authz_policy_runtime.policy.allows(
+            return resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="secret.read",
                 product="launchplane",
                 context=context,
                 target=target,
                 inherit_agent_read_role=False,
-            ) or resolved_authz_policy_runtime.policy.allows(
+            ) or resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="product_environment.read",
                 product=product_config_request.product,
@@ -16427,7 +16518,7 @@ def create_launchplane_fastapi_app(
         action = (
             "product_config.apply" if environment_request.mode == "apply" else "product_config.plan"
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=profile.product,
@@ -16628,7 +16719,7 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message="Product promotion target was not found.",
             ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=profile.product,
@@ -16636,7 +16727,7 @@ def create_launchplane_fastapi_app(
             target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
         ) and not (
             plan_action
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action=plan_action,
                 product=profile.product,
@@ -16668,7 +16759,7 @@ def create_launchplane_fastapi_app(
                 destination_environment=environment,
                 trace_id=trace_id,
                 action_allowed=lambda action, requested_product, context, instances: (
-                    resolved_authz_policy_runtime.policy.allows(
+                    resolved_authz_policy_runtime.allows(
                         identity=identity,
                         action=action,
                         product=requested_product,
@@ -17138,7 +17229,7 @@ def create_launchplane_fastapi_app(
             if onboarding_request.generic_web is not None and onboarding_request.mode == "dry_run"
             else "product_onboarding.apply"
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=onboarding_action,
             product=onboarding_request.product,
@@ -17351,14 +17442,14 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="merge_train.policy_import",
             product=policy_import_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ) and not (
             policy_import_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="merge_train.policy_import.plan",
                 product=policy_import_request.product,
@@ -17451,7 +17542,7 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             message="Generic-web preview authz planning requires Launchplane database storage.",
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="generic_web_preview_authz.plan",
             product=planning_request.product,
@@ -17654,7 +17745,7 @@ def create_launchplane_fastapi_app(
                     code="authorization_denied",
                     message="Administrator authority changed; reauthenticate and retry.",
                 )
-        if not browser_identity and not resolved_authz_policy_runtime.policy.allows(
+        if not browser_identity and not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="authz_policy_grant.write",
             product=authz_request.product,
@@ -19018,7 +19109,7 @@ def create_launchplane_fastapi_app(
         trace_id = next_trace_id()
         if isinstance(
             identity, LocalOperatorIdentity | TerminalAgentIdentity
-        ) and resolved_authz_policy_runtime.policy.allows(
+        ) and resolved_authz_policy_runtime.allows(
             identity=identity,
             action=AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
             product="launchplane",
@@ -19035,9 +19126,7 @@ def create_launchplane_fastapi_app(
                     active_record
                 ),
             )
-        if isinstance(
-            identity, TerminalAgentIdentity
-        ) or not resolved_authz_policy_runtime.policy.allows(
+        if isinstance(identity, TerminalAgentIdentity) or not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="authz_policy_grant.write",
             product="launchplane",
@@ -19117,7 +19206,7 @@ def create_launchplane_fastapi_app(
         record_store: object,
         trace_id: str,
     ) -> tuple[PostgresRecordStore, LaunchplaneAuthzPolicyRecord]:
-        preflight_authorized = resolved_authz_policy_runtime.policy.allows(
+        preflight_authorized = resolved_authz_policy_runtime.allows(
             identity=identity,
             action=AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
             product="launchplane",
@@ -19308,7 +19397,7 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> AuthzPolicyHealthResponse:
         trace_id = next_trace_id()
-        preflight_authorized = resolved_authz_policy_runtime.policy.allows(
+        preflight_authorized = resolved_authz_policy_runtime.allows(
             identity=identity,
             action=AUTHZ_POLICY_HEALTH_READ_ACTION,
             product="launchplane",
@@ -19592,7 +19681,7 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> EffectiveAccessEvaluateResponse:
         trace_id = next_trace_id()
-        preflight_authorized = resolved_authz_policy_runtime.policy.allows(
+        preflight_authorized = resolved_authz_policy_runtime.allows(
             identity=identity,
             action=EFFECTIVE_ACCESS_READ_ACTION,
             product="launchplane",
@@ -19669,7 +19758,7 @@ def create_launchplane_fastapi_app(
             identity,
             GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity,
         )
-        preflight_authorized = resolved_authz_policy_runtime.policy.allows(
+        preflight_authorized = resolved_authz_policy_runtime.allows(
             identity=identity,
             action=AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
             product="launchplane",
@@ -19737,7 +19826,7 @@ def create_launchplane_fastapi_app(
     ) -> control_plane_authz_diagnostics.AuthzDiagnosticEvaluateResponse:
         trace_id = next_trace_id()
         if not isinstance(identity, GitHubActionsIdentity) or not (
-            resolved_authz_policy_runtime.policy.allows(
+            resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="authz_diagnostic.evaluate",
                 product=diagnostic_request.product,
@@ -20133,7 +20222,7 @@ def create_launchplane_fastapi_app(
             if live_target_runtime_request.apply_changes
             else "live_target_runtime.plan"
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=live_target_runtime_request.product,
@@ -20592,14 +20681,14 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="edge_endpoint.apply",
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ) and not (
             endpoint_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="edge_endpoint.plan",
                 product="launchplane",
@@ -20678,14 +20767,14 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="private_health_endpoint.apply",
             product=endpoint_request.endpoint.product,
             context=endpoint_request.endpoint.context,
         ) and not (
             endpoint_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="private_health_endpoint.plan",
                 product=endpoint_request.endpoint.product,
@@ -20784,14 +20873,14 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="ingress_canary_route.apply",
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ) and not (
             canary_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="ingress_canary_route.plan",
                 product="launchplane",
@@ -21342,7 +21431,7 @@ def create_launchplane_fastapi_app(
         controller_action = (
             f"{action_prefix}.apply" if refresh_request.mode == "apply" else f"{action_prefix}.plan"
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=controller_action,
             product="launchplane",
@@ -21783,7 +21872,7 @@ def create_launchplane_fastapi_app(
             else native_routes.native_driver_route_alternate_authz_action(apply_ingress_route)
         )
         instance_name = route_request.instance.strip()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=authz_action,
             product=route_request.product,
@@ -21803,7 +21892,7 @@ def create_launchplane_fastapi_app(
                     + ("product/context/instance." if instance_name else "product/context.")
                 ),
             )
-        role_only = not resolved_authz_policy_runtime.policy.allows(
+        role_only = not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=authz_action,
             product=route_request.product,
@@ -22081,7 +22170,7 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="preview_lifecycle.plan",
             product=plan_request.product,
@@ -22194,7 +22283,7 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="preview_lifecycle.cleanup",
             product=cleanup_request.product,
@@ -22340,7 +22429,7 @@ def create_launchplane_fastapi_app(
         denied_action = ""
         for profile in requested_sweep_profiles:
             for action in ("preview_lifecycle.plan", "preview_lifecycle.cleanup"):
-                if not resolved_authz_policy_runtime.policy.allows(
+                if not resolved_authz_policy_runtime.allows(
                     identity=identity,
                     action=action,
                     product=profile.product,
@@ -22501,7 +22590,7 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
 
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=retirement_request.product,
@@ -22739,7 +22828,7 @@ def create_launchplane_fastapi_app(
                     "or a local admin identity."
                 ),
             )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=_LAUNCHPLANE_SERVICE_CONTEXT,
@@ -23007,7 +23096,7 @@ def create_launchplane_fastapi_app(
                     if remediation_request.mode == "dry-run"
                     else "preview_pr_feedback_remediation.apply"
                 )
-                if not resolved_authz_policy_runtime.policy.allows(
+                if not resolved_authz_policy_runtime.allows(
                     identity=identity,
                     action=action,
                     product=remediation_request.product,
@@ -23464,7 +23553,7 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="preview_desired_state.discover",
             product=desired_state_request.product,
@@ -24634,7 +24723,7 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="ingress_route.apply",
             product=canary_request.product,
@@ -24759,14 +24848,14 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             message="Local operator public ingress notification policy apply requires a reason.",
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="public_ingress_notification_policy.apply",
             product=policy_request.policy.product or "launchplane",
             context=policy_request.policy.context or _LAUNCHPLANE_SERVICE_CONTEXT,
         ) and not (
             policy_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="public_ingress_notification_policy.plan",
                 product=policy_request.policy.product or "launchplane",
@@ -24837,14 +24926,14 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             message="Local operator Every Code notification policy apply requires a reason.",
         )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="every_code_notification_policy.apply",
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         ) and not (
             policy_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="every_code_notification_policy.plan",
                 product="launchplane",
@@ -24909,7 +24998,7 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="runtime_key_safety.write",
             product=policy_request.product,
@@ -24983,7 +25072,7 @@ def create_launchplane_fastapi_app(
         lane_owner = _lane_setup_context_owner(
             record_store=database_store, context=setup_request.context
         )
-        service_scoped = resolved_authz_policy_runtime.policy.allows(
+        service_scoped = resolved_authz_policy_runtime.allows(
             identity=identity,
             action="dokploy_target.setup",
             product=setup_request.product,
@@ -25001,7 +25090,7 @@ def create_launchplane_fastapi_app(
             and not setup_request.project_id
             and not setup_request.environment_id
             and bool(lane_owner)
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action=DOKPLOY_TARGET_LANE_SETUP_ACTION,
                 product=lane_owner,
@@ -25012,7 +25101,7 @@ def create_launchplane_fastapi_app(
         can_setup_target = service_scoped or lane_scoped_only
         can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (
             can_setup_target
-            or resolved_authz_policy_runtime.policy.allows(
+            or resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="dokploy_target.repair_domain_authority",
                 product=setup_request.product,
@@ -25021,7 +25110,7 @@ def create_launchplane_fastapi_app(
         )
         can_plan_target = setup_request.mode == "dry-run" and (
             can_setup_target
-            or resolved_authz_policy_runtime.policy.allows(
+            or resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="dokploy_target.plan",
                 product=setup_request.product,
@@ -25035,7 +25124,7 @@ def create_launchplane_fastapi_app(
                 if setup_request.mode == "apply"
                 else (
                     can_repair_domain_authority
-                    or resolved_authz_policy_runtime.policy.allows(
+                    or resolved_authz_policy_runtime.allows(
                         identity=identity,
                         action="dokploy_target.repair_domain_authority.plan",
                         product=setup_request.product,
@@ -25046,8 +25135,9 @@ def create_launchplane_fastapi_app(
             )
         else:
             authorized = can_setup_target if setup_request.mode == "apply" else can_plan_target
-        if not authorized and setup_request.mode == "dry-run" and lane_owner:
-            authorized = resolved_authz_policy_runtime.policy.allows(
+        role_only_setup = not authorized and setup_request.mode == "dry-run" and bool(lane_owner)
+        if role_only_setup:
+            authorized = resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action=(
                     "dokploy_target.repair_domain_authority.plan"
@@ -25058,6 +25148,31 @@ def create_launchplane_fastapi_app(
                 context=setup_request.context,
                 target=AuthorizationTarget(scope="instance", instances=(setup_request.instance,)),
             )
+        if role_only_setup and authorized:
+            if setup_request.project_id or setup_request.environment_id:
+                authorized = False
+            if setup_request.target_id:
+                try:
+                    tracked_id = database_store.read_dokploy_target_id_record(
+                        context_name=setup_request.context,
+                        instance_name=setup_request.instance,
+                    )
+                    authorized = authorized and tracked_id.target_id == setup_request.target_id
+                except FileNotFoundError:
+                    authorized = False
+            if setup_request.expected_current_provider_target is not None:
+                try:
+                    tracked_provider = database_store.read_provider_target_record(
+                        context_name=setup_request.context,
+                        instance_name=setup_request.instance,
+                    )
+                    authorized = (
+                        authorized
+                        and tracked_provider.to_deployed_target_reference()
+                        == setup_request.expected_current_provider_target
+                    )
+                except FileNotFoundError:
+                    authorized = False
         if not authorized:
             raise _launchplane_http_error(
                 status_code=403,
@@ -25109,7 +25224,9 @@ def create_launchplane_fastapi_app(
                 request=setup_request,
                 # A lane-scoped caller's owner is re-checked when records commit.
                 required_context_owner=(
-                    (lane_owner, setup_request.context) if lane_scoped_only else None
+                    (lane_owner, setup_request.context)
+                    if lane_scoped_only or role_only_setup
+                    else None
                 ),
             )
         except DokployComposeDomainPartialError as error:
@@ -25183,14 +25300,14 @@ def create_launchplane_fastapi_app(
                     "Preview PR feedback notification policy apply requires explicit product and context."
                 ),
             )
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="preview_pr_feedback_notification_policy.apply",
             product=policy_request.policy.product,
             context=policy_request.policy.context,
         ) and not (
             policy_request.mode != "apply"
-            and resolved_authz_policy_runtime.policy.allows(
+            and resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="preview_pr_feedback_notification_policy.plan",
                 product=policy_request.policy.product,
@@ -25255,7 +25372,7 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.policy.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action="public_ingress_monitor.run_once",
             product=monitor_request.product,
@@ -25457,7 +25574,7 @@ def create_launchplane_fastapi_app(
         trace_id = next_trace_id()
         if not resolved_authz_policy_runtime.allows(
             identity=identity,
-            action="product_config.plan",
+            action="launchplane_service.read",
             product=_LAUNCHPLANE_SERVICE_CONTEXT,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
             target=AuthorizationTarget(scope="context"),
