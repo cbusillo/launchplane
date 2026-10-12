@@ -16,6 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { LaunchplaneApiError, readProduct } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
+import { ProductGenericWebTransitionPanel } from "./ProductGenericWebTransitionPanel";
 import { ProductDisplayNamePanel } from "./ProductDisplayNamePanel";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
 import { ProductWebsiteCleanupPanel } from "./ProductWebsiteCleanupPanel";
@@ -557,6 +558,7 @@ function ProductWorkspace({
       <ProductOwnerPanel fixtureMode={fixtureMode} product={product.product} />
       <ProductWebsiteCleanupPanel key={`website:${product.product}`} fixtureMode={fixtureMode} product={product.product} onSaved={onSaved} />
 
+      <ProductGenericWebTransitionPanel key={`driver:${product.product}`} fixtureMode={fixtureMode} product={product.product} onSaved={onSaved} />
       <ProductDiagnostics product={product} />
     </article>
   );

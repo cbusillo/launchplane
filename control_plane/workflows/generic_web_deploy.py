@@ -157,6 +157,7 @@ class GenericWebPostDeployContext(BaseModel):
     target_type: str = ""
     artifact_id: str
     source_git_ref: str
+    authority_digest: str = ""
 
     @model_validator(mode="after")
     def _validate_context(self) -> "GenericWebPostDeployContext":
@@ -333,6 +334,7 @@ def _build_post_deploy_context(
     resolved_deploy_target: GenericWebResolvedDeployTarget,
     artifact_id: str,
     source_git_ref: str,
+    authority_digest: str = "",
 ) -> GenericWebPostDeployContext:
     resolved_target = resolved_deploy_target.resolved_target
     deployed_target = resolved_deploy_target.deployed_target
@@ -356,6 +358,7 @@ def _build_post_deploy_context(
         target_type=resolved_target.target_type,
         artifact_id=artifact_id,
         source_git_ref=source_git_ref,
+        authority_digest=authority_digest,
     )
 
 
@@ -465,6 +468,7 @@ def execute_generic_web_deploy(
     profile: LaunchplaneProductProfileRecord | None = None,
     lane: ProductLaneProfile | None = None,
     post_deploy_executor: GenericWebPostDeployExecutor | None = None,
+    post_deploy_authority_digest: str = "",
     deploy_provider: GenericWebDeployProvider | None = None,
     resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
     provider_operation_title: str = "",
@@ -490,6 +494,23 @@ def execute_generic_web_deploy(
             request=request,
         )
     resolved_lane = _canonical_generic_web_lane(resolved_lane)
+    from control_plane.workflows.generic_web_post_deploy import (
+        generic_web_post_deploy_authority_digest,
+        generic_web_post_deploy_executor_for_profile,
+    )
+
+    qualification_authority = post_deploy_authority_digest
+    if (
+        not qualification_authority
+        and post_deploy_executor is not None
+        and post_deploy_executor
+        is generic_web_post_deploy_executor_for_profile(
+            resolved_profile, instance=resolved_lane.instance
+        )
+    ):
+        qualification_authority = generic_web_post_deploy_authority_digest(
+            record_store, resolved_profile, resolved_lane
+        )
 
     record_id = deployment_record_id.strip() or generate_deployment_record_id(
         context_name=resolved_lane.context,
@@ -727,6 +748,7 @@ def execute_generic_web_deploy(
                     resolved_deploy_target=prepared_deploy_target,
                     artifact_id=ship_request.artifact_id,
                     source_git_ref=ship_request.source_git_ref,
+                    authority_digest=qualification_authority,
                 ),
                 post_deploy_executor=post_deploy_executor,
                 guard=GenericWebPostDeployGuard(
