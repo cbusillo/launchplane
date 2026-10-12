@@ -661,6 +661,39 @@ export type ExistingDeliveryKey = {
     secret_id: string;
 };
 
+export type GenericWebApplicationSchedule = {
+    command: string;
+    cron_expression: string;
+    enabled: boolean;
+    name: string;
+    timeout_seconds: number;
+};
+
+export type GenericWebLaneDeclaration = {
+    context: string;
+    extensions: GenericWebLaneExtensions;
+    instance: string;
+};
+
+export type GenericWebLaneExtensions = {
+    maintenance: Array<GenericWebMaintenanceCommand>;
+    schedules: Array<GenericWebApplicationSchedule>;
+    verification_extension?: '' | 'verireel-testing';
+};
+
+export type GenericWebMaintenanceCommand = {
+    command: string;
+    name: string;
+    timeout_seconds: number;
+};
+
+export type GenericWebPreviewDeclaration = {
+    app_name_suffix?: string;
+    data_transport_mode: 'none' | 'driver';
+    transport_database_prefix?: string;
+    transport_extension?: '' | 'verireel-postgres';
+};
+
 export type GenericWebProdPromotionRecords = {
     backup_record_id: string;
     backup_status: string;
@@ -2935,6 +2968,15 @@ export type ProductExpectedConfigProfile = {
     runtime_environment_keys: Array<ProductRuntimeConfigRequirement>;
 };
 
+export type ProductGenericWebTransitionRequest = {
+    lanes: Array<GenericWebLaneDeclaration>;
+    mode?: 'dry-run' | 'apply';
+    preview?: GenericWebPreviewDeclaration | null;
+    reason: string;
+    reviewed_plan_sha256?: string;
+    schema_version?: 1;
+};
+
 export type ProductHealthMonitoringCheckSummary = {
     enabled: boolean;
     failure_code: string;
@@ -3154,6 +3196,7 @@ export type ProductLaneHealthMonitoringPolicy = {
 export type ProductLaneProfile = {
     base_url: string;
     context: string;
+    generic_web_extensions?: GenericWebLaneExtensions;
     health_monitoring: ProductLaneHealthMonitoringPolicy;
     health_url: string;
     instance: string;
@@ -3252,11 +3295,10 @@ export type ProductObservedTopology = {
 export type ProductOdooEnvironmentExtension = {
     allowed_rebuild_sources: Array<string>;
     data_authority: string;
+    destructive_replacement_proof_required: boolean;
     prelaunch_rebuild_allowed: boolean;
     prelaunch_rebuild_approval_issue_url: string;
     prelaunch_rebuild_data_source_mode: string;
-    requires_backup_before_destroy: boolean;
-    requires_restore_proof: boolean;
     requires_runtime_identity: boolean;
     rollback_artifact_id: string;
     rollback_deployment_record_id: string;
@@ -3266,8 +3308,6 @@ export type ProductOdooEnvironmentExtension = {
 export type ProductOdooLaneDataPolicy = {
     allowed_rebuild_sources: Array<'empty' | 'upstream_restore'>;
     data_authority: 'unknown' | 'resettable' | 'restorable' | 'authoritative';
-    requires_backup_before_destroy: boolean;
-    requires_restore_proof: boolean;
     requires_runtime_identity: boolean;
     upstream_source: string;
 };
@@ -3383,6 +3423,7 @@ export type ProductOwnerSecretInput = {
 
 export type ProductPreviewProfile = {
     app_name_prefix: string;
+    app_name_suffix?: string;
     context: string;
     copied_env_keys: Array<string>;
     data_transport_mode: 'none' | 'driver';
@@ -3401,6 +3442,8 @@ export type ProductPreviewProfile = {
     required_template_env_keys: Array<string>;
     slug_template: string;
     template_instance: string;
+    transport_database_prefix?: string;
+    transport_extension?: '' | 'verireel-postgres';
 };
 
 export type ProductPreviewReference = {
@@ -3432,7 +3475,7 @@ export type ProductProfileListResponse = {
 };
 
 export type ProductProfileMutationReceipt = {
-    field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup' | 'display-name';
+    field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup' | 'display-name' | 'generic-web-transition';
     idempotency_key: string;
     original_trace_id: string;
     product: string;
@@ -4818,6 +4861,7 @@ export type OwnerSecretInputEnvelopeWritable = {
 
 export type ProductPreviewProfileWritable = {
     app_name_prefix: string;
+    app_name_suffix?: string;
     context: string;
     copied_env_keys: Array<string>;
     data_transport_mode: 'none' | 'driver';
@@ -4833,6 +4877,8 @@ export type ProductPreviewProfileWritable = {
     required_template_env_keys: Array<string>;
     slug_template: string;
     template_instance: string;
+    transport_database_prefix?: string;
+    transport_extension?: '' | 'verireel-postgres';
 };
 
 export type ProductProfileListResponseWritable = {
@@ -5360,7 +5406,7 @@ export type ReadProductProfileMutationReceiptData = {
     };
     path: {
         product: string;
-        field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup' | 'display-name';
+        field: 'owner' | 'image-repository' | 'production-use' | 'website-cleanup' | 'display-name' | 'generic-web-transition';
     };
     query: {
         operation_key: string;
@@ -6344,6 +6390,37 @@ export type ApplyProductDisplayNameResponses = {
 };
 
 export type ApplyProductDisplayNameResponse = ApplyProductDisplayNameResponses[keyof ApplyProductDisplayNameResponses];
+
+export type ApplyProductGenericWebTransitionData = {
+    body: ProductGenericWebTransitionRequest;
+    headers?: {
+        'Idempotency-Key'?: string;
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        product: string;
+    };
+    query?: never;
+    url: '/v1/product-profiles/{product}/generic-web-transition';
+};
+
+export type ApplyProductGenericWebTransitionErrors = {
+    400: LaunchplaneErrorResponse;
+    401: LaunchplaneErrorResponse;
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ApplyProductGenericWebTransitionError = ApplyProductGenericWebTransitionErrors[keyof ApplyProductGenericWebTransitionErrors];
+
+export type ApplyProductGenericWebTransitionResponses = {
+    202: AcceptedEvidenceResponse;
+};
+
+export type ApplyProductGenericWebTransitionResponse = ApplyProductGenericWebTransitionResponses[keyof ApplyProductGenericWebTransitionResponses];
 
 export type ApplyProductImageRepositoryData = {
     body: {

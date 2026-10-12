@@ -29,6 +29,11 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.workflows.generic_web_application_snapshot import ApplicationLifecycleSnapshot
+from control_plane.workflows.generic_web_application_lifecycle import (
+    GenericWebApplicationLifecycle,
+    dokploy_application_lifecycle,
+)
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
@@ -55,6 +60,7 @@ class GenericWebProviderReconciliationTarget(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     original_event_deploy: dict[str, object] | None = None
+    qualification_authority_digest: str = Field(default="", exclude_if=lambda value: not value)
     product: str = ""
     context: str
     instance: str
@@ -100,11 +106,13 @@ def build_generic_web_provider_reconciliation_key(
     *,
     product: str = "",
     original_event_deploy: dict[str, object] | None = None,
+    qualification_authority_digest: str = "",
 ) -> str:
     ship_request = resolved_deploy_target.ship_request
     snapshot = GenericWebProviderReconciliationTarget(
         product=product.strip(),
         original_event_deploy=original_event_deploy,
+        qualification_authority_digest=qualification_authority_digest,
         context=ship_request.context,
         instance=ship_request.instance,
         provider_id=ship_request.provider_id,
@@ -462,6 +470,25 @@ class TestingEventDeployRecoveryRefused(ValueError):
 class DokployGenericWebDeployProvider:
     provider_id = "dokploy"
     delegated_executor = "control-plane.dokploy"
+
+    def application_lifecycle(
+        self,
+        *,
+        control_plane_root: Path,
+        snapshot: ApplicationLifecycleSnapshot,
+        target_type: str,
+        target_id: str,
+        checkpoint: Callable[[str], None],
+        effect_started: Callable[[], None],
+    ) -> GenericWebApplicationLifecycle:
+        return dokploy_application_lifecycle(
+            control_plane_root=control_plane_root,
+            snapshot=snapshot,
+            target_type=target_type,
+            target_id=target_id,
+            checkpoint=checkpoint,
+            effect_started=effect_started,
+        )
 
     def _read_provider_config(self, *, control_plane_root: Path) -> tuple[str, str]:
         if self.provider_id != "dokploy":

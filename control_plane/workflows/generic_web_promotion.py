@@ -431,7 +431,15 @@ def execute_generic_web_prod_promotion(
     promotion_deploy_status: ReleaseStatus = deploy_result.deploy_status
     failure = ""
     failure_code = ""
-    if deploy_result.deploy_status == "pass":
+    if deploy_result.deploy_status == "pass" and deploy_result.post_deploy_status not in {
+        "pass",
+        "skipped",
+    }:
+        destination_health = _mark_health_skipped(destination_health)
+        promotion_deploy_status = "fail"
+        failure = f"Destination application qualification failed: {deploy_result.error_message or 'no detail'}"
+        failure_code = "destination_post_deploy_failed"
+    elif deploy_result.deploy_status == "pass":
         try:
             destination_health = _verify_health_evidence_with_identity(
                 destination_health,
@@ -474,7 +482,7 @@ def execute_generic_web_prod_promotion(
             request=request,
             rollback_target=rollback_target,
             production_changed=deploy_result.deploy_status == "pass"
-            or deploy_result.provider_effect_attempted,
+            or deploy_result.image_effect_attempted,
             deploy_provider=deploy_provider,
             provider_operation_title=provider_operation_title,
             deployment_record_id=deploy_result.deployment_record_id,
@@ -700,6 +708,8 @@ def _roll_back_production(
             ),
             deployment_record_id=f"{deployment_record_id}-rollback",
             rollback=True,
+            rollback_source_deployment_record_id=deployment_record_id,
+            rollback_target_deployment_record_id=target_id,
             provider_effect_checkpoint=_rollback_phase_checkpoint(provider_effect_checkpoint),
         )
     except Exception as error:  # noqa: BLE001 - recorded on the promotion, then re-raised.
@@ -714,7 +724,10 @@ def _roll_back_production(
             ),
             error=error,
         )
-    if deploy_result.deploy_status != "pass":
+    if deploy_result.deploy_status != "pass" or deploy_result.post_deploy_status not in {
+        "pass",
+        "skipped",
+    }:
         return _RollbackOutcome(
             evidence=RollbackExecutionEvidence(
                 attempted=True,

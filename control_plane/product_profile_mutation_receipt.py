@@ -11,7 +11,12 @@ from pydantic import BaseModel, ConfigDict
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 
 ProfileMutationField = Literal[
-    "owner", "image-repository", "production-use", "website-cleanup", "display-name"
+    "owner",
+    "image-repository",
+    "production-use",
+    "website-cleanup",
+    "display-name",
+    "generic-web-transition",
 ]
 
 
