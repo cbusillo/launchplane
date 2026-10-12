@@ -10931,13 +10931,22 @@ def create_launchplane_fastapi_app(
             )
         except (ValueError, click.ClickException) as error:
             from control_plane.service_deploy_drain import (
+                ServiceDeployDrainTimeout,
                 ServiceDeployDispatchBusy,
                 ServiceDeployFenceConflict,
                 ServiceDeployOutcomeUnknown,
                 ServiceDeployPreEffectRefused,
             )
 
-            if isinstance(error, ServiceDeployDispatchBusy):
+            if isinstance(error, ServiceDeployDrainTimeout):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="self_deploy_drain_timeout",
+                    message=str(error),
+                    records={"running_operation_ids": json.dumps(error.blockers)},
+                ) from error
+            elif isinstance(error, ServiceDeployDispatchBusy):
                 driver_result = LaunchplaneSelfDeployResult(
                     target_type=self_deploy_request.deploy.target_type,
                     target_id=self_deploy_request.deploy.target_id,
