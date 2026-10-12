@@ -26928,6 +26928,11 @@
             "title": "Current Monitoring Intent",
             "type": "string"
           },
+          "current_private_endpoint_key": {
+            "default": "",
+            "title": "Current Private Endpoint Key",
+            "type": "string"
+          },
           "current_require_runtime_identity": {
             "anyOf": [
               {
@@ -27040,6 +27045,7 @@
           "current_check_kind",
           "current_enabled",
           "current_monitoring_intent",
+          "current_private_endpoint_key",
           "current_require_runtime_identity",
           "instance",
           "mode",

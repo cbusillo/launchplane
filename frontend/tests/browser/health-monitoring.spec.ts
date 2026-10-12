@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "private", "removed-check", "stale", "denied", "readback-failed", "read-only"]) {
+for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "private", "endpoint-changed", "removed-check", "stale", "denied", "readback-failed", "read-only"]) {
   test(`monitoring editor reviews stored policy and handles ${outcome}`, { tag: "@layout" }, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -14,7 +14,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
       health_monitoring: { monitoring_intent: "prelaunch", checks: [{ name: "public-ingress", kind: "public_http",
         enabled: false, require_runtime_identity: false, url: "", private_endpoint_key: "" }] },
     };
-    if (outcome === "private") Object.assign(lane.health_monitoring.checks[0], { kind: "private_http", private_endpoint_key: "registered-private-health" });
+    if (["private", "endpoint-changed"].includes(outcome)) Object.assign(lane.health_monitoring.checks[0], { kind: "private_http", private_endpoint_key: "registered-private-health" });
     for (const product of fixtures.products) {
       product.environments = product.environments.filter((item, index, items) => items.findIndex(other =>
         other.context === item.context && other.environment === item.environment) === index);
@@ -55,6 +55,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
       return route.fulfill({ status: 202, json: { status: "accepted", trace_id: "monitoring", records: {},
         result: { status: "ok", mode: body.mode, product: body.product, context: body.context, instance: body.instance,
           check_name: body.check_name, requested_check_kind: body.check_kind, private_endpoint_key: body.private_endpoint_key,
+          current_private_endpoint_key: outcome === "endpoint-changed" ? "new-registered-private-health" : body.private_endpoint_key,
           operation: outcome === "removed-check" ? "create" : "update", current_check_kind: outcome === "removed-check" ? null : body.check_kind,
           current_monitoring_intent: "prelaunch", requested_monitoring_intent: body.monitoring_intent,
           current_enabled: false, requested_enabled: body.enabled,
@@ -79,7 +80,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
       expect(plans).toHaveLength(0); expect(applies).toHaveLength(0);
       return;
     }
-    await panel.getByRole("combobox", { name: "Monitoring intent", exact: true }).selectOption(outcome === "private" ? "private" : "public");
+    await panel.getByRole("combobox", { name: "Monitoring intent", exact: true }).selectOption(["private", "endpoint-changed"].includes(outcome) ? "private" : "public");
     await panel.getByLabel("Check enabled", { exact: true }).check();
     await panel.getByLabel("Require runtime identity", { exact: true }).check();
     await panel.getByLabel("Reason", { exact: true }).fill("Enable the approved testing monitor.");
@@ -93,6 +94,15 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
     if (outcome === "removed-check") {
       await expect(panel.getByRole("status")).toContainText("stored check changed or was removed");
       await expect(panel.getByRole("button", { name: "Apply reviewed monitoring" })).toHaveCount(0);
+      expect(applies).toHaveLength(0);
+      lane.health_monitoring.checks = [];
+      await page.getByRole("button", { name: "Refresh current evidence" }).click();
+      await expect(panel.getByLabel("Stored check")).toHaveValue("");
+      return;
+    }
+    if (outcome === "endpoint-changed") {
+      await expect(panel.getByRole("button", { name: "Apply reviewed monitoring" })).toHaveCount(0);
+      await expect(panel.getByRole("status")).toContainText("stored private endpoint changed");
       expect(applies).toHaveLength(0);
       return;
     }
@@ -130,6 +140,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
       await expect(panel.getByRole("button", { name: "Apply reviewed monitoring" })).toHaveCount(0);
       return;
     }
+    await expect(panel).toHaveAttribute("aria-busy", "false");
     await expect(panel.getByRole("status")).toContainText(outcome === "readback-failed" ? "readback not confirmed" : "saved and read back");
     await expect(page.getByRole("status", { name: "Lane status" })).toHaveText(initialLaneStatus);
     expect(applies[0].key).toBeTruthy();

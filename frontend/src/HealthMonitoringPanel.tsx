@@ -7,8 +7,8 @@ import { recoverBrowserOperationState } from "./browser-operation";
 
 type MonitoringRequest = ApplyProductHealthMonitoringData["body"];
 
-export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh }: {
-  detail: ProductEnvironmentDetail; fixtureMode: boolean; onRefresh: () => void;
+export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshToken }: {
+  detail: ProductEnvironmentDetail; fixtureMode: boolean; onRefresh: () => void; refreshToken: number;
 }) {
   const id = useId();
   const scope = `${detail.product}:${detail.context}:${detail.environment}:health-monitoring:apply`;
@@ -24,6 +24,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh }: {
   const [review, setReview] = useState<ProductHealthMonitoringPlan | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [message, setMessage] = useState("");
+  const [profileError, setProfileError] = useState("");
   const [pending, setPending] = useState<MonitoringRequest | null>(() => {
     try {
       if (!recoverBrowserOperationState(scope).requiresIdempotencyContinuity) {
@@ -53,6 +54,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh }: {
 
   useEffect(() => {
     if (fixtureMode) return;
+    setLoading(true); setReview(null); setConfirmed(false); setLane(null); setAdmin(false); setProfileError("");
     const controller = new AbortController();
     void Promise.all([readAuthSession(controller.signal), readProductProfile(detail.product, controller.signal)])
       .then(([session, response]) => {
@@ -66,10 +68,10 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh }: {
         setEnabled(first?.enabled ?? false);
         setIdentityRequired(first?.require_runtime_identity ?? false);
       }).catch(error => {
-        if (!controller.signal.aborted) setMessage(error instanceof Error ? error.message : "Monitoring profile unavailable.");
+        if (!controller.signal.aborted) setProfileError(error instanceof Error ? error.message : "Monitoring profile unavailable.");
       }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [detail.product, detail.context, detail.environment, fixtureMode]);
+  }, [detail.product, detail.context, detail.environment, fixtureMode, refreshToken]);
 
   function edited() { setReview(null); setConfirmed(false); setMessage(""); }
 
@@ -85,6 +87,10 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh }: {
     if (response?.result) {
       if (response.result.operation === "create" || response.result.current_check_kind !== response.result.requested_check_kind) {
         setMessage("The stored check changed or was removed. Refresh this environment before editing monitoring.");
+        return;
+      }
+      if (response.result.current_private_endpoint_key !== response.result.private_endpoint_key) {
+        setMessage("The stored private endpoint changed. Refresh this environment before editing monitoring.");
         return;
       }
       setReview(response.result);
@@ -179,6 +185,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh }: {
         : <p>Original request unavailable in browser storage. Inspect the operation receipt before starting another change.</p>}
     </div> : null}
     {failure ? <p role="alert">{failure.message} {failure.traceId ? `Trace: ${failure.traceId}` : ""}</p> : null}
+    {profileError ? <p role="alert">{profileError}</p> : null}
     {message ? <p role="status">{message}</p> : null}
   </section>;
 }

@@ -109,6 +109,7 @@ class ProductHealthMonitoringPlan(BaseModel):
     requested_enabled: bool
     current_require_runtime_identity: bool | None = None
     requested_require_runtime_identity: bool
+    current_private_endpoint_key: str = ""
     private_endpoint_key: str = ""
     resolved_url: str
     changed: bool
@@ -241,6 +242,9 @@ def build_product_health_monitoring_plan(
             existing_check.require_runtime_identity if existing_check is not None else None
         ),
         requested_require_runtime_identity=request.require_runtime_identity,
+        current_private_endpoint_key=(
+            existing_check.private_endpoint_key if existing_check else ""
+        ),
         private_endpoint_key=candidate_check.private_endpoint_key,
         resolved_url=resolved_url,
         changed=changed,

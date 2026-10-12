@@ -65,7 +65,7 @@ export function EnvironmentActionsView({
     <section className="environment-actions-view">
       <HealthMonitoringPanel
         key={`monitoring:${detail.product}:${detail.context}:${detail.environment}`}
-        detail={detail} fixtureMode={!!fixtureMode} onRefresh={onRefresh}
+        detail={detail} fixtureMode={!!fixtureMode} onRefresh={onRefresh} refreshToken={refreshToken}
       />
       {detail.available_actions.some(action => action.action_id === "service_restart" && action.enabled) ? <ServiceRestartPanel
         key={`restart:${detail.product}:${detail.context}:${detail.environment}`}

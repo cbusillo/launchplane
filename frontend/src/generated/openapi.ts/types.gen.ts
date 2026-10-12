@@ -3204,6 +3204,7 @@ export type ProductHealthMonitoringPlan = {
     current_check_kind: 'public_http' | 'private_http' | 'provider' | null;
     current_enabled: boolean | null;
     current_monitoring_intent: 'public' | 'private' | 'prelaunch';
+    current_private_endpoint_key: string;
     current_require_runtime_identity: boolean | null;
     instance: string;
     mode: 'dry-run' | 'apply';
