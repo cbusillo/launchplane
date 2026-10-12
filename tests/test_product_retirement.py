@@ -20,6 +20,7 @@ from control_plane.contracts.product_retirement import (
     ProductRetirementProviderObservation,
     ProductRetirementRecord,
     ProductRetirementRequest,
+    canonical_sha256,
     provider_identifier_sha256,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -792,3 +793,49 @@ class ProductRetirementTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProductRetirementObservationCompatibilityTests(unittest.TestCase):
+    def test_pre_upgrade_plan_with_domains_keeps_its_provider_identity(self) -> None:
+        # Captured from 13b55ec7 with synthetic provider input; this is immutable
+        # persisted evidence, not a hash recomputed from the current builder.
+        import json
+        from control_plane.contracts.product_retirement import ProductRetirementProviderObservation
+        from control_plane.product_retirement import (
+            build_provider_observation,
+            _same_planned_observation,
+            _observation_allows_reconciliation,
+        )
+
+        legacy = ProductRetirementProviderObservation.model_validate(
+            json.loads(
+                (
+                    Path(__file__).parent / "fixtures/product-retirement/legacy-observation.json"
+                ).read_text()
+            )
+        )
+        current = build_provider_observation(
+            target_id=legacy.target_id,
+            payload={
+                "applicationId": legacy.target_id,
+                "name": "legacy-fixture-testing",
+                "appName": "legacy-fixture-abc",
+                "applicationStatus": "idle",
+                "sourceType": "docker",
+                "dockerImage": "ghcr.io/example/legacy:fixture",
+                "repository": "example/legacy",
+            },
+            domains=({"domainId": "legacy-domain", "host": "testing.example.invalid"},),
+            latest_deployment={"status": "done"},
+            observed_at=legacy.observed_at,
+        )
+        self.assertTrue(_same_planned_observation(planned=legacy, current=current))
+        self.assertTrue(_observation_allows_reconciliation(planned=legacy, current=current))
+        changed = current.model_copy(
+            update={
+                "application_fingerprint_sha256": canonical_sha256(
+                    {"different_target_identity": True}
+                )
+            }
+        )
+        self.assertFalse(_observation_allows_reconciliation(planned=legacy, current=changed))

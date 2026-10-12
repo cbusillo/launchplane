@@ -1531,6 +1531,9 @@ class AuthSessionResponse(BaseModel):
     trace_id: str
     identity: GitHubHumanIdentityResponse
     csrf_token: str
+    is_administrator: bool = Field(
+        default=False, json_schema_extra={"x-launchplane-optional-response": True}
+    )
 
 
 class AuthSessionRequiredResponse(BaseModel):
@@ -4600,6 +4603,9 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             identity=human_identity_response(session.identity),
             csrf_token=human_session_manager.csrf_token(session),
+            is_administrator=resolved_authz_policy_runtime.policy.names_administrator(
+                session.identity
+            ),
         )
 
     def reject_github_oauth_not_configured(trace_id: str) -> JSONResponse:
@@ -22308,6 +22314,15 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="idempotency_key_required",
                 message="Product retirement requires Idempotency-Key.",
+            )
+        if isinstance(
+            identity, GitHubHumanIdentity
+        ) and not resolved_authz_policy_runtime.policy.names_administrator(identity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Browser retirement requires the signed-in administrator.",
             )
         if retirement_request.include_previews and (
             not isinstance(identity, GitHubHumanIdentity)

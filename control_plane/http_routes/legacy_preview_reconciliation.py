@@ -101,7 +101,10 @@ def register_legacy_preview_reconciliation_route(
                 label="Reconciliation",
             )
             with serialize_generic_web_preview_operation(
-                record_store=store, profile=profile, preview_slug=slug
+                record_store=store,
+                profile=profile,
+                preview_slug=slug,
+                product_mutation=reconciliation.mode == "apply",
             ):
                 if reconciliation.mode == "apply":
                     saved = store.read_idempotency_record(

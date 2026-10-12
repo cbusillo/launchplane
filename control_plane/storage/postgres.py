@@ -12942,7 +12942,7 @@ class PostgresRecordStore(HumanSessionStore):
 
     @contextmanager
     def serialize_preview_refresh(
-        self, *, preview_id: str, dedicated: bool = False
+        self, *, preview_id: str, dedicated: bool = False, shared: bool = False
     ) -> Iterator[None]:
         normalized_preview_id = preview_id.strip()
         if not normalized_preview_id:
@@ -12955,8 +12955,9 @@ class PostgresRecordStore(HumanSessionStore):
             assert self._preview_lock_engine is not None
             factory = sessionmaker(self._preview_lock_engine, expire_on_commit=False)
         with factory() as session:
+            lock_function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
             session.execute(
-                text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                text(f"select {lock_function}(hashtextextended(:lock_name, 0))"),
                 {"lock_name": f"launchplane-preview-refresh:{normalized_preview_id}"},
             )
             try:

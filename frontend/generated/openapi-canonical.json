@@ -1132,6 +1132,12 @@
           "identity": {
             "$ref": "#/components/schemas/GitHubHumanIdentityResponse"
           },
+          "is_administrator": {
+            "default": false,
+            "title": "Is Administrator",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
+          },
           "status": {
             "const": "ok",
             "default": "ok",

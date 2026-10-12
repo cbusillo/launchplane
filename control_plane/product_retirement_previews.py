@@ -97,6 +97,14 @@ def validate_product_scope(
         for other in store.list_product_profile_records()
     ):
         raise ValueError("Product retirement contexts have shared ownership.")
+    for context in profile.historical_contexts:
+        if context != profile.preview.context and any(
+            preview.state != "destroyed"
+            for preview in store.list_preview_records(context_name=context)
+        ):
+            raise ValueError(
+                "Active historical previews have unqualified ownership; product retirement is blocked."
+            )
     scopes = {(profile.lanes[0].context, instance)} | {
         (p.preview.context, p.slug) for p in owned_previews(store, profile)
     }

@@ -487,13 +487,13 @@ def execute_generic_web_deploy(
         record_store=record_store, product=request.product
     ):
         current = record_store.read_product_profile_record(request.product)
-        if not current.is_active or profile is not None and current != profile:
-            raise click.ClickException("Product is retiring or deploy authority changed.")
+        if not current.is_active:
+            raise click.ClickException("Product is retiring and cannot deploy.")
         return _execute_generic_web_deploy_unserialized(
             control_plane_root=control_plane_root,
             record_store=record_store,
             request=request,
-            profile=current,
+            profile=profile or current,
             lane=lane,
             post_deploy_executor=post_deploy_executor,
             post_deploy_authority_digest=post_deploy_authority_digest,

@@ -71,8 +71,10 @@ refresh, teardown and reconciliation share the database's preview serialization
 lock; HTTP cancellation preserves any atomic completion and its replay receipt.
 Generic-web lock waits use separate unpooled database connections, preserving
 existing waiting behavior and keeping the shared record pool available. They
-use the same database/bootstrap identity and timeouts. Each active/waiting
-operation still consumes a database connection; deployments must qualify
+use the same database/bootstrap identity and timeouts. Preview mutations hold a shared product lock plus their exclusive preview
+lock on dedicated connections; retirement alone takes the exclusive product
+lock. Read-only inspection/planning keeps the per-preview lock, so an unrelated
+preview cannot block it. Each held or waiting lock consumes a database connection; deployments must qualify
 database/thread capacity and connection lifetime for their workload.
 Lifecycle cleanup/sweep completion also runs off the event loop and includes
 its idempotency receipt; sweep uses the product-profile scope checked before

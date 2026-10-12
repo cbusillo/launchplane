@@ -159,6 +159,7 @@ class ProductRetirementProviderObservation(BaseModel):
     target_id_sha256: str
     state: Literal["present", "absent"]
     application_fingerprint_sha256: str = ""
+    source_fingerprint_sha256: str = ""
     application_name_sha256: str = ""
     project_reference_sha256: str = ""
     domain_ids: tuple[str, ...] = ()
@@ -202,6 +203,7 @@ class ProductRetirementProviderObservation(BaseModel):
             raise ValueError("Product retirement domain identifier digests do not match.")
         for digest in (
             self.application_fingerprint_sha256,
+            self.source_fingerprint_sha256,
             self.application_name_sha256,
             self.project_reference_sha256,
             *self.domain_id_sha256,

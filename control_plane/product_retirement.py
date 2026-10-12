@@ -390,8 +390,6 @@ def build_provider_observation(
         "environment_id": str(payload.get("environmentId") or "").strip(),
         "server_id": str(payload.get("serverId") or "").strip(),
         "source_type": str(payload.get("sourceType") or "").strip(),
-        "image": str(payload.get("dockerImage") or "").strip(),
-        "repository": str(payload.get("repository") or payload.get("customGitUrl") or "").strip(),
     }
     return ProductRetirementProviderObservation(
         observed_at=observed_at,
@@ -399,6 +397,14 @@ def build_provider_observation(
         target_id_sha256=provider_identifier_sha256(observed_target_id),
         state="present",
         application_fingerprint_sha256=canonical_sha256(core_payload),
+        source_fingerprint_sha256=canonical_sha256(
+            {
+                "image": str(payload.get("dockerImage") or "").strip(),
+                "repository": str(
+                    payload.get("repository") or payload.get("customGitUrl") or ""
+                ).strip(),
+            }
+        ),
         application_name_sha256=canonical_sha256(
             {"name": core_payload["name"], "app_name": core_payload["app_name"]}
         ),
@@ -622,7 +628,7 @@ class DokployProductRetirementAdapter:
 
         if self._request.include_previews:
             with serialize_generic_web_product_operation(
-                record_store=self._record_store, product=self._request.product
+                record_store=self._record_store, product=self._request.product, exclusive=True
             ):
                 try:
                     return self._apply(provider_operation_key, lease)
@@ -713,8 +719,6 @@ class DokployProductRetirementAdapter:
             self._terminal_error_message = _redacted_terminal_error_message(str(error))
             raise ProviderMutationRejectedError(error) from error
 
-        self._ensure_retiring_profile()
-        self._checkpoint(lease, "profile_retiring")
         if self._request.include_previews:
             from control_plane.product_retirement_previews import retire_product_previews
 
@@ -727,7 +731,21 @@ class DokployProductRetirementAdapter:
                 OSError,
                 TimeoutError,
             ) as error:
+                if (
+                    not self._phases
+                    and self._record_store.read_product_profile_record(
+                        self._request.product
+                    ).lifecycle_state
+                    == "active"
+                ):
+                    self._terminal_error_message = _redacted_terminal_error_message(str(error))
+                    raise ProviderMutationRejectedError(
+                        ProductRetirementBlockedError(self._terminal_error_message)
+                    ) from error
                 raise self._unknown_provider_error(error) from error
+        else:
+            self._ensure_retiring_profile()
+            self._checkpoint(lease, "profile_retiring")
         if current_observation.state == "absent":
             try:
                 self._finalize_authority(provider_operation_key)
@@ -1458,7 +1476,7 @@ def redacted_product_retirement_response(record: ProductRetirementRecord) -> dic
                             else "",
                             "routes": list(p.routes),
                             "affected_records": list(p.affected_record_refs),
-                            "ownership": "exclusive product context and exact preview identity",
+                            "ownership": f"Exclusive context {p.preview.context}; repository {p.preview.anchor_repo}; PR {p.preview.anchor_pr_number}. Exact preview identity and product source or historical target match verified.",
                         }
                         for p in record.preview_plans
                     ],
@@ -1480,7 +1498,7 @@ def redacted_product_retirement_response(record: ProductRetirementRecord) -> dic
                             *record.authority_snapshot.runtime_record_refs,
                             *record.authority_snapshot.secret_record_refs,
                         ],
-                        "ownership": "exclusive product context and tracked application",
+                        "ownership": f"Exclusive context {record.context}; all three tracked target records agree. Provider target has no other product or lane owner.",
                     },
                 }
                 if record.profile_record is not None
@@ -1555,6 +1573,10 @@ def _observation_allows_reconciliation(
         or current.application_fingerprint_sha256 != planned.application_fingerprint_sha256
         or current.application_name_sha256 != planned.application_name_sha256
         or current.project_reference_sha256 != planned.project_reference_sha256
+        or (
+            planned.source_fingerprint_sha256
+            and current.source_fingerprint_sha256 != planned.source_fingerprint_sha256
+        )
     ):
         return False
     planned_domains = dict(zip(planned.domain_id_sha256, planned.domain_host_sha256, strict=True))
@@ -1571,7 +1593,15 @@ def _same_planned_observation(
     planned: ProductRetirementProviderObservation,
     current: ProductRetirementProviderObservation,
 ) -> bool:
-    return planned.model_copy(update={"observed_at": current.observed_at}) == current
+    normalized = current.model_copy(
+        update={
+            "source_fingerprint_sha256": current.source_fingerprint_sha256
+            if planned.source_fingerprint_sha256
+            else "",
+            "domain_hosts": current.domain_hosts if planned.domain_hosts else (),
+        }
+    )
+    return planned.model_copy(update={"observed_at": current.observed_at}) == normalized
 
 
 def _application_id(payload: Mapping[str, object]) -> str:

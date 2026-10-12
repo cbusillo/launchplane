@@ -342,7 +342,7 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_provider_config_drift_and_unbound_renamed_candidates_fail_closed(self) -> None:
         await self.plan()
-        self.apps["preview-6"]["dockerImage"] = "ghcr.io/another/product:changed"
+        self.apps["preview-6"]["dockerImage"] = self.profile.image.repository + ":changed"
         response = await request(
             self.app,
             "POST",
@@ -353,8 +353,30 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(self.deleted, [])
         self.assertEqual(
-            self.store.read_product_profile_record(self.profile.product).lifecycle_state, "retiring"
+            self.store.read_product_profile_record(self.profile.product).lifecycle_state, "active"
         )
+
+        new_headers = {**self.headers, "Idempotency-Key": "review-changed-image"}
+        replanned = await request(
+            self.app, "POST", "/v1/product-retirement", headers=new_headers, payload=self.payload
+        )
+        self.assertEqual(replanned.status_code, 202, replanned.text)
+        updated = replanned.json()
+        apply_request = {
+            **self.payload,
+            "mode": "apply",
+            "reviewed_plan_record_id": updated["records"]["product_retirement_plan_id"],
+            "reviewed_plan_sha256": updated["result"]["plan_sha256"],
+            "confirmation": updated["result"]["confirmation"],
+        }
+        applied = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers={**self.headers, "Idempotency-Key": "apply-changed-image"},
+            payload=apply_request,
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
 
     async def test_shared_preview_target_refuses_plan_before_any_delete(self) -> None:
         self.store.write_provider_target_record(
@@ -520,6 +542,67 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_dokploy_target_id_records(), ())
         self.assertEqual(self.store.list_dokploy_target_records(), ())
 
+    async def test_standalone_destroy_with_stale_profile_refuses_retiring_product(self) -> None:
+        from control_plane.workflows.generic_web_preview import (
+            execute_generic_web_preview_destroy,
+            GenericWebPreviewDestroyRequest,
+        )
+
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"lifecycle_state": "retiring"})
+        )
+        with patch(
+            "control_plane.workflows.generic_web_preview._execute_generic_web_preview_destroy_unserialized"
+        ) as provider:
+            result = execute_generic_web_preview_destroy(
+                control_plane_root=self.root,
+                record_store=self.store,
+                request=GenericWebPreviewDestroyRequest(
+                    product=self.profile.product, preview_slug="pr-6"
+                ),
+                profile=self.profile,
+            )
+            self.assertEqual(result.destroy_status, "fail")
+            provider.assert_not_called()
+
+    async def test_ordinary_operations_coexist_and_retirement_drains_them(self) -> None:
+        if self.store.database_url.startswith("sqlite"):
+            self.skipTest("PostgreSQL shared/exclusive advisory-lock proof.")
+        import asyncio
+        from threading import Event
+        from control_plane.workflows.generic_web_preview import (
+            serialize_generic_web_product_operation,
+        )
+
+        entered = (Event(), Event())
+        release = Event()
+        retired = Event()
+
+        def ordinary(index: int) -> None:
+            with serialize_generic_web_product_operation(
+                record_store=self.store, product=self.profile.product
+            ):
+                entered[index].set()
+                if not release.wait(5):
+                    raise AssertionError("Timed out releasing ordinary operation.")
+
+        def retirement() -> None:
+            with serialize_generic_web_product_operation(
+                record_store=self.store, product=self.profile.product, exclusive=True
+            ):
+                retired.set()
+
+        tasks = [asyncio.create_task(asyncio.to_thread(ordinary, i)) for i in range(2)]
+        try:
+            for event in entered:
+                self.assertTrue(await asyncio.to_thread(event.wait, 3))
+            tasks.append(asyncio.create_task(asyncio.to_thread(retirement)))
+            self.assertFalse(await asyncio.to_thread(retired.wait, 0.1))
+        finally:
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*tasks), 5)
+        self.assertTrue(retired.is_set())
+
     async def test_retiring_product_fences_a_queued_deploy_with_stale_profile(self) -> None:
         if self.store.database_url.startswith("sqlite"):
             self.skipTest("PostgreSQL advisory-lock integration proof; SQLite is portability only.")
@@ -552,7 +635,7 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         with serialize_generic_web_product_operation(
-            record_store=self.store, product=self.profile.product
+            record_store=self.store, product=self.profile.product, exclusive=True
         ):
             task = asyncio.create_task(asyncio.to_thread(queued_deploy))
             await asyncio.to_thread(entered.wait, 5)

@@ -1352,11 +1352,13 @@ def evaluate_generic_web_preview_readiness(
 
 @contextmanager
 def serialize_generic_web_product_operation(
-    *, record_store: object, product: str
+    *, record_store: object, product: str, exclusive: bool = False
 ) -> Iterator[None]:
     serialize = getattr(record_store, "serialize_preview_refresh", None)
     if callable(serialize):
-        with serialize(preview_id=f"product-retirement:{product}", dedicated=True):
+        with serialize(
+            preview_id=f"product-retirement:{product}", dedicated=True, shared=not exclusive
+        ):
             yield
     else:
         yield
@@ -1368,10 +1370,14 @@ def serialize_generic_web_preview_operation(
     record_store: object,
     profile: LaunchplaneProductProfileRecord,
     preview_slug: str,
+    product_mutation: bool = True,
 ) -> Iterator[None]:
-    with serialize_generic_web_product_operation(
-        record_store=record_store, product=profile.product
-    ):
+    product_scope = (
+        serialize_generic_web_product_operation(record_store=record_store, product=profile.product)
+        if product_mutation
+        else nullcontext()
+    )
+    with product_scope:
         serialize = getattr(record_store, "serialize_preview_refresh", None)
         scope = (
             serialize(
@@ -1744,6 +1750,26 @@ def execute_generic_web_preview_destroy(
     with serialize_generic_web_preview_operation(
         record_store=record_store, profile=resolved, preview_slug=request.preview_slug
     ):
+        current = resolve_generic_web_preview_profile(
+            record_store=record_store, product=resolved.product
+        )
+        if not current.is_active:
+            now = utc_now_timestamp()
+            return GenericWebPreviewDestroyResult(
+                destroy_status="fail",
+                destroy_started_at=now,
+                destroy_finished_at=now,
+                product=resolved.product,
+                context=resolved.preview.context,
+                preview_slug=request.preview_slug,
+                application_name=preview_application_name(
+                    app_name_suffix=resolved.preview.app_name_suffix,
+                    app_name_prefix=effective_preview_app_name_prefix(profile=resolved),
+                    preview_slug=request.preview_slug,
+                ),
+                application_id="",
+                error_message="Product is retiring or retired; resume its retirement operation.",
+            )
         return _execute_generic_web_preview_destroy_unserialized(
             control_plane_root=control_plane_root,
             record_store=record_store,

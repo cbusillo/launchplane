@@ -32,13 +32,17 @@ invalidate review. The card checks that its reason and related issue still match
 
 ## Execution and recovery
 
-Apply takes the product serialization lock shared with generic-web preview
-operations and stable deployment. In-flight operations drain before retirement;
+Apply takes an exclusive product serialization lock. Ordinary generic-web
+preview mutations and stable deployments share that lock with each other;
+read-only legacy plans keep their individual preview lock. In-flight operations drain before retirement;
 queued refreshes and deploys reread the current profile under that lock and
 refuse retiring or changed authority. The existing durable provider target lease
 also preserves operation and idempotency fencing.
 
-The executor atomically records its operation-bound profile checkpoint and
+The complete preview/provider review is revalidated before entering the fence.
+A changed pre-effect plan is rejected while the product stays active and its
+provider reservation is released, so the admin can review a new plan. The
+executor atomically records its operation-bound profile checkpoint and
 enters `retiring` with previews disabled. It revalidates the owned preview set,
 then uses the existing preview resource teardown helper for each verified
 application. Each preview's provider absence is independently enumerated before
@@ -49,7 +53,7 @@ rechecks completed preview evidence, and uses the existing finalization checkpoi
 to remove stable runtime/target authority, disable scoped secrets with audit
 history, and mark the retained product profile `retired`.
 
-Unknown provider or database outcomes, changing ownership, and partial effects
+After an effect starts, unknown provider or database outcomes, changing ownership, and partial effects
 remain reconciliation-required with the product fenced. The browser keeps the
 reviewed request and its original key in session storage across reloads. Use
 **Resume original retirement**; never substitute a key or reviewed payload.
@@ -63,7 +67,10 @@ instance-scoped: `include_previews=true` is refused for machine callers.
 Standalone preview destroy/reconciliation retains its existing authorization.
 The existing tracked and provider-absent no-target lane requests remain supported
 through their current worker/API contracts. Products with other drivers, a live
-lane, multiple stable lanes or uncertain resources are refused by this card.
+lane, multiple stable lanes, active historical previews with unqualified
+ownership, or uncertain resources are refused by this card. Restoring ownership
+evidence through the existing admin paths permits the original request to
+resume; retirement never overrides ambiguity or adopts a changed partial plan.
 
 Container images and GHCR packages are retained. Retirement does not delete a
 repository, package, volume, backup or historical generation. Existing package
