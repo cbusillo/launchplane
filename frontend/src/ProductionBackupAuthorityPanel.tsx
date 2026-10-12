@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { ShieldCheck } from "lucide-react";
-import { applyProductionBackupAuthority, LaunchplaneApiError, readAuthSession, readProductionBackupAuthority } from "./api";
+import { applyProductionBackupAuthority, LaunchplaneApiError, readAuthSession, readProductEnvironmentConfigStatus, readProductionBackupAuthority } from "./api";
 import type { ProductionBackupAuthorityReadModel, ProductionBackupAuthorityWriteEnvelope, ProductionBackupAuthorityWriteResponse, ProductEnvironmentDetail } from "./generated/openapi.ts";
 import { recoverBrowserOperationState } from "./browser-operation";
 import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
@@ -35,6 +35,7 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
     } catch { return null; }
   });
   const [admin, setAdmin] = useState(false);
+  const [requiredActions, setRequiredActions] = useState<string[]>([]);
   const [authority, setAuthority] = useState<ProductionBackupAuthorityReadModel | null>(null);
   const [readingAuthority, setReadingAuthority] = useState(false);
   const [review, setReview] = useState<Review | null>(null);
@@ -51,6 +52,7 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
   });
   const busy = checking || [plan.state.phase, apply.state.phase].some(phase => ["queued", "submitting"].includes(phase));
   const uncertain = apply.state.requiresIdempotencyContinuity;
+  const supportedAction = Boolean(proposal && requiredActions.includes(proposal.policy.promotion_action));
   const proposalLoad = useRef(0);
   useEffect(() => {
     if (apply.state.phase === "failed" && !apply.state.requiresIdempotencyContinuity) {
@@ -61,13 +63,20 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
   useEffect(() => {
     if (fixtureMode) return;
     const controller = new AbortController();
-    void readAuthSession(controller.signal).then(session => { if (!controller.signal.aborted) setAdmin(session.identity.role === "admin"); })
-      .catch(() => { if (!controller.signal.aborted) setAdmin(false); });
+    void Promise.all([readAuthSession(controller.signal), readProductEnvironmentConfigStatus(detail.product, detail.environment, controller.signal)])
+      .then(([session, response]) => {
+        if (controller.signal.aborted) return;
+        const config = response.config_status;
+        if (config.product !== detail.product || config.context !== detail.context || config.environment !== detail.environment) throw new Error("Backup requirements belong to another lane.");
+        setAdmin(session.identity.role === "admin");
+        setRequiredActions(config.production_backup_authorities.map(item => item.promotion_action));
+      }).catch(failure => { if (!controller.signal.aborted) { setAdmin(false); setError(failure instanceof Error ? failure.message : "Current backup requirements could not be read."); } });
     return () => controller.abort();
-  }, [fixtureMode]);
+  }, [fixtureMode, detail.product, detail.context, detail.environment]);
   useEffect(() => {
-    generation.current += 1; setReview(null); setAuthority(null);
+    generation.current += 1; setReview(null);
     if (!proposal || fixtureMode) return;
+    setAuthority(null);
     const controller = new AbortController();
     setReadingAuthority(true);
     void readProductionBackupAuthority(proposal.policy, controller.signal).then(response => {
@@ -86,6 +95,7 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
       if (file.size > 100_000) throw new Error("Use a single product's backup proposal (under 100 KB).");
       const next = readBackupProposal(await file.text(), detail);
       if (loadVersion !== proposalLoad.current) return;
+      if (!requiredActions.includes(next.policy.promotion_action)) throw new Error("This proposal does not protect the lane's current production promotion.");
       const raw = JSON.stringify(next);
       sessionStorage.setItem(storageKey, raw);
       if (sessionStorage.getItem(storageKey) !== raw) throw new Error("The proposal could not be retained in this tab.");
@@ -95,7 +105,7 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
     }
   }
   async function dryRun() {
-    if (!proposal || !admin || busy || uncertain || fixtureMode) return;
+    if (!proposal || !supportedAction || !admin || busy || uncertain || fixtureMode) return;
     setReview(null); setError(""); setMessage("");
     const version = generation.current;
     const response = await plan.run(proposal);
@@ -108,7 +118,7 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
     setReview({ request: proposal, digest: response.result.authority_digest });
   }
   async function approve() {
-    if (!admin || busy || fixtureMode || (uncertain ? !pending : !review)) return;
+    if (!admin || busy || fixtureMode || (uncertain ? !pending : !review || !supportedAction)) return;
     const request: ProductionBackupAuthorityWriteEnvelope = uncertain ? pending! : {
       ...review!.request, mode: "apply", reviewed_authority_digest: review!.digest,
     };
@@ -148,7 +158,7 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
     <p>Current authority: <strong>{authority?.state ?? (proposal ? readingAuthority ? "Reading…" : "Unknown" : "Load a prepared proposal to inspect")}</strong></p>
     {!admin ? <p>A signed-in administrator with access to this product must review the proposal.</p> : null}
     <div className="product-config-field"><label htmlFor={`${id}-file`}>Prepared backup proposal</label>
-      <input id={`${id}-file`} type="file" accept="application/json,.json" disabled={!admin || busy || uncertain || fixtureMode} onChange={event => {
+      <input id={`${id}-file`} type="file" accept="application/json,.json" disabled={!admin || !requiredActions.length || busy || uncertain || fixtureMode} onChange={event => {
         const file = event.target.files?.[0]; event.target.value = ""; void load(file);
       }} />
       <small>Preparation uses a private proposal file. It stays in this tab until approval; credentials are never part of it.</small>
@@ -156,6 +166,7 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
     {proposal && snapshot && backup ? <div className="product-owner-plan">
       <h3>Proposed protection for {detail.display_name} · production</h3>
       <dl className="environment-action-facts">
+        <div><dt>Production promotion scope</dt><dd>{proposal.policy.promotion_action}</dd></div>
         <div><dt>Snapshot retention</dt><dd>{snapshot.retention_count} snapshots · prefix {snapshot.snapshot_prefix}</dd></div>
         <div><dt>Snapshot freshness</dt><dd>{snapshot.max_evidence_age_seconds} seconds maximum age</dd></div>
         <div><dt>Independent backup freshness</dt><dd>{backup.max_evidence_age_seconds} seconds maximum age</dd></div>
@@ -168,7 +179,10 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
       <ul>{proposal.targets?.map(target => <li key={target.target_id}>
         {target.target_id} · revision {target.target_revision}: {target.destination.host} · {target.destination.username} · {target.destination.destination_kind === "proxmox_guest" ? `${target.destination.guest_kind} ${target.destination.guest_id}` : target.destination.storage_id}
       </li>)}</ul>
-      {!proposal.targets?.length ? <p>Existing targets: {snapshot.source_target_id} → {backup.destination_target_id}. The dry-run digest binds their current revisions.</p> : null}
+      {!proposal.targets?.length ? <>
+        <p>Existing targets: {snapshot.source_target_id} → {backup.destination_target_id}. The dry-run digest binds their current revisions; provider coordinates are withheld from this read.</p>
+        <ul>{authority?.targets.map(target => <li key={target.record_id}>{target.target_id} · {target.destination_kind} · revision {target.target_revision} · {target.record_id}</li>)}</ul>
+      </> : null}
     </div> : null}
     <OperationNotice state={plan.state} label="Dry run" /><OperationNotice state={apply.state} label="Approval" />
     {error ? <InlineFormError message={error} /> : null}
@@ -176,8 +190,8 @@ export function ProductionBackupAuthorityPanel({ detail, fixtureMode, onRefresh 
     {review || (uncertain && pending) ? <p className="backup-authority-digest">Reviewed digest: <code>{review?.digest ?? pending?.reviewed_authority_digest}</code></p> : null}
     {uncertain ? <p role="status">The approval outcome is uncertain. Keep the original proposal and retry only the same request and key.</p> : null}
     <div className="product-config-actions">
-      <button type="button" className="button" disabled={!admin || !proposal || busy || uncertain || fixtureMode} onClick={() => void dryRun()}>Run backup authority dry run</button>
-      <button type="button" className="button button-primary" disabled={!admin || busy || fixtureMode || (uncertain ? !pending : !review)} onClick={() => void approve()}>{uncertain ? "Retry original backup approval" : "Approve this product's backup policy"}</button>
+      <button type="button" className="button" disabled={!admin || !proposal || !supportedAction || busy || uncertain || fixtureMode} onClick={() => void dryRun()}>Run backup authority dry run</button>
+      <button type="button" className="button button-primary" disabled={!admin || busy || fixtureMode || (uncertain ? !pending : !review || !supportedAction)} onClick={() => void approve()}>{uncertain ? "Retry original backup approval" : "Approve this product's backup policy"}</button>
     </div>
   </section>;
 }

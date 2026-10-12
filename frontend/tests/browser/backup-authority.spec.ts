@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-for (const outcome of ["approved", "denied", "different-lane", "credential", "changed", "uncertain", "uncertain-stale", "uncertain-denied", "stale", "readback-delayed", "read-only"]) {
+for (const outcome of ["approved", "denied", "different-lane", "wrong-action", "credential", "changed", "uncertain", "uncertain-stale", "uncertain-denied", "stale", "readback-delayed", "read-only"]) {
   test(`production backup proposal handles ${outcome}`, { tag: "@layout" }, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -21,6 +21,8 @@ for (const outcome of ["approved", "denied", "different-lane", "credential", "ch
     await page.route("**/v1/products/atlas-commerce/environments/prod", r => r.fulfill({ json: { status: "ok", trace_id: "lane", environment: fixtures.environment } }));
     await page.route("**/promotion-status", r => r.fulfill({ status: 503, json: { error: { code: "fixture_unavailable", message: "Promotion is outside this isolated approval journey." } } }));
     await page.route("**/operational-readiness?*", r => r.fulfill({ status: 503, json: { error: { code: "fixture_unavailable", message: "No readiness evidence in this isolated approval journey." } } }));
+    await page.route("**/v1/products/atlas-commerce/environments/prod/config-status", r => r.fulfill({ json: { status: "ok", trace_id: "requirements", config_status: {
+      product: policy.product, context: policy.context, environment: policy.instance, production_backup_authorities: [{ promotion_action: policy.promotion_action }] } } }));
     await page.route("**/v1/product-profiles/atlas-commerce", r => r.fulfill({ json: { status: "ok", trace_id: "profile", profile: { lanes: [] } } }));
     await page.route("**/v1/production-backup-authority?*", r => {
       const answer = { json: { status: "ok", trace_id: "authority", authority: { ...policy, state: ready ? "ready" : "missing", ready, policy: ready ? { record_id: "fixture-policy-r1" } : null, targets: [], summary: "Fixture authority" } } };
@@ -48,10 +50,10 @@ for (const outcome of ["approved", "denied", "different-lane", "credential", "ch
     if (outcome === "read-only") { await expect(file).toBeDisabled(); expect(requests).toHaveLength(0); return; }
     await expect(file).toBeEnabled();
     if (outcome === "credential") (proposal.targets[0].destination as Record<string, unknown>).private_key = "not-a-real-secret";
-    const loaded = outcome === "different-lane" ? { ...proposal, policy: { ...policy, context: "another-product" } } : proposal;
+    const loaded = outcome === "different-lane" ? { ...proposal, policy: { ...policy, context: "another-product" } } : outcome === "wrong-action" ? { ...proposal, policy: { ...policy, promotion_action: "wrong_promotion.execute" } } : proposal;
     await file.setInputFiles({ name: "private-proposal.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(loaded)) });
     if (outcome === "credential") { await expect(panel.getByRole("alert")).toBeVisible(); await expect(approve).toBeDisabled(); expect(requests).toHaveLength(0); return; }
-    if (outcome === "different-lane") { await expect(panel.getByRole("alert")).toBeVisible(); await expect(approve).toBeDisabled(); expect(requests).toHaveLength(0); return; }
+    if (["different-lane", "wrong-action"].includes(outcome)) { await expect(panel.getByRole("alert")).toBeVisible(); await expect(approve).toBeDisabled(); expect(requests).toHaveLength(0); return; }
     await expect(panel.getByText("missing", { exact: true })).toBeVisible();
     await panel.getByRole("button", { name: "Run backup authority dry run" }).click();
     if (outcome === "denied") { await expect(panel.locator('.operation-notice[data-phase="failed"]')).toBeVisible(); await expect(approve).toBeDisabled(); expect(requests.every(x => x.body.mode === "dry_run")).toBe(true); return; }

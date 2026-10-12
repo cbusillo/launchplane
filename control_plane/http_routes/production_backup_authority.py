@@ -309,10 +309,14 @@ def _execute_write(
                     else "authorization_denied",
                     message=target_refusal,
                 )
-        plan = plan_production_backup_authority_write(
-            record_store=authority_store,
-            envelope=envelope,
-        )
+        if envelope.mode == "dry_run":
+            plan = plan_production_backup_authority_write(
+                record_store=authority_store,
+                envelope=envelope,
+            )
+            return ProductionBackupAuthorityWriteResponse(
+                trace_id=current_trace_id, result=plan.result
+            )
     except (
         ProductionBackupAuthorityConflictError,
         ProductionBackupAuthoritySequenceError,
@@ -330,11 +334,6 @@ def _execute_write(
             code="database_storage_required" if isinstance(error, TypeError) else "invalid_request",
             message=str(error),
         ) from error
-    if envelope.mode == "dry_run":
-        return ProductionBackupAuthorityWriteResponse(
-            trace_id=current_trace_id,
-            result=plan.result,
-        )
     normalized_idempotency_key = idempotency_key.strip()
     assert normalized_idempotency_key
     assert isinstance(record_store, PostgresRecordStore)

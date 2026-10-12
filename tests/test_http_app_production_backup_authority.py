@@ -1,13 +1,15 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from typing import Any
 from unittest.mock import patch
 from urllib.parse import urlencode
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.production_backup_authority import ProductionBackupAuthorityWriteEnvelope
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
+from control_plane.http_routes.mutation_support import idempotency_scope, request_fingerprint
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.support.auth import _StubVerifier, _identity
 from tests.support.http import get as http_get
@@ -261,15 +263,52 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(refused.status_code, 409)
             self.assertEqual(store.list_production_backup_policy_records(), ())
-            for replayed in (False, True):
-                result = await http_request(
-                    app,
-                    "POST",
-                    route,
-                    headers=_browser_mutation_headers(sessions, session)
-                    | {"Idempotency-Key": "browser-backup-approval"},
-                    payload=request,
-                )
+            prepare = store.prepare_db_only_mutation
+            original_committed = False
+
+            def original_finishes_after_retry_preflight(**kwargs: Any) -> Any:
+                nonlocal original_committed
+                preflight = prepare(**kwargs)
+                if not original_committed:
+                    original_committed = True
+                    original_envelope = ProductionBackupAuthorityWriteEnvelope.model_validate(
+                        request
+                    )
+                    original_payload = original_envelope.model_dump(mode="json", exclude_none=True)
+                    store.compare_and_apply_production_backup_authority(
+                        envelope=original_envelope,
+                        mutation=DbOnlyMutationRequest(
+                            scope=idempotency_scope(_github_human_identity()),
+                            route_path=route,
+                            idempotency_key="browser-backup-approval",
+                            request_fingerprint=request_fingerprint(original_payload),
+                            lease_owner="original-request",
+                            response_status_code=200,
+                            response_trace_id="original-request",
+                            response_payload={},
+                        ),
+                        response_payload_builder=lambda result: {
+                            "status": "ok",
+                            "trace_id": "original-request",
+                            "result": result.model_dump(mode="json"),
+                        },
+                    )
+                return preflight
+
+            for replayed in (True, True):
+                with patch.object(
+                    store,
+                    "prepare_db_only_mutation",
+                    side_effect=original_finishes_after_retry_preflight,
+                ):
+                    result = await http_request(
+                        app,
+                        "POST",
+                        route,
+                        headers=_browser_mutation_headers(sessions, session)
+                        | {"Idempotency-Key": "browser-backup-approval"},
+                        payload=request,
+                    )
                 self.assertEqual(result.status_code, 200, result.text)
                 self.assertEqual(bool(result.json().get("replayed")), replayed)
             self.assertEqual(len(store.list_production_backup_policy_records()), 1)

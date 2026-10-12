@@ -295,10 +295,13 @@ canonical `authority_digest`, then submit the same payload with `mode=apply`,
 the reviewed digest, expected-current record IDs, and an `Idempotency-Key`.
 The production lane's **Actions → Production backup authority** card accepts
 a private prepared proposal for that exact product/context/instance. It displays
-the proposed whole-guest scope, snapshot retention, evidence ages and review date,
+the proposed target coordinates (when supplied), whole-guest capture scope,
+snapshot retention, evidence ages and review date,
 runs the dry run, and approves only its returned digest through this same route.
 Preparation can load the file into the signed-in administrator's tab before the
-administrator reviews it; no terminal command or bearer token is needed from
+administrator reviews it. This is browser-local staging: preparation uses an
+already-authorized administrator tab, or the administrator loads the private file;
+there is no server-side proposal inbox. No terminal command or bearer token is needed from
 the person approving. Proposal loading does not submit or activate a policy.
 
 Browser writes use the existing CSRF-checked session dependency and the unchanged
@@ -306,12 +309,17 @@ Browser writes use the existing CSRF-checked session dependency and the unchange
 also checks this action on every active lane using that target, including inside
 the locked write. A product-scoped caller cannot revise another product's target;
 an administrator already authorized on every affected lane retains that authority.
-The card accepts only target revisions used by the submitted policy. It retains the
+The card accepts only target revisions used by the submitted policy and only a
+promotion action reported by the lane's current config-status read. Policy-only
+proposals display current target IDs, kinds and revisions; that read intentionally
+withholds provider coordinates. It retains the
 private proposal and, for an uncertain approval, the original request and
 idempotency key in that tab's session storage. A changed file invalidates review;
 an uncertain result locks replacement and permits only the original request's
 retry. A stale-authority conflict returned after the route's replay preflight
-settles that original request and permits a fresh review. An authorization refusal
+settles that original request and permits a fresh review. Apply plans only inside
+the transaction after idempotency reservation/replay, so a concurrent original
+commit cannot become an unlocked stale-planning refusal. An authorization refusal
 occurs before replay and does not prove a lost response never committed; it keeps
 the original request locked. The card reads authority back after approval and
 keeps replacement disabled during that read. Approval does not enqueue
