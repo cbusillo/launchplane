@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 ProductReconcileTargetKind = Literal["testing", "preview"]
+RECONCILE_SOURCE = "launchplane-reconcile"
 ProductReconcileRequestState = Literal["pending", "running", "done", "failed"]
 PRODUCT_RECONCILE_REQUEST_STATES: tuple[ProductReconcileRequestState, ...] = (
     "pending",

@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
+from control_plane.contracts.product_reconcile import RECONCILE_SOURCE
 
 
 class ServiceDeployDrainRecord(BaseModel):
@@ -125,6 +126,20 @@ def admission_allowed(session: Any, now: str) -> bool:
     )
 
 
+def reservation_requires_admission(scope: str) -> bool:
+    return scope.strip() == "client-release" or scope.strip().startswith(f"{RECONCILE_SOURCE}:")
+
+
+def admit_reservation(store: Any, session: Any, scope: str) -> None:
+    """Order every fresh/retried event effect against the self-deploy fence."""
+    if not reservation_requires_admission(scope):
+        return
+    if not store.database_url.startswith("sqlite"):
+        lock(store, session)
+    if not admission_allowed(session, store._database_mutation_timestamp(session)):
+        raise ServiceDeployDraining("Launchplane is draining product provider effects.")
+
+
 def _running_operations(session: Any) -> tuple[str, ...]:
     from control_plane.storage.postgres import (
         LaunchplaneIdempotencyRow,
@@ -147,8 +162,13 @@ def _running_operations(session: Any) -> tuple[str, ...]:
     ids.extend(
         session.scalars(
             select(LaunchplaneIdempotencyRow.record_id).where(
-                LaunchplaneIdempotencyRow.scope == "client-release",
-                LaunchplaneIdempotencyRow.state == "running",
+                (
+                    (LaunchplaneIdempotencyRow.scope == "client-release")
+                    | LaunchplaneIdempotencyRow.scope.startswith(f"{RECONCILE_SOURCE}:")
+                ),
+                # Expiry is not provider quiescence. Inspection and terminal
+                # settlement remain runnable while fresh admission is paused.
+                LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
             )
         )
     )
