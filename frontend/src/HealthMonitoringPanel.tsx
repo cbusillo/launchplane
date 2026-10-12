@@ -3,6 +3,7 @@ import { applyProductHealthMonitoring, readAuthSession, readProductProfile } fro
 import type { ApplyProductHealthMonitoringData, ProductEnvironmentDetail, ProductHealthMonitoringPlan, ProductLaneProfile } from "./generated/openapi.ts";
 import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
 import { useBrowserOperationController } from "./use-browser-operation";
+import { recoverBrowserOperationState } from "./browser-operation";
 
 type MonitoringRequest = ApplyProductHealthMonitoringData["body"];
 
@@ -25,6 +26,10 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh }: {
   const [message, setMessage] = useState("");
   const [pending, setPending] = useState<MonitoringRequest | null>(() => {
     try {
+      if (!recoverBrowserOperationState(scope).requiresIdempotencyContinuity) {
+        sessionStorage.removeItem(storageKey);
+        return null;
+      }
       const value = sessionStorage.getItem(storageKey);
       if (!value) return null;
       const request = JSON.parse(value) as MonitoringRequest;
@@ -81,8 +86,8 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh }: {
   }
 
   async function apply() {
-    if (fixtureMode || !admin || busy || (!pending && (!review || !confirmed))) return;
-    const request = pending ?? {
+    if (fixtureMode || !admin || busy || (uncertain ? !pending : !review || !confirmed)) return;
+    const request = uncertain && pending ? pending : {
       product: review!.product, context: review!.context, instance: review!.instance,
       check_name: review!.check_name, check_kind: review!.requested_check_kind,
       monitoring_intent: review!.requested_monitoring_intent, enabled: review!.requested_enabled,
@@ -109,7 +114,8 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh }: {
       const savedCheck = saved?.health_monitoring?.checks.find(item => item.name === request.check_name);
       if (!saved || !savedCheck || saved.health_monitoring?.monitoring_intent !== request.monitoring_intent
         || savedCheck.enabled !== request.enabled || savedCheck.require_runtime_identity !== request.require_runtime_identity
-        || savedCheck.kind !== request.check_kind || savedCheck.private_endpoint_key !== request.private_endpoint_key) {
+        || savedCheck.kind !== request.check_kind || savedCheck.private_endpoint_key !== request.private_endpoint_key
+        || savedCheck.kind === "public_http" && (savedCheck.url || saved.health_url || saved.base_url) !== response.result.resolved_url) {
         throw new Error("Stored monitoring differs from this request. Refresh and inspect the current profile.");
       }
       setLane(saved); setIntent(request.monitoring_intent); setEnabled(request.enabled ?? true);
@@ -157,7 +163,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh }: {
         <div><dt>Monitoring intent</dt><dd>{review.current_monitoring_intent} → {review.requested_monitoring_intent}</dd></div>
         <div><dt>Check enabled</dt><dd>{String(review.current_enabled)} → {String(review.requested_enabled)}</dd></div>
         <div><dt>Require runtime identity</dt><dd>{String(review.current_require_runtime_identity)} → {String(review.requested_require_runtime_identity)}</dd></div>
-        <div><dt>Endpoint preserved</dt><dd>{review.resolved_url || `Registered private endpoint: ${review.private_endpoint_key}`}</dd></div>
+        <div><dt>Endpoint preserved</dt><dd>{review.requested_check_kind === "private_http" ? `Registered private endpoint: ${review.private_endpoint_key}` : review.resolved_url || "No public endpoint recorded"}</dd></div>
       </dl>
       <label className="monitoring-checkbox"><input type="checkbox" disabled={locked} checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />I confirm this monitoring change on {detail.environment}.</label>
       <button className="primary-button" disabled={locked || !confirmed} onClick={() => void apply()}>Apply reviewed monitoring</button>

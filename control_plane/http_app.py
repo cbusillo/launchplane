@@ -12819,7 +12819,7 @@ def create_launchplane_fastapi_app(
 
     async def apply_product_health_monitoring(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:

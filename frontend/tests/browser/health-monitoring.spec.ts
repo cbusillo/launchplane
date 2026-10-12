@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-for (const outcome of ["saved", "uncertain", "stale", "denied", "readback-failed", "read-only"]) {
+for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "private", "stale", "denied", "readback-failed", "read-only"]) {
   test(`monitoring editor reviews stored policy and handles ${outcome}`, { tag: "@layout" }, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -14,6 +14,7 @@ for (const outcome of ["saved", "uncertain", "stale", "denied", "readback-failed
       health_monitoring: { monitoring_intent: "prelaunch", checks: [{ name: "public-ingress", kind: "public_http",
         enabled: false, require_runtime_identity: false, url: "", private_endpoint_key: "" }] },
     };
+    if (outcome === "private") Object.assign(lane.health_monitoring.checks[0], { kind: "private_http", private_endpoint_key: "registered-private-health" });
     for (const product of fixtures.products) {
       product.environments = product.environments.filter((item, index, items) => items.findIndex(other =>
         other.context === item.context && other.environment === item.environment) === index);
@@ -43,7 +44,9 @@ for (const outcome of ["saved", "uncertain", "stale", "denied", "readback-failed
         trace_id: "denied", error: { code: "authorization_denied", message: "Exact lane monitoring plan denied." } } });
       if (body.mode === "apply") {
         applies.push({ key: route.request().headers()["idempotency-key"], body });
-        if (outcome === "uncertain" && applies.length === 1) return route.abort();
+        if (["uncertain", "uncertain-stale"].includes(outcome) && applies.length === 1) return route.abort();
+        if (outcome === "uncertain-stale" && applies.length === 2) return route.fulfill({ status: 409, json: {
+          error: { code: "stale", message: "Stored profile changed after review." } } });
         if (outcome === "stale" && applies.length === 1) return route.fulfill({ status: 409, json: {
           error: { code: "stale", message: "Stored profile changed after review." } } });
         lane.health_monitoring = { monitoring_intent: body.monitoring_intent, checks: [{ ...lane.health_monitoring.checks[0],
@@ -51,13 +54,20 @@ for (const outcome of ["saved", "uncertain", "stale", "denied", "readback-failed
       } else plans.push(body);
       return route.fulfill({ status: 202, json: { status: "accepted", trace_id: "monitoring", records: {},
         result: { status: "ok", mode: body.mode, product: body.product, context: body.context, instance: body.instance,
-          check_name: body.check_name, requested_check_kind: body.check_kind, private_endpoint_key: "",
+          check_name: body.check_name, requested_check_kind: body.check_kind, private_endpoint_key: body.private_endpoint_key,
           current_monitoring_intent: "prelaunch", requested_monitoring_intent: body.monitoring_intent,
           current_enabled: false, requested_enabled: body.enabled,
           current_require_runtime_identity: false, requested_require_runtime_identity: body.require_runtime_identity,
-          resolved_url: lane.health_url, changed: true, applied: body.mode === "apply", reason: body.reason,
+          resolved_url: body.check_kind === "private_http" ? "" : lane.health_url, changed: true, applied: body.mode === "apply", reason: body.reason,
           plan_sha256: "a".repeat(64) } } });
     });
+    if (outcome === "leftover") await page.evaluate(({ context }) => {
+      sessionStorage.setItem(`launchplane:monitoring-request:atlas-commerce:${context}:testing:health-monitoring:apply`, JSON.stringify({
+        product: "atlas-commerce", context, instance: "testing", check_name: "public-ingress", check_kind: "public_http",
+        mode: "apply", monitoring_intent: "prelaunch", enabled: false, require_runtime_identity: false,
+        private_endpoint_key: "", reason: "Abandoned older request", reviewed_plan_sha256: "b".repeat(64),
+      }));
+    }, { context: lane.context });
     await page.goto("/ui/products/atlas-commerce/environments/testing/actions");
     let panel = page.getByRole("region", { name: "Health monitoring", exact: true });
     await expect(panel.getByLabel("Stored check")).toHaveValue("public-ingress");
@@ -67,7 +77,7 @@ for (const outcome of ["saved", "uncertain", "stale", "denied", "readback-failed
       expect(plans).toHaveLength(0); expect(applies).toHaveLength(0);
       return;
     }
-    await panel.getByRole("combobox", { name: "Monitoring intent", exact: true }).selectOption("public");
+    await panel.getByRole("combobox", { name: "Monitoring intent", exact: true }).selectOption(outcome === "private" ? "private" : "public");
     await panel.getByLabel("Check enabled", { exact: true }).check();
     await panel.getByLabel("Require runtime identity", { exact: true }).check();
     await panel.getByLabel("Reason", { exact: true }).fill("Enable the approved testing monitor.");
@@ -86,8 +96,12 @@ for (const outcome of ["saved", "uncertain", "stale", "denied", "readback-failed
     await review.click();
     await panel.getByLabel("I confirm this monitoring change on testing.").check();
     await panel.screenshot({ path: testInfo.outputPath("monitoring-reviewed.png") });
+    if (outcome === "saved") {
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({ path: testInfo.outputPath("monitoring-page-reviewed.png"), fullPage: true });
+    }
     await panel.getByRole("button", { name: "Apply reviewed monitoring" }).click();
-    if (outcome === "uncertain") {
+    if (["uncertain", "uncertain-stale"].includes(outcome)) {
       await expect(panel.getByRole("button", { name: "Retry original monitoring request" })).toBeEnabled();
       await expect(panel.getByLabel("Reason", { exact: true })).toBeDisabled();
       await page.reload();
@@ -95,6 +109,12 @@ for (const outcome of ["saved", "uncertain", "stale", "denied", "readback-failed
       await panel.getByRole("button", { name: "Retry original monitoring request" }).click();
       await expect.poll(() => applies.length).toBe(2);
       expect(applies[1]).toEqual(applies[0]);
+      if (outcome === "uncertain-stale") {
+        await expect(panel.getByLabel("Reason", { exact: true })).toBeDisabled();
+        await panel.getByRole("button", { name: "Retry original monitoring request" }).click();
+        await expect.poll(() => applies.length).toBe(3);
+        expect(applies[2]).toEqual(applies[0]);
+      }
     }
     if (outcome === "stale") {
       await expect(panel.getByRole("alert")).toContainText("Stored profile changed after review");
@@ -105,8 +125,7 @@ for (const outcome of ["saved", "uncertain", "stale", "denied", "readback-failed
     await expect(panel.getByRole("status")).toContainText(outcome === "readback-failed" ? "readback unavailable" : "saved and read back");
     if (outcome !== "readback-failed") await expect(panel.getByRole("status")).toContainText("remain unverified");
     expect(applies[0].key).toBeTruthy();
-    expect(applies[0].body.reviewed_plan_sha256).toBe("a".repeat(64));
-    expect(lane.health_url).toBe("https://testing.example.com/health");
+    expect(applies[0].body).toEqual({ ...plans.at(-1), mode: "apply", reviewed_plan_sha256: "a".repeat(64) });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await panel.screenshot({ path: testInfo.outputPath(`monitoring-${outcome}.png`) });
   });

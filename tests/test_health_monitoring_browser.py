@@ -3,7 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import (
@@ -11,16 +11,51 @@ from tests.http_app_test_support import (
     _github_human_identity,
     _github_oauth_config,
     _RejectingVerifier,
+    _MissingProductReadStore,
 )
 from tests.test_http_app_product import (
     _product_health_monitoring_payload,
     _product_health_monitoring_profile,
-    _sqlite_database_url,
 )
 from tests.support.http import request
+from tests.support.stores import _sqlite_database_url
 
 
 class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_agent_cannot_use_monitoring_even_with_broad_policy(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="fixture-token",
+                terminal_agent_subject="fixture-reader",
+                terminal_agent_token_label="fixture-read",
+            ),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 2,
+                    "terminal_agents": [
+                        {
+                            "subjects": ["*"],
+                            "token_labels": ["*"],
+                            "products": ["*"],
+                            "contexts": ["*"],
+                            "instances": ["*"],
+                        }
+                    ],
+                }
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+        response = await request(
+            app,
+            "POST",
+            "/v1/product-profiles/health-monitoring/apply",
+            payload=_product_health_monitoring_payload(),
+            headers={"Authorization": "Bearer fixture-token"},
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
     async def test_admin_reviews_applies_and_replays_with_csrf(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(database_url=_sqlite_database_url(Path(directory) / "db"))
