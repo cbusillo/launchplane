@@ -406,6 +406,7 @@ jobs:
       - name: Read scrubbed Launchplane stored records
         id: stored_record_snapshot
         uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
+        timeout-minutes: 1
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
@@ -418,31 +419,28 @@ jobs:
 
       - name: Preflight candidate against stored records
         id: stored_record_preflight
-        shell: bash
         timeout-minutes: 5
         env:
           CANDIDATE_IMAGE: ${{ steps.image.outputs.image_reference }}
-        run: |
-          set -euo pipefail
-          timeout --kill-after=15s 240s bash <<'PREFLIGHT' | tee "$RUNNER_TEMP/launchplane-stored-record-preflight-result.json"
-          set -euo pipefail
-          # CI owns the PostgreSQL test-image pin; do not copy it into deploys.
-          postgres_image="$(uv run --extra dev python - <<'PY'
-          from pathlib import Path
-          import yaml
-          workflow = yaml.safe_load(Path('.github/workflows/ci.yml').read_text())
-          print(workflow['env']['LAUNCHPLANE_CI_POSTGRES_IMAGE'])
-          PY
-          )"
-          bash scripts/deploy/stored-record-preflight.sh \
-            "$CANDIDATE_IMAGE" "$RUNNER_TEMP/launchplane-stored-record-snapshot.json" \
-            "$postgres_image"
-          PREFLIGHT
+          LAUNCHPLANE_PREFLIGHT_OWNER: github-actions:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.job }}
+        run: bash scripts/deploy/run-stored-record-preflight.sh
 
-      - name: Remove scrubbed snapshot material
+      - name: Clean preflight resources and snapshot
         if: always()
-        shell: bash
-        run: rm -f -- "$RUNNER_TEMP/launchplane-stored-record-snapshot.json"
+        timeout-minutes: 1
+        env:
+          LAUNCHPLANE_PREFLIGHT_OWNER: github-actions:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.job }}
+        run: bash scripts/deploy/cleanup-stored-record-preflight.sh
+
+      - name: Retain safe preflight result
+        if: always()
+        env:
+          PREFLIGHT_OUTCOME: ${{ steps.stored_record_preflight.outcome }}
+        run: |
+          printf 'Stored-record rehearsal: %s\n' "$PREFLIGHT_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f "$RUNNER_TEMP/launchplane-stored-record-preflight-result.json" ]]; then
+            cat "$RUNNER_TEMP/launchplane-stored-record-preflight-result.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Read previous Launchplane runtime
         id: previous_runtime
