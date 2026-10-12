@@ -120,6 +120,38 @@ def _request(
 
 
 class ProductStableLaneRepairTests(unittest.TestCase):
+    def test_registers_no_website_lane_without_domains_or_public_urls(self) -> None:
+        payload = _profile().model_dump(mode="json")
+        payload["public_website"] = "none"
+        for lane in payload["lanes"]:
+            lane["base_url"] = lane["health_url"] = ""
+        original = LaunchplaneProductProfileRecord.model_validate(payload)
+        store = _Store(profile=original, dokploy_target=_dokploy_target(domains=()))
+        plan, before, replacement, *_ = build_product_stable_lane_repair_plan(
+            record_store=store, request=_request(base_url="")
+        )
+        self.assertEqual(replacement.lanes[:-1], before.lanes)
+        self.assertEqual(replacement.public_website, before.public_website)
+        self.assertFalse(replacement.lanes[-1].base_url)
+        self.assertFalse(replacement.lanes[-1].health_url)
+        self.assertFalse(replacement.lanes[-1].health_monitoring.checks)
+        self.assertEqual(plan.target.target_id, store.dokploy_target_id.target_id)
+        self.assertFalse(plan.target.domains)
+        replacement.validate_write_contract()
+        # This is registration only: no endpoint/check or healthy observation is fabricated.
+        store.profile = replacement
+        with self.assertRaises(ProductStableLaneRepairBoundaryError):
+            build_product_stable_lane_repair_plan(record_store=store, request=_request(base_url=""))
+        store.profile = original
+        with self.assertRaises(ProductStableLaneRepairBoundaryError):
+            build_product_stable_lane_repair_plan(record_store=store, request=_request())
+
+    def test_website_lane_still_requires_tracked_https_origin(self) -> None:
+        with self.assertRaises(ProductStableLaneRepairBoundaryError):
+            build_product_stable_lane_repair_plan(
+                record_store=_Store(), request=_request(base_url="")
+            )
+
     def test_dry_run_builds_target_bound_plan(self) -> None:
         plan, profile, replacement, provider_target, dokploy_target, dokploy_target_id = (
             build_product_stable_lane_repair_plan(record_store=_Store(), request=_request())
