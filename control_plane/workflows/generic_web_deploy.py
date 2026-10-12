@@ -484,6 +484,57 @@ def execute_generic_web_deploy(
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
 ) -> GenericWebDeployResult:
+    from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
+
+    with serialize_generic_web_product_operation(
+        record_store=record_store, product=request.product
+    ):
+        current = record_store.read_product_profile_record(request.product)
+        if not current.is_active:
+            raise click.ClickException("Product is retiring and cannot deploy.")
+        return _execute_generic_web_deploy_unserialized(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=request,
+            profile=profile or current,
+            lane=lane,
+            post_deploy_executor=post_deploy_executor,
+            post_deploy_authority_digest=post_deploy_authority_digest,
+            deploy_provider=deploy_provider,
+            resolved_deploy_target=resolved_deploy_target,
+            provider_operation_title=provider_operation_title,
+            deployment_record_id=deployment_record_id,
+            provider_effect_checkpoint=provider_effect_checkpoint,
+            before_records_commit=before_records_commit,
+            recorded_artifact=recorded_artifact,
+            rollback=rollback,
+            proved_pre_image_retry=proved_pre_image_retry,
+            rollback_source_deployment_record_id=rollback_source_deployment_record_id,
+            rollback_target_deployment_record_id=rollback_target_deployment_record_id,
+        )
+
+
+def _execute_generic_web_deploy_unserialized(
+    *,
+    control_plane_root: Path,
+    record_store: GenericWebDeployStore,
+    request: GenericWebDeployRequest,
+    profile: LaunchplaneProductProfileRecord | None = None,
+    lane: ProductLaneProfile | None = None,
+    post_deploy_executor: GenericWebPostDeployExecutor | None = None,
+    post_deploy_authority_digest: str = "",
+    deploy_provider: GenericWebDeployProvider | None = None,
+    resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
+    provider_operation_title: str = "",
+    deployment_record_id: str = "",
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
+    before_records_commit: Callable[[], None] | None = None,
+    recorded_artifact: bool = False,
+    rollback: bool = False,
+    proved_pre_image_retry: bool = False,
+    rollback_source_deployment_record_id: str = "",
+    rollback_target_deployment_record_id: str = "",
+) -> GenericWebDeployResult:
     """Deploy ``request``; ``recorded_artifact`` marks its artifact as Launchplane's own record."""
     normalized_provider_operation_title = provider_operation_title.strip()
     if provider_effect_checkpoint is not None and not normalized_provider_operation_title:

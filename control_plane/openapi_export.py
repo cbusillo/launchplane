@@ -196,6 +196,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/product-retirement": "execute_product_retirement",
     "/v1/production-backup-authority/apply": "apply_production_backup_authority",
     # POST carries the original typed request for an inert receipt lookup.
     "/v1/service/delivery/apply-receipt": "read_service_delivery_apply_receipt",

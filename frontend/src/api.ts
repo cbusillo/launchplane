@@ -1077,3 +1077,7 @@ export function applyProductStableLaneRepair(
   return requestJson(BROWSER_WRITE_ROUTES.productStableLaneRepairApply, "POST", payload,
     options.signal, options.idempotencyKey, options.onDispatch);
 }
+
+export function executeProductRetirement(payload: import("./generated/openapi.ts").ExecuteProductRetirementData["body"], options: BrowserOperationOptions): Promise<import("./generated/openapi.ts").AcceptedEvidenceResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.productRetirement, "POST", payload, options.signal, options.idempotencyKey, options.onDispatch);
+}
