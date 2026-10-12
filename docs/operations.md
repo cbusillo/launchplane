@@ -3081,6 +3081,32 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   instance overrides or website bootstrap data are missing. Launchplane re-reads
   the provider target environment after writing it and fails the operation if
   the typed payload or assertion flags did not persist.
+- Before destructive target replacement (`empty` or `upstream_restore`) on an
+  authoritative Odoo lane or a Live product's prod lane, replacement captures a
+  fresh logical backup and verifies it through the shared Odoo backup workflows.
+  It generates its own unique record IDs: caller-supplied historical proof cannot
+  substitute for that capture. The shared restore validator checks lane, source,
+  backup binding, normalized paths, nonce, hashes, integrity and staging space.
+  Replacement re-reads the exact proof before target writes and each restore
+  schedule effect, and records the consumed IDs and hashes. Authorization is
+  re-read at the first target write after backup and at destructive restore
+  triggering; subsequent non-destructive website setup completes without a
+  redundant proof check. Backup capture and
+  verification support both stable `prod` and `testing` lanes and preserve the
+  operation's authorization/lease checkpoints. Missing backup runtime settings
+  block the plan; capture or verification failure stops before target mutation.
+  The existing production backup restore workflow continues to support recovery
+  from an intentionally older verified backup.
+- `requires_backup_before_destroy` and `requires_restore_proof` are retired
+  display-only settings. Historical profiles remain readable, but those fields
+  are discarded when read and cannot waive protection. Data authority owns
+  eligibility: authoritative lanes and Live production need verified backup/restore proof; explicitly
+  resettable or restorable lanes retain their issue-backed prelaunch rebuild
+  source, confirmation, target and domain checks. Unknown authority cannot allow
+  a destructive rebuild. An existing-data replacement must retain complete,
+  matching volume authority even if `allow_empty_data` was supplied. The UI
+  describes this enforced boundary rather than claiming a saved setting proves
+  a backup exists.
 - Target replacement requests with `data_source_mode="upstream_restore"` use the
   guarded post-deploy schedule in destructive restore mode after image deploy so
   the devkit restore path performs restore sanitization, website bootstrap,

@@ -1395,6 +1395,28 @@ def _generic_web_profile() -> LaunchplaneProductProfileRecord:
 
 
 class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
+    def test_declared_maintenance_changes_testing_retry_authority(self) -> None:
+        from control_plane.contracts.generic_web_extensions import (
+            GenericWebLaneExtensions,
+            GenericWebMaintenanceCommand,
+        )
+        from control_plane.product_reconcile import _generic_web_testing_authority
+
+        lane = self.store.read_product_profile_record("site").lanes[0]
+        before = _generic_web_testing_authority(record_store=self.store, lane=lane)
+        changed = lane.model_copy(
+            update={
+                "generic_web_extensions": GenericWebLaneExtensions(
+                    maintenance=(GenericWebMaintenanceCommand(name="migrate", command="./migrate"),)
+                )
+            }
+        )
+        after = _generic_web_testing_authority(record_store=self.store, lane=changed)
+        self.assertNotEqual(before, after)
+        self.assertEqual(
+            after, _generic_web_testing_authority(record_store=self.store, lane=changed)
+        )
+
     def prepare_unqualified_verireel_testing(self) -> str:
         self.github.add_run(20, DEPLOYABLE)
         self.github.add_run(30, OLDER)
@@ -1606,6 +1628,41 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.request()
             repeated = self.run_once()
         self.assertEqual(repeated.last_plan["deploy_operation_status"], "reconcile_required")
+        qualify.assert_called_once()
+
+    def test_declared_generic_web_profile_requalifies_then_reuses_complete_evidence(self) -> None:
+        from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+
+        self.prepare_unqualified_verireel_testing()
+        profile = self.store.read_product_profile_record("site")
+        profile = profile.model_copy(
+            update={
+                "driver_id": "generic-web",
+                "lanes": tuple(
+                    lane.model_copy(
+                        update={
+                            "generic_web_extensions": GenericWebLaneExtensions(
+                                verification_extension="verireel-testing"
+                            )
+                        }
+                    )
+                    if lane.instance == "testing"
+                    else lane
+                    for lane in profile.lanes
+                ),
+            }
+        )
+        self.store.write_product_profile_record(profile)
+        with patch(
+            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+            side_effect=self._testing_qualification_evidence,
+        ) as qualify:
+            self.request()
+            first = self.run_once()
+            self.request()
+            repeated = self.run_once()
+        self.assertEqual(first.state, "done")
+        self.assertEqual(repeated.last_plan["reason"], "already_deployed")
         qualify.assert_called_once()
 
     def setUp(self) -> None:

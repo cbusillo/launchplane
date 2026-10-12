@@ -21,6 +21,7 @@ OdooTargetReplacementPlanBlockerCode = Literal[
     "allow_empty_data_required",
     "volume_authority_unresolved",
     "prelaunch_rebuild_policy_refused",
+    "backup_restore_proof_required",
     "volume_env_keys_missing",
     "volume_authority_drift",
     "domains_missing",
@@ -121,6 +122,7 @@ class OdooStableTargetReplacementRequest(BaseModel):
         self.artifact_id = self.artifact_id.strip()
         self.source_git_ref = self.source_git_ref.strip()
         self.expected_current_artifact_id = self.expected_current_artifact_id.strip()
+
         if not self.product:
             raise ValueError("Odoo stable target replacement requires product.")
         if not self.instance:

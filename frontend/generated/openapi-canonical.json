@@ -8795,6 +8795,47 @@
         "title": "ExternalRouteBindingReconcileEnvelope",
         "type": "object"
       },
+      "GenericWebApplicationSchedule": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Command",
+            "type": "string"
+          },
+          "cron_expression": {
+            "minLength": 1,
+            "title": "Cron Expression",
+            "type": "string"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "default": 300,
+            "maximum": 3600.0,
+            "minimum": 1.0,
+            "title": "Timeout Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "command",
+          "cron_expression"
+        ],
+        "title": "GenericWebApplicationSchedule",
+        "type": "object"
+      },
       "GenericWebDeployEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -9406,6 +9447,69 @@
           "source_git_ref"
         ],
         "title": "GenericWebDeployRequest",
+        "type": "object"
+      },
+      "GenericWebLaneExtensions": {
+        "additionalProperties": false,
+        "properties": {
+          "maintenance": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GenericWebMaintenanceCommand"
+            },
+            "title": "Maintenance",
+            "type": "array"
+          },
+          "schedules": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GenericWebApplicationSchedule"
+            },
+            "title": "Schedules",
+            "type": "array"
+          },
+          "verification_extension": {
+            "default": "",
+            "enum": [
+              "",
+              "verireel-testing"
+            ],
+            "title": "Verification Extension",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          }
+        },
+        "title": "GenericWebLaneExtensions",
+        "type": "object"
+      },
+      "GenericWebMaintenanceCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Command",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "default": 300,
+            "maximum": 3600.0,
+            "minimum": 1.0,
+            "title": "Timeout Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "command"
+        ],
+        "title": "GenericWebMaintenanceCommand",
         "type": "object"
       },
       "GenericWebPreviewAuthzPlanRequest": {
@@ -31236,6 +31340,10 @@
             "title": "Context",
             "type": "string"
           },
+          "generic_web_extensions": {
+            "$ref": "#/components/schemas/GenericWebLaneExtensions",
+            "x-launchplane-optional-response": true
+          },
           "health_monitoring": {
             "$ref": "#/components/schemas/ProductLaneHealthMonitoringPolicy"
           },
@@ -31895,6 +32003,11 @@
             "title": "Data Authority",
             "type": "string"
           },
+          "destructive_replacement_proof_required": {
+            "default": true,
+            "title": "Destructive Replacement Proof Required",
+            "type": "boolean"
+          },
           "prelaunch_rebuild_allowed": {
             "default": false,
             "title": "Prelaunch Rebuild Allowed",
@@ -31909,16 +32022,6 @@
             "default": "",
             "title": "Prelaunch Rebuild Data Source Mode",
             "type": "string"
-          },
-          "requires_backup_before_destroy": {
-            "default": true,
-            "title": "Requires Backup Before Destroy",
-            "type": "boolean"
-          },
-          "requires_restore_proof": {
-            "default": true,
-            "title": "Requires Restore Proof",
-            "type": "boolean"
           },
           "requires_runtime_identity": {
             "default": true,
@@ -31969,16 +32072,6 @@
             ],
             "title": "Data Authority",
             "type": "string"
-          },
-          "requires_backup_before_destroy": {
-            "default": true,
-            "title": "Requires Backup Before Destroy",
-            "type": "boolean"
-          },
-          "requires_restore_proof": {
-            "default": true,
-            "title": "Requires Restore Proof",
-            "type": "boolean"
           },
           "requires_runtime_identity": {
             "default": true,
@@ -32649,6 +32742,14 @@
             "title": "App Name Prefix",
             "type": "string"
           },
+          "app_name_suffix": {
+            "default": "",
+            "maxLength": 40,
+            "pattern": "^(-[a-z0-9-]+)?$",
+            "title": "App Name Suffix",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "context": {
             "default": "",
             "title": "Context",
@@ -32750,6 +32851,23 @@
             "default": "testing",
             "title": "Template Instance",
             "type": "string"
+          },
+          "transport_database_prefix": {
+            "default": "",
+            "maxLength": 40,
+            "title": "Transport Database Prefix",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
+          "transport_extension": {
+            "default": "",
+            "enum": [
+              "",
+              "verireel-postgres"
+            ],
+            "title": "Transport Extension",
+            "type": "string",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "ProductPreviewProfile",
@@ -79261,16 +79379,6 @@
                         ],
                         "title": "Data Authority",
                         "type": "string"
-                      },
-                      "requires_backup_before_destroy": {
-                        "default": true,
-                        "title": "Requires Backup Before Destroy",
-                        "type": "boolean"
-                      },
-                      "requires_restore_proof": {
-                        "default": true,
-                        "title": "Requires Restore Proof",
-                        "type": "boolean"
                       },
                       "requires_runtime_identity": {
                         "default": true,

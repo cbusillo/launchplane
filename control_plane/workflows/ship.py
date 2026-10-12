@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -17,8 +18,8 @@ from control_plane.contracts.ship_request import ShipRequest
 
 
 def generate_deployment_record_id(*, context_name: str, instance_name: str) -> str:
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return f"deployment-{timestamp}-{context_name}-{instance_name}"
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"deployment-{timestamp}-{uuid4().hex}-{context_name}-{instance_name}"
 
 
 def utc_now_timestamp() -> str:

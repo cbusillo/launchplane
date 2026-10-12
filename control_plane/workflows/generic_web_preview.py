@@ -436,15 +436,22 @@ def effective_preview_app_name_prefix(*, profile: LaunchplaneProductProfileRecor
     return profile.preview.app_name_prefix.strip() or f"{profile.product}-preview"
 
 
-def preview_application_name(*, app_name_prefix: str, preview_slug: str) -> str:
-    return f"{app_name_prefix.strip()}-{preview_slug.strip()}"
+def preview_application_name(
+    *, app_name_prefix: str, preview_slug: str, app_name_suffix: str = ""
+) -> str:
+    return f"{app_name_prefix.strip()}-{preview_slug.strip()}{app_name_suffix}"
 
 
-def preview_slug_from_application_name(*, app_name_prefix: str, application_name: str) -> str:
+def preview_slug_from_application_name(
+    *, app_name_prefix: str, application_name: str, app_name_suffix: str = ""
+) -> str:
     prefix = f"{app_name_prefix.strip()}-"
     if not application_name.startswith(prefix):
         return ""
-    return application_name[len(prefix) :]
+    if app_name_suffix and not application_name.endswith(app_name_suffix):
+        return ""
+    tail = application_name[len(prefix) :]
+    return tail[: -len(app_name_suffix)] if app_name_suffix else tail
 
 
 def preview_pr_number_from_slug(*, preview_slug: str, slug_template: str) -> int | None:
@@ -1403,6 +1410,7 @@ def _execute_generic_web_preview_refresh_unserialized(
     started_at = utc_now_timestamp()
     app_name_prefix = effective_preview_app_name_prefix(profile=resolved_profile)
     application_name = preview_application_name(
+        app_name_suffix=resolved_profile.preview.app_name_suffix,
         app_name_prefix=app_name_prefix,
         preview_slug=request.preview_slug,
     )
@@ -1671,6 +1679,7 @@ def execute_generic_web_preview_inventory(
     for application in dokploy_api.iter_dokploy_applications(raw_projects):
         application_name = str(application.get("name") or "").strip()
         preview_slug = preview_slug_from_application_name(
+            app_name_suffix=resolved_profile.preview.app_name_suffix,
             app_name_prefix=app_name_prefix,
             application_name=application_name,
         )
@@ -1741,6 +1750,7 @@ def _execute_generic_web_preview_destroy_unserialized(
     started_at = utc_now_timestamp()
     app_name_prefix = effective_preview_app_name_prefix(profile=resolved_profile)
     application_name = preview_application_name(
+        app_name_suffix=resolved_profile.preview.app_name_suffix,
         app_name_prefix=app_name_prefix,
         preview_slug=request.preview_slug,
     )
