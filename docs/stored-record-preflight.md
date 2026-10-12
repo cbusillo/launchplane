@@ -100,16 +100,24 @@ default branch with `stored_record_preflight_only=true` and an immutable
 `image_reference`, using the installed protected-workflow helper. This read-only
 job authenticates the existing image read, fetches the supported scrubbed export
 and runs the rehearsal on the actual deploy runner. Both deployment jobs are
-excluded in this mode. Verify its per-family counts, bounds and successful
+excluded in this mode. Read-only qualification has its own workflow concurrency
+group, so a later self-deploy run cannot displace its pending run. Replacements
+retain their existing serialized group. Verify its per-family counts, bounds and successful
 runner result before routing the mandatory deploy gate PR. Qualification and
 manual deploys validate the same bootstrap image repository and immutable digest. A refused read is
 reported as missing standing authority; this mode creates no new grant. Landing both in one batch would require a route the old service lacks.
 This ordered capability rollout supplies a supported way to keep deploying.
 
-The gate change on #3413 runs after immutable image resolution and before
+The mandatory Deploy Launchplane gate runs after immutable image resolution and before
 rendering or requesting self-deploy. It deletes snapshot material after every
 attempt and retains only counts, revision and pass/fail evidence. The existing
 Director-gated emergency rollback remains governed by operations.
+
+The PostgreSQL test image is read from CI's canonical pin. The workflow first
+requires a successful authenticated export, then runs the isolated candidate
+under the bounded timeout. Its normal failure propagation stops before even
+rendering a self-deploy request; no provider effect or replacement is possible
+on a preflight failure. The gate has no continue-on-error or missing-route skip.
 
 After a rollback, verify that the running service still exports the required
 format and that the candidate supports its database revision. A missing route
