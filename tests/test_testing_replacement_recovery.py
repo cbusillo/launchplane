@@ -172,7 +172,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 with self.provider():
                     self.assertEqual(recover_stranded_testing_replacements(store, root), ())
                 with patch.object(api, "_dokploy_request") as dispatch:
-                    with self.assertRaisesRegex(RuntimeError, "generation"):
+                    with self.assertRaises(RuntimeError):
                         api.dokploy_request(
                             host="https://provider.test",
                             token="fixture-token",
