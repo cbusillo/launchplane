@@ -1750,9 +1750,7 @@ def execute_generic_web_preview_destroy(
     with serialize_generic_web_preview_operation(
         record_store=record_store, profile=resolved, preview_slug=request.preview_slug
     ):
-        current = resolve_generic_web_preview_profile(
-            record_store=record_store, product=resolved.product
-        )
+        current = record_store.read_product_profile_record(resolved.product)
         if not current.is_active:
             now = utc_now_timestamp()
             return GenericWebPreviewDestroyResult(

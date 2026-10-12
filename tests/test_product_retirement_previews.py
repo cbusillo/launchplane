@@ -549,7 +549,12 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.store.write_product_profile_record(
-            self.profile.model_copy(update={"lifecycle_state": "retiring"})
+            self.profile.model_copy(
+                update={
+                    "lifecycle_state": "retiring",
+                    "preview": self.profile.preview.model_copy(update={"enabled": False}),
+                }
+            )
         )
         with patch(
             "control_plane.workflows.generic_web_preview._execute_generic_web_preview_destroy_unserialized"
@@ -558,7 +563,9 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
                 control_plane_root=self.root,
                 record_store=self.store,
                 request=GenericWebPreviewDestroyRequest(
-                    product=self.profile.product, preview_slug="pr-6"
+                    product=self.profile.product,
+                    preview_slug="pr-6",
+                    destroy_reason="Fixture lifecycle fence",
                 ),
                 profile=self.profile,
             )
