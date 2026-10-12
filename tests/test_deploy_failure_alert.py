@@ -19,6 +19,9 @@ from control_plane.deploy_failure_alert import (
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 class DeployFailureAlertTests(unittest.TestCase):
     def test_pre_effect_refusals_and_drain_skip_but_unknown_attempt_still_alerts(self) -> None:
         with TemporaryDirectory() as directory:
@@ -91,7 +94,7 @@ class DeployFailureAlertTests(unittest.TestCase):
             self.assertIn("https://forge.example/example/service/actions/runs/1234", values)
             recovery_link = next(value for value in values if "/actions/workflows/" in value)
             workflow_name = recovery_link.rsplit("/", 1)[1]
-            self.assertTrue((Path(".github/workflows") / workflow_name).is_file())
+            self.assertTrue(((REPO_ROOT / ".github/workflows") / workflow_name).is_file())
             self.assertTrue(recovery_link.startswith("https://forge.example/example/service/"))
             self.assertNotIn(sender_url, json.dumps(payload))
             self.assertEqual(payload["allowed_mentions"]["parse"], [])
@@ -102,7 +105,7 @@ class DeployFailureAlertTests(unittest.TestCase):
                 validate_sender()
 
     def test_cli_failure_never_logs_the_sender_or_http_exception_detail(self) -> None:
-        script = Path("scripts/deploy/notify-deploy-failure.py")
+        script = REPO_ROOT / "scripts/deploy/notify-deploy-failure.py"
         with (
             patch.object(sys, "argv", [str(script)]),
             patch(

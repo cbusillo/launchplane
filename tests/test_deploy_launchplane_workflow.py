@@ -95,6 +95,7 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
             "Resolve deploy_runtime_wait remaining wait",
             "Resolve deploy_marker_wait remaining wait",
             "Resolve rollback_runtime_wait remaining wait",
+            "Resolve final runtime marker remaining wait",
         ):
             for remaining in (60, -60):
                 with (
@@ -120,7 +121,7 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                     else:
                         self.assertEqual(actual, 1)
 
-    def test_finished_drain_starts_short_observation_deadline_then_later_wait_consumes_it(
+    def test_finished_drain_preserves_worker_stop_budget_then_later_wait_consumes_it(
         self,
     ) -> None:
         with TemporaryDirectory() as directory_name:
@@ -158,6 +159,66 @@ class DeployLaunchplaneWorkflowTests(unittest.TestCase):
                 line.split("=", 1) for line in (directory / "output").read_text().splitlines()
             )
             self.assertLessEqual(int(later["timeout_ms"]), int(values["timeout_ms"]))
+
+    def test_recovered_health_clears_previous_failed_probe(self) -> None:
+        with TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            curl = directory / "curl"
+            curl.write_text("""#!/usr/bin/env bash
+while [ "$1" != "-o" ]; do shift; done
+if [ -f "$RUNNER_TEMP/probed" ]; then
+  printf '{"status":"ok"}' > "$2"
+  printf 200
+else
+  touch "$RUNNER_TEMP/probed"
+  printf '{"status":"unhealthy"}' > "$2"
+  printf 503
+fi
+""")
+            curl.chmod(0o700)
+            sleep = directory / "sleep"
+            sleep.write_text("#!/usr/bin/env bash\nexit 0\n")
+            sleep.chmod(0o700)
+            evidence = directory / "launchplane-deployed-health-result.json"
+            result = self._run_step(
+                "deploy",
+                "Wait for deployed Launchplane health URLs",
+                {
+                    "WAIT_DEADLINE_EPOCH": str(int(time.time()) + 30),
+                    "LAUNCHPLANE_DEPLOY_HEALTH_URLS": "https://health.example.invalid",
+                    "PATH": str(directory) + os.pathsep + os.environ["PATH"],
+                },
+                directory,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(evidence.read_text(), "")
+            self.assertTrue((directory / "output").is_file())
+
+    def test_request_outage_deadline_caps_the_worker_stop_budget(self) -> None:
+        with TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            outage_deadline = int(time.time()) + 30
+            (directory / "launchplane-self-deploy-response.json").write_text(
+                json.dumps({"result": {"release_drain_complete": True}})
+            )
+            result = self._run_step(
+                "deploy",
+                "Resolve deploy_runtime_wait remaining wait",
+                {"OUTAGE_DEADLINE_EPOCH": str(outage_deadline)},
+                directory,
+                expression_values={
+                    "${{ steps.deploy_wait_timeout.outputs.deadline_epoch }}": str(
+                        int(time.time()) + 1000
+                    ),
+                    "${{ steps.deploy_wait_timeout.outputs.drained_timeout_seconds }}": "500",
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(
+                line.split("=", 1) for line in (directory / "output").read_text().splitlines()
+            )
+            self.assertEqual(int(values["deadline_epoch"]), outage_deadline)
+            self.assertLessEqual(int(values["timeout_ms"]), 30000)
 
     def test_timed_out_drain_does_not_request_service_rollback(self) -> None:
         for payload in (

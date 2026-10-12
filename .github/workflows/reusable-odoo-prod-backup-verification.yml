@@ -127,7 +127,7 @@ jobs:
       - name: Request Launchplane backup verification
         id: launchplane
         # yamllint disable-line rule:line-length
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@46c35a03b4a47acdd0a05f824e4976eb4a0a054e # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@0860765d66350bc4b1b006bcb334667f886b8cb2 # launchplane-request
         with:
           launchplane-url: >-
             ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
