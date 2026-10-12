@@ -114,7 +114,12 @@ function SetupChange({ product, kind, makeRequest, onApplied, children }: { prod
     // stale proves this exact request did not commit. A fresh auth denial cannot.
     if (cause instanceof LaunchplaneApiError && cause.statusCode === 409 && cause.code === "stale") return "settled";
     return productConfigFailureCertainty(cause, dispatched);
-  }, failureFor: productConfigOperationFailure });
+  }, failureFor: cause => {
+    const failure = productConfigOperationFailure(cause);
+    return failure.statusCode === 409 && failure.code === "stale"
+      ? { ...failure, message: "This request did not apply. Run a new dry run against the current product profile." }
+      : failure;
+  } });
   const busy = isOperationBusy(planOperation.state) || isOperationBusy(applyOperation.state);
   const uncertain = applyOperation.state.requiresIdempotencyContinuity;
   let reviewMatchesDraft = false;

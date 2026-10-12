@@ -851,7 +851,8 @@ repair endpoint: choose a context already owned by the product, enter the new
 non-production environment name and, for a product with a public website, its
 prepared HTTPS origin, and run the service dry run. A product whose stored
 website declaration is `none` omits that origin; it still requires matching
-prepared target records and a separately configured private health check. Review the exact service result and confirm **Apply reviewed
+prepared target records. Configure its private health check separately after
+registration. Review the exact service result and confirm **Apply reviewed
 change**. The target records must already exist and, when supplied, agree with that origin;
 missing or changed target authority is a visible service refusal, not permission
 to create or guess a target. The apply is bound to the reviewed plan digest.

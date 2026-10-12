@@ -74,9 +74,12 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
         await panel.getByRole("button", { name: "Run dry-run", exact: true }).click();
         await panel.getByRole("checkbox").check();
         await panel.getByRole("button", { name: "Apply reviewed change" }).click();
+        await expect.poll(() => applies.length).toBe(3);
+        expect(applies[2].key).not.toBe(applies[0].key);
       }
     }
     await expect(panel.getByRole("link", { name: "Open testing managed secrets" })).toBeVisible();
+    if (outcome === "private") expect(applies[0].body.base_url).toBe("");
     const declarations = panel.locator("details").filter({ has: page.locator("summary", { hasText: "Declare managed-secret fields" }) });
     await expect(declarations.locator("select")).toBeVisible();
     await declarations.getByRole("combobox", { name: "Environment", exact: true }).selectOption("testing");
@@ -119,6 +122,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
         await recoveredDeclarations.getByRole("checkbox").check();
         await recoveredDeclarations.getByRole("button", { name: "Apply reviewed change" }).click();
         await expect.poll(() => applies.length).toBe(4);
+        expect(applies[3].key).not.toBe(applies[1].key);
       }
     }
     await panel.getByRole("link", { name: "Open testing managed secrets" }).click();
