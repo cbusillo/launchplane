@@ -258,7 +258,7 @@ def _execute_plan_mode(
     )
     # Plans become batch candidates, so every labeled member needs Client review.
     dry_run_result = build_merge_train_dry_run_result(
-        policy=policy, snapshot=snapshot, batch_landing=True
+        policy=policy, snapshot=snapshot, batch_landing=True, new_candidate=True
     )
     selected_pr = dry_run_result.selected_pr
     # Report the selected queue block before discovering another collapse.
