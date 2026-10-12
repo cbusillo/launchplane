@@ -205,9 +205,12 @@ process.on('beforeExit', () => {{
                     )
 
     def test_replacement_deadline_starts_at_marker_and_carries_elapsed_outage(self) -> None:
-        for outage in (False, True):
-            with self.subTest(outage=outage), TemporaryDirectory() as directory:
-                markers = ["old", "old", "forward"] if outage else ["old"] * 6 + ["forward"]
+        for failures, markers, start_step in (
+            ("", ["old"] * 6 + ["forward"], 7),
+            ("2", ["old", "old", "forward"], 1),
+            ("1", ["old"] * 4 + ["forward"], 5),
+        ):
+            with self.subTest(failures=failures), TemporaryDirectory() as directory:
                 clock_step = 1000
                 short_budget = 4000
                 output = Path(directory) / "output"
@@ -229,14 +232,14 @@ process.on('beforeExit', () => {{
                         "TEST_CLOCK_STEP_MS": str(clock_step),
                         "TEST_RUNTIME_IMAGES": "registry.example/service@sha256:same-image",
                         "TEST_RUNTIME_MARKERS": ",".join(markers),
-                        "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "2" if outage else "",
+                        "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": failures,
                     },
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 deadline = int(
                     output.read_text().split("observation-deadline-epoch<<")[1].splitlines()[1]
                 )
-                window_start = clock_step if outage else len(markers) * clock_step
+                window_start = start_step * clock_step
                 self.assertEqual(deadline, (window_start + short_budget) // 1000)
 
     def test_pre_request_auth_and_ingress_outages_preserve_known_drain(self) -> None:
