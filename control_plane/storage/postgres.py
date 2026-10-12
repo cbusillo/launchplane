@@ -52,6 +52,7 @@ from sqlalchemy import (
     or_,
     text,
     select,
+    union_all,
 )
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
@@ -140,6 +141,7 @@ from control_plane.contracts.provider_delivery_readiness import (
 )
 
 if TYPE_CHECKING:
+    from control_plane.stored_record_snapshot import SnapshotAuthorization
     from control_plane.legacy_preview_reconciliation import LegacyPreviewReconciliationRequest
     from control_plane.product_retirement import BoundProductRetirement
     from control_plane.contracts.merge_train_historical_completion import (
@@ -4776,6 +4778,8 @@ class LaunchplaneAgentWriteIntentRow(Base):
             "status",
             desc("recorded_at"),
         ),
+        # Evaluations retain denied caller inputs; they do not establish products.
+        {"info": {"product_scope_authority": False}},
     )
 
     record_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -5853,10 +5857,29 @@ class PostgresRecordStore(HumanSessionStore):
             return
         Base.metadata.create_all(self._engine)
 
-    def export_stored_record_snapshot(self) -> StoredRecordSnapshot:
+    def list_recorded_product_scopes(self) -> tuple[str, ...]:
+        """Product projections include historical records without an active profile."""
+        product_columns = tuple(
+            table.c.product
+            for table in Base.metadata.tables.values()
+            if "product" in table.c and table.info.get("product_scope_authority", True)
+        )
+        scopes = union_all(
+            *(select(column.label("product")).distinct() for column in product_columns)
+        ).subquery()
+        with self._engine.connect() as connection:
+            return tuple(
+                connection.execute(
+                    select(scopes.c.product).distinct().where(scopes.c.product != "")
+                ).scalars()
+            )
+
+    def export_stored_record_snapshot(
+        self, *, authorize_records: SnapshotAuthorization | None = None
+    ) -> StoredRecordSnapshot:
         from control_plane.stored_record_snapshot import export_stored_record_snapshot
 
-        return export_stored_record_snapshot(self._engine)
+        return export_stored_record_snapshot(self._engine, authorize_records=authorize_records)
 
     def verify_schema(self) -> None:
         backend_name = self._engine.url.get_backend_name()
