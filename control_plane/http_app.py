@@ -935,6 +935,9 @@ from control_plane.workflows.launchplane_self_deploy import (
     execute_launchplane_self_deploy,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.http_routes.product_website_cleanup import (
+    register_product_website_cleanup_routes,
+)
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
@@ -28876,6 +28879,10 @@ def create_launchplane_fastapi_app(
     )
 
     register_import_override_reconcile_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
+    )
+
+    register_product_website_cleanup_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
 

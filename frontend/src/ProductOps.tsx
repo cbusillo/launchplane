@@ -17,6 +17,7 @@ import { LaunchplaneApiError, readProduct } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { ProductOwnerPanel } from "./ProductOwnerPanel";
+import { ProductWebsiteCleanupPanel } from "./ProductWebsiteCleanupPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
@@ -266,6 +267,7 @@ export function ProductWorkspaceRoute({
 
   return (
     <ProductWorkspace
+      onSaved={() => setRetryToken(value => value + 1)}
       fixtureMode={fixtureMode}
       refreshToken={refreshToken}
       product={expireProductEvidence(resource.data)}
@@ -364,6 +366,7 @@ function DirectoryLane({
 }
 
 function ProductWorkspace({
+  onSaved,
   fixtureMode,
   refreshToken,
   product,
@@ -372,6 +375,7 @@ function ProductWorkspace({
   traceId,
   updating,
 }: {
+  onSaved: () => void;
   fixtureMode: DevFixtureMode;
   refreshToken: number;
   product: ProductSiteOverview;
@@ -547,6 +551,7 @@ function ProductWorkspace({
       <PreviewInventory key={product.product} product={product} refreshToken={refreshToken} />
 
       <ProductOwnerPanel fixtureMode={fixtureMode} product={product.product} />
+      <ProductWebsiteCleanupPanel key={`website:${product.product}`} fixtureMode={fixtureMode} product={product.product} onSaved={onSaved} />
 
       <ProductDiagnostics product={product} />
     </article>
