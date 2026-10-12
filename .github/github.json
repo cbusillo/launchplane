@@ -71,7 +71,7 @@
     "lint": {
       "default": "uv run --extra dev ruff check .",
       "changedFiles": "uv run --extra dev ruff check {files}",
-      "odooOwnership": "uv run launchplane odoo-ownership check --workspace-root ..",
+      "odooOwnership": "uv run launchplane odoo-ownership check --workspace-root {workspace_root} {repository_args}",
       "roleWords": "uv run python scripts/validate_role_words.py"
     },
     "format": {

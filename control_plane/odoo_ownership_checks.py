@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import fnmatch
 import json
+import os
 from pathlib import Path
 import re
-from typing import Literal
+from typing import Literal, get_args
 
 
 OdooRepoFamily = Literal[
@@ -24,6 +25,12 @@ class OdooOwnershipRepoPolicy:
     family: OdooRepoFamily
     allowed_path_globs: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if not self.repository.strip():
+            raise ValueError("Repository root must not be empty.")
+        if self.family not in get_args(OdooRepoFamily):
+            raise ValueError(f"Unknown Odoo repository family: {self.family}")
+
 
 @dataclass(frozen=True)
 class OdooOwnershipFinding:
@@ -38,17 +45,29 @@ class OdooOwnershipFinding:
 
 
 @dataclass(frozen=True)
+class OdooOwnershipCoverage:
+    repository: str
+    family: OdooRepoFamily
+    root: str
+    status: Literal["complete", "unavailable"]
+    scanned_file_count: int
+    omitted_file_count: int
+
+
+@dataclass(frozen=True)
 class OdooOwnershipScanResult:
     status: Literal["pass", "fail"]
     repository_count: int
     scanned_file_count: int
     findings: tuple[OdooOwnershipFinding, ...]
+    coverage: tuple[OdooOwnershipCoverage, ...]
 
     def to_json_payload(self) -> dict[str, object]:
         return {
             "status": self.status,
             "repository_count": self.repository_count,
             "scanned_file_count": self.scanned_file_count,
+            "coverage": [asdict(entry) for entry in self.coverage],
             "findings": [
                 {
                     "repository": finding.repository,
@@ -75,26 +94,6 @@ class _Rule:
     allowed_path_globs: tuple[str, ...] = ()
     allowed_line_patterns: tuple[re.Pattern[str], ...] = ()
     severity: Literal["error", "warning"] = "error"
-
-
-DEFAULT_ODOO_REPO_POLICIES: tuple[OdooOwnershipRepoPolicy, ...] = (
-    OdooOwnershipRepoPolicy("odoo-tenant-cm", "tenant"),
-    OdooOwnershipRepoPolicy("odoo-tenant-cm-website", "tenant"),
-    OdooOwnershipRepoPolicy("odoo-tenant-opw", "tenant"),
-    OdooOwnershipRepoPolicy("odoo-docker", "image"),
-    OdooOwnershipRepoPolicy("odoo-enterprise-docker", "image"),
-    OdooOwnershipRepoPolicy("odoo-shared-addons", "shared_addons"),
-    OdooOwnershipRepoPolicy(
-        "odoo-devkit",
-        "devkit",
-        allowed_path_globs=(
-            "odoo_devkit/dokploy_api.py",
-            "odoo_devkit/dokploy_config.py",
-            "odoo_devkit/remote_runtime.py",
-            "odoo_devkit/workspace_surface.py",
-        ),
-    ),
-)
 
 
 _TEXT_FILE_SUFFIXES = {
@@ -208,45 +207,83 @@ _RULES: tuple[_Rule, ...] = (
 def scan_odoo_ownership_boundaries(
     *,
     workspace_root: Path,
-    repo_policies: Iterable[OdooOwnershipRepoPolicy] = DEFAULT_ODOO_REPO_POLICIES,
+    repo_policies: Iterable[OdooOwnershipRepoPolicy],
 ) -> OdooOwnershipScanResult:
     findings: list[OdooOwnershipFinding] = []
-    scanned_file_count = 0
+    coverage: list[OdooOwnershipCoverage] = []
     resolved_workspace_root = workspace_root.expanduser().resolve()
     policies = tuple(repo_policies)
-    for policy in policies:
-        repo_root = resolved_workspace_root / policy.repository
-        if not repo_root.exists():
+    if not policies:
+        raise ValueError("Explicit repository coverage is required.")
+    roots = tuple(
+        (resolved_workspace_root / Path(policy.repository).expanduser()).resolve()
+        for policy in policies
+    )
+    if len(set(roots)) != len(roots):
+        raise ValueError("Each repository root must be requested exactly once.")
+    for policy, repo_root in zip(policies, roots, strict=True):
+        scanned = 0
+        omitted = 0
+        unavailable = False
+        try:
+            if not repo_root.is_dir():
+                raise OSError("Requested repository root is missing or is not a directory.")
+            for path in _iter_scannable_files(repo_root):
+                relative_path = path.relative_to(repo_root).as_posix()
+                if _matches_any(
+                    relative_path, _GLOBALLY_ALLOWED_PATH_GLOBS + policy.allowed_path_globs
+                ):
+                    omitted += 1
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as error:
+                    unavailable = True
+                    findings.append(
+                        OdooOwnershipFinding(
+                            repository=policy.repository,
+                            family=policy.family,
+                            path=relative_path,
+                            line=0,
+                            rule_id="file-unavailable",
+                            severity="error",
+                            message="Requested source file could not be read as UTF-8.",
+                            evidence=str(error),
+                        )
+                    )
+                    continue
+                scanned += 1
+                findings.extend(_scan_file(policy=policy, relative_path=relative_path, text=text))
+        except OSError as error:
+            unavailable = True
             findings.append(
                 OdooOwnershipFinding(
                     repository=policy.repository,
                     family=policy.family,
                     path=".",
                     line=0,
-                    rule_id="repository-missing",
+                    rule_id="repository-unavailable",
                     severity="error",
-                    message="Configured Odoo repository was not found under the workspace root.",
-                    evidence=str(repo_root),
+                    message="Requested repository coverage could not be completed.",
+                    evidence=str(error),
                 )
             )
-            continue
-        for path in _iter_scannable_files(repo_root):
-            scanned_file_count += 1
-            relative_path = path.relative_to(repo_root).as_posix()
-            if _matches_any(
-                relative_path, _GLOBALLY_ALLOWED_PATH_GLOBS + policy.allowed_path_globs
-            ):
-                continue
-            text = _read_text(path)
-            if text is None:
-                continue
-            findings.extend(_scan_file(policy=policy, relative_path=relative_path, text=text))
-    error_findings = [finding for finding in findings if finding.severity == "error"]
+        coverage.append(
+            OdooOwnershipCoverage(
+                repository=policy.repository,
+                family=policy.family,
+                root=str(repo_root),
+                status="unavailable" if unavailable else "complete",
+                scanned_file_count=scanned,
+                omitted_file_count=omitted,
+            )
+        )
     return OdooOwnershipScanResult(
-        status="fail" if error_findings else "pass",
+        status="fail" if any(finding.severity == "error" for finding in findings) else "pass",
         repository_count=len(policies),
-        scanned_file_count=scanned_file_count,
+        scanned_file_count=sum(entry.scanned_file_count for entry in coverage),
         findings=tuple(findings),
+        coverage=tuple(coverage),
     )
 
 
@@ -257,6 +294,12 @@ def render_odoo_ownership_scan_text(result: OdooOwnershipScanResult) -> str:
         f"scanned_files: {result.scanned_file_count}",
         f"findings: {len(result.findings)}",
     ]
+    for entry in result.coverage:
+        lines.append(
+            f"coverage: {entry.repository} ({entry.family}): {entry.status}; "
+            f"root={entry.root}; scanned={entry.scanned_file_count}; "
+            f"omitted={entry.omitted_file_count}"
+        )
     for finding in result.findings:
         location = f"{finding.repository}/{finding.path}:{finding.line}"
         lines.append(
@@ -304,22 +347,20 @@ def _scan_file(
 
 
 def _iter_scannable_files(repo_root: Path) -> Iterable[Path]:
-    for path in sorted(repo_root.rglob("*")):
-        if not path.is_file():
-            continue
-        if any(part in _IGNORED_PARTS for part in path.relative_to(repo_root).parts):
-            continue
-        if path.suffix not in _TEXT_FILE_SUFFIXES:
-            continue
-        yield path
+    def raise_walk_error(error: OSError) -> None:
+        raise error
 
-
-def _read_text(path: Path) -> str | None:
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return None
+    for directory, subdirectories, files in os.walk(repo_root, onerror=raise_walk_error):
+        subdirectories[:] = sorted(name for name in subdirectories if name not in _IGNORED_PARTS)
+        for name in sorted(files):
+            path = Path(directory) / name
+            if name not in _IGNORED_PARTS and path.suffix in _TEXT_FILE_SUFFIXES:
+                yield path
 
 
 def _matches_any(path: str, patterns: tuple[str, ...]) -> bool:
-    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+    return any(
+        fnmatch.fnmatch(path, pattern)
+        or (pattern.startswith("**/") and fnmatch.fnmatch(path, pattern[3:]))
+        for pattern in patterns
+    )

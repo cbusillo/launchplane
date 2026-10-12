@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from functools import partial
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
 import click
 from pydantic import ValidationError
@@ -17,6 +17,8 @@ from control_plane.cli_shared import (
     require_direct_db_mutation_acknowledgement as _require_direct_db_mutation_acknowledgement,
 )
 from control_plane.odoo_ownership_checks import (
+    OdooOwnershipRepoPolicy,
+    OdooRepoFamily,
     render_odoo_ownership_scan_json,
     render_odoo_ownership_scan_text,
     scan_odoo_ownership_boundaries,
@@ -575,7 +577,16 @@ def odoo_ownership() -> None:
     "--workspace-root",
     type=click.Path(path_type=Path, file_okay=False),
     default=None,
-    help="Directory containing launchplane and sibling Odoo repositories.",
+    help="Base directory for relative repository roots; defaults to Launchplane's parent.",
+)
+@click.option(
+    "--repository",
+    "repositories",
+    type=(str, click.Choice(get_args(OdooRepoFamily))),
+    multiple=True,
+    required=True,
+    metavar="ROOT FAMILY",
+    help="Explicit coverage: repeat for every requested repository. Absolute roots are supported.",
 )
 @click.option(
     "--format",
@@ -584,9 +595,22 @@ def odoo_ownership() -> None:
     default="text",
     show_default=True,
 )
-def odoo_ownership_check(workspace_root: Path | None, output_format: str) -> None:
+def odoo_ownership_check(
+    workspace_root: Path | None,
+    repositories: tuple[tuple[str, str], ...],
+    output_format: str,
+) -> None:
     resolved_workspace_root = workspace_root or _control_plane_root().parent
-    result = scan_odoo_ownership_boundaries(workspace_root=resolved_workspace_root)
+    try:
+        result = scan_odoo_ownership_boundaries(
+            workspace_root=resolved_workspace_root,
+            repo_policies=tuple(
+                OdooOwnershipRepoPolicy(root, cast(OdooRepoFamily, family))
+                for root, family in repositories
+            ),
+        )
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
     if output_format == "json":
         click.echo(render_odoo_ownership_scan_json(result))
     else:

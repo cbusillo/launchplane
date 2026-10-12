@@ -1,6 +1,8 @@
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
@@ -218,15 +220,6 @@ jobs:
     def test_cli_returns_nonzero_for_findings(self) -> None:
         with TemporaryDirectory() as workspace:
             workspace_root = Path(workspace)
-            for repository in (
-                "odoo-tenant-cm-website",
-                "odoo-tenant-opw",
-                "odoo-docker",
-                "odoo-enterprise-docker",
-                "odoo-shared-addons",
-                "odoo-devkit",
-            ):
-                (workspace_root / repository).mkdir()
             script = workspace_root / "odoo-tenant-cm" / "scripts" / "client.js"
             script.parent.mkdir(parents=True)
             script.write_text("await getIDToken();\n", encoding="utf-8")
@@ -238,6 +231,9 @@ jobs:
                     "check",
                     "--workspace-root",
                     str(workspace_root),
+                    "--repository",
+                    "odoo-tenant-cm",
+                    "tenant",
                     "--format",
                     "json",
                 ],
@@ -246,3 +242,180 @@ jobs:
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn('"status": "fail"', result.output)
         self.assertIn("repo-local-oidc-client", result.output)
+
+    def test_root_and_nested_source_files_are_checked(self) -> None:
+        for relative in ("ops.py", "scripts/ops.py"):
+            with self.subTest(path=relative), TemporaryDirectory() as workspace:
+                root = Path(workspace)
+                script = root / "new-tenant" / relative
+                script.parent.mkdir(parents=True)
+                script.write_text("ACTIONS_ID_TOKEN_REQUEST_TOKEN = token\n", encoding="utf-8")
+                result = scan_odoo_ownership_boundaries(
+                    workspace_root=root,
+                    repo_policies=(OdooOwnershipRepoPolicy("new-tenant", "tenant"),),
+                )
+            self.assertEqual(result.status, "fail")
+            self.assertEqual(
+                [(finding.path, finding.rule_id) for finding in result.findings],
+                [(relative, "repo-local-oidc-client")],
+            )
+
+    def test_requires_nonempty_unambiguous_coverage(self) -> None:
+        with TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            for policies in (
+                (),
+                (
+                    OdooOwnershipRepoPolicy("repo", "tenant"),
+                    OdooOwnershipRepoPolicy(str(root / "repo"), "image"),
+                ),
+            ):
+                with self.subTest(policies=policies), self.assertRaises(ValueError):
+                    scan_odoo_ownership_boundaries(workspace_root=root, repo_policies=policies)
+
+    def test_incomplete_requested_coverage_fails_with_available_root_reported(self) -> None:
+        with TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            (root / "available").mkdir()
+            (root / "available" / "build.py").write_text("print('build')\n", encoding="utf-8")
+            (root / "not-directory").write_text("content", encoding="utf-8")
+            result = scan_odoo_ownership_boundaries(
+                workspace_root=root,
+                repo_policies=tuple(
+                    OdooOwnershipRepoPolicy(name, "tenant")
+                    for name in ("available", "missing", "not-directory")
+                ),
+            )
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(
+            [(entry.repository, entry.status) for entry in result.coverage],
+            [
+                ("available", "complete"),
+                ("missing", "unavailable"),
+                ("not-directory", "unavailable"),
+            ],
+        )
+        self.assertEqual(result.coverage[0].scanned_file_count, 1)
+        self.assertEqual(
+            {finding.repository for finding in result.findings}, {"missing", "not-directory"}
+        )
+
+    def test_unreadable_source_cannot_pass(self) -> None:
+        with TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            (root / "repo").mkdir()
+            (root / "repo" / "ops.py").write_bytes(b"\xff")
+            result = scan_odoo_ownership_boundaries(
+                workspace_root=root, repo_policies=(OdooOwnershipRepoPolicy("repo", "tenant"),)
+            )
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(result.coverage[0].status, "unavailable")
+        self.assertEqual(result.scanned_file_count, 0)
+        self.assertEqual(result.findings[0].rule_id, "file-unavailable")
+
+    def test_failed_traversal_cannot_pass(self) -> None:
+        with TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            (root / "repo").mkdir()
+            with patch("control_plane.odoo_ownership_checks.os.walk") as walk:
+
+                def denied_walk(*args: object, **kwargs: object) -> None:
+                    onerror = kwargs["onerror"]
+                    assert callable(onerror)
+                    onerror(PermissionError("source directory is unreadable"))
+
+                walk.side_effect = denied_walk
+                result = scan_odoo_ownership_boundaries(
+                    workspace_root=root, repo_policies=(OdooOwnershipRepoPolicy("repo", "tenant"),)
+                )
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(result.coverage[0].status, "unavailable")
+        self.assertEqual(result.findings[0].rule_id, "repository-unavailable")
+
+    def test_explicit_exceptions_report_omitted_files(self) -> None:
+        with TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            repo = root / "tool"
+            repo.mkdir()
+            for relative in ("local.py", "build.py", "tests/fixture.py", "nested/local.py"):
+                source = repo / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("print('local')\n", encoding="utf-8")
+            result = scan_odoo_ownership_boundaries(
+                workspace_root=root,
+                repo_policies=(
+                    OdooOwnershipRepoPolicy("tool", "devkit", allowed_path_globs=("**/local.py",)),
+                ),
+            )
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.coverage[0].scanned_file_count, 1)
+        self.assertEqual(result.coverage[0].omitted_file_count, 3)
+
+    def test_cli_checks_arbitrary_relative_and_absolute_roots_with_family_intent(self) -> None:
+        with TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            tenant = root / "brand-new-tenant"
+            image = root / "build-image"
+            tenant.mkdir()
+            image.mkdir()
+            (tenant / "ops.py").write_text("dokploy compose apply\n", encoding="utf-8")
+            (image / "build.sh").write_text("docker compose build\n", encoding="utf-8")
+            result = CliRunner().invoke(
+                main,
+                [
+                    "odoo-ownership",
+                    "check",
+                    "--workspace-root",
+                    str(root),
+                    "--repository",
+                    tenant.name,
+                    "tenant",
+                    "--repository",
+                    str(image),
+                    "image",
+                    "--format",
+                    "json",
+                ],
+            )
+        self.assertNotEqual(result.exit_code, 0)
+        payload = json.JSONDecoder().raw_decode(result.output)[0]
+        self.assertEqual(payload["status"], "fail")
+        self.assertEqual(
+            [
+                (entry["repository"], entry["family"], entry["status"])
+                for entry in payload["coverage"]
+            ],
+            [(tenant.name, "tenant", "complete"), (str(image), "image", "complete")],
+        )
+        self.assertEqual(
+            [(finding["repository"], finding["rule_id"]) for finding in payload["findings"]],
+            [(tenant.name, "tenant-provider-mutation")],
+        )
+
+    def test_cli_rejects_missing_or_invalid_family_coverage(self) -> None:
+        for selection in ([], ["--repository", "repo", "unknown"]):
+            with self.subTest(selection=selection):
+                result = CliRunner().invoke(main, ["odoo-ownership", "check", *selection])
+            self.assertNotEqual(result.exit_code, 0)
+
+    def test_cli_pass_names_only_requested_coverage(self) -> None:
+        with TemporaryDirectory() as workspace:
+            repo = Path(workspace) / "source"
+            repo.mkdir()
+            (repo / "build.py").write_text("print('build')\n", encoding="utf-8")
+            result = CliRunner().invoke(
+                main,
+                [
+                    "odoo-ownership",
+                    "check",
+                    "--repository",
+                    str(repo),
+                    "shared_addons",
+                    "--format",
+                    "json",
+                ],
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "pass")
+        self.assertEqual([entry["root"] for entry in payload["coverage"]], [str(repo.resolve())])
