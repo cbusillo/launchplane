@@ -123,7 +123,7 @@ def bind_legacy_preview(
             or runtime.context != preview.context
             or runtime.instance != slug
             or runtime.preview_id
-            and runtime.preview_id != preview.preview_id
+            and runtime.preview_id not in {preview.preview_id, slug}
         ):
             raise ValueError("Historical runtime evidence belongs to another preview.")
         try:
