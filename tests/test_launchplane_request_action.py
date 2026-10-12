@@ -39,6 +39,9 @@ class LaunchplaneRequestActionTests(unittest.TestCase):
 const calls = [];
 let launchplaneRequestCount = 0;
 let oidcTokenCount = 0;
+let testClock = 0;
+const clockStep = Number(process.env.TEST_CLOCK_STEP_MS || '0');
+if (clockStep) Date.now = () => testClock;
 global.fetch = async (url, init) => {{
   calls.push({{url, init}});
   if (url.startsWith('https://oidc.example/token')) {{
@@ -46,6 +49,7 @@ global.fetch = async (url, init) => {{
     return new Response(JSON.stringify({{value: `oidc-token-${{oidcTokenCount}}`}}), {{status: 200}});
   }}
   launchplaneRequestCount += 1;
+  testClock += clockStep;
   const failureAttempts = String(process.env.TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS || '')
     .split(',')
     .filter(Boolean)
@@ -116,6 +120,65 @@ process.on('beforeExit', () => {{
             env=env,
             text=True,
         )
+
+    def test_unavailable_budget_preserves_healthy_drain_and_resets_after_recovery(self) -> None:
+        for failures in ("", "2,4"):
+            with self.subTest(failures=failures):
+                result = self.run_action(
+                    inputs={
+                        "launchplane-url": "https://launchplane.example",
+                        "route-path": "/v1/drivers/launchplane/self-deploy",
+                        "poll-result-path": "result.deploy_state",
+                        "poll-result-statuses": "draining",
+                        "poll-retry-on-request-error": "true",
+                        "poll-unavailable-timeout-ms": "25",
+                        "poll-timeout-ms": "1000",
+                        "poll-interval-ms": "1",
+                        "retry-attempts": "1",
+                    },
+                    environment={
+                        "TEST_CLOCK_STEP_MS": "10",
+                        "TEST_RESULT_FIELD": "deploy_state",
+                        "TEST_REFRESH_STATUSES": "draining,draining,draining,draining,draining,requested",
+                        "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": failures,
+                    },
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unavailable_budget_bounds_network_and_ingress_outages_with_long_drain_budget(
+        self,
+    ) -> None:
+        for kind in ("TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS", "TEST_INGRESS_404_ATTEMPTS"):
+            with self.subTest(kind=kind), TemporaryDirectory() as directory:
+                response = Path(directory) / "response.json"
+                result = self.run_action(
+                    inputs={
+                        "launchplane-url": "https://launchplane.example",
+                        "route-path": "/v1/drivers/launchplane/self-deploy",
+                        "response-output-file": str(response),
+                        "poll-result-path": "result.deploy_state",
+                        "poll-result-statuses": "draining",
+                        "poll-retry-on-request-error": "true",
+                        "poll-unavailable-timeout-ms": "25",
+                        "poll-timeout-ms": "1000",
+                        "poll-interval-ms": "1",
+                        "ingress-retry-delay-ms": "0",
+                        "retry-attempts": "1",
+                    },
+                    environment={
+                        "TEST_CLOCK_STEP_MS": "10",
+                        "TEST_RESULT_FIELD": "deploy_state",
+                        "TEST_REFRESH_STATUSES": "draining",
+                        kind: ",".join(str(index) for index in range(2, 100)),
+                    },
+                )
+                self.assertNotEqual(result.returncode, 0)
+                calls = json.loads(result.stderr.strip().splitlines()[-1])
+                mutations = [
+                    call for call in calls if call["url"].startswith("https://launchplane.example")
+                ]
+                self.assertLess(len(mutations), 10)
+                self.assertIsNone(json.loads(response.read_text()))
 
     def test_posts_oidc_authenticated_json_with_idempotency_key(self) -> None:
         with TemporaryDirectory() as temporary_directory:

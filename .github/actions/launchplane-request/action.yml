@@ -131,6 +131,13 @@ inputs:
     description: Maximum polling duration in milliseconds.
     required: false
     default: "600000"
+  poll-unavailable-timeout-ms:
+    description: >-
+      Optional shorter limit for continuous network or ingress failures while
+      polling. Successful Launchplane responses reset this limit, preserving
+      long-running healthy operations. Use 0 to disable.
+    required: false
+    default: "0"
   fail-result-statuses:
     description: >-
       Comma-separated result status values that should fail the action.
