@@ -59,9 +59,7 @@ class ProductOnboardingPreviewManifest(BaseModel):
     preview_domain_env_keys: tuple[str, ...] = ()
     domain_certificate_type: Literal["none", "letsencrypt"] = "none"
     required_provider_fields: tuple[str, ...] = ()
-    data_transport_mode: Literal["none", "clone", "bootstrap", "migrate_seed", "driver"] = "none"
-    migration_command: str = ""
-    seed_command: str = ""
+    data_transport_mode: Literal["none", "driver"] = "none"
 
 
 class ProductOnboardingTargetManifest(BaseModel):

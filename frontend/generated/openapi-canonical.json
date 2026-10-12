@@ -32626,9 +32626,6 @@
             "default": "none",
             "enum": [
               "none",
-              "clone",
-              "bootstrap",
-              "migrate_seed",
               "driver"
             ],
             "title": "Data Transport Mode",
@@ -32648,10 +32645,14 @@
             "title": "Enabled",
             "type": "boolean"
           },
-          "migration_command": {
-            "default": "",
-            "title": "Migration Command",
-            "type": "string"
+          "historical_transport": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "readOnly": true,
+            "title": "Historical Transport",
+            "type": "object",
+            "x-launchplane-optional-response": true
           },
           "omitted_env_keys": {
             "default": [],
@@ -32699,11 +32700,6 @@
             },
             "title": "Required Template Env Keys",
             "type": "array"
-          },
-          "seed_command": {
-            "default": "",
-            "title": "Seed Command",
-            "type": "string"
           },
           "slug_template": {
             "default": "pr-{number}",
@@ -79387,9 +79383,6 @@
                         "default": "none",
                         "enum": [
                           "none",
-                          "clone",
-                          "bootstrap",
-                          "migrate_seed",
                           "driver"
                         ],
                         "title": "Data Transport Mode",
@@ -79408,11 +79401,6 @@
                         "default": false,
                         "title": "Enabled",
                         "type": "boolean"
-                      },
-                      "migration_command": {
-                        "default": "",
-                        "title": "Migration Command",
-                        "type": "string"
                       },
                       "omitted_env_keys": {
                         "default": [],
@@ -79460,11 +79448,6 @@
                         },
                         "title": "Required Template Env Keys",
                         "type": "array"
-                      },
-                      "seed_command": {
-                        "default": "",
-                        "title": "Seed Command",
-                        "type": "string"
                       },
                       "slug_template": {
                         "default": "pr-{number}",
