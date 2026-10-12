@@ -28094,9 +28094,6 @@
             "default": "none",
             "enum": [
               "none",
-              "clone",
-              "bootstrap",
-              "migrate_seed",
               "driver"
             ],
             "title": "Data Transport Mode",
@@ -28116,10 +28113,14 @@
             "title": "Enabled",
             "type": "boolean"
           },
-          "migration_command": {
-            "default": "",
-            "title": "Migration Command",
-            "type": "string"
+          "historical_transport": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "readOnly": true,
+            "title": "Historical Transport",
+            "type": "object",
+            "x-launchplane-optional-response": true
           },
           "omitted_env_keys": {
             "default": [],
@@ -28168,11 +28169,6 @@
             "title": "Required Template Env Keys",
             "type": "array"
           },
-          "seed_command": {
-            "default": "",
-            "title": "Seed Command",
-            "type": "string"
-          },
           "slug_template": {
             "default": "pr-{number}",
             "title": "Slug Template",
@@ -28210,14 +28206,12 @@
           "data_transport_mode",
           "domain_certificate_type",
           "enabled",
-          "migration_command",
           "omitted_env_keys",
           "override_env",
           "preview_domain_env_keys",
           "preview_url_env_keys",
           "required_provider_fields",
           "required_template_env_keys",
-          "seed_command",
           "slug_template",
           "template_instance"
         ]

@@ -67,8 +67,6 @@ def _successful_driver_refresh_evidence(
             override_env_keys=tuple(profile.preview.override_env),
             preview_url_env_keys=profile.preview.preview_url_env_keys,
             preview_domain_env_keys=profile.preview.preview_domain_env_keys,
-            migration_command_configured=bool(profile.preview.migration_command.strip()),
-            seed_command_configured=bool(profile.preview.seed_command.strip()),
         ),
         checks=(
             GenericWebPreviewReadinessCheck(
@@ -99,6 +97,11 @@ def apply_generic_web_preview_driver_refresh(
     request: GenericWebPreviewRefreshRequest,
     profile: LaunchplaneProductProfileRecord,
 ) -> tuple[dict[str, object], dict[str, object]] | None:
+    if profile.preview.data_transport_mode == "driver" and profile.preview.historical_transport:
+        raise click.ClickException(
+            "Saved preview transport intent was never implemented; replace the preview settings "
+            "with supported none/driver configuration before refreshing."
+        )
     if profile.preview.data_transport_mode != "driver":
         return None
     if not _uses_verireel_transport(profile):

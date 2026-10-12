@@ -7,7 +7,7 @@ from typing import Literal
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
@@ -325,7 +325,7 @@ class ProductPreviewProfile(BaseModel):
     preview_domain_env_keys: tuple[str, ...] = ()
     domain_certificate_type: Literal["none", "letsencrypt"] = "none"
     required_provider_fields: tuple[str, ...] = ()
-    data_transport_mode: Literal["none", "clone", "bootstrap", "migrate_seed", "driver"] = "none"
+    data_transport_mode: Literal["none", "driver"] = "none"
     transport_extension: Literal["", "verireel-postgres"] = Field(
         default="",
         exclude_if=lambda value: not value,
@@ -337,8 +337,32 @@ class ProductPreviewProfile(BaseModel):
         exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
-    migration_command: str = ""
-    seed_command: str = ""
+    historical_transport: dict[str, str] = Field(
+        default_factory=dict,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"readOnly": True, "x-launchplane-optional-response": True},
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _preserve_stored_transport(cls, value: object, info: ValidationInfo) -> object:
+        if not isinstance(value, dict):
+            return value
+        if not (info.context and info.context.get("stored_product_profile")):
+            return value
+        normalized = dict(value)
+        historical = dict(normalized.get("historical_transport") or {})
+        mode = normalized.get("data_transport_mode", "none")
+        if mode in {"clone", "bootstrap", "migrate_seed"}:
+            historical["data_transport_mode"] = mode
+            normalized["data_transport_mode"] = "none"
+        for field in ("migration_command", "seed_command"):
+            command = normalized.pop(field, "")
+            if isinstance(command, str) and command.strip():
+                historical[field] = command
+                historical.setdefault("data_transport_mode", mode)
+        normalized["historical_transport"] = historical
+        return normalized
 
     @model_validator(mode="before")
     @classmethod
@@ -390,10 +414,6 @@ class ProductPreviewProfile(BaseModel):
                 raise ValueError("product preview profile override_env keys must be non-empty")
             if raw_value is None:
                 raise ValueError("product preview profile override_env values must not be null")
-        if self.data_transport_mode == "none" and (self.migration_command or self.seed_command):
-            raise ValueError(
-                "product preview profile migration_command/seed_command require a data transport mode"
-            )
         if self.transport_extension and self.data_transport_mode != "driver":
             raise ValueError("preview transport extension requires driver data transport")
         if self.transport_extension and (
@@ -405,6 +425,7 @@ class ProductPreviewProfile(BaseModel):
             )
         if self.transport_database_prefix and not self.transport_extension:
             raise ValueError("preview transport database prefix requires a transport extension")
+
         return self
 
 
