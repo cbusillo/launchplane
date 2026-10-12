@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from typing import Annotated, NoReturn
 
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Path
 
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
@@ -12,7 +12,11 @@ from control_plane.http_routes.mutation_support import (
     replay_idempotent_response,
     request_fingerprint,
 )
-from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.http_routes.support import (
+    ApiRouteRegistrar,
+    ReadRouteDependencies,
+    LAUNCHPLANE_SERVICE_CONTEXT,
+)
 from control_plane.product_website_cleanup import (
     ProductWebsiteCleanupRequest,
     build_website_cleanup,
@@ -31,7 +35,7 @@ def register_product_website_cleanup_routes(
     mutation_identity: Callable[..., LaunchplaneIdentity],
 ) -> None:
     def cleanup(
-        product: str,
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         body: ProductWebsiteCleanupRequest,
         identity: Annotated[LaunchplaneIdentity, Depends(mutation_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
@@ -50,7 +54,7 @@ def register_product_website_cleanup_routes(
             identity=identity,
             action="product_profile.write",
             product=product,
-            context="launchplane",
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
         ):
             refusal(403, "authorization_denied", "Caller cannot change this product profile.")
         if not isinstance(record_store, PostgresRecordStore):

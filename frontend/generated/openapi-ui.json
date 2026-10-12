@@ -6606,6 +6606,8 @@
             "name": "product",
             "required": true,
             "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
               "title": "Product",
               "type": "string"
             }

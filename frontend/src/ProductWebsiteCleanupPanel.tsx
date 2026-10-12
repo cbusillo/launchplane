@@ -6,6 +6,7 @@ import { type DevFixtureMode } from "./dev-fixture-loader";
 import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
 import { InlineFormError, isOperationBusy, OperationNotice, ReasonField } from "./ProductConfigForms";
 import { useBrowserOperationController } from "./use-browser-operation";
+import { profileApplyFailureCertainty } from "./ProductOwnerPanel";
 import type { AcceptedEvidenceResponse, ApplyProductWebsiteCleanupData } from "./generated/openapi.ts";
 
 type CleanupRequest = ApplyProductWebsiteCleanupData["body"];
@@ -42,7 +43,10 @@ export function ProductWebsiteCleanupPanel({ product, fixtureMode, onSaved }: {
       const parsed = JSON.parse(sessionStorage.getItem(storageKey) ?? "null") as Review | null;
       if (!parsed || parsed.request.mode !== "apply" || typeof parsed.request.reason !== "string" ||
           !/^[a-f0-9]{64}$/.test(parsed.request.reviewed_plan_sha256 ?? "") ||
-          !Array.isArray(parsed.changes)) return null;
+          typeof parsed.changed !== "boolean" || !Array.isArray(parsed.changes) ||
+          !parsed.changes.every(change => change && typeof change.path === "string" &&
+            ["string", "boolean"].includes(typeof change.before) &&
+            ["string", "boolean"].includes(typeof change.after))) return null;
       return parsed;
     } catch { return null; }
   });
@@ -61,7 +65,7 @@ export function ProductWebsiteCleanupPanel({ product, fixtureMode, onSaved }: {
   const apply = useBrowserOperationController<CleanupRequest, AcceptedEvidenceResponse>({
     scope,
     execute: (request, options) => applyProductWebsiteCleanup(product, request, options),
-    failureCertainty: productConfigFailureCertainty,
+    failureCertainty: profileApplyFailureCertainty,
     failureFor: productConfigOperationFailure,
   });
   const busy = checking || isOperationBusy(preview.state) || isOperationBusy(apply.state);
@@ -72,6 +76,10 @@ export function ProductWebsiteCleanupPanel({ product, fixtureMode, onSaved }: {
     if (apply.state.failure?.code === "stale" && !apply.state.requiresIdempotencyContinuity) {
       setReview(null);
       try { sessionStorage.removeItem(storageKey); } catch { /* A settled refusal has no recovery draft. */ }
+      const controller = startRead();
+      void refresh(controller.signal).catch(failure => {
+        if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Profile refresh failed.");
+      });
     }
   }, [apply.state.failure, apply.state.requiresIdempotencyContinuity, storageKey]);
 
@@ -83,9 +91,14 @@ export function ProductWebsiteCleanupPanel({ product, fixtureMode, onSaved }: {
       payload.profile.lanes!.every(lane => lane.health_monitoring?.monitoring_intent === "private"));
     return payload.profile.public_website === "none";
   }
+  function startRead(): AbortController {
+    readAbort.current?.abort();
+    const controller = new AbortController(); readAbort.current = controller;
+    return controller;
+  }
   useEffect(() => {
     if (fixtureMode) return;
-    const controller = new AbortController(); readAbort.current = controller;
+    const controller = startRead();
     void refresh(controller.signal).catch(failure => {
       if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Profile could not be read.");
     });
@@ -115,7 +128,8 @@ export function ProductWebsiteCleanupPanel({ product, fixtureMode, onSaved }: {
     await readBack(true);
   }
   async function readBack(applied = false) {
-    const controller = new AbortController(); readAbort.current = controller;
+    setChecking(true);
+    const controller = startRead();
     try {
       if (await refresh(controller.signal)) {
         setNotice(`${applied ? "Applied and read back" : "Read back"}: no public website. Private health and incidents still determine lane status.`);
@@ -124,13 +138,13 @@ export function ProductWebsiteCleanupPanel({ product, fixtureMode, onSaved }: {
       else setNotice("Read back: public website required.");
     } catch (failure) {
       if (!controller.signal.aborted) setError(`${applied ? "Apply completed; read-back" : "Profile read"} could not be confirmed. ${failure instanceof Error ? failure.message : "Read failed."}`);
-    }
+    } finally { if (!controller.signal.aborted) setChecking(false); }
   }
   async function checkOriginal() {
     const identity = apply.state.identity;
     if (!identity || checking) return;
     setChecking(true); setError(""); setNotice("");
-    const controller = new AbortController(); readAbort.current = controller;
+    const controller = startRead();
     try {
       const receipt = await readProductProfileMutationReceipt(product, "website-cleanup", identity.idempotencyKey, controller.signal);
       if (controller.signal.aborted) return;
@@ -141,9 +155,10 @@ export function ProductWebsiteCleanupPanel({ product, fixtureMode, onSaved }: {
       await refresh(controller.signal);
       if (controller.signal.aborted) return;
       if (apply.reconcile(identity, { trace_id: receipt.trace_id, original_trace_id: receipt.original_trace_id, replayed: true })) {
-        setReview(null); sessionStorage.removeItem(storageKey);
+        setReview(null);
+        try { sessionStorage.removeItem(storageKey); } catch { /* The completed receipt already settled the operation. */ }
         setNotice("Original cleanup completed. The current profile was read again."); onSaved();
-      }
+      } else setNotice("The retained operation changed while checking. Keep its key and check again.");
     } catch (failure) {
       if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Original operation could not be checked.");
     } finally { if (!controller.signal.aborted) setChecking(false); }
@@ -153,7 +168,7 @@ export function ProductWebsiteCleanupPanel({ product, fixtureMode, onSaved }: {
     <header className="product-config-panel-header"><span aria-hidden="true"><Globe /></span><div>
       <p className="eyebrow">Product profile</p><h2 id="product-website-cleanup-title">Public website</h2>
       <p>For a product with no website, review and withdraw its stale public URLs and public HTTP checks together. Private endpoints, checks, Client and release settings are preserved.</p>
-      <p>Withdraw only obsolete URLs. This also removes release testing links and URLs used by public probes, Odoo URL-based diagnostics and ingress route edits.</p>
+      <p>Withdraw only obsolete URLs. This also removes release testing links and URLs used by public probes, Odoo diagnostics, web restart, production restore and ingress route edits. This panel has no undo; restoring public declarations requires product-profile configuration.</p>
     </div></header>
     <p>Current: {current === null ? fixtureMode ? "Unavailable in fixtures" : "Reading profile…" : current === "none" ? "No public website" : "Public website required"}</p>
     {current !== "none" && current !== null && !eligible ? <p>Cleanup requires private monitoring intent on every recorded lane. Public or unknown intent needs review.</p> : null}

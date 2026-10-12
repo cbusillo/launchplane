@@ -35,6 +35,8 @@ for (const outcome of ["applied", "lost-response", "lost-response-stale", "stale
         if (outcome === "stale" || outcome === "lost-response-stale" && sent.length > 1) {
           await route.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "stale", message: "Profile changed. Preview again." } } }); return;
         }
+        // Here the original request fails before commit; the subsequent retry is stale.
+        if (outcome === "lost-response-stale") { await route.abort("failed"); return; }
         publicWebsite = "none";
         if (outcome === "lost-response" || outcome === "lost-response-stale") { await route.abort("failed"); return; }
       }
@@ -96,9 +98,13 @@ for (const outcome of ["applied", "lost-response", "lost-response-stale", "stale
       if (outcome === "lost-response-stale") {
         await panel.getByRole("button", { name: "Retry original cleanup", exact: true }).click();
         await expect(panel).toContainText("Profile changed. Preview again.");
-        await expect(preview).toBeDisabled();
-        await expect(panel.getByLabel("Change reason")).toBeDisabled();
+        await expect(preview).toBeEnabled();
+        await expect(apply).toBeDisabled();
+        await expect(panel.getByLabel("Change reason")).toBeEnabled();
+        await expect(panel.getByRole("button", { name: "Check original operation", exact: true })).toHaveCount(0);
         expect(sent[1]).toEqual(sent[0]);
+        await panel.screenshot({ path: testInfo.outputPath("website-cleanup-settled-stale.png") });
+        return;
       }
       // Lost reviewed draft must still recover only through a completed receipt.
       await page.evaluate(() => {
