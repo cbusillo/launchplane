@@ -61,14 +61,6 @@ from control_plane.contracts.privileged_operation import (
     PrivilegedOperationRequest,
     PrivilegedOperationSafetyClass,
 )
-from control_plane.contracts.ordinary_agent_activation import (
-    OrdinaryAgentDeliveryActivationRevokeRequest,
-    OrdinaryAgentDeliveryActivationSetupRequest,
-)
-from control_plane.ordinary_agent_activation import (
-    OrdinaryAgentDeliveryActivationPlanningError,
-    plan_ordinary_agent_delivery_activation,
-)
 from control_plane.service_auth import AgentConsumerActionSafety, action_safety
 
 
@@ -144,7 +136,7 @@ PrivilegedOperationPlanner = Callable[
 @dataclass(frozen=True, slots=True)
 class RegisteredPrivilegedOperationDescriptor:
     descriptor: PrivilegedOperationDescriptor
-    planner: PrivilegedOperationPlanner
+    planner: PrivilegedOperationPlanner | None
 
 
 MANAGED_SECRET_REENCRYPTION_DESCRIPTOR = PrivilegedOperationDescriptor(
@@ -556,28 +548,6 @@ def plan_managed_merge_train_policy_import(
     )
 
 
-def plan_ordinary_agent_delivery_activation_operation(
-    record_store: object,
-    request: PrivilegedOperationRequest,
-) -> PrivilegedOperationHumanEvidence:
-    if not isinstance(
-        request,
-        (
-            OrdinaryAgentDeliveryActivationSetupRequest,
-            OrdinaryAgentDeliveryActivationRevokeRequest,
-        ),
-    ):
-        raise PrivilegedOperationPlannerError(
-            "Ordinary-agent activation planner received an invalid request type."
-        )
-    try:
-        return plan_ordinary_agent_delivery_activation(record_store, request)
-    except OrdinaryAgentDeliveryActivationPlanningError as error:
-        raise PrivilegedOperationPlannerError(
-            "Ordinary-agent activation planning failed before evidence was produced."
-        ) from error
-
-
 _REGISTRY: dict[PrivilegedOperationDescriptorId, RegisteredPrivilegedOperationDescriptor] = {
     "managed-secret-reencryption": RegisteredPrivilegedOperationDescriptor(
         descriptor=MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
@@ -593,7 +563,8 @@ _REGISTRY: dict[PrivilegedOperationDescriptorId, RegisteredPrivilegedOperationDe
     ),
     "ordinary-agent-delivery-activation": RegisteredPrivilegedOperationDescriptor(
         descriptor=ORDINARY_AGENT_DELIVERY_ACTIVATION_DESCRIPTOR,
-        planner=plan_ordinary_agent_delivery_activation_operation,
+        # Preserve descriptor metadata for historical records and semantic review.
+        planner=None,
     ),
 }
 
@@ -607,7 +578,9 @@ def validate_privileged_operation_registry() -> None:
             raise RuntimeError(
                 "Privileged-operation registry key does not match descriptor identity."
             )
-        if not callable(registration.planner):
+        if not callable(registration.planner) and not (
+            descriptor_id == "ordinary-agent-delivery-activation" and registration.planner is None
+        ):
             raise RuntimeError(f"Privileged-operation descriptor {descriptor_id!r} has no planner.")
 
 

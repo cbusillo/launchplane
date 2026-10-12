@@ -502,16 +502,12 @@ class MergeTrainPolicyTests(unittest.TestCase):
 
     def test_new_imports_reject_historical_required_policy(self) -> None:
         from control_plane.http_app import MergeTrainPolicyImportEnvelope
-        from control_plane.http_routes.privileged_operations import (
-            OrdinaryAgentMergeTrainTargetPrepareEnvelope,
-        )
         from control_plane.privileged_operation_registry import (
             plan_managed_merge_train_policy_import,
         )
         from control_plane.privileged_operation_registry import PrivilegedOperationPlannerError
         from control_plane.contracts.privileged_operation import (
             ManagedMergeTrainPolicyImportProposalInput,
-            OrdinaryAgentMergeTrainTargetIntent,
         )
 
         record = MergeTrainPolicyRecord.model_validate_json(
@@ -530,19 +526,6 @@ class MergeTrainPolicyTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(PrivilegedOperationPlannerError, "mode is retired"):
             plan_managed_merge_train_policy_import(_PolicyStore(record), proposal)
-        intent_payload = {
-            key: value
-            for key, value in record.policy.policies[0].model_dump(mode="json").items()
-            if key in OrdinaryAgentMergeTrainTargetIntent.model_fields
-        }
-        intent_payload["repository_id"] = "12345"
-        intent_payload["engineering_review_mode"] = "advisory"
-        OrdinaryAgentMergeTrainTargetIntent.model_validate(intent_payload)
-        intent_payload["engineering_review_mode"] = "required"
-        with self.assertRaises(ValidationError):
-            OrdinaryAgentMergeTrainTargetPrepareEnvelope.model_validate(
-                {"source_event_id": "retirement-test", "intent": intent_payload}
-            )
 
     def test_trusted_automation_ids_change_policy_digest(self) -> None:
         default_policy = build_test_merge_train_policy()

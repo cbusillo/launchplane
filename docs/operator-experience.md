@@ -479,8 +479,24 @@ recorded approval. The escape hatch still requires database
 storage, an `Idempotency-Key`, the same target snapshot check, and the same
 durable provider-mutation reservation.
 
-Both testing and production inventory must be fresh, healthy, and bound to
-matching generated runtime identity. The source and
+Both testing and production must have fresh, healthy evidence bound to
+matching generated runtime identity. For lanes with effective monitoring,
+promotion status uses the same current runtime verifier as the Products page;
+monitor evidence must follow the current profile, deployment and private
+endpoint configuration, and every effective check must pass. Each check follows
+its configured identity requirement; the lane still needs a current matching
+runtime-identity probe even when other checks supply only health. Deploy inventory
+still owns the artifact and source revision, but its age and historical health
+do not override current monitor verification. Missing, expired or mismatched
+monitor evidence cannot fall back to a passing deploy check. Lanes without
+effective monitoring retain the bounded deploy-health evidence path.
+After deployment, wait for the next scheduled monitor verification or use the
+supported `POST /v1/products/public-ingress-monitor/run-once` service operation
+under existing authorization to obtain current evidence before promoting.
+`health_provenance` identifies the monitor evidence and its freshness deadline;
+inventory timestamps continue to describe the deploy record. Equivalent passing
+monitor renewals preserve the reviewed candidate/target fingerprint; current
+health and trust are rechecked before dispatch and execution. The source and
 destination artifacts must be digest-pinned `@sha256:` references and source
 revisions must be immutable commit IDs. Current production provider-target
 authority comes only from the explicit provider-target record; deployment

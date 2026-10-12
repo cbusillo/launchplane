@@ -8,9 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetProposalInput,
-    ManagedOrdinaryAgentPolicyPreparationContext,
     ManagedMergeTrainPolicyImportProposalInput,
-    ManagedMergeTrainPolicyPreparationContext,
     ManagedSecretReencryptionPlanInput,
     PrivilegedOperationApproval,
     PrivilegedOperationActor,
@@ -25,36 +23,17 @@ from control_plane.contracts.privileged_operation import (
     PrivilegedOperationSemanticReview,
     PrivilegedOperationStatus,
     PrivilegedOperationSummary,
-    OrdinaryAgentMergeTrainTargetIntent,
-    OrdinaryAgentDeliveryPolicyIntent,
     build_privileged_operation_id_for_actor,
     normalize_privileged_operation_source_event_id,
     privileged_operation_agent_summary,
     privileged_operation_pre_state_digest,
     terminal_agent_principal_sha256,
 )
-from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.merge_train_policy import (
-    MergeTrainGitHubTokenSource,
-    MergeTrainPolicy,
-    MergeTrainPolicyRecord,
-    MergeTrainRepositoryPolicy,
-    MergeTrainSchedulerPolicy,
-    build_merge_train_policy_record_id,
-    normalize_merge_train_policy_timestamp,
-)
-from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.ordinary_agent_activation import (
-    OrdinaryAgentDeliveryActivationDurationOption,
-    OrdinaryAgentDeliveryActivationRevokeOption,
     OrdinaryAgentDeliveryActivationRevokeRequest,
-    OrdinaryAgentDeliveryActivationSetupOption,
     OrdinaryAgentDeliveryActivationSetupRequest,
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
-from control_plane.contracts.ordinary_agent_delivery_authorization_inputs import (
-    OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
-)
 from control_plane.authz_candidate_preparation import (
     AGENT_PRODUCT_SETUP_CANDIDATE_ID,
     AGENT_PRODUCT_SETUP_MAX_PRODUCTS,
@@ -63,10 +42,6 @@ from control_plane.authz_candidate_preparation import (
     agent_product_setup_grants_match_records,
     authorization_candidate_request_matches,
     compile_authorization_candidate,
-    compile_ordinary_agent_delivery_policy_candidate,
-    OrdinaryAgentPolicyPreparationError,
-    ORDINARY_AGENT_DELIVERY_POLICY_MANAGED_RULE_ID,
-    ordinary_agent_delivery_policy_managed_set_id,
 )
 from control_plane.durable_operation_authorization import (
     ManagedRuleAuthorizationError,
@@ -77,21 +52,10 @@ from control_plane.durable_operation_authorization import (
     require_single_managed_rule_identity,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
-from control_plane.ordinary_agent_activation import (
-    OrdinaryAgentDeliveryActivationPlanningError,
-    list_ordinary_agent_delivery_activation_options,
-    ordinary_agent_delivery_activation_duration_options,
-)
-from control_plane.ordinary_agent_delivery_authorization_inputs import (
-    _read_current_inventory,
-    read_ordinary_agent_delivery_authorization_candidate_inputs,
-)
 from control_plane.privileged_operation_registry import (
     PrivilegedOperationPlannerError,
-    PrivilegedOperationPlanningConflictError,
     PrivilegedOperationPlanningStoreError,
     read_privileged_operation_descriptor,
-    _policy_key_payloads,
 )
 from control_plane.privileged_operation_service import (
     DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
@@ -129,19 +93,7 @@ PRIVILEGED_OPERATION_APPROVE_ROUTE = "/v1/privileged-operations/plans/{operation
 PRIVILEGED_OPERATION_REVOKE_ROUTE = "/v1/privileged-operations/plans/{operation_id}/revoke"
 PRIVILEGED_OPERATION_AGENT_SUMMARY_ROUTE = "/v1/agent/privileged-operations/plans/{operation_id}"
 PRIVILEGED_OPERATION_AGENT_PLANS_ROUTE = "/v1/agent/privileged-operations/plans"
-ORDINARY_AGENT_DELIVERY_ACTIVATION_OPTIONS_ROUTE = (
-    "/v1/privileged-operations/ordinary-agent-delivery-activation/options"
-)
-ORDINARY_AGENT_DELIVERY_ACTIVATION_PLANS_ROUTE = (
-    "/v1/privileged-operations/ordinary-agent-delivery-activation/plans"
-)
 AUTHORIZATION_CANDIDATE_PREPARE_ROUTE = "/v1/privileged-operations/authorization-candidates/prepare"
-ORDINARY_AGENT_DELIVERY_AUTHORIZATION_CANDIDATE_INPUTS_ROUTE = (
-    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/inputs"
-)
-ORDINARY_AGENT_DELIVERY_POLICY_PREPARE_ROUTE = (
-    "/v1/privileged-operations/authorization-candidates/ordinary-agent-delivery/prepare"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,7 +141,7 @@ class PrivilegedOperationPlanEnvelope(BaseModel):
             and self.request.ordinary_agent_preparation_context is not None
         ):
             raise ValueError(
-                "Ordinary-agent policy preparation context is accepted only by its dedicated endpoint."
+                "Historical ordinary-agent preparation context cannot be submitted as a new proposal."
             )
         if self.descriptor_id == "managed-merge-train-policy-import" and not isinstance(
             self.request, ManagedMergeTrainPolicyImportProposalInput
@@ -200,7 +152,7 @@ class PrivilegedOperationPlanEnvelope(BaseModel):
             and self.request.preparation_context is not None
         ):
             raise ValueError(
-                "Merge-train target preparation context is accepted only by its dedicated endpoint."
+                "Historical target preparation context cannot be submitted as a new proposal."
             )
         if self.descriptor_id == "ordinary-agent-delivery-activation" and not isinstance(
             self.request,
@@ -210,27 +162,6 @@ class PrivilegedOperationPlanEnvelope(BaseModel):
             ),
         ):
             raise ValueError("Ordinary-agent activation descriptor requires an activation request.")
-        return self
-
-
-class OrdinaryAgentDeliveryActivationPlanEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: Literal[1] = 1
-    source_event_id: str = Field(min_length=1, max_length=128)
-    expires_in_seconds: int = Field(
-        default=DEFAULT_PRIVILEGED_OPERATION_TTL_SECONDS,
-        ge=MIN_PRIVILEGED_OPERATION_TTL_SECONDS,
-        le=MAX_PRIVILEGED_OPERATION_TTL_SECONDS,
-    )
-    request: Annotated[
-        OrdinaryAgentDeliveryActivationSetupRequest | OrdinaryAgentDeliveryActivationRevokeRequest,
-        Field(discriminator="action"),
-    ]
-
-    @model_validator(mode="after")
-    def _validate_envelope(self) -> "OrdinaryAgentDeliveryActivationPlanEnvelope":
-        self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
         return self
 
 
@@ -271,96 +202,6 @@ class AuthorizationCandidatePrepareResponse(BaseModel):
     )
 
 
-class OrdinaryAgentDeliveryPolicyPrepareEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: Literal[1] = 1
-    source_event_id: str = Field(min_length=1, max_length=128)
-    intent: OrdinaryAgentDeliveryPolicyIntent
-
-    @model_validator(mode="after")
-    def _validate_envelope(self) -> "OrdinaryAgentDeliveryPolicyPrepareEnvelope":
-        self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
-        return self
-
-
-class OrdinaryAgentDeliveryPolicyPrepareResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    trace_id: str
-    state: Literal["planned", "already_satisfied"]
-    principal_id: str
-    operation_id: str | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
-
-
-ORDINARY_AGENT_MERGE_TRAIN_TARGET_INPUTS_ROUTE = (
-    "/v1/privileged-operations/merge-train-targets/inputs"
-)
-ORDINARY_AGENT_MERGE_TRAIN_TARGET_PREPARE_ROUTE = (
-    "/v1/privileged-operations/merge-train-targets/prepare"
-)
-
-
-class OrdinaryAgentMergeTrainTargetPrepareEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    source_event_id: str = Field(min_length=1, max_length=128)
-    intent: OrdinaryAgentMergeTrainTargetIntent
-
-    @model_validator(mode="after")
-    def _validate_envelope(self) -> "OrdinaryAgentMergeTrainTargetPrepareEnvelope":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported ordinary-agent merge target preparation schema version.")
-        self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
-        if self.intent.engineering_review_mode != "advisory":
-            raise ValueError("Required engineering-review merge mode is retired; use advisory")
-        return self
-
-
-class OrdinaryAgentMergeTrainTargetPrepareResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    trace_id: str
-    state: Literal["planned", "already_satisfied"]
-    operation_id: str | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
-
-
-class OrdinaryAgentMergeTrainTargetInventoryInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    repository_id: str
-    repository: str
-    inventory_record_id: str
-    inventory_digest: str
-
-
-class OrdinaryAgentMergeTrainTargetPolicyInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    record_id: str
-    updated_at: str
-    policy_sha256: str
-    configured_policy_keys: tuple[str, ...]
-
-
-class OrdinaryAgentMergeTrainTargetInputsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    policy: OrdinaryAgentMergeTrainTargetPolicyInput
-    tracked_repositories: tuple[OrdinaryAgentMergeTrainTargetInventoryInput, ...]
-
-
 class PrivilegedPolicyOperationAgentProposalEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -391,7 +232,7 @@ class PrivilegedPolicyOperationAgentProposalEnvelope(BaseModel):
             and self.request.ordinary_agent_preparation_context is not None
         ):
             raise ValueError(
-                "Ordinary-agent policy preparation context is accepted only by its dedicated endpoint."
+                "Historical ordinary-agent preparation context cannot be submitted as a new proposal."
             )
         if self.descriptor_id == "managed-merge-train-policy-import" and not isinstance(
             self.request, ManagedMergeTrainPolicyImportProposalInput
@@ -402,7 +243,7 @@ class PrivilegedPolicyOperationAgentProposalEnvelope(BaseModel):
             and self.request.preparation_context is not None
         ):
             raise ValueError(
-                "Merge-train target preparation context is accepted only by its dedicated endpoint."
+                "Historical target preparation context cannot be submitted as a new proposal."
             )
         return self
 
@@ -466,16 +307,6 @@ class PrivilegedOperationListResponse(BaseModel):
     trace_id: str
     total: int = Field(ge=0)
     reviews: tuple[PrivilegedOperationSemanticReview, ...]
-
-
-class OrdinaryAgentDeliveryActivationOptionsResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    duration_options: tuple[OrdinaryAgentDeliveryActivationDurationOption, ...]
-    setup_options: tuple[OrdinaryAgentDeliveryActivationSetupOption, ...]
-    revoke_options: tuple[OrdinaryAgentDeliveryActivationRevokeOption, ...]
 
 
 class PrivilegedOperationSemanticReviewResponse(BaseModel):
@@ -634,10 +465,12 @@ def register_privileged_operation_routes(
         if record.safety_class != "policy_admin":
             return
         try:
-            current_evidence = read_privileged_operation_descriptor(record.descriptor_id).planner(
-                record_store,
-                record.request,
-            )
+            planner = read_privileged_operation_descriptor(record.descriptor_id).planner
+            if planner is None:
+                raise PrivilegedOperationPlannerError(
+                    "This privileged-operation planner is retired."
+                )
+            current_evidence = planner(record_store, record.request)
         except PrivilegedOperationPlannerError as error:
             raise dependencies.common.http_error(
                 status_code=409,
@@ -716,7 +549,18 @@ def register_privileged_operation_routes(
             ) from error
 
     def descriptor_action(descriptor_id: PrivilegedOperationDescriptorId, field_name: str) -> str:
-        descriptor = read_privileged_operation_descriptor(descriptor_id).descriptor
+        registration = read_privileged_operation_descriptor(descriptor_id)
+        if registration.planner is None and field_name not in {
+            "human_read_action",
+            "agent_summary_read_action",
+        }:
+            raise dependencies.common.http_error(
+                status_code=410,
+                trace_id=dependencies.common.next_trace_id(),
+                code="privileged_operation_retired",
+                message="This privileged operation is retired; its history is read-only.",
+            )
+        descriptor = registration.descriptor
         action = getattr(descriptor, field_name)
         if not isinstance(action, str) or not action:
             raise ValueError("Privileged-operation descriptor does not expose this action.")
@@ -765,42 +609,6 @@ def register_privileged_operation_routes(
                 code="authorization_denied",
                 message="Identity has no current explicit privileged-operation read grant.",
             ) from error
-
-    def read_ordinary_agent_delivery_activation_options(
-        identity: Annotated[
-            LaunchplaneIdentity,
-            Depends(read_record_identity),
-        ],
-        record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
-    ) -> OrdinaryAgentDeliveryActivationOptionsResponse:
-        trace_id = dependencies.common.next_trace_id()
-        descriptor_id: PrivilegedOperationDescriptorId = "ordinary-agent-delivery-activation"
-        require_record_read(
-            identity=identity,
-            trace_id=trace_id,
-            descriptor_id=descriptor_id,
-        )
-        try:
-            observed_at = datetime.now(timezone.utc)
-            setup_options, revoke_options = list_ordinary_agent_delivery_activation_options(
-                record_store,
-                observed_at=observed_at,
-            )
-        except OrdinaryAgentDeliveryActivationPlanningError as error:
-            raise dependencies.common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="privileged_operation_planning_unavailable",
-                message="Ordinary-agent activation options are unavailable.",
-            ) from error
-        return OrdinaryAgentDeliveryActivationOptionsResponse(
-            trace_id=trace_id,
-            duration_options=ordinary_agent_delivery_activation_duration_options(
-                observed_at=observed_at
-            ),
-            setup_options=setup_options,
-            revoke_options=revoke_options,
-        )
 
     def plan_privileged_operation(
         envelope: PrivilegedOperationPlanEnvelope,
@@ -863,209 +671,6 @@ def register_privileged_operation_routes(
             write_status=result.write_status,
             record=result.record,
             events=events,
-        )
-
-    def plan_ordinary_agent_delivery_activation(
-        envelope: OrdinaryAgentDeliveryActivationPlanEnvelope,
-        identity: Annotated[
-            GitHubHumanIdentity,
-            Depends(dependencies.read_github_human_mutation_identity),
-        ],
-        record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
-    ) -> PrivilegedOperationHumanResponse:
-        return plan_privileged_operation(
-            PrivilegedOperationPlanEnvelope(
-                descriptor_id="ordinary-agent-delivery-activation",
-                source_event_id=envelope.source_event_id,
-                expires_in_seconds=envelope.expires_in_seconds,
-                request=envelope.request,
-            ),
-            identity,
-            record_store,
-        )
-
-    def prepare_ordinary_agent_delivery_policy(
-        envelope: OrdinaryAgentDeliveryPolicyPrepareEnvelope,
-        identity: Annotated[
-            GitHubHumanIdentity,
-            Depends(dependencies.read_github_human_mutation_identity),
-        ],
-        record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
-    ) -> OrdinaryAgentDeliveryPolicyPrepareResponse:
-        trace_id = dependencies.common.next_trace_id()
-        descriptor_id: PrivilegedOperationDescriptorId = "managed-authz-policy-set"
-        propose_action = descriptor_action(descriptor_id, "plan_action")
-        require_managed_rule(
-            identity=identity,
-            action=propose_action,
-            trace_id=trace_id,
-            descriptor_id=descriptor_id,
-        )
-        policy_record, _managed_set_id, _managed_rule_id = require_immutable_approval_rule(
-            identity=identity,
-            action=propose_action,
-            trace_id=trace_id,
-            descriptor_id=descriptor_id,
-        )
-        if not authz_policy_allows_immutable_github_id_administration(
-            policy=policy_record.policy,
-            github_id=identity.github_id,
-        ):
-            raise dependencies.common.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Identity cannot prepare ordinary-agent policy.",
-            )
-        actor = PrivilegedOperationActor(
-            identity_type="github_human",
-            github_id=identity.github_id,
-            login=identity.login,
-        )
-        operation_id = build_privileged_operation_id_for_actor(
-            descriptor_id=descriptor_id,
-            actor=actor,
-            source_event_id=envelope.source_event_id,
-        )
-        try:
-            store = require_privileged_operation_store(record_store)
-            try:
-                replay = store.read_privileged_operation_record(operation_id)
-            except FileNotFoundError:
-                replay = None
-            if replay is not None:
-                request = replay.request
-                context = getattr(request, "ordinary_agent_preparation_context", None)
-                if (
-                    replay.requested_by != actor
-                    or replay.source_event_id != envelope.source_event_id
-                    or not isinstance(request, ManagedAuthzPolicySetProposalInput)
-                    or context is None
-                    or context.intent != envelope.intent
-                ):
-                    raise PrivilegedOperationConflictError(
-                        "Ordinary-agent policy replay changed the original intent."
-                    )
-                return OrdinaryAgentDeliveryPolicyPrepareResponse(
-                    trace_id=trace_id,
-                    state="planned",
-                    principal_id=envelope.intent.principal_id,
-                    operation_id=operation_id,
-                )
-            principal_reader = getattr(record_store, "read_current_ordinary_agent_principal", None)
-            if not callable(principal_reader):
-                raise PrivilegedOperationPlanningStoreError(
-                    "Ordinary-agent policy preparation requires principal storage."
-                )
-            try:
-                current_principal = principal_reader(principal_id=envelope.intent.principal_id)
-            except Exception as error:
-                raise PrivilegedOperationPlanningStoreError(
-                    "Ordinary-agent principal storage is unavailable."
-                ) from error
-            if current_principal is not None:
-                raise OrdinaryAgentPolicyPreparationError(
-                    "ordinary_agent_rule_conflict",
-                    "This client identity is already registered. Prepare a new client setup.",
-                )
-            inventory_state, inventories, _diagnostics = _read_current_inventory(record_store)
-            if inventory_state == "unavailable":
-                raise PrivilegedOperationPlanningStoreError("Repository inventory is unavailable.")
-            if inventory_state != "complete":
-                raise OrdinaryAgentPolicyPreparationError(
-                    "ordinary_agent_target_unavailable",
-                    "Repository inventory is incomplete or conflicting. Check setup prerequisites again.",
-                )
-            matches = tuple(
-                item for item in inventories if item.repository_id == envelope.intent.repository_id
-            )
-            if len(matches) != 1:
-                raise OrdinaryAgentPolicyPreparationError(
-                    "ordinary_agent_target_unavailable",
-                    "The selected project is no longer tracked. Check setup prerequisites again.",
-                )
-            try:
-                merge_record = read_current_merge_train_policy(record_store=record_store)
-            except Exception as error:
-                raise PrivilegedOperationPlanningStoreError(
-                    "Ordinary-agent merge policy storage is unavailable."
-                ) from error
-            state, candidate = compile_ordinary_agent_delivery_policy_candidate(
-                current_policy=policy_record.policy,
-                intent=envelope.intent,
-                inventory=matches[0],
-                merge_policy=merge_record,
-            )
-            if state == "already_satisfied":
-                return OrdinaryAgentDeliveryPolicyPrepareResponse(
-                    trace_id=trace_id,
-                    state=state,
-                    principal_id=envelope.intent.principal_id,
-                )
-            assert candidate is not None
-            context = ManagedOrdinaryAgentPolicyPreparationContext(
-                intent=envelope.intent,
-                managed_set_id=ordinary_agent_delivery_policy_managed_set_id(
-                    envelope.intent.principal_id
-                ),
-                managed_rule_id=ORDINARY_AGENT_DELIVERY_POLICY_MANAGED_RULE_ID,
-                expected_policy_record_id=policy_record.record_id,
-                expected_policy_revision=policy_record.revision,
-                expected_policy_sha256=policy_record.policy_sha256,
-                expected_inventory_record_id=matches[0].record_id,
-                expected_inventory_revision=matches[0].inventory_revision,
-                expected_inventory_sha256=matches[0].inventory_digest,
-                expected_merge_policy_record_id=merge_record.record_id,
-                expected_merge_policy_sha256=merge_record.policy_sha256,
-            )
-            candidate = candidate.model_copy(update={"ordinary_agent_preparation_context": context})
-            result = create_typed_privileged_operation_plan(
-                record_store=record_store,
-                descriptor_id=descriptor_id,
-                actor=actor,
-                source_kind="browser_api",
-                source_event_id=envelope.source_event_id,
-                request=candidate,
-            )
-        except PrivilegedOperationConflictError as error:
-            raise dependencies.common.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="ordinary_agent_policy_preparation_conflict",
-                message="The saved request conflicts with another plan. Discard the saved setup and prepare it again.",
-            ) from error
-        except OrdinaryAgentPolicyPreparationError as error:
-            raise dependencies.common.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code=error.reason_code,
-                message=str(error),
-            ) from error
-        except PrivilegedOperationPlanningConflictError as error:
-            raise dependencies.common.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="ordinary_agent_policy_preparation_conflict",
-                message="The setup configuration changed. Retry the saved request to prepare against current configuration.",
-            ) from error
-        except (
-            PrivilegedOperationPlannerError,
-            PrivilegedOperationPlanningStoreError,
-            PrivilegedOperationStoreUnavailableError,
-            TypeError,
-            ValueError,
-        ) as error:
-            raise dependencies.common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="ordinary_agent_policy_preparation_unavailable",
-                message="Ordinary-agent policy preparation is unavailable.",
-            ) from error
-        return OrdinaryAgentDeliveryPolicyPrepareResponse(
-            trace_id=trace_id,
-            state="planned",
-            principal_id=envelope.intent.principal_id,
-            operation_id=result.record.operation_id,
         )
 
     def list_human_privileged_operations(
@@ -1771,347 +1376,6 @@ def register_privileged_operation_routes(
             operation_id=result.record.operation_id,
         )
 
-    def read_current_merge_train_policy(*, record_store: object) -> MergeTrainPolicyRecord:
-        list_records = getattr(record_store, "list_merge_train_policy_records", None)
-        if not callable(list_records):
-            raise PrivilegedOperationPlanningStoreError(
-                "Merge-train target preparation requires merge-train policy storage."
-            )
-        active_records = tuple(list_records(status="active", limit=2))
-        if len(active_records) != 1:
-            raise PrivilegedOperationPlannerError(
-                "Merge-train target preparation requires exactly one active policy record."
-            )
-        return MergeTrainPolicyRecord.model_validate(active_records[0])
-
-    def current_tracked_inventory(*, record_store: object) -> tuple[RepositoryInventoryRecord, ...]:
-        inventory_state, tracked_records, _diagnostics = _read_current_inventory(record_store)
-        if inventory_state != "complete":
-            raise PrivilegedOperationPlanningStoreError(
-                "Merge-train target preparation requires complete unambiguous repository inventory."
-            )
-        return tracked_records
-
-    def read_ordinary_agent_merge_train_target_inputs(
-        identity: Annotated[
-            GitHubHumanIdentity,
-            Depends(dependencies.read_github_human_identity),
-        ],
-        record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
-    ) -> OrdinaryAgentMergeTrainTargetInputsResponse:
-        trace_id = dependencies.common.next_trace_id()
-        descriptor_id: PrivilegedOperationDescriptorId = "managed-merge-train-policy-import"
-        require_managed_rule(
-            identity=identity,
-            action=descriptor_action(descriptor_id, "plan_action"),
-            trace_id=trace_id,
-            descriptor_id=descriptor_id,
-        )
-        try:
-            active_record = read_current_merge_train_policy(record_store=record_store)
-            tracked_repositories = current_tracked_inventory(record_store=record_store)
-        except (
-            PrivilegedOperationPlannerError,
-            PrivilegedOperationPlanningStoreError,
-            OSError,
-            TypeError,
-            ValueError,
-        ) as error:
-            raise dependencies.common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="privileged_operation_planning_unavailable",
-                message="Ordinary-agent merge target inputs are unavailable.",
-            ) from error
-        return OrdinaryAgentMergeTrainTargetInputsResponse(
-            trace_id=trace_id,
-            policy=OrdinaryAgentMergeTrainTargetPolicyInput(
-                record_id=active_record.record_id,
-                updated_at=normalize_merge_train_policy_timestamp(active_record.updated_at),
-                policy_sha256=active_record.policy_sha256,
-                configured_policy_keys=tuple(sorted(_policy_key_payloads(active_record))),
-            ),
-            tracked_repositories=tuple(
-                OrdinaryAgentMergeTrainTargetInventoryInput(
-                    repository_id=record.repository_id,
-                    repository=record.repository,
-                    inventory_record_id=record.record_id,
-                    inventory_digest=record.inventory_digest,
-                )
-                for record in tracked_repositories
-            ),
-        )
-
-    def prepare_ordinary_agent_merge_train_target(
-        envelope: OrdinaryAgentMergeTrainTargetPrepareEnvelope,
-        identity: Annotated[
-            GitHubHumanIdentity,
-            Depends(dependencies.read_github_human_mutation_identity),
-        ],
-        record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
-    ) -> OrdinaryAgentMergeTrainTargetPrepareResponse:
-        trace_id = dependencies.common.next_trace_id()
-        descriptor_id: PrivilegedOperationDescriptorId = "managed-merge-train-policy-import"
-        propose_action = descriptor_action(descriptor_id, "plan_action")
-        require_managed_rule(
-            identity=identity,
-            action=propose_action,
-            trace_id=trace_id,
-            descriptor_id=descriptor_id,
-        )
-        actor = PrivilegedOperationActor(
-            identity_type="github_human",
-            github_id=identity.github_id,
-            login=identity.login,
-        )
-        operation_id = build_privileged_operation_id_for_actor(
-            descriptor_id=descriptor_id,
-            actor=actor,
-            source_event_id=envelope.source_event_id,
-        )
-        try:
-            store = require_privileged_operation_store(record_store)
-            try:
-                replay = store.read_privileged_operation_record(operation_id)
-            except FileNotFoundError:
-                replay = None
-            if replay is not None:
-                replay_request = replay.request
-                if (
-                    replay.requested_by != actor
-                    or replay.source_event_id != envelope.source_event_id
-                    or not isinstance(replay_request, ManagedMergeTrainPolicyImportProposalInput)
-                    or replay_request.preparation_context is None
-                    or replay_request.preparation_context.intent != envelope.intent
-                ):
-                    raise PrivilegedOperationConflictError(
-                        "Ordinary-agent merge target replay changed the original intent."
-                    )
-                return OrdinaryAgentMergeTrainTargetPrepareResponse(
-                    trace_id=trace_id,
-                    state="planned",
-                    operation_id=operation_id,
-                )
-            active_record = read_current_merge_train_policy(record_store=record_store)
-            try:
-                active_record.policy.require_advisory_review()
-            except ValueError as error:
-                raise dependencies.common.http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="merge_train_engineering_review_mode_retired",
-                    message=(
-                        "The active policy contains retired required engineering review. "
-                        "Import a replacement policy using advisory review before preparing a target."
-                    ),
-                ) from error
-            inventory_by_id = {
-                record.repository_id: record
-                for record in current_tracked_inventory(record_store=record_store)
-            }
-            inventory_record = inventory_by_id.get(envelope.intent.repository_id)
-            if inventory_record is None:
-                raise PrivilegedOperationConflictError(
-                    "Ordinary-agent merge target requires current tracked repository inventory."
-                )
-            target = MergeTrainRepositoryPolicy(
-                repository=inventory_record.repository,
-                base_branch=envelope.intent.base_branch,
-                enqueue_label=envelope.intent.enqueue_label,
-                blocked_label=envelope.intent.blocked_label,
-                stack_child_disposition_label=envelope.intent.stack_child_disposition_label,
-                merge_method=envelope.intent.merge_method,
-                engineering_review_mode=envelope.intent.engineering_review_mode,
-                failure_policy=envelope.intent.failure_policy,
-                enqueue=envelope.intent.enqueue,
-                merge_identity=envelope.intent.merge_identity,
-                github_token=MergeTrainGitHubTokenSource(),
-                scheduler=MergeTrainSchedulerPolicy(enabled=False, mutate=False),
-                provider_delivery_protection_expectation=(
-                    envelope.intent.provider_delivery_protection_expectation
-                ),
-            )
-            active_payloads = _policy_key_payloads(active_record)
-            target_payload = target.model_dump(mode="json")
-            existing_payload = active_payloads.get(target.policy_key)
-            if existing_payload is not None:
-                if existing_payload == target_payload:
-                    return OrdinaryAgentMergeTrainTargetPrepareResponse(
-                        trace_id=trace_id,
-                        state="already_satisfied",
-                    )
-                raise PrivilegedOperationConflictError(
-                    "Ordinary-agent merge target already has a different policy."
-                )
-            prepared_at = datetime.now(timezone.utc)
-            updated_at = prepared_at.isoformat(timespec="microseconds").replace("+00:00", "Z")
-            candidate_policy = MergeTrainPolicy(
-                policies=(*active_record.policy.policies, target),
-            )
-            candidate_record = MergeTrainPolicyRecord(
-                record_id=build_merge_train_policy_record_id(
-                    updated_at=updated_at,
-                    policy_sha256=candidate_policy.policy_sha256,
-                ),
-                source="privileged-operation:ordinary-agent-merge-target-preparation",
-                updated_at=updated_at,
-                policy=candidate_policy,
-            )
-            request = ManagedMergeTrainPolicyImportProposalInput(
-                record=candidate_record,
-                reason=(
-                    "Prepare ordinary-agent-only merge target "
-                    f"{canonical_json_sha256(envelope.intent.model_dump(mode='json'))[:24]}."
-                ),
-                preparation_context=ManagedMergeTrainPolicyPreparationContext(
-                    intent=envelope.intent,
-                    expected_active_record_id=active_record.record_id,
-                    expected_active_policy_sha256=active_record.policy_sha256,
-                    expected_active_updated_at=normalize_merge_train_policy_timestamp(
-                        active_record.updated_at
-                    ),
-                    target_policy_key=target.policy_key,
-                ),
-            )
-            result = create_typed_privileged_operation_plan(
-                record_store=record_store,
-                descriptor_id=descriptor_id,
-                actor=actor,
-                source_kind="browser_api",
-                source_event_id=envelope.source_event_id,
-                request=request,
-                now=lambda: prepared_at,
-            )
-        except PrivilegedOperationConflictError as error:
-            raise dependencies.common.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="ordinary_agent_merge_target_conflict",
-                message="Ordinary-agent merge target preparation conflicts with current state.",
-            ) from error
-        except PrivilegedOperationPlannerError as error:
-            raise dependencies.common.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="ordinary_agent_merge_target_baseline_drift",
-                message="Ordinary-agent merge target preparation baseline changed; retry from inputs.",
-            ) from error
-        except (
-            PrivilegedOperationPlanningStoreError,
-            PrivilegedOperationStoreUnavailableError,
-            OSError,
-            TypeError,
-            ValueError,
-        ) as error:
-            raise dependencies.common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="privileged_operation_planning_unavailable",
-                message="Ordinary-agent merge target preparation is unavailable.",
-            ) from error
-        return OrdinaryAgentMergeTrainTargetPrepareResponse(
-            trace_id=trace_id,
-            state="planned",
-            operation_id=result.record.operation_id,
-        )
-
-    def read_ordinary_agent_delivery_authorization_inputs(
-        identity: Annotated[
-            GitHubHumanIdentity,
-            Depends(dependencies.read_github_human_identity),
-        ],
-        record_store: Annotated[object, Depends(dependencies.common.get_record_store)],
-    ) -> OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse:
-        trace_id = dependencies.common.next_trace_id()
-        descriptor_id: PrivilegedOperationDescriptorId = "managed-authz-policy-set"
-        propose_action = descriptor_action(descriptor_id, "plan_action")
-        if not isinstance(identity, GitHubHumanIdentity):
-            raise dependencies.common.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Only authorized humans can inspect authorization candidate inputs.",
-            )
-        require_managed_rule(
-            identity=identity,
-            action=propose_action,
-            trace_id=trace_id,
-            descriptor_id=descriptor_id,
-        )
-        policy_record, _managed_set_id, _managed_rule_id = require_immutable_approval_rule(
-            identity=identity,
-            action=propose_action,
-            trace_id=trace_id,
-            descriptor_id=descriptor_id,
-        )
-        if policy_record.status != "active":
-            raise dependencies.common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="authz_policy_unavailable",
-                message="The active authorization policy record is unavailable.",
-            )
-        if not authz_policy_allows_immutable_github_id_administration(
-            policy=policy_record.policy,
-            github_id=identity.github_id,
-        ):
-            raise dependencies.common.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Identity cannot inspect authorization candidate inputs.",
-            )
-        observed_at = (
-            datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
-        )
-        return read_ordinary_agent_delivery_authorization_candidate_inputs(
-            record_store=record_store,
-            policy_record=policy_record,
-            trace_id=trace_id,
-            observed_at=observed_at,
-            configured_terminal_identity=dependencies.read_configured_terminal_identity(),
-        )
-
-    app.add_api_route(
-        ORDINARY_AGENT_MERGE_TRAIN_TARGET_INPUTS_ROUTE,
-        read_ordinary_agent_merge_train_target_inputs,
-        methods=["GET"],
-        response_model=OrdinaryAgentMergeTrainTargetInputsResponse,
-        responses={
-            403: {"model": dependencies.common.error_response_model},
-            503: {"model": dependencies.common.error_response_model},
-        },
-        summary="Read ordinary-agent merge target preparation inputs",
-        operation_id="read_ordinary_agent_merge_train_target_inputs",
-        tags=["privileged-operations"],
-    )
-    app.add_api_route(
-        ORDINARY_AGENT_MERGE_TRAIN_TARGET_PREPARE_ROUTE,
-        prepare_ordinary_agent_merge_train_target,
-        methods=["POST"],
-        response_model=OrdinaryAgentMergeTrainTargetPrepareResponse,
-        responses={
-            403: {"model": dependencies.common.error_response_model},
-            409: {"model": dependencies.common.error_response_model},
-            503: {"model": dependencies.common.error_response_model},
-        },
-        summary="Prepare one ordinary-agent-only merge target",
-        operation_id="prepare_ordinary_agent_merge_train_target",
-        tags=["privileged-operations"],
-    )
-    app.add_api_route(
-        ORDINARY_AGENT_DELIVERY_AUTHORIZATION_CANDIDATE_INPUTS_ROUTE,
-        read_ordinary_agent_delivery_authorization_inputs,
-        methods=["GET"],
-        response_model=OrdinaryAgentDeliveryAuthorizationCandidateInputsResponse,
-        responses={
-            403: {"model": dependencies.common.error_response_model},
-            503: {"model": dependencies.common.error_response_model},
-        },
-        summary="Read ordinary-agent delivery authorization candidate inputs",
-        operation_id="read_ordinary_agent_delivery_authorization_candidate_inputs",
-        tags=["privileged-operations"],
-    )
     app.add_api_route(
         AUTHORIZATION_CANDIDATE_PREPARE_ROUTE,
         prepare_authorization_candidate,
@@ -2124,47 +1388,6 @@ def register_privileged_operation_routes(
         },
         summary="Prepare a closed authorization candidate",
         operation_id="prepare_authorization_candidate",
-        tags=["privileged-operations"],
-    )
-    app.add_api_route(
-        ORDINARY_AGENT_DELIVERY_POLICY_PREPARE_ROUTE,
-        prepare_ordinary_agent_delivery_policy,
-        methods=["POST"],
-        response_model=OrdinaryAgentDeliveryPolicyPrepareResponse,
-        responses={
-            403: {"model": dependencies.common.error_response_model},
-            409: {"model": dependencies.common.error_response_model},
-            503: {"model": dependencies.common.error_response_model},
-        },
-        summary="Prepare one ordinary-agent delivery policy rule",
-        operation_id="prepare_ordinary_agent_delivery_policy",
-        tags=["privileged-operations"],
-    )
-    app.add_api_route(
-        ORDINARY_AGENT_DELIVERY_ACTIVATION_PLANS_ROUTE,
-        plan_ordinary_agent_delivery_activation,
-        methods=["POST"],
-        response_model=PrivilegedOperationHumanResponse,
-        responses={
-            403: {"model": dependencies.common.error_response_model},
-            409: {"model": dependencies.common.error_response_model},
-            503: {"model": dependencies.common.error_response_model},
-        },
-        summary="Plan ordinary-agent delivery activation setup or revocation",
-        operation_id="plan_ordinary_agent_delivery_activation",
-        tags=["privileged-operations"],
-    )
-    app.add_api_route(
-        ORDINARY_AGENT_DELIVERY_ACTIVATION_OPTIONS_ROUTE,
-        read_ordinary_agent_delivery_activation_options,
-        methods=["GET"],
-        response_model=OrdinaryAgentDeliveryActivationOptionsResponse,
-        responses={
-            403: {"model": dependencies.common.error_response_model},
-            503: {"model": dependencies.common.error_response_model},
-        },
-        summary="List server-resolved ordinary-agent activation choices",
-        operation_id="read_ordinary_agent_delivery_activation_options",
         tags=["privileged-operations"],
     )
     app.add_api_route(
