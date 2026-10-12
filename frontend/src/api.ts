@@ -5,6 +5,10 @@ import type {
   ProductListPayload,
 } from "./types";
 import type {
+  ApplyProductionBackupAuthorityData,
+  ApplyProductionBackupAuthorityResponse,
+  ReadProductionBackupAuthorityData,
+  ReadProductionBackupAuthorityResponse,
   ApplyProductHealthMonitoringData,
   ApplyProductHealthMonitoringResponse,
   ApplyProductEnvironmentConfigData,
@@ -558,6 +562,22 @@ export function applyProductHealthMonitoring(
     BROWSER_WRITE_ROUTES.productHealthMonitoringApply,
     "POST", payload, options.signal, options.idempotencyKey, options.onDispatch,
   );
+}
+
+export function applyProductionBackupAuthority(
+  payload: ApplyProductionBackupAuthorityData["body"], options: BrowserOperationOptions,
+): Promise<ApplyProductionBackupAuthorityResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.productionBackupAuthorityApply, "POST", payload,
+    options.signal, options.idempotencyKey, options.onDispatch);
+}
+
+export function readProductionBackupAuthority(
+  query: ReadProductionBackupAuthorityData["query"], signal?: AbortSignal,
+): Promise<ReadProductionBackupAuthorityResponse> {
+  const request: ReadProductionBackupAuthorityData = { url: "/v1/production-backup-authority", query };
+  const parameters = new URLSearchParams({ product: query.product, context: query.context,
+    instance: query.instance, promotion_action: query.promotion_action });
+  return requestJson(`${request.url}?${parameters}`, "GET", undefined, signal);
 }
 
 export function listProductProfiles(

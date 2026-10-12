@@ -3322,3 +3322,6 @@
 .setup-diff-table table { border-collapse: collapse; width: 100%; font-size: 12px; }
 .setup-diff-table th, .setup-diff-table td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 .product-setup-panel h2 { scroll-margin-top: 90px; }
+.backup-authority-digest code {
+  overflow-wrap: anywhere;
+}
