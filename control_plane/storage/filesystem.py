@@ -5309,24 +5309,72 @@ class FilesystemRecordStore:
         return tuple(records)
 
     def cancel_pending_odoo_stable_target_replacement_operation_record(
-        self, record: OdooStableTargetReplacementOperationRecord
+        self,
+        record: OdooStableTargetReplacementOperationRecord,
+        *,
+        expected_record: OdooStableTargetReplacementOperationRecord | None = None,
     ) -> bool:
         if record.status != "cancelled" or record.phase != "cancelled":
             raise ValueError("Odoo target replacement cancellation requires a cancelled record.")
-        with self._exclusive_record_lock(
-            "odoo_stable_target_replacement_operations", record.operation_id
+        with (
+            self._exclusive_record_lock(
+                "odoo_stable_target_replacement_operations", record.operation_id
+            ),
+            self._product_authority_bundle_lock(),
         ):
-            current_record = self.read_odoo_stable_target_replacement_operation_record(
-                record.operation_id
+            current_record = self._read_model_locked(
+                OdooStableTargetReplacementOperationRecord,
+                "odoo_stable_target_replacement_operations",
+                record.operation_id,
             )
+            if expected_record is not None:
+                from control_plane.testing_replacement_recovery import (
+                    recovery_binding_fingerprint,
+                    service_testing_operation,
+                )
+
+                route = _context_instance_record_id(current_record.context, current_record.instance)
+                bindings = [
+                    self._read_model_locked(
+                        LaunchplaneProductProfileRecord,
+                        "launchplane_product_profiles",
+                        current_record.product,
+                    ),
+                    self._read_model_locked(DokployTargetRecord, "dokploy_targets", route),
+                    self._read_model_locked(DokployTargetIdRecord, "dokploy_target_ids", route),
+                ]
+
+                if (
+                    not service_testing_operation(current_record)
+                    or current_record != expected_record
+                    or current_record.recovery_journal is None
+                    or recovery_binding_fingerprint(
+                        [item.model_dump(mode="json", exclude_none=True) for item in bindings]
+                    )
+                    != current_record.recovery_journal.target_fingerprint
+                ):
+                    return False
             if not odoo_stable_lane_cancellation_is_allowed(
                 current_status=current_record.status,
                 reconciliation_required_at=current_record.updated_at,
                 cancellation=record.cancellation,
             ):
                 return False
-            self.write_odoo_stable_target_replacement_operation_record(record)
+            self._write_model_locked(
+                "odoo_stable_target_replacement_operations", record.operation_id, record
+            )
             return True
+
+    @contextmanager
+    def testing_replacement_execution_lock(
+        self, operation_id: str
+    ) -> Iterator[Callable[[], None] | None]:
+        from control_plane.storage.testing_replacement_recovery import file_execution_lock
+
+        with file_execution_lock(
+            self.state_dir / ".locks" / "testing-execution", operation_id
+        ) as check:
+            yield check
 
     def create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
         self, record: OdooStableTargetReplacementOperationRecord
@@ -5509,6 +5557,14 @@ class FilesystemRecordStore:
                 or current_record.lease_expires_at <= completed_at
             ):
                 return False
+            if record.status == "running" and record.recovery_journal is not None:
+                record = current_record.model_copy(
+                    update={"recovery_journal": record.recovery_journal}
+                )
+            elif current_record.recovery_journal is not None:
+                record = record.model_copy(
+                    update={"recovery_journal": current_record.recovery_journal}
+                )
             self.write_odoo_stable_target_replacement_operation_record(record)
             return True
 

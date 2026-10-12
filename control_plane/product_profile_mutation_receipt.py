@@ -10,7 +10,9 @@ from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 
-ProfileMutationField = Literal["owner", "image-repository", "production-use", "website-cleanup"]
+ProfileMutationField = Literal[
+    "owner", "image-repository", "production-use", "website-cleanup", "display-name"
+]
 
 
 class ProductProfileMutationReceipt(BaseModel):

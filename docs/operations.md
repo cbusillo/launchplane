@@ -2036,6 +2036,50 @@ product/runtime truth from checked-in catalogs.
 deploy workflow. Use a Launchplane `GET /v1/health` endpoint reachable from that
 runner rather than an internal-only provider hostname.
 
+After the self-deploy request leaves its legitimate release drain, the workflow
+allows the existing provider/worker stop budget while the old API still serves.
+Successful completion of the deploy request clears its outage window before
+replacement verification starts, preserving that worker/provider wait.
+The first API outage starts a two-minute observation window. When the forward
+deployment marker appears, image and health checks share its remaining deadline;
+if no outage was observed, that marker starts the window. This also handles a
+same-image redeploy. A continuously unavailable API during the request has that
+shorter limit, while successful draining responses reset it and preserve the
+full release-drain budget. In-flight requests are bounded; this is health-based
+failure detection, not evidence of container restarts or a startup cause.
+OIDC failures before sending a request and non-JSON ingress 404 route misses
+after a known pre-effect drain preserve that drain proof and its full wait.
+Gateway failures may follow a dispatched POST with a lost reply, so they start
+the short window and clear earlier drain proof. A later auth refusal cannot
+downgrade an already dispatched or uncertain attempt. These proof changes apply
+only to the opted-in self-deploy polling path. The alert and rollback share the same
+dispatch-proof decoder, including authentication refusals and a request that
+could not be prepared before any Launchplane attempt.
+A later authoritative `draining` response restores pre-effect proof because the
+server replays dispatched results. An unexpected decoder failure retains the
+existing conservative service-rollback attempt.
+After the forward marker is observed, a nearly expired window permits a bounded
+fifteen-second image confirmation and at least one health probe. Healthy results
+permit the same bounded allowance for each final identity check. Persistent
+unhealthiness does not restart the observation window. The Q197 window applies
+during startup migrations as well as ordinary startup; Compose's healthcheck
+schedule does not extend it.
+
+Before replacement, the workflow validates the already-approved existing
+Launchplane Discord sender supplied as `DISCORD_LAUNCHPLANE_WEBHOOK`. An absent
+or invalid sender stops before dispatch; bind that same sender through the
+approved workflow configuration before enabling this path. Do not generate a
+new sender or grant provider access. On a possibly dispatched replacement
+failure, the workflow reports the image, bounded HTTP/health results, run link
+and manual break-glass workflow link before attempting its existing service
+rollback. Explicit pre-effect refusals and an unfinished drain do not page for
+break-glass. The alert does not include response bodies, endpoint URLs or
+startup logs. Sending failures fail visibly without printing the webhook.
+When available, the previous image is included for the manual recovery input.
+The break-glass link opens manual dispatch; a pending protected approval exists
+only after an admin dispatches that recovery. No recovery is dispatched by the
+reporter, and manual break-glass credentials remain behind their approval gate.
+
 The manual Merge Train Policy Import workflow uses GitHub OIDC with
 `merge_train.policy_import` authority for product/context `launchplane`. It does
 not inherit Launchplane self-deploy authority; use that workflow for DB-backed

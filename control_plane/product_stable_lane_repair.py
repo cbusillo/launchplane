@@ -53,7 +53,7 @@ class ProductStableLaneRepairRequest(BaseModel):
     product: str
     context: str
     instance: str
-    base_url: str
+    base_url: str = ""
     mode: ProductStableLaneRepairMode = "dry-run"
     reason: str
     reviewed_plan_sha256: str = ""
@@ -66,7 +66,7 @@ class ProductStableLaneRepairRequest(BaseModel):
         self.base_url = self.base_url.strip().rstrip("/")
         self.reason = self.reason.strip()
         self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
-        for field_name in ("product", "context", "instance", "base_url", "reason"):
+        for field_name in ("product", "context", "instance", "reason"):
             if not getattr(self, field_name):
                 raise ValueError(f"Product stable lane repair requires {field_name}.")
         if self.mode == "dry-run" and self.reviewed_plan_sha256:
@@ -264,9 +264,21 @@ def build_product_stable_lane_repair_plan(
             "Product stable lane repair currently requires a tracked Dokploy target."
         )
 
-    domains = _normalized_domains(dokploy_target.domains)
-    base_url = _validated_base_url(request.base_url, domains=domains)
-    health_url = _health_url(base_url=base_url, target=dokploy_target, profile=profile)
+    if profile.public_website == "none":
+        if request.base_url:
+            raise ProductStableLaneRepairBoundaryError(
+                "A product with no public website cannot register a public base_url."
+            )
+        if existing_lane is not None:
+            raise ProductStableLaneRepairBoundaryError(
+                "The private lane is already registered; configure its private health check."
+            )
+        domains = tuple(_normalized_target_domain(domain) for domain in dokploy_target.domains)
+        base_url = health_url = ""
+    else:
+        domains = _normalized_domains(dokploy_target.domains)
+        base_url = _validated_base_url(request.base_url, domains=domains)
+        health_url = _health_url(base_url=base_url, target=dokploy_target, profile=profile)
     if existing_lane is None:
         lanes: tuple[ProductLaneProfile, ...] = (
             *profile.lanes,
