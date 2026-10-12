@@ -625,8 +625,8 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
   );
 }
 
-function profileApplyFailureCertainty(error: unknown, dispatched: boolean): BrowserOperationFailureCertainty {
-  // Both profile routes check the same-key DB mutation before evaluating staleness.
+export function profileApplyFailureCertainty(error: unknown, dispatched: boolean): BrowserOperationFailureCertainty {
+  // These profile routes check the same-key DB mutation before returning staleness.
   // Its CAS binding prevents a late conflicting write; a fresh dry run is safe.
   // Stale can race a commit, so the panel refreshes the current value without claiming success.
   if (dispatched && error instanceof LaunchplaneApiError && error.statusCode === 409 && error.code === "stale") {
