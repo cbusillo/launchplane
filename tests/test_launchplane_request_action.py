@@ -238,13 +238,6 @@ process.on('beforeExit', () => {{
                 )
                 window_start = clock_step if outage else len(markers) * clock_step
                 self.assertEqual(deadline, (window_start + short_budget) // 1000)
-                if outage:
-                    outage_deadline = int(
-                        output.read_text().split("outage-deadline-epoch<<")[1].splitlines()[1]
-                    )
-                    self.assertEqual(outage_deadline, deadline)
-                else:
-                    self.assertNotIn("outage-deadline-epoch<<", output.read_text())
 
     def test_pre_request_auth_and_ingress_outages_preserve_known_drain(self) -> None:
         for failure in ("auth", "ingress"):

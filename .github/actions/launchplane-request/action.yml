@@ -171,10 +171,6 @@ inputs:
     default: "true"
 
 outputs:
-  outage-deadline-epoch:
-    description: >-
-      The observation deadline when a continuous outage immediately preceded
-      the terminal response, in Unix seconds; absent when no outage was observed.
   observation-deadline-epoch:
     description: >-
       With the unavailable limit enabled, the remaining replacement-observation
