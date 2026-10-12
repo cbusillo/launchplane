@@ -369,7 +369,7 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
             result = prepare(**kwargs)
             if first:
                 first = False
-                return result.model_copy(update={"status": "missing", "record": None})
+                return result._replace(status="missing", record=None)
             return result
 
         with patch.object(self.store, "prepare_db_only_mutation", side_effect=earlier_preflight):
