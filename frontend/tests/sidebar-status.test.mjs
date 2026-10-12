@@ -66,3 +66,14 @@ test("an expiring certificate is not named as a failure layer", () => {
   assert.ok(sidebarStatus(lane, "Production").description.includes(sidebarLayerLabel("dns")));
   assert.ok(!sidebarStatus(lane, "Production").description.includes(sidebarLayerLabel("tls")));
 });
+
+test("stale inventory replaces cached failures and absent lanes with clocks", () => {
+  const lane = structuredClone(productsForFixture("products")[0].environments[0]);
+  lane.health_monitoring.open_incidents = [{ failure_layer: "dns" }];
+  assert.equal(sidebarStatus(lane, "Testing").tone, "danger");
+  for (const cached of [lane, null]) {
+    const status = sidebarStatus(cached, "Testing", "Stale data; last refresh failed");
+    assert.equal(status.tone, "stale");
+    assert.doesNotMatch(status.description, /Alert|Warning|DNS/);
+  }
+});

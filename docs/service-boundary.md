@@ -597,7 +597,6 @@ records `already_absent` without claiming a GitHub mutation.
   - `POST /v1/drivers/verireel/stable-environment` (native FastAPI)
   - `POST /v1/drivers/verireel/app-maintenance` (native FastAPI)
   - `POST /v1/drivers/verireel/prod-deploy` (native FastAPI)
-  - `POST /v1/drivers/verireel/prod-backup-gate` (native FastAPI)
   - `POST /v1/drivers/verireel/prod-promotion` (native FastAPI)
   - `POST /v1/drivers/verireel/prod-rollback` (native FastAPI)
   - `POST /v1/drivers/verireel/preview-refresh` (native FastAPI)
