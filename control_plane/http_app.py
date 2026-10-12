@@ -2,6 +2,7 @@ from control_plane.action_effects import (
     AGENT_READ_ROLE_ACTION,
     agent_read_role_covers,
     action_requires_product_coverage,
+    action_is_service_metadata,
 )
 import asyncio
 import hashlib
@@ -4087,6 +4088,12 @@ class LaunchplaneAuthzPolicyRuntime:
         ):
             return evaluate_policy()
         returned_product = product
+        if (
+            context in ("", _LAUNCHPLANE_SERVICE_CONTEXT)
+            and action_is_service_metadata(action)
+            and product != _LAUNCHPLANE_SERVICE_CONTEXT
+        ):
+            return evaluate_policy()
         if context and context != _LAUNCHPLANE_SERVICE_CONTEXT:
             if self._context_product_resolver is None:
                 return evaluate_policy()
@@ -19589,6 +19596,24 @@ def create_launchplane_fastapi_app(
             record_store=record_store,
             trace_id=trace_id,
         )
+        if not resolved_authz_policy_runtime.allows(
+            identity=identity,
+            action=AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            inherit_agent_read_role=False,
+        ) and not resolved_authz_policy_runtime.allows(
+            identity=identity,
+            action="authz_policy_retirement_evidence.read",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Retirement evidence includes policy scopes outside this reader's coverage.",
+            )
         expected = (payload.policy_record_id, payload.policy_revision, payload.policy_sha256)
         actual = (active_record.record_id, active_record.revision, active_record.policy_sha256)
         if expected != actual:
@@ -20008,7 +20033,7 @@ def create_launchplane_fastapi_app(
         is_support_reader = isinstance(
             identity,
             GitHubHumanIdentity | LocalOperatorIdentity | LocalAdminIdentity,
-        )
+        ) or (isinstance(identity, TerminalAgentIdentity) and policy_metadata_reader(identity))
         preflight_authorized = resolved_authz_policy_runtime.allows(
             identity=identity,
             action=AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
@@ -20036,6 +20061,7 @@ def create_launchplane_fastapi_app(
             action=AUTHZ_DENIAL_EXPLANATION_READ_ACTION,
             product="launchplane",
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            inherit_agent_read_role=True,
         ):
             raise _launchplane_http_error(
                 status_code=403,

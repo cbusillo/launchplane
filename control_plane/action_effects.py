@@ -44,6 +44,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "authz_denial_explanation.read": ActionDeclaration("read", "service"),
         "authz_diagnostic.evaluate": ActionDeclaration("plan", "service"),
         "authz_policy.manage": ActionDeclaration("write"),
+        "authz_policy_retirement_evidence.read": ActionDeclaration("read"),
         "authz_policy_administration.read": ActionDeclaration("read", "service"),
         "authz_policy_candidate_preview.read": ActionDeclaration("read"),
         "authz_policy_effective_access.read": ActionDeclaration("read"),
@@ -252,6 +253,11 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
 ACTION_EFFECTS: Mapping[str, ActionEffect] = MappingProxyType(
     {action: declaration.effect for action, declaration in ACTION_DECLARATIONS.items()}
 )
+
+
+def action_is_service_metadata(action: str) -> bool:
+    declaration = ACTION_DECLARATIONS.get(action)
+    return declaration is not None and declaration.service_scope == "service"
 
 
 def action_requires_product_coverage(action: str) -> bool:

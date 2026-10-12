@@ -528,6 +528,78 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(result["secret_evidence"]["findings"])
                 inspect.assert_not_called()
 
+    async def test_product_role_cannot_read_service_destination_secret_findings(self) -> None:
+        own = LaunchplaneProductProfileRecord.model_validate(product_profile_payload("sample"))
+        with _database_app(reader_policy(product=own.product)) as (store, _, app):
+            store.write_product_profile_record(own)
+            with patch(
+                "control_plane.http_app.latest_active_runtime_key_safety_policy",
+                side_effect=AssertionError("Service secret metadata is outside product scope"),
+            ) as inspect:
+                async with lifespan_client(app) as client:
+                    result = await client.post(
+                        "/v1/agent/write-intents/evaluate",
+                        headers={"Authorization": "Bearer reader-token"},
+                        json={
+                            "intent": "product_config_apply",
+                            "product": own.product,
+                            "context": own.lanes[0].context,
+                            "source_url": "https://github.com/example/sample/issues/1",
+                            "reason": "Inspect intent",
+                            "secret_bindings": ["GITHUB_TOKEN"],
+                            "destination": {"context": "launchplane", "instance": "prod"},
+                        },
+                    )
+                    self.assertEqual(result.status_code, 202, result.text)
+                    self.assertEqual(result.json()["result"]["intent"]["status"], "denied")
+                    self.assertFalse(
+                        result.json()["result"]["intent"]["secret_evidence"]["findings"]
+                    )
+                inspect.assert_not_called()
+
+    async def test_role_reader_can_explain_its_persisted_denial(self) -> None:
+        foreign = LaunchplaneProductProfileRecord.model_validate(
+            product_profile_payload("foreign-site")
+        )
+        with _database_app(reader_policy()) as (store, _, app):
+            store.write_product_profile_record(foreign)
+            headers = {"Authorization": "Bearer reader-token"}
+            async with lifespan_client(app) as client:
+                denied = await client.get("/v1/service/runtime", headers=headers)
+                self.assertEqual(denied.status_code, 403, denied.text)
+                trace = denied.json()["trace_id"]
+                explained = await client.get(
+                    f"/v1/authz-diagnostics/denials/{trace}", headers=headers
+                )
+                self.assertEqual(explained.status_code, 200, explained.text)
+                self.assertEqual(explained.json()["trace_id"], trace)
+                self.assertNotIn("record-reader-label", explained.text)
+
+    async def test_retirement_evidence_does_not_probe_foreign_workflow_grants(self) -> None:
+        foreign = LaunchplaneProductProfileRecord.model_validate(
+            product_profile_payload("foreign-site")
+        )
+        with _database_app(reader_policy()) as (store, record, app):
+            store.write_product_profile_record(foreign)
+            async with lifespan_client(app) as client:
+                result = await client.post(
+                    "/v1/authz-policies/retirement-evidence",
+                    headers={"Authorization": "Bearer reader-token"},
+                    json={
+                        "policy_record_id": record.record_id,
+                        "policy_revision": record.revision,
+                        "policy_sha256": record.policy_sha256,
+                        "workflows": [
+                            {
+                                "repository": foreign.repository,
+                                "workflow_path": f"{foreign.repository}/.github/workflows/deploy.yml",
+                            }
+                        ],
+                    },
+                )
+                self.assertEqual(result.status_code, 403, result.text)
+                self.assertNotIn(foreign.repository, result.text)
+
     async def test_denied_intent_cannot_introduce_an_aggregate_product_scope(self) -> None:
         with _database_app(reader_policy()) as (store, _, app):
             headers = {"Authorization": "Bearer reader-token"}
