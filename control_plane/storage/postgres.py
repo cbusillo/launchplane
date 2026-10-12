@@ -323,6 +323,7 @@ from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
 )
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
+from control_plane.contracts.stored_record_snapshot import StoredRecordSnapshot
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyCompareWriteResult,
     MergeTrainPolicyRecord,
@@ -5843,6 +5844,11 @@ class PostgresRecordStore(HumanSessionStore):
             self.verify_schema()
             return
         Base.metadata.create_all(self._engine)
+
+    def export_stored_record_snapshot(self) -> StoredRecordSnapshot:
+        from control_plane.stored_record_snapshot import export_stored_record_snapshot
+
+        return export_stored_record_snapshot(self._engine)
 
     def verify_schema(self) -> None:
         backend_name = self._engine.url.get_backend_name()

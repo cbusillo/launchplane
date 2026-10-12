@@ -23,7 +23,7 @@ from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import create_engine, event, inspect, select, text
+from sqlalchemy import create_engine, event, inspect, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -1319,6 +1319,71 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_scrubbed_snapshot_restores_in_postgres_and_rejects_stricter_policy(self) -> None:
+        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from control_plane.stored_record_preflight import check_restored_records, restore_snapshot
+        from control_plane.storage.postgres import LaunchplaneAuthzPolicyRow
+        from tests.support.profiles import product_profile_payload
+        from tests.test_postgres_store import _merge_train_run_record
+        from pydantic import ValidationError
+
+        with _store_for_fresh_head_database() as source:
+            policy = LaunchplaneAuthzPolicy(
+                schema_version=2,
+                github_actions=(
+                    GitHubActionsPolicyRule(
+                        repository="private/example",
+                        products=("launchplane",),
+                        contexts=("launchplane",),
+                        actions=("live_target_runtime.plan",),
+                    ),
+                ),
+            )
+            source.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="fixture",
+                    source="rehearsal",
+                    policy=policy,
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                )
+            )
+            profile = product_profile_payload()
+            assert isinstance(profile["preview"], dict)
+            profile["preview"]["override_env"] = {"TOKEN": "plaintext-sentinel"}
+            source.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile)
+            )
+            source.write_merge_train_run_record(_merge_train_run_record())
+            with source._engine.begin() as connection:
+                payload = source.list_authz_policy_records()[0].model_dump(mode="json")
+                del payload["policy"]["github_actions"][0]["instances"]
+                connection.execute(update(LaunchplaneAuthzPolicyRow).values(payload=payload))
+            snapshot = source.export_stored_record_snapshot()
+            self.assertNotIn("plaintext-sentinel", snapshot.model_dump_json())
+            with _isolated_postgres_database() as target_url:
+                engine = create_engine(target_url)
+                self.addCleanup(engine.dispose)
+                revision = restore_snapshot(engine, snapshot)
+                target = PostgresRecordStore(database_url=target_url)
+                self.addCleanup(target.close)
+                self.assertEqual(revision, target.schema_revision())
+                restored_run = target.list_merge_train_run_records()[0]
+                self.assertNotEqual(
+                    restored_run.selected_pr_number,
+                    source.list_merge_train_run_records()[0].selected_pr_number,
+                )
+                with TemporaryDirectory() as directory:
+                    check_restored_records(target, state_dir=Path(directory))
+                    with patch(
+                        "control_plane.service_auth.exclusively_instance_scoped_authz_actions",
+                        return_value=frozenset({"live_target_runtime.plan"}),
+                    ):
+                        with self.assertRaises(ValidationError):
+                            check_restored_records(target, state_dir=Path(directory))
+                with self.assertRaises(ValueError):
+                    restore_snapshot(engine, snapshot)
+
     def test_feedback_recovery_orders_jsonb_receipts_and_supersedes_same_second_failure(
         self,
     ) -> None:
