@@ -9,7 +9,7 @@ from typing import cast
 def generic_web_post_deploy_authority_digest(
     store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
 ) -> str:
-    """Capture testing inputs before target preparation and provider effects."""
+    """Read expected testing authority before target preparation and provider effects."""
     from control_plane.workflows.verireel_testing_post_deploy import (
         execute_verireel_testing_post_deploy,
     )

@@ -56,7 +56,10 @@ class CapturedTestingAuthorityTests(unittest.TestCase):
         captured = context().model_copy(update={"authority_digest": "captured-before-deploy"})
         store = Mock()
         self.assertEqual(
-            testing_qualification_authority(store, captured), captured.authority_digest
+            testing_qualification_authority(
+                cast(GenericWebDeployStore, cast(object, store)), captured
+            ),
+            captured.authority_digest,
         )
         store.read_product_profile_record.assert_not_called()
 

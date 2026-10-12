@@ -147,8 +147,9 @@ reservation. The webhook request never waits on a deploy.
     artifact to run the testing-only post-deploy extension. Passing qualification
     is reused only when its authority digest matches the current lane. The
     deployment captures this digest before target preparation and provider
-    effects, and carries it into qualification; a concurrent profile or runtime
-    input edit cannot be credited to the older deployment. Changing consumed
+    effects, and carries it into qualification rather than reading a newer
+    authority after deployment. This binds the expected starting authority;
+    it does not provide an atomic snapshot of every runtime read. Changing consumed
     runtime settings or secret versions also requires fresh qualification. Declaring
     a new shared-web lifecycle therefore requalifies a previously passing legacy
     deployment even when the artifact is unchanged; a matching qualification then
