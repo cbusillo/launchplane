@@ -268,8 +268,8 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         for private in [
             "fixture-value",
-            "proxmox.example.invalid",
-            "pbs-production",
+            host.source.host,
+            host.storage,
             "capture_status",
         ]:
             self.assertNotIn(private, response.text)
