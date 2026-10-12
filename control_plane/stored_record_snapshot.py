@@ -102,7 +102,7 @@ class _Scrubber:
         ):
             return value
         digest = self._digest(value)
-        if name.endswith("_at") or name in {"started_at", "finished_at"}:
+        if protocol and (name.endswith("_at") or name in {"started_at", "finished_at"}):
             try:
                 datetime.fromisoformat(value.replace("Z", "+00:00"))
                 return value
@@ -129,7 +129,13 @@ class _Scrubber:
         return f"snapshot-{digest[:12]}"
 
     def scrub(
-        self, value: Any, schema: Mapping[str, Any], root: Mapping[str, Any], name: str = ""
+        self,
+        value: Any,
+        schema: Mapping[str, Any],
+        root: Mapping[str, Any],
+        name: str = "",
+        *,
+        declared: bool = False,
     ) -> Any:
         if "$ref" in schema:
             schema = root["$defs"][schema["$ref"].rsplit("/", 1)[-1]]
@@ -140,12 +146,20 @@ class _Scrubber:
                 if isinstance(value, dict)
                 else "array"
                 if isinstance(value, list)
+                else "boolean"
+                if isinstance(value, bool)
+                else "integer"
+                if isinstance(value, int)
+                else "number"
+                if isinstance(value, float)
+                else "null"
+                if value is None
                 else "string"
             )
             schema = next(
                 (item for item in candidates if item.get("type") == kind or "$ref" in item), {}
             )
-            return self.scrub(value, schema, root, name)
+            return self.scrub(value, schema, root, name, declared=declared)
         if isinstance(value, str) and value.strip() in schema.get(
             "x-launchplane-snapshot-protocol", []
         ):
@@ -159,6 +173,7 @@ class _Scrubber:
                     properties.get(key, additional if isinstance(additional, dict) else {}),
                     root,
                     key,
+                    declared=key in properties,
                 )
                 for key, item in value.items()
             }
@@ -166,17 +181,20 @@ class _Scrubber:
                 scrubbed["policy_key"] = f"{scrubbed['repository']}:{scrubbed['base_branch']}"
             return scrubbed
         if isinstance(value, list):
-            return [self.scrub(item, schema.get("items", {}), root, name) for item in value]
+            return [
+                self.scrub(item, schema.get("items", {}), root, name, declared=declared)
+                for item in value
+            ]
         if isinstance(value, str):
             if value in schema.get("enum", []) or ("const" in schema and value == schema["const"]):
                 return value
-            return self.string(value, name, protocol=bool(schema))
+            return self.string(value, name, protocol=declared)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if (
-                not schema
+                not declared
                 or name.endswith("_id")
                 or name.endswith("_ids")
-                or name in {"number", "selected_pr_number"}
+                or name in {"number", "selected_pr_number", "queue_order"}
             ):
                 pseudonym = int(self._digest(str(value))[:12], 16)
                 return float(pseudonym) if isinstance(value, float) else pseudonym

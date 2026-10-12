@@ -35,7 +35,9 @@ class MergeTrainRunRecord(BaseModel):
     status: str = Field(
         json_schema_extra={
             "x-launchplane-snapshot-protocol": list(
-                get_args(MergeTrainWorkerStepStatus) + get_args(MergeTrainDryRunAction)
+                dict.fromkeys(
+                    get_args(MergeTrainWorkerStepStatus) + get_args(MergeTrainDryRunAction)
+                )
             )
         }
     )

@@ -16701,7 +16701,6 @@
               "merged",
               "idle",
               "stale_head",
-              "idle",
               "block",
               "merge",
               "update_branch",

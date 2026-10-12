@@ -9,6 +9,67 @@ RUNNER = Path(__file__).resolve().parents[1] / "scripts/deploy/stored-record-pre
 
 
 class StoredRecordPreflightRunnerTests(unittest.TestCase):
+    def test_cleanup_removes_only_current_job_resources_and_reports_inventory_failure(self) -> None:
+        cleanup = RUNNER.with_name("cleanup-stored-record-preflight.sh")
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            docker = root / "docker"
+            docker.write_text("""#!/bin/bash
+printf '%s\\t' "$@" >> "$PREFLIGHT_TEST_LOG"
+printf '\\n' >> "$PREFLIGHT_TEST_LOG"
+if [[ "$1" == ps || "$1 $2" == 'network ls' ]]; then
+  [[ "${PREFLIGHT_TEST_FAILURE:-}" != true ]] || exit 9
+  for arg in "$@"; do
+    if [[ "$arg" == 'label=launchplane.stored-record-preflight.owner=job:123' ]]; then
+      if [[ "$1" == ps ]]; then echo owned-container; else echo owned-network; fi
+      exit 0
+    fi
+  done
+  echo other-job
+fi
+""")
+            docker.chmod(0o755)
+            log = root / "commands.log"
+            snapshot = root / "launchplane-stored-record-snapshot.json"
+            snapshot.write_text("scrubbed fixture")
+            unrelated = root / "other-job-snapshot.json"
+            unrelated.write_text("other job")
+            env = {
+                **os.environ,
+                "PATH": f"{root}:{os.environ['PATH']}",
+                "PREFLIGHT_TEST_LOG": str(log),
+                "LAUNCHPLANE_PREFLIGHT_OWNER": "job:123",
+                "RUNNER_TEMP": str(root),
+            }
+            result = subprocess.run(
+                ["bash", str(cleanup)], env=env, capture_output=True, text=True, check=False
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(snapshot.exists())
+            self.assertTrue(unrelated.exists())
+            commands = [line.split("\t")[:-1] for line in log.read_text().splitlines()]
+            removals = [
+                args for args in commands if args[0] == "rm" or args[:2] == ["network", "rm"]
+            ]
+            self.assertEqual(len(removals), 2)
+            self.assertNotIn("other-job", str(removals))
+            result = subprocess.run(
+                ["bash", str(cleanup)],
+                env={**env, "PREFLIGHT_TEST_FAILURE": "true"},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 9, result.stderr)
+            result = subprocess.run(
+                ["bash", str(cleanup)],
+                env={**env, "LAUNCHPLANE_PREFLIGHT_OWNER": ""},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+
     def test_candidate_failure_propagates_and_rehearsal_resources_are_cleaned(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -42,6 +103,9 @@ fi
 exit 0
 """)
             docker.chmod(0o755)
+            unavailable_uuidgen = root / "uuidgen"
+            unavailable_uuidgen.write_text("#!/bin/bash\nexit 127\n")
+            unavailable_uuidgen.chmod(0o755)
             snapshot = root / "snapshot.json"
             snapshot.write_text("{}")
             log = root / "commands.log"
