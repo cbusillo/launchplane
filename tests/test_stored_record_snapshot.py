@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from pydantic import ValidationError
-from sqlalchemy import text, update
+from sqlalchemy import insert, text, update
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -186,6 +186,64 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_ROWS", 0):
             with self.assertRaises(ValueError):
                 self.store.export_stored_record_snapshot()
+
+    def test_large_source_history_exports_every_row_within_scrubbed_bound(self) -> None:
+        from control_plane.contracts.stored_record_snapshot import SNAPSHOT_MAX_BYTES
+
+        with self.store._engine.begin() as connection:
+            payload = self.store.list_authz_policy_records()[0].model_dump(mode="json")
+            payload["audit"] = {"private_note": "plaintext-sentinel" * 1000}
+            connection.execute(update(LaunchplaneAuthzPolicyRow).values(payload=payload))
+            historical = dict(
+                payload, record_id="historical-policy", status="superseded", revision=2
+            )
+            connection.execute(
+                insert(LaunchplaneAuthzPolicyRow).values(
+                    record_id=historical["record_id"],
+                    status=historical["status"],
+                    source=historical["source"],
+                    revision=historical["revision"],
+                    updated_at=historical["updated_at"],
+                    policy_sha256=historical["policy_sha256"],
+                    payload=historical,
+                )
+            )
+        # Each row fits, and the scrubbed export fits, but cumulative raw data does not.
+        with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", 25_000):
+            snapshot = self.store.export_stored_record_snapshot()
+        rows = snapshot.tables[LaunchplaneAuthzPolicyRow.__tablename__]
+        self.assertEqual({row["status"] for row in rows}, {"active", "superseded"})
+        self.assertEqual(len(rows), 2)
+        self.assertLess(len(snapshot.model_dump_json().encode()), SNAPSHOT_MAX_BYTES)
+        self.assertNotIn("plaintext-sentinel", snapshot.model_dump_json())
+
+    def test_oversized_source_row_refuses_with_safe_family_and_budget_diagnostics(self) -> None:
+        from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
+
+        with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", 1):
+            with self.assertRaises(ValueError) as raised:
+                self.store.export_stored_record_snapshot()
+        diagnostics = snapshot_failure_diagnostics(raised.exception)
+        self.assertEqual(diagnostics["reason"], "snapshot_source_row_byte_limit")
+        self.assertEqual(diagnostics["record_family"], LaunchplaneAuthzPolicyRow.__tablename__)
+        self.assertGreater(diagnostics["source_row_bytes"], 1)
+        self.assertEqual(diagnostics["rows_exported"], 0)
+        self.assertNotIn("plaintext-sentinel", json.dumps(diagnostics))
+
+    def test_scrubbed_output_growth_refuses_before_accumulating_more_rows(self) -> None:
+        from control_plane.stored_record_snapshot import snapshot_failure_diagnostics
+
+        with self.store._engine.begin() as connection:
+            payload = self.store.list_authz_policy_records()[0].model_dump(mode="json")
+            payload["audit"] = {"private_numbers": [1] * 500}
+            connection.execute(update(LaunchplaneAuthzPolicyRow).values(payload=payload))
+        with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", 4_000):
+            with self.assertRaises(ValueError) as raised:
+                self.store.export_stored_record_snapshot()
+        diagnostics = snapshot_failure_diagnostics(raised.exception)
+        self.assertEqual(diagnostics["reason"], "snapshot_byte_limit")
+        self.assertLess(diagnostics["source_row_bytes"], 4_000)
+        self.assertEqual(diagnostics["rows_exported"], 0)
 
     def test_legacy_dictionary_keys_and_policy_key_relationship_survive(self) -> None:
         from control_plane.stored_record_snapshot import _Scrubber

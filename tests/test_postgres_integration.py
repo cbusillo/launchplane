@@ -23,7 +23,7 @@ from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import create_engine, event, inspect, select, text, update
+from sqlalchemy import create_engine, event, insert, inspect, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -1358,8 +1358,26 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             with source._engine.begin() as connection:
                 payload = source.list_authz_policy_records()[0].model_dump(mode="json")
                 del payload["policy"]["github_actions"][0]["instances"]
+                payload["audit"] = {"private_note": "plaintext-sentinel" * 1000}
                 connection.execute(update(LaunchplaneAuthzPolicyRow).values(payload=payload))
-            snapshot = source.export_stored_record_snapshot()
+                historical = dict(
+                    payload, record_id="historical-fixture", revision=2, status="superseded"
+                )
+                connection.execute(
+                    insert(LaunchplaneAuthzPolicyRow).values(
+                        **{
+                            column.name: historical[column.name]
+                            for column in LaunchplaneAuthzPolicyRow.__table__.c
+                            if column.name != "payload"
+                        },
+                        payload=historical,
+                    )
+                )
+            # Two individually bounded rows exceed the cumulative source limit;
+            # all their historical shape must survive the real PostgreSQL cursor.
+            with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", 25_000):
+                snapshot = source.export_stored_record_snapshot()
+            self.assertEqual(len(snapshot.tables[LaunchplaneAuthzPolicyRow.__tablename__]), 2)
             self.assertNotIn("plaintext-sentinel", snapshot.model_dump_json())
             with _isolated_postgres_database() as target_url:
                 engine = create_engine(target_url)
