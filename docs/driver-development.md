@@ -459,3 +459,9 @@ restores them; rollback after a failed promotion keeps jobs paused. Older rollba
 targets reuse the historical receipt that actually captured that artifact's
 baseline, rather than borrowing the current artifact's declarations. A profile
 declaration alone does not add lifecycle work to a pre-extension rollback.
+
+If provider deployment evidence is absent but the exact attempt's receipt proves
+that a pre-image refusal restored all schedules, recovery may retry the original
+operation. A different attempt or an unqualified/failed-restoration receipt does
+not supply that proof. Testing rollback selects the same declared qualification
+executor as a forward testing deploy.

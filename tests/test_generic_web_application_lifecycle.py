@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import click
 
@@ -552,6 +552,56 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                 type(profile).model_validate(
                     profile.model_copy(update=change).model_dump(mode="json")
                 )
+
+    def test_adapter_recovers_a_fully_restored_pre_image_refusal_by_retrying_original_operation(
+        self,
+    ) -> None:
+        from control_plane.provider_operations import (
+            ProviderOperationLease,
+            ProviderMutationUnknownError,
+        )
+
+        self._api_context()
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(update={"generic_web_extensions": self.extensions})
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        store = _GenericWebDeployStore(profile)
+        provider = _LifecycleDeployProvider(
+            target_id="app-123",
+            observation=GenericWebProviderDeploymentObservation(outcome="absent"),
+        )
+        adapter = GenericWebDeployProviderMutationAdapter(
+            control_plane_root=Path("."),
+            record_store=store,
+            deploy_request=GenericWebDeployEnvelope(product=profile.product, deploy=_request()),
+            profile=profile,
+            lane=lane,
+            trace_id="pre-image-refusal",
+            deploy_provider=provider,
+        )
+        operation = "restored-before-image"
+        with patch.object(
+            provider,
+            "execute_artifact_deploy",
+            side_effect=click.ClickException("preflight refused"),
+        ):
+            with self.assertRaises(ProviderMutationUnknownError):
+                adapter.apply(operation, Mock(spec=ProviderOperationLease))
+        self.assertEqual(self.schedules["billing-recovery"], self.original)
+        inspection = adapter.inspect(
+            provider_operation_key=operation,
+            provider_effect_phase="application_schedule_restore",
+            reconciliation_key=adapter.reconciliation_key(),
+        )
+        self.assertEqual(inspection.observation.outcome, "absent")
+        self.assertTrue(inspection.retry_safe)
+        self.assertFalse(
+            adapter.inspect(
+                provider_operation_key="different-attempt",
+                provider_effect_phase="application_schedule_restore",
+                reconciliation_key=adapter.reconciliation_key(),
+            ).retry_safe
+        )
 
     def test_unsupported_lifecycle_provider_refuses_before_deploy(self) -> None:
         profile = _profile()

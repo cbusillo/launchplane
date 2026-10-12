@@ -245,6 +245,17 @@ class GenericWebDeployProviderMutationAdapter:
         observation = evidence.observation
         resolved_target = evidence.resolved_deploy_target
         if observation.outcome != "present":
+            if (
+                observation.outcome == "absent"
+                and resolved_target is not None
+                and self._restored_application_attempt(provider_operation_key, resolved_target)
+            ):
+                return _GenericWebDeployProviderInspection(
+                    observation=observation,
+                    resolved_deploy_target=resolved_target,
+                    retry_safe=True,
+                    provider_evidence="deployment_absent_before_effect",
+                )
             if observation.outcome == "absent" and provider_effect_phase == "deploy_trigger":
                 (
                     legacy_correlation,
@@ -511,6 +522,44 @@ class GenericWebDeployProviderMutationAdapter:
             observation=observation,
             resolved_deploy_target=resolved_target,
             provider_evidence=provider_evidence,
+        )
+
+    def _restored_application_attempt(
+        self,
+        provider_operation_key: str,
+        target: GenericWebResolvedDeployTarget,
+    ) -> bool:
+        if not callable(getattr(self._record_store, "read_deployment_record", None)):
+            return False
+        try:
+            record = cast(_DeploymentRecordReader, self._record_store).read_deployment_record(
+                self._deployment_record_id(provider_operation_key)
+            )
+        except FileNotFoundError:
+            return False
+        receipt = recorded_application_lifecycle(record)
+        return (
+            receipt is not None
+            and receipt.state == "restored"
+            and record.deploy.status == "fail"
+            and (
+                receipt.product,
+                receipt.context,
+                receipt.instance,
+                receipt.provider_id,
+                receipt.target_id,
+                receipt.artifact_id,
+                receipt.source_git_ref,
+            )
+            == (
+                self._profile.product,
+                self._lane.context,
+                self._lane.instance,
+                self._deploy_provider.provider_id,
+                target.resolved_target.target_id,
+                target.ship_request.artifact_id,
+                target.ship_request.source_git_ref,
+            )
         )
 
     def _deployment_record_id(self, provider_operation_key: str) -> str:
