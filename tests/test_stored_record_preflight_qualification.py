@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -20,14 +22,10 @@ class StoredRecordPreflightQualificationTests(unittest.TestCase):
             (persistent / "config.json").write_text("persistent sentinel")
             github_env = root / "github-env"
             github_env.write_text("EXISTING=value\n")
-            config_used = root / "config-used"
             docker = root / "docker"
             docker.write_text("""#!/bin/bash
-if [[ "$1" == login ]]; then
-  cat >/dev/null
-  printf '%s' "$DOCKER_CONFIG" > "$PREFLIGHT_TEST_CONFIG_USED"
-  echo '{}' > "$DOCKER_CONFIG/config.json"
-fi
+# Authentication must not delegate to a Docker credential store.
+if [[ "$1" == login ]]; then exit 77; fi
 if [[ "$1" == ps ]]; then
   printf '%s' "$DOCKER_CONFIG" > "$PREFLIGHT_TEST_CLEANUP_CONFIG"
   if [[ "${PREFLIGHT_TEST_FAILURE:-}" == true ]]; then exit 9; fi
@@ -43,7 +41,6 @@ fi
                 "DOCKER_CONFIG": str(persistent),
                 "RUNNER_TEMP": str(root),
                 "LAUNCHPLANE_PREFLIGHT_OWNER": "fixture:login",
-                "PREFLIGHT_TEST_CONFIG_USED": str(config_used),
                 "PREFLIGHT_TEST_CLEANUP_CONFIG": str(root / "cleanup-config"),
             }
             result = subprocess.run(
@@ -55,7 +52,26 @@ fi
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(github_env.read_text(), "EXISTING=value\n")
-            temporary_config = Path(config_used.read_text())
+            temporary_config = Path(
+                subprocess.check_output(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; preflight_registry_config_path',
+                        "config-path",
+                        str(ROOT / "scripts/deploy/preflight-resource-owner.sh"),
+                    ],
+                    env=env,
+                    text=True,
+                )
+            )
+            config_path = temporary_config / "config.json"
+            config = json.loads(config_path.read_text())
+            self.assertEqual(
+                base64.b64decode(config["auths"]["ghcr.io"]["auth"]).decode(),
+                env["GITHUB_ACTOR"] + ":" + env["GITHUB_TOKEN"],
+            )
+            self.assertEqual(config_path.stat().st_mode & 0o077, 0)
             self.assertNotEqual(temporary_config, persistent)
             result = subprocess.run(
                 ["bash", str(ROOT / "scripts/deploy/cleanup-stored-record-preflight.sh")],
@@ -83,7 +99,7 @@ fi
                 check=False,
             )
             self.assertEqual(result.returncode, 9, result.stderr)
-            self.assertFalse((temporary_config / "config.json").exists())
+            self.assertFalse(temporary_config.exists())
             self.assertEqual((persistent / "config.json").read_text(), "persistent sentinel")
 
     def test_supplied_image_requires_its_configured_repository_and_digest(self) -> None:
