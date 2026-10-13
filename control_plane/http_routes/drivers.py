@@ -556,38 +556,32 @@ def register_operation_status_read_routes(
             control_plane_root,
             diagnostics=recovery_diagnostics,
         )
-        if not full_record:
+        if full_record:
+            status_view = odoo_stable_target_replacement_operation_status_payload(operation)
+            result = operation.result.model_dump(mode="json") if operation.result else None
+        else:
             status_view = operation_status_read_view(
                 operation,
                 poll_url=ODOO_STABLE_TARGET_REPLACEMENT_OPERATION_STATUS_ROUTE.format(
                     operation_id=operation.operation_id.strip()
                 ),
             )
-            if operation.status == "reconciliation_required" and service_testing_operation(
-                operation
-            ):
-                # The maintained bounded helper already retains this public
-                # description even when it omits new structured response fields.
-                description = (
-                    f"Recovery: {recovery['reason'] or recovery['status']}. "
-                    f"Journal: {recovery['journal']}. "
-                    f"Provider effects: {recovery['provider_effects']}. "
-                    "The operation fence is retained; this read changes nothing."
-                )
-                if recovery_diagnostics:
-                    description += " " + " ".join(recovery_diagnostics)
-                status_view["error_description"] = description
-            return OdooStableTargetReplacementOperationStatusResponse(
-                trace_id=trace_id,
-                recovery=TestingReplacementRecoveryRead.model_validate(recovery),
-                operation=status_view,
-                result=operation_result_read_view(operation.result),
+            result = operation_result_read_view(operation.result)
+        if operation.status == "reconciliation_required" and service_testing_operation(operation):
+            # Both authorized views preserve the same fixed public observations.
+            description = (
+                f"Recovery: {recovery['reason'] or recovery['status']}. "
+                f"Journal: {recovery['journal']}. "
+                f"Provider effects: {recovery['provider_effects']}. "
+                "The operation fence is retained; this read changes nothing."
             )
-        result = operation.result.model_dump(mode="json") if operation.result else None
+            if recovery_diagnostics:
+                description += " " + " ".join(recovery_diagnostics)
+            status_view["error_description"] = description
         return OdooStableTargetReplacementOperationStatusResponse(
             trace_id=trace_id,
             recovery=TestingReplacementRecoveryRead.model_validate(recovery),
-            operation=odoo_stable_target_replacement_operation_status_payload(operation),
+            operation=status_view,
             result=result,
         )
 

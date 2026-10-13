@@ -1,5 +1,6 @@
 """Observe retained legacy evidence without manufacturing dispatch or release proof."""
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
@@ -14,13 +15,32 @@ if TYPE_CHECKING:
     from control_plane.testing_replacement_recovery import TestingRecoveryStore
 
 
+@dataclass(frozen=True)
+class LegacyReplacementInspection:
+    provider_inspected: bool = False
+    detail: str = ""
+    target_history: str = "unknown"
+    schedule_history: str = "unknown"
+    schedule_timers: str = "unknown"
+
+    @property
+    def description(self) -> str:
+        if not self.provider_inspected:
+            return f"Legacy inspection: {self.detail}."
+        return (
+            f"Legacy inspection: retained deployment candidate; target history {self.target_history}; "
+            f"schedule history {self.schedule_history}; timers {self.schedule_timers}; "
+            "original data effects unbound."
+        )
+
+
 def inspect_legacy_replacement(
     store: "TestingRecoveryStore",
     operation: OdooStableTargetReplacementOperationRecord,
     root: Path,
     *,
     deadline_at: float,
-) -> tuple[bool, str]:
+) -> LegacyReplacementInspection:
     """A candidate's current provider history never proves the old effects complete.
 
     The caller owns execution exclusion, authority and before/after record checks.
@@ -29,12 +49,12 @@ def inspect_legacy_replacement(
     This function has no settlement path and emits only fixed diagnostic text.
     """
     if not operation.request.artifact_id or not operation.request.source_git_ref:
-        return False, "Legacy inspection: original build request unavailable."
+        return LegacyReplacementInspection(detail="original build request unavailable")
     records = store.list_deployment_records(
         context_name=operation.context, instance_name=operation.instance, limit=51
     )
     if len(records) >= 51:
-        return False, "Legacy inspection: retained deployment inventory truncated."
+        return LegacyReplacementInspection(detail="retained deployment inventory truncated")
     started = datetime.fromisoformat(operation.started_at)
     fenced = datetime.fromisoformat(operation.updated_at)
     candidates = [
@@ -50,7 +70,9 @@ def inspect_legacy_replacement(
         and started <= datetime.fromisoformat(record.deploy.started_at) <= fenced
     ]
     if len(candidates) != 1:
-        return False, "Legacy inspection: retained deployment attribution unavailable or ambiguous."
+        return LegacyReplacementInspection(
+            detail="retained deployment attribution unavailable or ambiguous"
+        )
     retained = candidates[0]
     assert retained.resolved_target is not None
     target_id = retained.resolved_target.target_id
@@ -58,7 +80,7 @@ def inspect_legacy_replacement(
         context_name=operation.context, instance_name=operation.instance
     )
     if current_target.target_id != target_id:
-        return False, "Legacy inspection: retained provider target differs from the lane."
+        return LegacyReplacementInspection(detail="retained provider target differs from the lane")
     host, token = source.read_dokploy_config(control_plane_root=root)
 
     def read(path: str, query: dict[str, str | int]) -> api.JsonValue:
@@ -71,7 +93,7 @@ def inspect_legacy_replacement(
 
     target = read("/api/compose.one", {"composeId": target_id})
     if not isinstance(target, dict) or target.get("composeId") != target_id:
-        return False, "Legacy inspection: retained provider target unreadable."
+        return LegacyReplacementInspection(detail="retained provider target unreadable")
     history = read("/api/deployment.allByType", {"id": target_id, "type": "compose"})
     target_state = _history_state(history)
     server_id = str(target.get("serverId") or "").strip()
@@ -83,7 +105,7 @@ def inspect_legacy_replacement(
         lookup_id = str(user.get("id") or "").strip() if isinstance(user, dict) else ""
         schedule_type = "dokploy-server"
     if not lookup_id:
-        return False, "Legacy inspection: provider schedule inventory unavailable."
+        return LegacyReplacementInspection(detail="provider schedule inventory unavailable")
     schedules = read("/api/schedule.list", {"id": lookup_id, "scheduleType": schedule_type})
     if isinstance(schedules, dict):
         wrappers = [
@@ -95,17 +117,22 @@ def inspect_legacy_replacement(
         or len(schedules) > 50
         or any(not isinstance(item, dict) for item in schedules)
     ):
-        return False, "Legacy inspection: provider schedule inventory incomplete."
+        return LegacyReplacementInspection(detail="provider schedule inventory incomplete")
     # Reuse the executor's naming rule. Matching a mutable name is only a
     # candidate for observation, never attribution to the historical attempt.
     app_name = post_deploy._build_dokploy_data_workflow_schedule_app_name(
         context_name=operation.context, instance_name=operation.instance
     )
     schedule_states = []
+    timer_states = []
     for schedule in schedules:
         assert isinstance(schedule, dict)
         if schedule.get("appName") != app_name:
             continue
+        enabled = schedule.get("enabled")
+        timer_states.append(
+            "enabled" if enabled is True else "disabled" if enabled is False else "unknown"
+        )
         schedule_id = api.schedule_key(schedule)
         if not schedule_id:
             schedule_states.append("unknown")
@@ -113,8 +140,7 @@ def inspect_legacy_replacement(
         schedule_history = read(
             "/api/deployment.allByType", {"id": schedule_id, "type": "schedule"}
         )
-        state = _history_state(schedule_history)
-        schedule_states.append("active" if schedule.get("enabled") is not False else state)
+        schedule_states.append(_history_state(schedule_history))
     schedule_state = (
         "unavailable"
         if not schedule_states
@@ -126,9 +152,20 @@ def inspect_legacy_replacement(
         if "empty" in schedule_states
         else "terminal"
     )
-    return True, (
-        f"Legacy inspection: retained deployment candidate; target history {target_state}; "
-        f"schedule history {schedule_state}; original data effects unbound."
+    timer_state = (
+        "unavailable"
+        if not timer_states
+        else "unknown"
+        if "unknown" in timer_states
+        else "enabled"
+        if "enabled" in timer_states
+        else "disabled"
+    )
+    return LegacyReplacementInspection(
+        provider_inspected=True,
+        target_history=target_state,
+        schedule_history=schedule_state,
+        schedule_timers=timer_state,
     )
 
 

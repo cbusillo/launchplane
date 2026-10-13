@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 from tempfile import TemporaryDirectory
+from time import monotonic
 import unittest
 from unittest.mock import patch
 
@@ -31,6 +32,7 @@ from control_plane.testing_replacement_recovery import (
     recover_stranded_testing_replacements,
     testing_replacement_recovery_read,
 )
+from control_plane.testing_legacy_replacement_inspection import inspect_legacy_replacement
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerStore,
     _execute_target_replacement_operation,
@@ -99,8 +101,17 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             )
             getattr(store, "write_deployment_record")(deployment)
             fenced = self.fence(store)
-            for schedule_status in ("done", "running", "unexpected-status"):
-                with self.subTest(backend=type(store).__name__, schedule_status=schedule_status):
+            for schedule_status, enabled, expected_history, expected_timer in (
+                ("done", False, "terminal", "disabled"),
+                ("running", False, "active", "disabled"),
+                ("unexpected-status", False, "unknown", "disabled"),
+                ("done", None, "terminal", "unknown"),
+                ("unexpected-status", True, "unknown", "enabled"),
+                ("done", "false", "terminal", "unknown"),
+            ):
+                with self.subTest(
+                    backend=type(store).__name__, schedule_status=schedule_status, enabled=enabled
+                ):
                     calls: list[str] = []
 
                     def read(**kwargs: object) -> api.JsonValue:
@@ -119,7 +130,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                                         context_name=operation.context,
                                         instance_name=operation.instance,
                                     ),
-                                    "enabled": False,
+                                    "enabled": enabled,
                                 }
                             ]
                         query = cast(dict[str, str], kwargs["query"])
@@ -135,6 +146,11 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                         ),
                         patch.object(api, "dokploy_request", side_effect=read),
                     ):
+                        observation = inspect_legacy_replacement(
+                            store, fenced, root, deadline_at=monotonic() + 15
+                        )
+                        self.assertEqual(observation.schedule_history, expected_history)
+                        self.assertEqual(observation.schedule_timers, expected_timer)
                         view = testing_replacement_recovery_read(
                             store, fenced, root, diagnostics=diagnostics
                         )

@@ -375,7 +375,7 @@ def testing_replacement_recovery_read(
                 )
 
                 fingerprint = current_binding_fingerprint(store, current)
-                inspected, summary = inspect_legacy_replacement(
+                legacy_inspection = inspect_legacy_replacement(
                     store, current, root, deadline_at=monotonic() + 15
                 )
                 check_lock()
@@ -387,9 +387,9 @@ def testing_replacement_recovery_read(
                     or current_binding_fingerprint(store, current) != fingerprint
                 ):
                     return refuse("recovery_operation_or_binding_changed")
-                view["provider_inspected"] = inspected
+                view["provider_inspected"] = legacy_inspection.provider_inspected
                 if diagnostics is not None:
-                    diagnostics.append(summary)
+                    diagnostics.append(legacy_inspection.description)
                 return refuse("recovery_journal_absent")
             if not view["attempt_matches"]:
                 return refuse("recovery_attempt_changed")

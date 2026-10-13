@@ -1902,6 +1902,28 @@ class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["recovery"]["provider_effects"], "unknown")
             self.assertIn(payload["recovery"]["reason"], payload["operation"]["error_description"])
             self.assertFalse(payload["recovery"]["safe_to_release"])
+            execution_app = create_launchplane_fastapi_app(
+                control_plane_root_path=root,
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(
+                    action="odoo_target_replacement_apply.execute",
+                    products=(operation.product,),
+                    contexts=(operation.context,),
+                    instances=("testing",),
+                    schema_version=2,
+                ),
+                record_store_factory=lambda: store,
+            )
+            full_response = await _asgi_get(
+                execution_app,
+                f"/v1/drivers/odoo/target-replacement/operations/{operation.operation_id}",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            self.assertEqual(full_response.status_code, 200, full_response.text)
+            self.assertEqual(
+                full_response.json()["operation"]["error_description"],
+                payload["operation"]["error_description"],
+            )
             self.assertEqual(
                 store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
                 operation,
