@@ -25797,6 +25797,16 @@
             "title": "Sequence",
             "type": "integer"
           },
+          "source_build": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArtifactSourceBuild"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "source_map": {
             "default": [],
             "items": {
