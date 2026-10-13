@@ -749,18 +749,14 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                         else []
                     )
                     self.assertEqual(comments, expected_annotations)
-                    self.assertEqual(
-                        labels, set(expected_annotations) if label_configured else set()
-                    )
+                    self.assertEqual(labels, set(expected_annotations))
                     self.assertEqual(close_requests, [])
                     self.assertEqual(len(graph.merge_requests), 2 if deeper else 1)
                     # Retry completed cleanup through the same HTTP controller.
                     replay = await run()
                     self.assertEqual(replay.status_code, 202, replay.text)
                     self.assertEqual(comments, expected_annotations)
-                    self.assertEqual(
-                        labels, set(expected_annotations) if label_configured else set()
-                    )
+                    self.assertEqual(labels, set(expected_annotations))
                     self.assertEqual(len(graph.merge_requests), 2 if deeper else 1)
                     self.assertTrue(
                         all(

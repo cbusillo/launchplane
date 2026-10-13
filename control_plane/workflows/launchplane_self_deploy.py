@@ -21,7 +21,6 @@ from control_plane.dokploy import source as dokploy_source
 
 LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 LAUNCHPLANE_DEPLOYMENT_MARKER_ENV_KEY = "LAUNCHPLANE_DEPLOYMENT_MARKER"
-LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS_ENV_KEY = "LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS"
 _DATABASE_URL_ENV_KEY = "LAUNCHPLANE_DATABASE_URL"
 _SECRET_KEYS_JSON_ENV_KEY = "LAUNCHPLANE_SECRET_KEYS_JSON"
 _MASTER_ENCRYPTION_KEY_ENV_KEY = "LAUNCHPLANE_MASTER_ENCRYPTION_KEY"
@@ -73,21 +72,6 @@ LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
 )
 
 
-class OrdinaryAgentWorkerReplicasChange(BaseModel):
-    """Reviewed expected-state change for the Launchplane ordinary-worker replica count."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    expected: Literal["absent", "0", "1"]
-    desired: Literal["absent", "0", "1"]
-
-    @model_validator(mode="after")
-    def _reject_noop(self) -> "OrdinaryAgentWorkerReplicasChange":
-        if self.expected == self.desired:
-            raise ValueError("Ordinary-agent worker replicas change must not be a no-op.")
-        return self
-
-
 class LaunchplaneSelfDeployRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -99,7 +83,6 @@ class LaunchplaneSelfDeployRequest(BaseModel):
     oauth_env_removals: tuple[str, ...] = ()
     oauth_env_expected_absent: tuple[str, ...] = ()
     oauth_env_expected_values: dict[str, str] = Field(default_factory=dict)
-    ordinary_agent_worker_replicas: OrdinaryAgentWorkerReplicasChange | None = None
     supersedes_deployment_marker: str = ""
     no_cache: bool = False
 
@@ -213,8 +196,6 @@ class LaunchplaneSelfDeployRequest(BaseModel):
                 "equal to an expected value."
             )
         self.oauth_env_expected_values = normalized_expected_values
-        if self.ordinary_agent_worker_replicas is not None and self.target_type != "compose":
-            raise ValueError("Ordinary-agent worker replicas apply only to compose targets.")
         return self
 
 
@@ -234,9 +215,6 @@ class LaunchplaneSelfDeployResult(BaseModel):
     authz_policy_sha256: str = ""
     oauth_env_keys_changed: tuple[str, ...] = ()
     oauth_env_keys_removed: tuple[str, ...] = ()
-    ordinary_agent_worker_replicas_changed: bool = False
-    ordinary_agent_worker_replicas_previous: str = ""
-    ordinary_agent_worker_replicas_desired: str = ""
 
 
 def execute_launchplane_self_deploy(
@@ -278,18 +256,9 @@ def _execute_launchplane_self_deploy(
     )
     raw_env_text = str(target_payload.get("env") or "")
     previous_env_map = dokploy_api.parse_dokploy_env_text(raw_env_text)
-    replicas_change = request.ordinary_agent_worker_replicas
-    previous_replicas: Literal["absent", "0", "1"] = "absent"
     if request.target_type == "compose":
-        _validate_ordinary_agent_worker_compose_target(
-            target_payload=target_payload,
-            env_map=previous_env_map,
-        )
-        previous_replicas = _ordinary_agent_worker_replicas_state(previous_env_map)
-    if replicas_change is not None and previous_replicas != replicas_change.expected:
-        raise ValueError(
-            "Launchplane self deploy ordinary-agent worker replicas must match the reviewed "
-            f"expected state {replicas_change.expected!r}."
+        _validate_launchplane_compose_target(
+            target_payload=target_payload, env_map=previous_env_map
         )
     for env_key in request.oauth_env_expected_absent:
         if env_key in previous_env_map:
@@ -305,11 +274,6 @@ def _execute_launchplane_self_deploy(
     updates = {LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY: request.image_reference}
     updates.update(request.oauth_env)
     removals: tuple[str, ...] = request.oauth_env_removals
-    if replicas_change is not None:
-        if replicas_change.desired == "absent":
-            removals = (*removals, LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS_ENV_KEY)
-        else:
-            updates[LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS_ENV_KEY] = replicas_change.desired
     if request.policy_b64:
         updates["LAUNCHPLANE_POLICY_B64"] = request.policy_b64
         removals = (
@@ -431,31 +395,10 @@ def _execute_launchplane_self_deploy(
         oauth_env_keys_removed=tuple(
             sorted(env_key for env_key in request.oauth_env_removals if env_key in previous_env_map)
         ),
-        ordinary_agent_worker_replicas_changed=replicas_change is not None,
-        ordinary_agent_worker_replicas_previous=(
-            previous_replicas if request.target_type == "compose" else ""
-        ),
-        ordinary_agent_worker_replicas_desired=(
-            replicas_change.desired
-            if replicas_change is not None
-            else (previous_replicas if request.target_type == "compose" else "")
-        ),
     )
 
 
-def _ordinary_agent_worker_replicas_state(env_map: dict[str, str]) -> Literal["absent", "0", "1"]:
-    raw_value = env_map.get(LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS_ENV_KEY)
-    if raw_value is None:
-        return "absent"
-    normalized_value = raw_value.strip()
-    if normalized_value in {"0", "1"}:
-        return cast(Literal["0", "1"], normalized_value)
-    raise ValueError(
-        "Launchplane self deploy ordinary-agent worker replicas have an unsupported state."
-    )
-
-
-def _validate_ordinary_agent_worker_compose_target(
+def _validate_launchplane_compose_target(
     *, target_payload: dokploy_api.JsonObject, env_map: dict[str, str]
 ) -> None:
     source_type = str(target_payload.get("sourceType") or "").strip()
@@ -468,18 +411,14 @@ def _validate_ordinary_agent_worker_compose_target(
         or compose_path != "./docker-compose.yml"
         or command
     ):
-        raise ValueError(
-            "Launchplane self deploy ordinary-agent worker compose target is incompatible."
-        )
+        raise ValueError("Launchplane self deploy compose target is incompatible.")
     incompatible_env_keys = {
         "COMPOSE_FILE",
         "COMPOSE_PROFILES",
         "COMPOSE_PROJECT_NAME",
     }
     if incompatible_env_keys & env_map.keys():
-        raise ValueError(
-            "Launchplane self deploy ordinary-agent worker compose target is incompatible."
-        )
+        raise ValueError("Launchplane self deploy compose target is incompatible.")
 
 
 def _validate_bootstrap_target_env(env_map: dict[str, str]) -> None:

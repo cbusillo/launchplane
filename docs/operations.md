@@ -175,11 +175,6 @@ checkout.
   run the scheduled merge-train pass for every scheduler-enabled policy target;
   the `launchplane-merge-train-workers` compose service runs it every five
   minutes.
-  `service ordinary-agent-workers run-once` and `run` belong to the retired
-  ordinary-agent delegated-delivery design, as does its
-  [provider delivery inspection](provider-delivery-inspection.md). The worker
-  deploys at zero replicas; do not enable or extend it. Its code is scheduled
-  for deletion (#2437).
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
 - `storage provider-target-audit`: run the read-only provider-target parity
   preflight before backfill or provider-target authority cutover.
@@ -4121,20 +4116,10 @@ remain diagnostic and do not block a valid DB heartbeat. Target lookup, service
 selection, container configuration/identity, and image identity failures remain
 hard failures.
 
-The ordinary-agent delivery cleanup below belongs to the retired
-delegated-delivery design and goes with its code (#2437). The same supervised
-process performs bounded expiry maintenance for private
-ordinary-agent credential deliveries after its startup schema probe confirms
-the delivery tables and expiry index. Deploying that worker image therefore
-starts the scanner automatically, although an empty table makes it inert and no
-ordinary-agent route, enrollment, or grant is activated. Cleanup emits separate
-`ordinary_agent_delivery_cleanup_succeeded` and
-`ordinary_agent_delivery_cleanup_failed` telemetry. A row-level cleanup failure
-uses process-local exponential backoff and does not increment the privileged
-poll error threshold or prevent otherwise-authorized operations from running.
-The existing poll heartbeat proves only the privileged-operation poll; retain a
-cleanup-success event separately when cleanup readiness is required. A shared
-database or startup-schema failure can still stop the whole worker process.
+The privileged-operation worker retains bounded expiry maintenance for legacy
+delivery ciphertext because managed-secret key retirement still accounts for
+that ciphertext. The ordinary enrollment recovery and execution workers are
+removed; remaining storage cleanup is tracked in #2437.
 
 Because runtime compatibility accepts only the checked-in Alembic head, a code
 rollback across this migration also requires the matching schema downgrade;

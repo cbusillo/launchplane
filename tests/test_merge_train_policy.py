@@ -33,6 +33,7 @@ from control_plane.contracts.merge_train_policy import (
     merge_train_repository_policy_delivery_semantics_sha256,
     parse_merge_train_policy_toml,
 )
+from control_plane.merge_train_stack_disposition import resolve_stack_child_disposition_label
 from control_plane.merge_train_policy_source import MergeTrainPolicyStoreMissingError
 from control_plane.merge_train_policy_source import resolve_merge_train_policy_record
 from control_plane.contracts.merge_train_controller_state import build_merge_train_controller_key
@@ -441,20 +442,35 @@ class MergeTrainPolicyTests(unittest.TestCase):
                 }
             ],
         }
-        legacy_sha256 = hashlib.sha256(
-            json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        record = MergeTrainPolicyRecord.model_validate(
-            {
-                "record_id": "merge-train-policy-legacy",
-                "source": "test",
-                "updated_at": "2026-05-13T21:00:00Z",
-                "policy_sha256": legacy_sha256,
-                "policy": legacy_payload,
-            }
-        )
-        self.assertEqual(merge_train_policy_sha256(record.policy), legacy_sha256)
-        self.assertFalse(record.policy.policies[0].scheduler.enabled)
+        for label in ("stack-landed", "", None):
+            with self.subTest(label=label):
+                payload = json.loads(json.dumps(legacy_payload))
+                repository = payload["policies"][0]
+                if label is None:
+                    repository.pop("stack_child_disposition_label")
+                else:
+                    repository["stack_child_disposition_label"] = label
+                canonical = json.loads(json.dumps(payload))
+                if not label:
+                    canonical["policies"][0].pop("stack_child_disposition_label", None)
+                legacy_sha256 = hashlib.sha256(
+                    json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                record = MergeTrainPolicyRecord.model_validate(
+                    {
+                        "record_id": "merge-train-policy-legacy",
+                        "source": "test",
+                        "updated_at": "2026-05-13T21:00:00Z",
+                        "policy_sha256": legacy_sha256,
+                        "policy": payload,
+                    }
+                )
+                stored_payload = record.model_dump(mode="json")
+                resolve_stack_child_disposition_label(record.policy.policies[0])
+                self.assertEqual(record.model_dump(mode="json"), stored_payload)
+                restored = MergeTrainPolicyRecord.model_validate_json(record.model_dump_json())
+                self.assertEqual(merge_train_policy_sha256(restored.policy), legacy_sha256)
+                self.assertFalse(restored.policy.policies[0].scheduler.enabled)
 
     def test_policy_record_rejects_timezone_naive_updated_at(self) -> None:
         with self.assertRaisesRegex(ValidationError, "timestamp must include a timezone"):

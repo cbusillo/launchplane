@@ -225,17 +225,6 @@ events. Daily fresh CI is supplied separately by PR #2893; this reporting
 change must land after or with that schedule so newly discovered advisories
 have a blocking signal independent of unrelated pull requests.
 
-The container-build CI jobs also run
-`bash scripts/qualify-ordinary-agent-compose.sh <built-test-image>`. This
-exercises the checked-in ordinary-worker replica expression with an isolated
-Compose project: default zero, one running container, then removal of that
-container at zero. All service commands become harmless bounded sleeps, with
-no runtime environment, mounts, network access or provider credentials. The
-check preserves unrelated fixture containers and removes only its own project.
-It proves Compose convergence, not the deployed provider invocation or worker
-authorization. Run it locally only with an available test Docker engine and an
-already-built image.
-
 CI image builds use the job-specific Buildx builder without importing or
 exporting shared build caches. `scripts/build-ci-runtime-image.sh` retries once
 without build cache only when cache-key computation reports the missing-layer

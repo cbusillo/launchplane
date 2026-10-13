@@ -30,6 +30,24 @@ from tests.test_privileged_operation_record_read import _reader_policy, _HEADERS
 
 
 class OrdinaryAgentRetirementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retired_worker_command_cannot_open_storage(self) -> None:
+        from click.testing import CliRunner
+        from control_plane.cli import main
+
+        with patch("control_plane.cli_service._store", side_effect=AssertionError) as store:
+            result = CliRunner().invoke(
+                main,
+                [
+                    "service",
+                    "ordinary-agent-workers",
+                    "run-once",
+                    "--database-url",
+                    "sqlite+pysqlite:///:memory:",
+                ],
+            )
+        self.assertEqual(result.exit_code, 2, result.output)
+        store.assert_not_called()
+
     async def test_removed_ingress_cannot_reach_storage(self) -> None:
         with _database_app(_reader_policy()) as (store, _, app):
             with patch.object(store, "claim_ordinary_agent_credential", side_effect=AssertionError):

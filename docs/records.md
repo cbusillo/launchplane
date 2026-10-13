@@ -67,22 +67,10 @@ revoked without reading custody or calling a provider. The store derives the
 receipt after DB time and server-allocated revisions are known; callers cannot
 supply response content or run callbacks while locks are held.
 
-The internal mutation requires its exact code-owned scope and route, uses the
-operation ID as its idempotency key, and binds the complete apply envelope in the
-request fingerprint. This internal apply envelope has no public client route or
-filesystem import path. The controlled worker constructs it from the approved
-enrollment operation and fresh administrator evidence. The separate A5 mediated
-policy transition and activation gates still apply; tables or source presence
-alone cannot activate an ordinary agent. See
-[ordinary agent execution](ordinary-agent-execution.md) for the complete flow.
-
-The supervised privileged-operation worker performs bounded expiry maintenance
-for private ordinary-agent delivery rows. The database clock and the delivery
-row's current state determine expiry; retries are idempotent and retain the
-audit rows needed for credential and key-retirement custody. Cleanup failure has
-separate redacted telemetry and process-local backoff, so a poisoned delivery
-cannot block unrelated privileged-operation execution. The worker's normal poll
-heartbeat does not assert cleanup success.
+Enrollment recovery has been removed. Retained delivery ciphertext still
+participates in managed-secret key retirement, so the privileged-operation
+worker keeps its bounded expiry maintenance until storage deletion under #2437.
+History remains readable; no enrollment or delegated execution is enabled.
 
 ### Provider Delivery Inspection
 
