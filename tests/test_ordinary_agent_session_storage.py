@@ -21,7 +21,7 @@ from control_plane.contracts.ordinary_agent_lifecycle import (
     OrdinaryAgentEnrollApplyEnvelope,
     OrdinaryAgentEnrollmentIntent,
 )
-from control_plane.ordinary_agent_session_approval import (
+from tests.support.ordinary_agent_session_approval import (
     approve_existing_ordinary_agent_session,
     cancel_pending_ordinary_agent_operation,
     revoke_ordinary_agent_session,

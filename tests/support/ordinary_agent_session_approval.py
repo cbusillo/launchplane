@@ -1,9 +1,4 @@
-"""Authenticated application boundary for ordinary session approval.
-
-The configured manager belongs to the service, never to request input. No route
-is registered here. Browser approvals use signed human sessions and stored
-ordinary proposals; they never accept an ordinary bearer or an asserted admin ID.
-"""
+"""Legacy approval fixture adapters for retained storage compatibility tests."""
 
 from __future__ import annotations
 
