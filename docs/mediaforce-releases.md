@@ -23,7 +23,7 @@ from an agent. It rechecks the resolver's exact plan, active product profile,
 production context, latest published Client acceptance, checklist digest and
 candidate/prior versions. Held releases and overrides cannot start it. Standing
 Director acceptance must already be recorded by Launchplane and still name the
-active policy administrator; this adapter does not invent standing decisions.
+admin named by the active policy; this adapter does not invent standing decisions.
 The profile driver is `mediaforce-macos`. Rollback drills and temporary hotfixes
 are not supported by this adapter and cannot silently become ordinary releases.
 
