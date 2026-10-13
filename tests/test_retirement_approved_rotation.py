@@ -92,7 +92,16 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                 f"sqlite+pysqlite:///{Path(directory) / 'rotation.sqlite3'}"
             )
 
-    async def assert_approved_rotation_survives(self, database_url: str) -> None:
+    async def test_partial_disable_preserves_rotation_and_refuses_changed_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            await self.assert_approved_rotation_survives(
+                f"sqlite+pysqlite:///{Path(directory) / 'partial-rotation.sqlite3'}",
+                partial_disable=True,
+            )
+
+    async def assert_approved_rotation_survives(
+        self, database_url: str, *, partial_disable: bool = False
+    ) -> None:
         fixture = retirement_http.ProductRetirementHttpTests()
         store = fixture._store(Path("."), database_url=database_url)
         try:
@@ -129,6 +138,29 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                     updated_at=NOW,
                 )
             )
+            first_secret = secret.model_copy(
+                update={
+                    "secret_id": "z-first-secret",
+                    "name": "first-fixture",
+                    "current_version_id": "first-v1",
+                }
+            )
+            if partial_disable:
+                store.write_secret_record(first_secret)
+                store.write_secret_version(
+                    store.read_secret_version("v1").model_copy(
+                        update={"secret_id": first_secret.secret_id, "version_id": "first-v1"}
+                    )
+                )
+                store.write_secret_binding(
+                    store.list_secret_bindings(integration="fixture")[0].model_copy(
+                        update={
+                            "binding_id": "first-binding",
+                            "secret_id": first_secret.secret_id,
+                            "binding_key": "FIRST_FIXTURE_TOKEN",
+                        }
+                    )
+                )
             policy = _policy().model_copy(
                 update={
                     "local_operators": (
@@ -182,29 +214,34 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                     return_value=("opaque-new-fixture", "new-root"),
                 ),
             ):
-                rotation_plan = await request(
-                    rotation_app,
-                    "POST",
-                    "/v1/privileged-operations/plans",
-                    payload={
-                        "descriptor_id": "managed-secret-reencryption",
-                        "source_event_id": "retirement-rotation-plan",
-                        "request": {"reason": "Fixture approved rotation overlap"},
-                    },
-                )
-                self.assertEqual(rotation_plan.status_code, 200, rotation_plan.text)
-                operation_id = rotation_plan.json()["record"]["operation_id"]
-                approved = await request(
-                    rotation_app,
-                    "POST",
-                    f"/v1/privileged-operations/plans/{operation_id}/approve",
-                    payload={
-                        "source_event_id": "retirement-rotation-approval",
-                        "reason": "Reviewed fixture rotation",
-                    },
-                )
-                self.assertEqual(approved.status_code, 200, approved.text)
-                self.assertEqual(approved.json()["record"]["status"], "approved")
+
+                async def approve_rotation() -> None:
+                    rotation_plan = await request(
+                        rotation_app,
+                        "POST",
+                        "/v1/privileged-operations/plans",
+                        payload={
+                            "descriptor_id": "managed-secret-reencryption",
+                            "source_event_id": "retirement-rotation-plan",
+                            "request": {"reason": "Fixture approved rotation overlap"},
+                        },
+                    )
+                    self.assertEqual(rotation_plan.status_code, 200, rotation_plan.text)
+                    operation_id = rotation_plan.json()["record"]["operation_id"]
+                    approved = await request(
+                        rotation_app,
+                        "POST",
+                        f"/v1/privileged-operations/plans/{operation_id}/approve",
+                        payload={
+                            "source_event_id": "retirement-rotation-approval",
+                            "reason": "Reviewed fixture rotation",
+                        },
+                    )
+                    self.assertEqual(approved.status_code, 200, approved.text)
+                    self.assertEqual(approved.json()["record"]["status"], "approved")
+
+                if not partial_disable:
+                    await approve_rotation()
                 entered, released = Event(), Event()
                 bindings_before = store.list_secret_bindings(integration="fixture")
                 paused = False
@@ -214,7 +251,7 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                     *, expected_record: SecretRecord, updated_at: str, updated_by: str
                 ) -> bool:
                     nonlocal paused
-                    if not paused:
+                    if expected_record.secret_id == secret.secret_id and not paused:
                         paused = True
                         entered.set()
                         if not released.wait(30):
@@ -249,6 +286,21 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(
                             await asyncio.to_thread(entered.wait, 10), "no secret pause"
                         )
+                        if partial_disable:
+                            self.assertEqual(
+                                store.read_secret_record(first_secret.secret_id).status, "disabled"
+                            )
+                            self.assertEqual(
+                                tuple(
+                                    event.event_type
+                                    for event in store.list_secret_audit_events(
+                                        secret_id=first_secret.secret_id
+                                    )
+                                ),
+                                ("disabled",),
+                            )
+                        if partial_disable:
+                            await approve_rotation()
                         executed = await asyncio.to_thread(
                             execute_approved_privileged_operations_once,
                             record_store=store,
@@ -270,7 +322,48 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                     delete.assert_not_called()
                 after = store.read_secret_record(secret.secret_id)
                 self.assertEqual(after, rotated)
-                self.assertEqual(store.list_secret_bindings(integration="fixture"), bindings_before)
+                bindings_after = store.list_secret_bindings(integration="fixture")
+                expected_bindings = tuple(
+                    binding.model_copy(
+                        update={
+                            "status": "disabled",
+                            "updated_at": store.read_secret_record(
+                                first_secret.secret_id
+                            ).updated_at,
+                        }
+                    )
+                    if partial_disable and binding.secret_id == first_secret.secret_id
+                    else binding
+                    for binding in bindings_before
+                )
+                self.assertEqual(
+                    {binding.binding_id: binding for binding in bindings_after},
+                    {binding.binding_id: binding for binding in expected_bindings},
+                )
+                if partial_disable:
+                    disabled_first = store.read_secret_record(first_secret.secret_id)
+                    first_events = store.list_secret_audit_events(secret_id=first_secret.secret_id)
+                    self.assertEqual(disabled_first.status, "disabled")
+                    self.assertEqual(
+                        disabled_first.current_version_id, first_secret.current_version_id
+                    )
+                    self.assertEqual(
+                        store.list_runtime_environment_records(
+                            context_name="example-site", instance_name="prod"
+                        ),
+                        (),
+                    )
+                self.assertEqual(
+                    store.read_product_profile_record("example-site").lifecycle_state, "retiring"
+                )
+                checkpoints = tuple(
+                    record
+                    for record in store.list_product_retirement_records(product="example-site")
+                    if record.mutation_evidence.finalization_profile_sha256
+                )
+                self.assertTrue(checkpoints)
+                checkpoint = checkpoints[0]
+                self.assertTrue(checkpoint.mutation_evidence.provider_absence_verified)
                 self.assertEqual(response.status_code, 409, response.text)
                 self.assertEqual(
                     response.json()["error"]["code"], "mutation_reconciliation_required"
@@ -313,6 +406,13 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                         headers=fixture.headers,
                         payload=retirement_payload,
                     )
+                    replan = await request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers={**fixture.headers, "Idempotency-Key": "replacement-plan"},
+                        payload=_plan_payload(),
+                    )
                     conflict = await request(
                         app,
                         "POST",
@@ -320,6 +420,8 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                         headers={**fixture.headers, "Idempotency-Key": "other-retirement"},
                         payload=retirement_payload,
                     )
+                self.assertEqual(replan.status_code, 409, replan.text)
+                self.assertEqual(replan.json()["error"]["code"], "product_retirement_blocked")
                 self.assertEqual(retry.status_code, 409, retry.text)
                 self.assertEqual(conflict.status_code, 409, conflict.text)
                 self.assertEqual(retry.json()["error"]["code"], "mutation_reconciliation_required")
@@ -327,6 +429,31 @@ class RetirementApprovedRotationTests(unittest.IsolatedAsyncioTestCase):
                     conflict.json()["error"]["code"], "mutation_reconciliation_required"
                 )
                 self.assertEqual(store.read_secret_record(secret.secret_id), rotated)
+                self.assertEqual(
+                    store.list_secret_audit_events(secret_id=secret.secret_id), rotation_events
+                )
+                self.assertEqual(store.list_secret_bindings(integration="fixture"), bindings_after)
+                self.assertEqual(
+                    store.read_product_retirement_record(checkpoint.record_id), checkpoint
+                )
+                held = store.read_idempotency_record(
+                    scope=reservation.scope,
+                    route_path=reservation.route_path,
+                    idempotency_key=reservation.idempotency_key,
+                )
+                assert held is not None
+                self.assertEqual(held.state, "reconcile_required")
+                self.assertEqual(held.request_fingerprint, reservation.request_fingerprint)
+                self.assertEqual(held.provider_target_key, reservation.provider_target_key)
+                self.assertEqual(held.reconciliation_key, reservation.reconciliation_key)
+                if partial_disable:
+                    self.assertEqual(
+                        store.read_secret_record(first_secret.secret_id), disabled_first
+                    )
+                    self.assertEqual(
+                        store.list_secret_audit_events(secret_id=first_secret.secret_id),
+                        first_events,
+                    )
                 delete.assert_not_called()
         finally:
             store.close()

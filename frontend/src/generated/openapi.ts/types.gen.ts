@@ -464,6 +464,7 @@ export type DokployTargetRecord = {
     healthcheck_path: string;
     healthcheck_timeout_seconds: number | null;
     instance: string;
+    pending_public_host_effects: Array<PublicHostEffect>;
     policies: DokployTargetPolicies;
     project_name: string;
     public_hosts: Array<string>;
@@ -2376,6 +2377,7 @@ export type PreviewGenerationRecord = {
     runtime_identity: RuntimeIdentity | null;
     schema_version: number;
     sequence: number;
+    source_build: ArtifactSourceBuild | null;
     source_map: Array<PreviewSourceRecord>;
     started_at: string;
     state: 'resolving' | 'building' | 'deploying' | 'verifying' | 'ready' | 'failed' | 'superseded';
@@ -3285,7 +3287,7 @@ export type ProductManagedSecretConfigStatusItem = {
     instance: string;
     integration: string;
     status: 'configured' | 'missing' | 'disabled' | 'unvalidated' | 'stale' | 'unsupported';
-    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported' | 'disabled' | 'unsupported';
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported' | 'disabled';
     updated_at: string;
 };
 
@@ -3832,6 +3834,9 @@ export type ProductReviewDecisionEnvelope = {
     pull_request: number;
     reason?: string;
     repository: string;
+    reviewed_generation_id: string;
+    reviewed_head_sha: string;
+    reviewed_preview_url: string;
 };
 
 export type ProductReviewDecisionRecord = {
@@ -3844,6 +3849,7 @@ export type ProductReviewDecisionRecord = {
     head_sha: string;
     owner_github_id: string;
     owner_github_login: string;
+    preview_generation_id: string;
     preview_url: string;
     product: string;
     pull_request_number: number;
@@ -3867,6 +3873,7 @@ export type ProductReviewResponse = {
     latest_decision: ProductReviewDecisionRecord | null;
     owner_github_login: string;
     owner_set: boolean;
+    preview_generation_id: string;
     preview_url: string;
     product: string;
     pull_request_number: number;
@@ -4256,6 +4263,14 @@ export type ProxmoxStorageBackupDestinationReference = {
     username: string;
 };
 
+export type PublicHostEffect = {
+    domain_id: string;
+    host: string;
+    provider_host: string;
+    runtime_port: number;
+    target_id: string;
+};
+
 export type PublicPauseRecord = {
     began_at: string;
     binding: PublicSiteBinding;
@@ -4410,6 +4425,7 @@ export type ReleaseReviewStatus = {
     checklist_complete?: boolean | null;
     checklist_digest: string;
     latest_decision: ReleaseReviewDecisionRecord | null;
+    no_new_release?: boolean;
     required: boolean;
     unavailable_reason: 'testing_lane_missing' | 'source_control_access_unavailable' | 'production_identity_missing' | 'candidate_identity_missing' | 'release_record_missing' | 'github_read_failed' | null;
 };

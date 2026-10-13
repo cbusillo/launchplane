@@ -280,6 +280,47 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             self.store.read_backup_gate_record(operation.backup_record_id).status, "pass"
         )
 
+    def test_held_and_changed_candidate_progress_uses_local_records_only(self) -> None:
+        accepted = self.accept()
+        self.switch("held")
+        with patch(
+            "control_plane.client_release.current_release_review",
+            side_effect=AssertionError("Progress must not call source control"),
+        ):
+            held = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(self.profile.product),
+                decision=accepted,
+            )
+            assert held is not None
+            self.assertEqual(held.state, "waiting")
+            self.assertIn("hold", held.blocked_reason)
+            self.switch("promote")
+            testing = self.store.read_environment_inventory(
+                context_name=self.context, instance_name="testing"
+            )
+            assert testing.runtime_identity is not None
+            self.store.write_environment_inventory(
+                testing.model_copy(
+                    update={
+                        "runtime_identity": testing.runtime_identity.model_copy(
+                            update={"source_git_ref": BASE}
+                        ),
+                    }
+                )
+            )
+            stale = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(self.profile.product),
+                decision=accepted,
+            )
+            assert stale is not None
+            self.assertIn("testing", stale.blocked_reason)
+            self.assertEqual(stale.steps, held.steps)
+            self.assertEqual(self.advance(), ())
+            self.assertEqual(self.provider.deployed_artifacts, [])
+            self.assertEqual(self.store.list_verireel_prod_backup_gate_operation_records(), ())
+
     def test_client_acceptance_runs_verified_backup_and_promotion_once(self) -> None:
         accepted = self.accept()
         (backup_id,) = self.advance()
@@ -300,6 +341,15 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         promotions = self.store.list_promotion_records()
         self.assertEqual(promotions[0].backup_record_id, backup.backup_record_id)
         self.assertEqual(promotions[0].destination_health.status, "pass")
+        completed_review = self.review()
+        self.assertTrue(completed_review.no_new_release)
+        self.assertFalse(completed_review.required)
+        self.assertFalse(completed_review.approved)
+        self.assertEqual(completed_review.blockers, ())
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product),
+            (accepted,),
+        )
 
     def test_generic_web_drills_once_with_two_backups_and_the_reviewed_passing_target(self) -> None:
         from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
@@ -377,6 +427,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         assert run is not None
         self.assertEqual(run.state, "passed", run.model_dump())
         self.assertTrue(all(step.status == "pass" for step in run.steps))
+        self.assertTrue(self.review().no_new_release)
         self.assertEqual(self.advance(), ())
         self.assertEqual(
             self.provider.deployed_artifacts,

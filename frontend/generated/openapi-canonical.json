@@ -5137,6 +5137,14 @@
             "title": "Instance",
             "type": "string"
           },
+          "pending_public_host_effects": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PublicHostEffect"
+            },
+            "title": "Pending Public Host Effects",
+            "type": "array"
+          },
           "policies": {
             "$ref": "#/components/schemas/DokployTargetPolicies"
           },
@@ -25797,6 +25805,16 @@
             "title": "Sequence",
             "type": "integer"
           },
+          "source_build": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArtifactSourceBuild"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "source_map": {
             "default": [],
             "items": {
@@ -32303,10 +32321,6 @@
               {
                 "const": "disabled",
                 "type": "string"
-              },
-              {
-                "const": "unsupported",
-                "type": "string"
               }
             ],
             "default": "missing",
@@ -35603,11 +35617,29 @@
             "pattern": "^[^/\\s]+/[^/\\s]+$",
             "title": "Repository",
             "type": "string"
+          },
+          "reviewed_generation_id": {
+            "minLength": 1,
+            "title": "Reviewed Generation Id",
+            "type": "string"
+          },
+          "reviewed_head_sha": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Reviewed Head Sha",
+            "type": "string"
+          },
+          "reviewed_preview_url": {
+            "minLength": 1,
+            "title": "Reviewed Preview Url",
+            "type": "string"
           }
         },
         "required": [
           "repository",
           "pull_request",
+          "reviewed_head_sha",
+          "reviewed_preview_url",
+          "reviewed_generation_id",
           "decision"
         ],
         "title": "ProductReviewDecisionEnvelope",
@@ -35665,6 +35697,11 @@
           },
           "owner_github_login": {
             "title": "Owner Github Login",
+            "type": "string"
+          },
+          "preview_generation_id": {
+            "default": "",
+            "title": "Preview Generation Id",
             "type": "string"
           },
           "preview_url": {
@@ -35782,6 +35819,10 @@
             "title": "Owner Set",
             "type": "boolean"
           },
+          "preview_generation_id": {
+            "title": "Preview Generation Id",
+            "type": "string"
+          },
           "preview_url": {
             "title": "Preview Url",
             "type": "string"
@@ -35825,6 +35866,7 @@
           "pull_request_url",
           "preview_url",
           "head_sha",
+          "preview_generation_id",
           "owner_set",
           "owner_github_login",
           "viewer_is_owner",
@@ -38524,6 +38566,43 @@
         "title": "ProxmoxStorageBackupDestinationReference",
         "type": "object"
       },
+      "PublicHostEffect": {
+        "additionalProperties": false,
+        "description": "Write-ahead addition and its provider identity, independent of config success.",
+        "properties": {
+          "domain_id": {
+            "default": "",
+            "title": "Domain Id",
+            "type": "string"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "provider_host": {
+            "title": "Provider Host",
+            "type": "string"
+          },
+          "runtime_port": {
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Runtime Port",
+            "type": "integer"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "provider_host",
+          "target_id",
+          "runtime_port"
+        ],
+        "title": "PublicHostEffect",
+        "type": "object"
+      },
       "PublicIngressMonitorRunOnceRequest": {
         "additionalProperties": false,
         "properties": {
@@ -39734,6 +39813,12 @@
                 "type": "null"
               }
             ]
+          },
+          "no_new_release": {
+            "default": false,
+            "title": "No New Release",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           },
           "required": {
             "default": true,

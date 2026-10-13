@@ -344,6 +344,13 @@ def _release_review_step(review: ReleaseReviewStatus | Unread | None) -> PathChe
         return _unread(step_id, Unread("release_review_unread"))
     if isinstance(review, Unread):
         return _unread(step_id, review)
+    if review.no_new_release:
+        return _step(
+            step_id,
+            "clear",
+            "no_new_release",
+            "Production already runs the testing version; no new Client decision.",
+        )
     if not review.required:
         return _step(
             step_id, "clear", "not_required", "The product is prelaunch; no Client review."

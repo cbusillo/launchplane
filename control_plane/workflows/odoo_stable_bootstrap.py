@@ -484,6 +484,7 @@ def execute_odoo_stable_bootstrap(
             context=request.context,
             instance=request.instance,
             public_hosts=target_record.public_hosts,
+            origin_domains=target_record.domains,
             updated_at=started_at,
         )
         if rendering_record is not None:

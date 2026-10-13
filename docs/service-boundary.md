@@ -2175,9 +2175,11 @@ of public DNS hostnames for an exact owned `prod` compose lane. For example,
 `{"mode":"dry-run","product":"example-site","context":"example-site",
 "instance":"prod","public_hosts":["example.com","www.example.com"]}`.
 Omitting the field preserves it; `[]` removes only names previously managed by
-this field. The tracked target's `public_hosts` is the single configuration
+this field or additions identified in its pending-effect journal. The tracked target's `public_hosts` is the single configuration
 source; its separate `domains` retains origin health and ingress authority.
-Existing internal domains cannot be adopted into the managed public set.
+Existing internal domains and pre-existing unmanaged provider routes cannot be
+adopted into the managed public set. Use an unoccupied public hostname rather
+than taking over an existing route.
 
 Use the supported `product-config-dry-run` and `product-config-apply` write-action
 helper commands with a private payload file. Apply needs a stable idempotency key
@@ -2198,11 +2200,40 @@ and idempotent success receipt. `verified: true` and `read_back_hosts` prove
 provider Host-route configuration for the reported web port, not an HTTP probe
 or public reachability. Partial provider failure returns
 `public_hosts_provider_outcome_unknown` and commits no successful config receipt;
-some routes may already exist. Rerun dry-run with the same requested host list
-and finish reconciliation before dropping names, so partial additions become
-managed and can later be removed explicitly. Provider operations are idempotent,
+some routes may already exist. Launchplane commits write-ahead addition intent
+in the target's `pending_public_host_effects` before provider writes, then
+checkpoints each returned route identity independently of the final config
+transaction. A fresh dry-run may keep or drop those additions: `removed` includes
+abandoned additions even when `before` (committed configuration) is empty.
+Recovery requires the same provider/compose binding, exact saved route ID and
+route shape; changed identities are never adopted or deleted. The journal also
+reserves its hostnames against other targets and survives definition round trips
+and re-onboarding. Successful configuration and its receipt commit together with
+journal clearance, after a fresh provider read-back.
+
+If the provider created a route but its response or identity checkpoint was
+lost, the intent remains tracked without claiming success or ownership of an
+observed route. Dry-run refuses while an unidentified route exists. Use the
+supported target inspection to establish what happened; if the route is absent,
+a fresh dry-run can retry or abandon the intent safely. This path cannot infer
+ownership from a hostname alone or authorize a manual provider deletion.
+Provider operations are idempotent,
 and internal/unmanaged routes are checked for preservation. The local file CLI
 refuses this field; use the service path for dry-run and apply.
+
+On PostgreSQL, apply fences the target context, provider identity and old/new
+hostnames while it reconciles. It validates the full authority bundle in a
+rolled-back savepoint before provider I/O, then revalidates and commits after
+read-back. The global authority lock and row locks are released during the
+network wait, so unrelated product writes can commit. Database write fences
+also cover profile ownership changes and direct target writes. A conflicting
+write fails promptly (`409 public_hosts_authority_busy` through the service);
+wait for reconciliation to finish, then review a fresh dry-run and apply.
+Each identity checkpoint commits and releases the fences, then reacquires them
+and revalidates authority before further provider effects. Pending-effect names
+are included in the fenced hostname set. SQLite rehearsal retains serialized
+provider transactions; it does not prove this PostgreSQL concurrency behavior.
+Uncertain provider/commit recovery uses the saved-identity procedure above.
 
 The signed-in browser uses the narrower product-owned operation
 `POST /v1/products/{product}/environments/{environment}/config/apply`, which is
@@ -4032,7 +4063,7 @@ independent of the retired exact-binding machinery and reads none of its records
 `GET /v1/product-review?repository=<owner/repo>&pull_request=<n>` returns the
 product display name, the pull request URL, the preview URL of the one active
 preview serving a ready generation for that pull request (empty when there is
-none), the head revision that preview serves, the latest decision, and
+none), the head revision and `preview_generation_id` that preview serves, the latest decision, and
 `owner_set`, `viewer_is_owner`, `can_decide`, and a plain `cannot_decide_reason`.
 Optional `decision_id` selects a saved decision from this same visible PR in
 `latest_decision`, returning 404 when absent. This supports historical decision
@@ -4047,9 +4078,15 @@ it receives `viewer_is_owner=false` and `can_decide=false`. Reading never grants
 the ability to record a Client decision.
 
 `POST /v1/product-review/decisions` takes `{repository, pull_request, decision,
-reason}` with `decision` of `accepted` or `changes_requested` (reason required)
-and appends one `launchplane_product_review_decisions` record bound to the served
-preview URL and head revision. It uses the GitHub-human browser mutation identity
+reason, reviewed_head_sha, reviewed_preview_url, reviewed_generation_id}` with
+`decision` of `accepted` or `changes_requested` (reason required). The three
+`reviewed_*` fields are required evidence copied from the GET response. The
+service compares them with the currently serving preview before saving, under
+the decision lock. A mismatch returns `409 product_review_preview_changed`
+without recording or publishing a decision. The browser disables decisions
+until the Client refreshes the review and inspects the current preview. A saved
+`launchplane_product_review_decisions` record retains the reviewed URL, head, and
+`preview_generation_id`; older records default the generation to empty. It uses the GitHub-human browser mutation identity
 path (session cookie, same-origin fetch metadata, single-use CSRF token); bearer
 and agent identities are rejected. Authorization is one comparison: the
 session's immutable GitHub id equals `owner.github_id` on the product profile

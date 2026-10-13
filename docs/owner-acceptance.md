@@ -4,6 +4,14 @@ title: Client Review and Retired Acceptance History
 
 ## Current Client review
 
+Setting a product's Client resolves the login through the repository-scoped
+Delivery App credential. A `github_credentials_unavailable` response identifies
+the failed stage: `request`, `identity`, `repository_inventory`, or `token_mint`.
+The mint stage includes installation lookup, permission checks and validation of
+the returned token's scope and expiry. Provider messages and credential values
+are never included. A failed lookup leaves the profile unchanged; it does not
+fall back to another credential. Service logs include the same failure stage.
+
 Products recorded with `release_on_acceptance: director_standing` do not wait
 for a Client-preview check at merge admission or receive preview-review invitations,
 even when the PR has test notes or an old review label. The Director's standing
@@ -84,8 +92,13 @@ One failed historical delivery does not prevent later decisions from being sent.
 The decision remains saved during a delivery failure. The review page reports
 pending delivery and provides **Retry delivery** for the saved decision, even
 after the preview is gone. This never records acceptance of another revision.
-Resubmitting the same decision for the same serving preview reuses its record; a new decision or
-preview creates a new record. A ready-preview refresh also retries undelivered
+Every decision submission includes the commit, URL, and serving generation
+shown by the review page. A changed preview refuses the stale submission without
+saving or publishing it. The Client uses **Refresh review**, inspects the current
+preview, and decides again; the page never resubmits a decision automatically.
+Resubmitting the same decision for the same serving preview reuses its record.
+A retry after that preview changes is refused, preserving the original decision.
+A new decision or reviewed generation creates a new record. A ready-preview refresh also retries undelivered
 decisions. The Client-review status remains pending until the current decision's
 feedback has a delivery receipt. Historical decisions keep their reviewed commit.
 Decisions saved before this feature have `feedback_requested=false`: refreshes

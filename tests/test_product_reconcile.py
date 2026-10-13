@@ -84,6 +84,7 @@ from control_plane.odoo_preview_apply_http import (
 )
 from control_plane.product_reconcile_read import product_reconcile_request_view
 from control_plane.product_review_status import OwnerReviewStatus, owner_review_reference_url
+from control_plane.product_review import resolve_serving_preview
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
 from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.product_reconcile import (
@@ -141,6 +142,11 @@ from control_plane.workflows.generic_web_preview import (
 from tests.support.profiles import _odoo_preview_profile_payload, product_profile_payload
 from tests.test_generic_web_deploy import _FakeGenericWebDeployProvider
 from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
+from control_plane.drivers.generic_web_preview_dispatch import GenericWebPreviewVerificationRequest
+from control_plane.generic_web_verification_http import (
+    GenericWebPreviewVerificationEnvelope,
+    apply_generic_web_preview_verification_result,
+)
 from tests.support.stores import (
     _write_odoo_preview_template_runtime_environment,
     sqlite_database_url,
@@ -165,6 +171,7 @@ class FakeGitHub:
 
     def __init__(self) -> None:
         self.runs: dict[int, dict[str, object]] = {}
+        self.image_digests: dict[str, str] = {}
         self.first_parents = {NEWEST: DEPLOYABLE, DEPLOYABLE: OLDER, OLDER: ""}
         self.pull_request: dict[str, object] = {
             "state": "open",
@@ -241,7 +248,13 @@ class FakeGitHub:
         if "/artifacts?" in path:
             run_id = int(path.split("/actions/runs/")[1].split("/")[0])
             return {
-                "artifacts": [{"id": run_id * 10, "name": "artifact-manifest-1", "expired": False}]
+                "artifacts": [
+                    {
+                        "id": run_id * 10,
+                        "name": f"artifact-manifest-{self.runs[run_id]['run_attempt']}",
+                        "expired": False,
+                    }
+                ]
             }
         raise AssertionError(f"unexpected GitHub read {path}")
 
@@ -257,7 +270,10 @@ class FakeGitHub:
         for lock in manifest["dependency_provenance"]["uv_locks"]:
             if lock["scope"] == "tenant":
                 lock["source_ref"] = commit
-        manifest["image"] = {"repository": IMAGE_REPOSITORY, "digest": _digest(commit)}
+        manifest["image"] = {
+            "repository": IMAGE_REPOSITORY,
+            "digest": self.image_digests.get(commit, _digest(commit)),
+        }
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w") as zip_file:
             zip_file.writestr("artifact-manifest.json", json.dumps(manifest))
@@ -1394,7 +1410,10 @@ class FakeGenericWebGitHub(FakeGitHub):
             "schema_version": 1,
             "kind": "generic-web",
             "source_commit": commit,
-            "image": {"repository": IMAGE_REPOSITORY, "digest": _digest(commit)},
+            "image": {
+                "repository": IMAGE_REPOSITORY,
+                "digest": self.image_digests.get(commit, _digest(commit)),
+            },
         }
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w") as zip_file:
@@ -3015,6 +3034,28 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.provider.applied, [("refresh", 5), ("destroy", 5), ("refresh", 5)])
         self.assertEqual(self.store.list_preview_records()[0].state, "active")
 
+    def test_same_digest_new_head_and_run_refresh_odoo_preview(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        pushed = "b" * 40
+        self.github.image_digests[pushed] = _digest(PR_HEAD)
+        self.github.pull_request["head"] = {"sha": pushed}
+        for run_id in (51, 52):
+            with self.subTest(run_id=run_id):
+                self.github.add_run(run_id, pushed, event="pull_request")
+                self.request("preview", 5)
+                self.assertEqual(self.reconcile()["action"], "apply")
+                (preview,) = self.store.list_preview_records()
+                generation = self.store.read_preview_generation_record(
+                    preview.serving_generation_id
+                )
+                self.assertEqual(generation.anchor_summary.head_sha, pushed)
+                assert generation.source_build is not None
+                self.assertEqual(generation.source_build.run_id, run_id)
+                self.request("preview", 5)
+                self.assertEqual(self.reconcile()["reason"], "already_serving")
+
     def test_blocked_destroy_stops_across_sweeps_and_resumes_after_record_changes(self) -> None:
         self.write_preview()
         self.github.pull_request["state"] = "closed"
@@ -3103,6 +3144,9 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.github.pull_request["state"] = "open"
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)
+        # The legacy generation has no exact build proof; reopening refreshes it.
+        self.assertEqual(self.reconcile()["action"], "apply")
+        self.request("preview", 5)
         self.assertEqual(self.reconcile()["reason"], "already_serving")
 
     def test_busy_destroy_does_not_consume_a_failure_attempt(self) -> None:
@@ -3190,6 +3234,27 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
                     self.github.add_run(50, PR_HEAD, event="pull_request")
                 if live:
                     self.write_preview(number=index)
+                    verified = verify_build_artifact(
+                        transport=self.github,
+                        repository=REPOSITORY,
+                        repository_id=REPOSITORY_ID,
+                        commit=PR_HEAD,
+                        purpose="preview",
+                        context="cm",
+                        image_repository=IMAGE_REPOSITORY,
+                        pull_request_number=index,
+                    )
+                    preview = next(
+                        p for p in self.store.list_preview_records() if p.anchor_pr_number == index
+                    )
+                    generation = self.store.read_preview_generation_record(
+                        preview.serving_generation_id
+                    )
+                    self.store.write_preview_generation_record(
+                        generation.model_copy(
+                            update={"source_build": verified.manifest.source_build}
+                        )
+                    )
                 self.request("preview", index)
                 before = self.snapshot()
 
@@ -3377,6 +3442,7 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.github.first_parents[PR_HEAD] = OLDER
         self.github.pull_request["head"] = {"sha": OLDER}
         self.github.add_run(51, OLDER, event="pull_request")
+        self.github.image_digests[OLDER] = _digest(PR_HEAD)
         self.request("preview", 5)
         plan = self.reconcile()
         self.assertEqual(plan["reason"], "ancestor_build")
@@ -3502,6 +3568,68 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         self.assertEqual(self.reconcile()["reason"], "already_serving")
         self.assertEqual(self.driver.changes, [("refresh", 5), ("refresh", 5)])
+
+    def test_same_digest_head_and_rebuilds_update_serving_evidence(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        pushed = "b" * 40
+        self.github.image_digests[pushed] = _digest(PR_HEAD)
+        self.github.pull_request["head"] = {"sha": pushed}
+        for run_id, attempt in ((51, 1), (52, 1), (52, 2)):
+            with self.subTest(run_id=run_id, attempt=attempt):
+                self.github.add_run(run_id, pushed, event="pull_request")
+                self.github.runs[run_id]["run_attempt"] = attempt
+                self.request("preview", 5)
+                result = self.reconcile()
+                self.assertEqual(result["action"], "apply")
+                (preview,) = self.store.list_preview_records()
+                generation = self.store.read_preview_generation_record(
+                    preview.serving_generation_id
+                )
+                self.assertEqual(generation.anchor_summary.head_sha, pushed)
+                review_preview = resolve_serving_preview(
+                    store=self.store,
+                    profile=self.store.read_product_profile_record("site"),
+                    pull_request_number=5,
+                )
+                self.assertEqual(review_preview.head_sha, pushed)
+                self.assertEqual(review_preview.preview_url, preview.canonical_url)
+                assert generation.runtime_identity is not None
+                self.assertEqual(generation.runtime_identity.source_git_ref, pushed)
+                assert generation.source_build is not None
+                self.assertEqual(
+                    (generation.source_build.run_id, generation.source_build.run_attempt),
+                    (run_id, attempt),
+                )
+                before = list(self.driver.changes)
+                self.request("preview", 5)
+                self.assertEqual(self.reconcile()["reason"], "already_serving")
+                self.assertEqual(self.driver.changes, before)
+        # Re-verification of the same generation retains its exact build provenance.
+        apply_generic_web_preview_verification_result(
+            control_plane_root=self.root,
+            record_store=self.store,
+            request=GenericWebPreviewVerificationEnvelope(
+                product="site",
+                verification=GenericWebPreviewVerificationRequest(
+                    context=preview.context,
+                    anchor_repo=preview.anchor_repo,
+                    anchor_pr_number=preview.anchor_pr_number,
+                    verification_status="pass",
+                    verified_at=generation.ready_at,
+                ),
+            ),
+        )
+        self.assertEqual(
+            self.store.read_preview_generation_record(generation.generation_id).source_build,
+            generation.source_build,
+        )
+        # Losing the newest run cannot move the serving preview back to an older build.
+        del self.github.runs[52]
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["reason"], "older_artifact")
+        self.assertEqual(self.driver.changes, before)
 
     def test_a_pr_without_a_verified_build_keeps_the_preview_it_has(self) -> None:
         # A preview the product's old preview workflow made, before its build.yml existed.

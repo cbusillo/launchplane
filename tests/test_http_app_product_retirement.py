@@ -136,6 +136,74 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
         self._apps.clear()
         super().tearDown()
 
+    async def test_multi_lane_retirement_refuses_before_changing_either_application(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = self._store(Path(directory))
+            try:
+                profile = LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload()
+                )
+                store.write_product_profile_record(profile)
+                store.write_provider_target_record(
+                    store.read_provider_target_record(
+                        context_name="example-site", instance_name="prod"
+                    ).model_copy(update={"instance": "testing", "target_id": "testing-application"})
+                )
+                store.write_dokploy_target_id_record(
+                    store.read_dokploy_target_id_record(
+                        context_name="example-site", instance_name="prod"
+                    ).model_copy(update={"instance": "testing", "target_id": "testing-application"})
+                )
+                store.write_dokploy_target_record(
+                    store.read_dokploy_target_record(
+                        context_name="example-site", instance_name="prod"
+                    ).model_copy(
+                        update={"instance": "testing", "target_name": "example-site-testing"}
+                    )
+                )
+                store.write_runtime_environment_record(
+                    store.list_runtime_environment_records()[0].model_copy(
+                        update={"instance": "testing"}
+                    )
+                )
+                targets = store.list_provider_target_records()
+                target_ids = store.list_dokploy_target_id_records()
+                applications = store.list_dokploy_target_records()
+                runtime = store.list_runtime_environment_records()
+                app = self._app(
+                    store, actions=("product_retirement.plan", "product_retirement.apply")
+                )
+                with (
+                    patch(
+                        "control_plane.product_retirement.observe_tracked_dokploy_application",
+                        return_value=_observation(),
+                    ) as observe,
+                    patch(
+                        "control_plane.product_retirement.dokploy_api.delete_dokploy_application"
+                    ) as delete,
+                ):
+                    response = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/product-retirement",
+                        headers=self.headers,
+                        payload=_plan_payload(),
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    json.loads(response.text)["error"]["code"], "product_retirement_blocked"
+                )
+                observe.assert_not_called()
+                delete.assert_not_called()
+                self.assertEqual(store.read_product_profile_record(profile.product), profile)
+                self.assertEqual(store.list_provider_target_records(), targets)
+                self.assertEqual(store.list_dokploy_target_id_records(), target_ids)
+                self.assertEqual(store.list_dokploy_target_records(), applications)
+                self.assertEqual(store.list_runtime_environment_records(), runtime)
+                self.assertEqual(store.list_product_retirement_records(product=profile.product), ())
+            finally:
+                store.close()
+
     def _no_target_store(
         self, root: Path, *, database_url: str = "", previews: bool = True
     ) -> PostgresRecordStore:
@@ -660,8 +728,11 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             "enabled": False,
             "context": "example-site-preview",
         }
+        profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
         store.write_product_profile_record(
-            LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            profile.model_copy(
+                update={"lanes": tuple(lane for lane in profile.lanes if lane.instance == "prod")}
+            )
         )
         store.write_provider_target_record(
             ProviderTargetRecord(

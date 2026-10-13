@@ -18,6 +18,7 @@ from control_plane.dokploy.source import (
     DokployTargetDefinition,
     resolve_ship_healthcheck_urls,
 )
+from control_plane.odoo_instance_overrides import record_with_public_base_url
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
 from control_plane.workflows.odoo_stable_target_replacement import _target_base_url
@@ -97,26 +98,29 @@ class OdooPublicBaseUrlTests(unittest.TestCase):
                             )
                         self.assertEqual(result.post_deploy_status, "pass")
                         env = cast(dict[str, str], captured[0]["workflow_environment_overrides"])
-                        if has_record or hosts:
-                            payload = json.loads(
-                                base64.b64decode(env["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"])
+                        payload = json.loads(
+                            base64.b64decode(env["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"])
+                        )
+                        expected = (
+                            f"https://{hosts[0]}"
+                            if hosts
+                            else original_url
+                            if has_record
+                            else f"https://{origin}"
+                        )
+                        parameters = {
+                            item["key"]: item["value"]["value"]
+                            for item in payload["config_parameters"]
+                        }
+                        self.assertEqual(parameters["web.base.url"], expected)
+                        if has_record:
+                            self.assertEqual(
+                                payload["website_bootstrap"]["canonical_url"], expected
                             )
-                            expected = f"https://{hosts[0]}" if hosts else original_url
-                            parameters = {
-                                item["key"]: item["value"]["value"]
-                                for item in payload["config_parameters"]
-                            }
-                            self.assertEqual(parameters["web.base.url"], expected)
-                            if has_record:
-                                self.assertEqual(
-                                    payload["website_bootstrap"]["canonical_url"], expected
-                                )
-                            if hosts:
-                                self.assertEqual(
-                                    result.override_evidence["resolved_base_url"], expected
-                                )
-                        else:
-                            self.assertEqual(env, {})
+                        if hosts:
+                            self.assertEqual(
+                                result.override_evidence["resolved_base_url"], expected
+                            )
                         if has_record:
                             persisted = store.read_odoo_instance_override_record(
                                 context_name="cm_website", instance_name="prod"
@@ -139,6 +143,105 @@ class OdooPublicBaseUrlTests(unittest.TestCase):
                             ),
                             (f"https://{origin}/web/health",),
                         )
+
+    def test_withdrawing_public_hosts_reconciles_base_url_without_selecting_a_website(self) -> None:
+        for phase in ("deploy", "promotion"):
+            with self.subTest(phase=phase), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(state_dir=Path(directory) / "state")
+                origin = "https://origin.example.test"
+                target = DokployTargetDefinition(
+                    context="example",
+                    instance="prod",
+                    target_id="example-compose",
+                    domains=("origin.example.test",),
+                    public_hosts=("public.example.test",),
+                )
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy.dokploy_source.read_control_plane_dokploy_source_of_truth"
+                    ) as source,
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
+                        return_value=("host", "token"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
+                        return_value=_module_update_evidence(),
+                    ) as provider,
+                ):
+                    for hosts in (target.public_hosts, ()):
+                        source.return_value = DokploySourceOfTruth(
+                            schema_version=1,
+                            targets=(target.model_copy(update={"public_hosts": hosts}),),
+                        )
+                        result = execute_odoo_post_deploy(
+                            control_plane_root=Path(directory),
+                            record_store=store,
+                            request=OdooPostDeployRequest(
+                                context="example", instance="prod", phase=phase
+                            ),
+                        )
+                        self.assertEqual(result.post_deploy_status, "pass")
+                        payload = json.loads(
+                            base64.b64decode(
+                                provider.call_args.kwargs["workflow_environment_overrides"][
+                                    "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
+                                ]
+                            )
+                        )
+                        parameters = {
+                            item["key"]: item["value"]["value"]
+                            for item in payload["config_parameters"]
+                        }
+                        expected = f"https://{hosts[0]}" if hosts else origin
+                        self.assertEqual(parameters["web.base.url"], expected)
+                        self.assertIsNone(payload.get("website_bootstrap"))
+                        self.assertFalse(result.override_record_found)
+                        self.assertEqual(result.override_status, "skipped")
+                        with self.assertRaises(FileNotFoundError):
+                            store.read_odoo_instance_override_record(
+                                context_name="example", instance_name="prod"
+                            )
+
+    def test_origin_fallback_preserves_explicit_url_and_website_intent(self) -> None:
+        explicit = OdooInstanceOverrideRecord(
+            context="example",
+            instance="prod",
+            config_parameters=(
+                OdooConfigParameterOverride(
+                    key="web.base.url",
+                    value=OdooOverrideValue(
+                        source="literal", value="https://explicit.example.test"
+                    ),
+                ),
+            ),
+            updated_at="2026-10-08T00:00:00Z",
+        )
+        website = explicit.model_copy(
+            update={
+                "config_parameters": (),
+                "website_bootstrap": OdooWebsiteBootstrapPayload(
+                    name="Example",
+                    canonical_url="https://website.example.test",
+                ),
+            }
+        )
+        for record, instance, origin in (
+            (explicit, "prod", "https://origin.example.test"),
+            (website, "prod", "https://origin.example.test"),
+            (None, "testing", "https://origin.example.test"),
+            (None, "prod", ""),
+        ):
+            with self.subTest(record=record, instance=instance, origin=origin):
+                rendered = record_with_public_base_url(
+                    record,
+                    context="example",
+                    instance=instance,
+                    public_hosts=(),
+                    origin_domains=(origin,) if origin else (),
+                    updated_at=explicit.updated_at,
+                )
+                self.assertIs(rendered, record)
 
     def test_public_url_precedes_lane_url_but_testing_and_no_public_hosts_keep_existing_url(
         self,
