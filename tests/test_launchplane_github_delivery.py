@@ -38,6 +38,7 @@ from control_plane.launchplane_github_delivery import (
     resolve_delivery_github_token,
     delivery_github_credentials_ready,
     DeliveryGitHubTokenUnavailable,
+    DeliveryGitHubCredentialsUnavailable,
 )
 from control_plane.merge_train_github_token import resolve_merge_train_github_token
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -119,7 +120,12 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
         raise AssertionError(f"Unexpected provider call {path}")
 
     def resolve(
-        self, purpose: str, *, repository: str = "example/site", retry_provider_errors: bool = False
+        self,
+        purpose: str,
+        *,
+        repository: str = "example/site",
+        retry_provider_errors: bool = False,
+        report_failure: bool = False,
     ) -> str:
         def mint(
             *,
@@ -153,7 +159,47 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
                 repository=repository,
                 purpose=purpose,
                 retry_provider_errors=retry_provider_errors,
+                report_failure=report_failure,
             )
+
+    def test_diagnostics_distinguish_failed_stages_without_provider_details(self) -> None:
+        for target, stage in (
+            ("resolve_delivery_github_app_identity", "identity"),
+            ("_tracked_repository", "repository_inventory"),
+            ("mint_delivery_installation_token", "token_mint"),
+        ):
+            with (
+                self.subTest(stage=stage),
+                patch(
+                    "control_plane.launchplane_github_delivery.resolve_delivery_github_app_identity",
+                    return_value=self.identity,
+                ),
+                patch(
+                    f"control_plane.launchplane_github_delivery.{target}",
+                    side_effect=ValueError("private-key provider-url sensitive-detail"),
+                ),
+            ):
+                # Use the real resolver so the failing step is derived from execution.
+                with self.assertRaises(DeliveryGitHubCredentialsUnavailable) as caught:
+                    resolve_delivery_github_token(
+                        control_plane_root=self.root,
+                        context_name="site",
+                        repository="example/site",
+                        purpose="repository_read",
+                        report_failure=True,
+                    )
+                self.assertEqual(caught.exception.stage, stage)
+                self.assertNotIn("sensitive-detail", str(caught.exception))
+
+    def test_diagnostic_mode_preserves_validation_revocation_and_retry_classification(self) -> None:
+        self.token_repository = "example/other"
+        with self.assertRaises(DeliveryGitHubCredentialsUnavailable) as caught:
+            self.resolve("repository_read", report_failure=True)
+        self.assertEqual(caught.exception.stage, "token_mint")
+        self.assertTrue(self.revoked)
+        self.provider_error = TimeoutError("private-provider-detail")
+        with self.assertRaises(DeliveryGitHubTokenUnavailable):
+            self.resolve("repository_read", report_failure=True, retry_provider_errors=True)
 
     def test_each_operation_mints_only_its_permissions_for_the_inventory_repository(self) -> None:
         for purpose, permissions in (

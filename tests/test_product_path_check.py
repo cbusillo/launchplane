@@ -297,6 +297,20 @@ class ProductPathCheckTests(unittest.TestCase):
 
         self.assertEqual((check.state, check.blocked_count, check.unknown_count), ("clear", 0, 0))
 
+    def test_identical_live_versions_are_distinct_from_prelaunch(self) -> None:
+        check = build_product_path_check(
+            product="example-site",
+            path="promote",
+            inputs=PathCheckInputs(
+                profile=_profile(),
+                promotion_allowed=True,
+                release_review=ReleaseReviewStatus(required=False, no_new_release=True),
+                backup_authority=_backup("ready"),
+                latest_promotion=None,
+            ),
+        )
+        self.assertEqual(_steps(check)["client_acceptance"], ("clear", "no_new_release", "none"))
+
     def test_an_unread_step_is_unknown_never_clear(self) -> None:
         check = build_product_path_check(
             product="example-site",
