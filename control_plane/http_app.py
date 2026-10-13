@@ -826,6 +826,7 @@ from control_plane.service_human_auth import (
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.product_authority_bundle import (
+    PublicHostAuthorityBusy,
     OdooInstanceOverrideConflictError,
     SecretCopySourceConflictError,
     SecretRecordConflictError,
@@ -28508,6 +28509,21 @@ def create_launchplane_fastapi_app(
     register_promotion_recovery_routes(
         app, dependencies=generic_web_write_route_dependencies, read_identity=read_identity
     )
+
+    async def public_host_authority_busy_handler(
+        request: Request, error: Exception
+    ) -> JSONResponse:
+        return await launchplane_http_exception_handler(
+            request,
+            _launchplane_http_error(
+                status_code=409,
+                trace_id=next_trace_id(),
+                code="public_hosts_authority_busy",
+                message=str(error),
+            ),
+        )
+
+    app.add_exception_handler(PublicHostAuthorityBusy, public_host_authority_busy_handler)
     app.add_exception_handler(HTTPException, launchplane_http_exception_handler)
     app.add_exception_handler(
         STARLETTE_HTTP_EXCEPTION,
