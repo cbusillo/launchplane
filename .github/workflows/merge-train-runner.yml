@@ -588,6 +588,7 @@ jobs:
           audience: ${{ steps.admission.outputs.service_audience }}
           method: POST
           route-path: /v1/work-graph/merge-train/controller/run-once
+          expected-status: "202,409"
           payload-file: ${{ steps.controller_request.outputs.payload_file }}
           idempotency-key: ${{ steps.controller_request.outputs.idempotency_key }}
           fail-result-paths: ""
@@ -605,6 +606,17 @@ jobs:
           STATUS_CODE: ${{ steps.controller_run.outputs.status-code }}
         run: |
           set -euo pipefail
+          if [ "$STATUS_CODE" = "409" ] && \
+            jq -e '.error.code == "merge_train_controller_lease_held"' "$RESPONSE_FILE" > /dev/null; then
+            echo "feedback_count=0" >> "$GITHUB_OUTPUT"
+            {
+              echo '## Launchplane merge train controller'
+              echo
+              echo '- Status: deferred; another controller pass holds the train lease'
+              echo '- Next action: the next scheduled pass reobserves the train'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ "$STATUS_CODE" != "202" ]; then
             cat "$RESPONSE_FILE" >&2
             echo "Merge-train controller run-once failed" \
