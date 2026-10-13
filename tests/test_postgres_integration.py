@@ -45,7 +45,10 @@ from tests import test_preview_reservation_recovery as preview_reservation_tests
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from tests.test_odoo_addon_settings_override import _existing_record as _addon_override_record
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecord,
+    DokployTargetRecordChanged,
+)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from tests import test_http_app_product_retirement as retirement_tests
 from tests import test_legacy_preview_reconciliation as legacy_preview_tests
@@ -221,7 +224,6 @@ from control_plane.service_auth import (
     LocalAdminPolicyRule,
 )
 from control_plane.storage.postgres import (
-    DokployTargetRecordChanged,
     LaunchplaneMergeTrainBatchLandingPlanRow,
     LaunchplanePrivilegedOperationRow,
     DbOnlyMutationRequest,
