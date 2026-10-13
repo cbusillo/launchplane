@@ -4,8 +4,12 @@ import click
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from typing import Any
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 
 from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
+from control_plane.workflows.preview_desired_state import build_preview_desired_state_record
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.generic_web_preview import GenericWebPreviewDestroyResult
@@ -14,6 +18,28 @@ from tests.test_generic_web_preview import _profile
 
 
 class PreviewLifecycleCleanupTests(unittest.TestCase):
+    def setUp(self) -> None:
+        def closed_prs(
+            *, profile: LaunchplaneProductProfileRecord, **kwargs: Any
+        ) -> PreviewDesiredStateRecord:
+            return build_preview_desired_state_record(
+                product=profile.product,
+                context=profile.preview.context,
+                source="test",
+                discovered_at="2026-10-13T00:00:00Z",
+                repository=profile.repository,
+                anchor_repo=profile.repository.partition("/")[2],
+                preview_slug_prefix="pr-",
+                desired_previews=(),
+            )
+
+        mock = patch(
+            "control_plane.workflows.preview_lifecycle_cleanup.discover_generic_web_preview_desired_state",
+            side_effect=closed_prs,
+        )
+        mock.start()
+        self.addCleanup(mock.stop)
+
     def test_cleanup_uses_the_declared_postgres_transport(self) -> None:
         from tests.test_generic_web_preview_extensions import _driver_profile
 
@@ -21,6 +47,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             store = FilesystemRecordStore(root / "state")
+            store.write_product_profile_record(profile)
             store.write_preview_record(
                 PreviewRecord(
                     preview_id="preview-video",
@@ -40,7 +67,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                 plan_id="cleanup-video",
                 product=profile.product,
                 context=profile.preview.context,
-                planned_at="2026-10-12T00:00:00Z",
+                planned_at="2026-10-12T00:00:01Z",
                 source="test",
                 status="pass",
                 inventory_scan_id="scan-video",
@@ -62,7 +89,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                     return_value=({}, result.model_dump(mode="json")),
                 ) as extension,
                 patch(
-                    "control_plane.workflows.preview_lifecycle_cleanup.execute_generic_web_preview_destroy"
+                    "control_plane.workflows.preview_lifecycle_cleanup._execute_generic_web_preview_destroy_unserialized"
                 ) as plain,
             ):
                 cleanup = build_preview_lifecycle_cleanup_record(
@@ -153,7 +180,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                 plan_id="preview-lifecycle-plan-syo-testing-1",
                 product="sellyouroutboard",
                 context="sellyouroutboard-testing",
-                planned_at="2026-04-30T21:00:00Z",
+                planned_at="2026-04-30T21:00:01Z",
                 source="test",
                 status="pass",
                 inventory_scan_id="preview-inventory-scan-syo-testing-1",
@@ -161,7 +188,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.workflows.preview_lifecycle_cleanup.execute_generic_web_preview_destroy",
+                "control_plane.workflows.preview_lifecycle_cleanup._execute_generic_web_preview_destroy_unserialized",
                 return_value=GenericWebPreviewDestroyResult(
                     destroy_status="pass",
                     destroy_started_at="2026-04-30T21:01:00Z",
@@ -192,6 +219,9 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                     store.read_preview_record("preview-syo-testing-sellyouroutboard-pr-42").state,
                     "active",
                 )
+                store.write_product_profile_record(
+                    _profile().model_copy(update={"repository": "example/site-repository"})
+                )
                 record = build_preview_lifecycle_cleanup_record(
                     plan=plan,
                     requested_at="2026-04-30T21:02:00Z",
@@ -220,7 +250,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
             plan_id="preview-lifecycle-plan-syo-testing-1",
             product="sellyouroutboard",
             context="sellyouroutboard-testing",
-            planned_at="2026-04-30T21:00:00Z",
+            planned_at="2026-04-30T21:00:01Z",
             source="test",
             status="pass",
             inventory_scan_id="preview-inventory-scan-syo-testing-1",
@@ -235,6 +265,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
             destroy_reason="test_cleanup",
             control_plane_root=Path("."),
             record_store=object(),
+            profile=_profile(),
             timeout_seconds=300,
             driver_id="generic-web",
             preview_slug_template="preview-{number}-site",
@@ -247,6 +278,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(_profile())
             store.write_preview_record(
                 PreviewRecord(
                     preview_id="preview-syo-testing-sellyouroutboard-pr-42",
@@ -266,7 +298,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                 plan_id="preview-lifecycle-plan-syo-testing-1",
                 product="sellyouroutboard",
                 context="sellyouroutboard-testing",
-                planned_at="2026-04-30T21:00:00Z",
+                planned_at="2026-04-30T21:00:01Z",
                 source="test",
                 status="pass",
                 inventory_scan_id="preview-inventory-scan-syo-testing-1",
@@ -274,7 +306,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.workflows.preview_lifecycle_cleanup.execute_generic_web_preview_destroy",
+                "control_plane.workflows.preview_lifecycle_cleanup._execute_generic_web_preview_destroy_unserialized",
                 return_value=GenericWebPreviewDestroyResult(
                     destroy_status="pass",
                     destroy_started_at="2026-04-30T21:01:00Z",
@@ -297,6 +329,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                     timeout_seconds=300,
                     driver_id="generic-web",
                     preview_slug_template="preview-{number}-site",
+                    profile=_profile(),
                 )
 
             self.assertEqual(record.status, "pass")

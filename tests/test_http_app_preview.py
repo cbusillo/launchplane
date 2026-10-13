@@ -253,7 +253,7 @@ class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
             )
 
             with patch(
-                "control_plane.workflows.preview_lifecycle_cleanup.execute_generic_web_preview_destroy"
+                "control_plane.workflows.preview_lifecycle_cleanup._execute_generic_web_preview_destroy_unserialized"
             ) as destroy_mock:
                 response = await _asgi_request(
                     app,
