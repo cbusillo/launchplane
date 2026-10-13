@@ -2672,7 +2672,20 @@ requires `dokploy_target.inspect` authz for product/context `launchplane`, reads
 Dokploy through Launchplane-managed secrets, and returns a redacted identity
 summary only: target ids, names, project/environment/server identity, domain
 summaries, source metadata, and environment key names/counts. It must not return
-raw provider payloads or environment values. The manual `Dokploy Target Inspect`
+raw provider payloads or environment values. For a tracked target, its
+`provider_target_record` includes the complete `provider_evidence` required by
+the domain-authority planner's expected-current reference. This evidence must
+exactly match the canonical Dokploy metadata derived from the tracked target and
+target-id records (currently the project name already exposed by inspection).
+An empty canonical evidence map is returned explicitly. Unrecognized or
+inconsistent stored evidence returns HTTP 400
+`dokploy_target_comparison_evidence_unavailable` with a trace and a supported
+reviewed-repair prerequisite, without exposing the hidden keys or values. It
+does not silently omit, reconstruct, or alter the stored comparison input.
+The private helper forwards this evidence and drops it from public receipts;
+the planner still compares the full current reference and rechecks the live
+target identity and exact domain set. Neither inspection nor a repair dry run
+writes records or grants apply authority. The manual `Dokploy Target Inspect`
 workflow is the supported shared and production caller when admins need
 provider evidence without mutating Dokploy or Launchplane records. A
 `local_operator` caller may also use its existing `driver.read` grant for product `launchplane`

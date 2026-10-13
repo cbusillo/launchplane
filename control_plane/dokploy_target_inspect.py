@@ -24,6 +24,15 @@ _RUNTIME_EVIDENCE_LOG_LINE_COUNT = dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT
 _MAX_WORKER_HEARTBEAT_RECORDS = 100
 
 
+class DokployTargetComparisonEvidenceUnavailableError(ValueError):
+    def __init__(self) -> None:
+        super().__init__(
+            "Complete provider-target comparison evidence is unavailable without exposing "
+            "unrecognized or inconsistent stored evidence. Reconcile the provider-target "
+            "evidence with the tracked Dokploy metadata through a supported reviewed repair."
+        )
+
+
 class FetchDokployTargetPayload(Protocol):
     def __call__(
         self, *, host: str, token: str, target_type: str, target_id: str
@@ -400,6 +409,15 @@ def inspect_dokploy_target(
         if provider_target_record is None:
             result["provider_target_record"] = {"status": "missing"}
         else:
+            # Only the canonical Dokploy metadata already exposed by this read is safe
+            # to carry into a full expected-current reference. Never return a partial
+            # evidence map or publish arbitrary stored provider payloads.
+            inspected_evidence = ProviderTargetRecord.from_dokploy_records(
+                target_record=target_record,
+                target_id_record=target_id_record,
+            ).provider_evidence
+            if provider_target_record.provider_evidence != inspected_evidence:
+                raise DokployTargetComparisonEvidenceUnavailableError()
             result["provider_target_record"] = {
                 "status": "present",
                 "provider_id": provider_target_record.provider_id,
@@ -407,6 +425,7 @@ def inspect_dokploy_target(
                 "target_id": provider_target_record.target_id,
                 "display_name": provider_target_record.display_name,
                 "provider_target_type": provider_target_record.provider_target_type,
+                "provider_evidence": dict(provider_target_record.provider_evidence),
                 "source_label": provider_target_record.source_label,
                 "updated_at": provider_target_record.updated_at,
             }

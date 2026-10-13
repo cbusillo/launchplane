@@ -804,7 +804,10 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(payload["inspect"]["provider_payload_redacted"])
         self.assertNotIn("secret", str(payload))
-        self.assertNotIn("provider_evidence", str(payload))
+        self.assertEqual(
+            payload["inspect"]["provider_target_record"]["provider_evidence"],
+            {"project_name": payload["inspect"]["tracked_target"]["project_name"]},
+        )
         read_dokploy_config.assert_called_once_with(
             control_plane_root=root,
             database_url=database_url,
