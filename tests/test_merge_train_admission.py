@@ -202,19 +202,19 @@ class MergeTrainAdmissionTests(unittest.TestCase):
             base_branch="main",
             requested_at="2026-05-09T02:00:30Z",
             latest_run=latest_run,
-            poll_interval_seconds=60,
+            poll_interval_seconds=120,
         )
         elapsed_decision = evaluate_merge_train_admission(
             repository="cbusillo/sellyouroutboard",
             base_branch="main",
-            requested_at="2026-05-09T02:01:00Z",
+            requested_at="2026-05-09T02:02:00Z",
             latest_run=latest_run,
-            poll_interval_seconds=60,
+            poll_interval_seconds=120,
         )
 
         self.assertFalse(pending_decision.admitted)
         self.assertEqual(pending_decision.reason_code, "poll_interval_pending")
-        self.assertEqual(pending_decision.next_allowed_at, "2026-05-09T02:01:00Z")
+        self.assertEqual(pending_decision.next_allowed_at, "2026-05-09T02:02:00Z")
         self.assertTrue(elapsed_decision.admitted)
         self.assertEqual(elapsed_decision.reason_code, "poll_interval_elapsed")
 
@@ -227,21 +227,21 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         pending_decision = evaluate_merge_train_admission(
             repository="cbusillo/sellyouroutboard",
             base_branch="main",
-            requested_at="2026-05-09T02:01:00Z",
+            requested_at="2026-05-09T02:02:00Z",
             latest_run=latest_run,
-            backoff_seconds=300,
+            backoff_seconds=900,
         )
         elapsed_decision = evaluate_merge_train_admission(
             repository="cbusillo/sellyouroutboard",
             base_branch="main",
-            requested_at="2026-05-09T02:05:00Z",
+            requested_at="2026-05-09T02:15:00Z",
             latest_run=latest_run,
-            backoff_seconds=300,
+            backoff_seconds=900,
         )
 
         self.assertFalse(pending_decision.admitted)
         self.assertEqual(pending_decision.reason_code, "backoff_pending")
-        self.assertEqual(pending_decision.next_allowed_at, "2026-05-09T02:05:00Z")
+        self.assertEqual(pending_decision.next_allowed_at, "2026-05-09T02:15:00Z")
         self.assertTrue(elapsed_decision.admitted)
         self.assertEqual(elapsed_decision.reason_code, "backoff_elapsed")
 
@@ -269,6 +269,38 @@ class MergeTrainAdmissionTests(unittest.TestCase):
 
         self.assertTrue(decision.admitted)
         self.assertEqual(store.requests, [("cbusillo/sellyouroutboard", "main")])
+
+    def test_status_and_scheduler_agree_on_custom_poll_and_backoff_windows(self) -> None:
+        for mutation, elapsed, admitted in (
+            ("wait", 16, False),
+            ("wait", 17, True),
+            ("block", 90, False),
+            ("block", 91, True),
+        ):
+            with self.subTest(mutation=mutation, elapsed=elapsed):
+                recorded = datetime.fromisoformat("2026-05-09T02:00:00+00:00")
+                requested_at = (recorded + timedelta(seconds=elapsed)).isoformat()
+                store = _RunHistoryStore(
+                    _run_record(recorded_at=recorded.isoformat(), mutation=mutation)
+                )
+                decision = evaluate_merge_train_admission_from_store(
+                    store=store,
+                    repository="cbusillo/sellyouroutboard",
+                    base_branch="main",
+                    requested_at=requested_at,
+                    poll_interval_seconds=17,
+                    backoff_seconds=91,
+                )
+                status = build_merge_train_controller_status_read_model(
+                    store=store,
+                    repository="cbusillo/sellyouroutboard",
+                    base_branch="main",
+                    generated_at=requested_at,
+                    poll_interval_seconds=17,
+                    backoff_seconds=91,
+                )
+                self.assertEqual(decision.admitted, admitted)
+                self.assertEqual(status.admission, decision)
 
     def test_includes_controller_record_decision(self) -> None:
         candidate_record = _candidate_record(status="ready_for_checks")
@@ -860,6 +892,45 @@ class MergeTrainAdmissionTests(unittest.TestCase):
             42,
         )
 
+    def test_controller_status_normalizes_imported_queue_collections(self) -> None:
+        run = _idle_run_record(recorded_at="2026-05-09T02:10:00Z")
+        for collection in (list, tuple):
+            with self.subTest(collection=collection):
+                queue = collection(
+                    (
+                        None,
+                        {
+                            "number": 42,
+                            "ineligible_reasons": collection((" pending checks ", None, "")),
+                        },
+                    )
+                )
+                status = build_merge_train_controller_status_read_model(
+                    store=_RunHistoryStore(
+                        run.model_copy(update={"dry_run_result": {"queue": queue}})
+                    ),
+                    repository=run.repository,
+                    base_branch=run.base_branch,
+                    generated_at=run.recorded_at,
+                )
+                assert status.latest_dry_run is not None
+                (entry,) = status.latest_dry_run.queue_entries
+                self.assertEqual(entry.pull_request_number, 42)
+                self.assertEqual(entry.ineligible_reasons, ("pending checks",))
+
+        for malformed_queue in (None, 42, "not a queue", {"number": 42}):
+            with self.subTest(malformed_queue=malformed_queue):
+                status = build_merge_train_controller_status_read_model(
+                    store=_RunHistoryStore(
+                        run.model_copy(update={"dry_run_result": {"queue": malformed_queue}})
+                    ),
+                    repository=run.repository,
+                    base_branch=run.base_branch,
+                    generated_at=run.recorded_at,
+                )
+                assert status.latest_dry_run is not None
+                self.assertEqual(status.latest_dry_run.queue_entries, ())
+
     def test_controller_status_includes_latest_controller_state(self) -> None:
         latest_run = _idle_run_record(recorded_at="2026-05-09T02:10:00Z")
         controller_state = MergeTrainControllerStateRecord(
@@ -1401,7 +1472,7 @@ def _idle_run_record(*, recorded_at: str) -> MergeTrainRunRecord:
             for entry in queue
             if isinstance(entry, dict)
         )
-        if isinstance(queue, list | tuple)
+        if isinstance(queue, (list, tuple))
         else ()
     )
     dry_run_result = {
