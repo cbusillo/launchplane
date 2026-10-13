@@ -690,21 +690,26 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         )
         # Compose resolves the unset ODOO_WEB_COMMAND to the startup script.
         command = command[: command.index("exec ${ODOO_WEB_COMMAND")] + "echo web-started"
-        try:
-            completed = subprocess.run(
-                ["/bin/sh", "-c", command],
-                capture_output=True,
-                text=True,
-                env={
-                    "PATH": os.environ.get("PATH", ""),
-                    "ODOO_DB_NAME": database_name,
-                    "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": overrides_payload,
-                },
-                timeout=3,
-            )
-        except subprocess.TimeoutExpired:
+        # Reaching the first wait proves the web is held. Stop there instead of
+        # spending three seconds asleep; other command failures are not a hold.
+        waiting_status = 73
+        completed = subprocess.run(
+            ["/bin/sh", "-c", f"sleep() {{ exit {waiting_status}; }}; {command}"],
+            capture_output=True,
+            text=True,
+            env={
+                "PATH": os.environ.get("PATH", ""),
+                "ODOO_DB_NAME": database_name,
+                "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": overrides_payload,
+            },
+            timeout=3,
+        )
+        if completed.returncode == waiting_status:
+            self.assertNotIn("web-started", completed.stdout)
             return False
-        return "web-started" in completed.stdout
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("web-started", completed.stdout)
+        return True
 
     def test_passing_readback_releases_web_for_the_checked_payload_only(self) -> None:
         run = self._run(
