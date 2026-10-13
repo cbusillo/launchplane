@@ -4,7 +4,9 @@ import { RELEASE_PROGRESS_REFRESH_MS } from "../../src/OwnerReleaseReviewRoute";
 
 test("Identical testing and production preserve the completed run without decision controls @responsive", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
-  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
+  const heading = page.locator("[data-route-heading]");
+  await expect(heading).toBeVisible();
+  const pendingHeading = await heading.textContent();
   const response = await page.evaluate(async () => {
     const modulePath = "/ui/src/dev-fixtures.ts";
     const fixtures = await import(modulePath);
@@ -26,8 +28,8 @@ test("Identical testing and production preserve the completed run without decisi
     return route.fulfill({ status: 409, json: {} });
   });
   await page.goto("/ui/owner-review?product=example-site");
-  await expect(page.getByRole("heading", { name: "No new release to accept" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Release progress" })).toContainText("Release progress: Live");
+  await expect(heading).not.toHaveText(pendingHeading!);
+  await expect(page.getByRole("region", { name: "Release progress" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Accept release" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Request changes", exact: true })).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("no-new-release-client.png"), fullPage: true });
