@@ -1095,6 +1095,13 @@ def _evaluate_product_config_runtime_key_safety(
     )
     if not runtime_secrets:
         return {"required": False, "status": "skipped", "checked_binding_keys": []}
+    if not context_name or not instance_name:
+        raise ProductConfigError(
+            "Runtime secrets require a context and instance for key-safety evaluation. "
+            "For a shared secret, keep scope context and name an owned stable lane "
+            "as the top-level instance.",
+            code="runtime_key_safety_target_required",
+        )
     try:
         policy_record = latest_active_runtime_key_safety_policy(record_store)
     except ValueError as error:
