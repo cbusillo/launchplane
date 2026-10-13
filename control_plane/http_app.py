@@ -26700,6 +26700,7 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=ReleaseReviewRouteDependencies(
             common=owner_review_route_dependencies,
+            control_plane_root=resolved_control_plane_root,
             read_github_human_browser_mutation_identity=(
                 read_owner_review_browser_mutation_identity
             ),

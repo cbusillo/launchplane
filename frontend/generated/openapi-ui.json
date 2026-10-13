@@ -10306,6 +10306,39 @@
           "run_status"
         ]
       },
+      "BusinessHoursWindow": {
+        "additionalProperties": false,
+        "properties": {
+          "applies": {
+            "default": false,
+            "title": "Applies",
+            "type": "boolean"
+          },
+          "blocked_reason": {
+            "default": "",
+            "title": "Blocked Reason",
+            "type": "string"
+          },
+          "next_release_at": {
+            "default": "",
+            "title": "Next Release At",
+            "type": "string"
+          },
+          "timezone": {
+            "default": "",
+            "title": "Timezone",
+            "type": "string"
+          }
+        },
+        "title": "BusinessHoursWindow",
+        "type": "object",
+        "required": [
+          "applies",
+          "blocked_reason",
+          "next_release_at",
+          "timezone"
+        ]
+      },
       "ChangeImpactCoverage": {
         "additionalProperties": false,
         "description": "Bounded path-coverage diagnostics, independent of classification authority.",
@@ -10393,9 +10426,21 @@
             "title": "Blocked Reason",
             "type": "string"
           },
+          "business_hours_timezone": {
+            "default": "",
+            "title": "Business Hours Timezone",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "decision_record_id": {
             "title": "Decision Record Id",
             "type": "string"
+          },
+          "next_release_at": {
+            "default": "",
+            "title": "Next Release At",
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "rollback_drill": {
             "title": "Rollback Drill",
@@ -14174,6 +14219,17 @@
             ],
             "title": "Lifecycle State",
             "type": "string"
+          },
+          "odoo_business_hours": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooBusinessHoursPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "owner": {
             "$ref": "#/components/schemas/ProductOwnerProfile"
@@ -18703,6 +18759,28 @@
           "value"
         ],
         "title": "OdooAddonSettingOverride",
+        "type": "object"
+      },
+      "OdooBusinessHoursPolicy": {
+        "additionalProperties": false,
+        "description": "Select the company calendar in Odoo; never copy its hours into Launchplane.",
+        "properties": {
+          "company_id": {
+            "minimum": 1,
+            "title": "Company Id",
+            "type": "integer"
+          },
+          "private_endpoint_key": {
+            "default": "",
+            "title": "Private Endpoint Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "company_id",
+          "private_endpoint_key"
+        ],
+        "title": "OdooBusinessHoursPolicy",
         "type": "object"
       },
       "OdooConfigParameterOverride": {
@@ -34576,6 +34654,11 @@
             "maxLength": 4000,
             "title": "Reason",
             "type": "string"
+          },
+          "release_during_business_hours": {
+            "default": false,
+            "title": "Release During Business Hours",
+            "type": "boolean"
           }
         },
         "required": [
@@ -34646,6 +34729,12 @@
             "minLength": 1,
             "title": "Record Id",
             "type": "string"
+          },
+          "release_during_business_hours": {
+            "default": false,
+            "title": "Release During Business Hours",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           },
           "release_issue_url": {
             "default": "",
@@ -34744,6 +34833,17 @@
       "ReleaseReviewResponse": {
         "additionalProperties": false,
         "properties": {
+          "business_hours": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BusinessHoursWindow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "can_override": {
             "title": "Can Override",
             "type": "boolean"

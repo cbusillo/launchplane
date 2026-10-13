@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, cast
 from uuid import uuid4
+from pathlib import Path
 
 import click
 from fastapi import Depends, Query
@@ -47,6 +48,8 @@ from control_plane.release_review import (
 )
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.odoo_business_hours import BusinessHoursWindow
+from control_plane.odoo_business_hours import read_business_hours_window
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +66,7 @@ class ReleaseReviewRouteDependencies:
     open_urgent_review: Callable[
         [ReleaseReviewStore, LaunchplaneProductProfileRecord, str, str], bool
     ]
+    control_plane_root: Path | None = None
 
 
 class ReleaseReviewResponse(BaseModel):
@@ -84,6 +88,11 @@ class ReleaseReviewResponse(BaseModel):
     # the review shown is a live temporary hotfix awaiting the Client.
     can_start_temporary_hotfix: bool = False
     reviewing_temporary_hotfix: bool = False
+    business_hours: BusinessHoursWindow | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class ReleaseReviewDecisionEnvelope(BaseModel):
@@ -93,10 +102,17 @@ class ReleaseReviewDecisionEnvelope(BaseModel):
     checklist_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     decision: ReleaseDecision
     reason: str = Field(default="", max_length=4000)
+    release_during_business_hours: bool = False
 
     @model_validator(mode="after")
     def validate_reason(self) -> "ReleaseReviewDecisionEnvelope":
         self.reason = self.reason.strip()
+        if self.release_during_business_hours and (
+            self.decision not in {"accepted", "temporary_hotfix"} or not self.reason
+        ):
+            raise ValueError(
+                "Releasing during business hours requires acceptance or a hotfix and a reason."
+            )
         if self.decision != "accepted" and not self.reason:
             raise ValueError("Requesting changes or overriding requires a reason.")
         return self
@@ -227,7 +243,12 @@ def register_release_review_routes(
                 or checklist.production != checklist.candidate
             ):
                 return None
-        return read_client_release_run(store=store, profile=profile, decision=decision)
+        return read_client_release_run(
+            store=store,
+            profile=profile,
+            decision=decision,
+            control_plane_root=dependencies.control_plane_root,
+        )
 
     def response(
         store: object,
@@ -278,6 +299,13 @@ def register_release_review_routes(
             release_run=release_run(store, profile, review, reviewing_hotfix=hotfix is not None),
             can_start_temporary_hotfix=director,
             reviewing_temporary_hotfix=hotfix is not None,
+            business_hours=(
+                read_business_hours_window(
+                    store=store, profile=profile, control_plane_root=dependencies.control_plane_root
+                )
+                if profile.production_use == "live" and profile.odoo_business_hours
+                else None
+            ),
         )
 
     def decision_release_start(
@@ -419,6 +447,7 @@ def register_release_review_routes(
             checklist=review.checklist,
             decision=envelope.decision,
             reason=envelope.reason,
+            release_during_business_hours=envelope.release_during_business_hours,
             actor_github_id=str(identity.github_id),
             actor_github_login=identity.login,
             decided_at=datetime.now(UTC).isoformat(),
@@ -433,6 +462,7 @@ def register_release_review_routes(
             and previous.decision == decision.decision
             and previous.reason == decision.reason
             and previous.release_start == decision.release_start
+            and previous.release_during_business_hours == decision.release_during_business_hours
             and (current.release_run is None or current.release_run.state != "stopped")
         )
         if repeated and previous and not previous.release_issue_url:
@@ -476,7 +506,10 @@ def register_release_review_routes(
         return current.model_copy(
             update={
                 "release_run": read_client_release_run(
-                    store=record_store, profile=profile, decision=decision
+                    store=record_store,
+                    profile=profile,
+                    decision=decision,
+                    control_plane_root=dependencies.control_plane_root,
                 ),
                 "review": review.model_copy(
                     update={

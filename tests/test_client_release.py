@@ -136,6 +136,95 @@ def _backup_binding(store: object, request: object) -> object:
 
 
 class ClientReleaseTests(unittest.TestCase):
+    def test_business_hours_hold_resumes_the_exact_acceptance_and_rechecks_before_promotion(
+        self,
+    ) -> None:
+        from control_plane.contracts.odoo_business_hours import (
+            BusinessHoursWindow,
+            OdooBusinessHoursPolicy,
+        )
+
+        self.switch("promote")
+        self.store.write_product_profile_record(
+            self.store.read_product_profile_record(PRODUCT).model_copy(
+                update={
+                    "production_use": "live",
+                    "odoo_business_hours": OdooBusinessHoursPolicy(company_id=7),
+                }
+            )
+        )
+        accepted = self.accept()
+        held = BusinessHoursWindow(
+            applies=True,
+            blocked_reason="business open",
+            next_release_at="2026-10-13T21:00:00Z",
+            timezone="America/New_York",
+        )
+        with patch(
+            "control_plane.odoo_business_hours.read_business_hours_window", return_value=held
+        ) as window:
+            self.assertEqual(self.advance(), ())
+            view = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(PRODUCT),
+                decision=accepted,
+                control_plane_root=self.root,
+            )
+            assert view is not None
+            self.assertEqual(view.next_release_at, held.next_release_at)
+            self.assertEqual(view.state, "waiting")
+            window.return_value = BusinessHoursWindow(applies=True)
+            (backup_id,) = self.advance()
+            backup = self.store.read_verireel_prod_backup_gate_operation_record(backup_id)
+            assert backup.authorization is not None
+            self.assertEqual(backup.authorization.release_decision_record_id, accepted.record_id)
+            self.finish(backup_id)
+            window.return_value = held
+            self.assertEqual(self.advance(), ())
+            window.return_value = BusinessHoursWindow(applies=True)
+            (promotion_id,) = self.advance()
+            promotion = self.store.read_odoo_prod_promotion_operation_record(promotion_id)
+            self.assertEqual(
+                promotion.request.expected_artifact_id, accepted.checklist.candidate.artifact_id
+            )
+            self.assertEqual(promotion.authorization.release_decision_record_id, accepted.record_id)
+
+    def test_urgent_timing_never_bypasses_acceptance_hold_or_candidate_binding(self) -> None:
+        from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
+
+        self.switch("promote")
+        self.store.write_product_profile_record(
+            self.store.read_product_profile_record(PRODUCT).model_copy(
+                update={
+                    "production_use": "live",
+                    "odoo_business_hours": OdooBusinessHoursPolicy(company_id=7),
+                }
+            )
+        )
+        accepted = self.accept().model_copy(
+            update={
+                "release_during_business_hours": True,
+                "reason": "Staff cannot save orders; urgent fix.",
+            }
+        )
+        self.store.write_release_review_decision_record(accepted)
+        with patch("control_plane.odoo_business_hours.read_business_hours_window") as calendar:
+            self.switch("held")
+            self.assertEqual(self.advance(), ())
+            self.switch("promote")
+            (backup_id,) = self.advance()
+            calendar.assert_not_called()
+            self.finish(backup_id)
+            testing = self.store.read_release_tuple_record(
+                context_name=CONTEXT, channel_name="testing"
+            )
+            self.store.write_release_tuple_record(
+                testing.model_copy(
+                    update={"artifact_id": "artifact-prod", "repo_shas": {"example/site": BASE}}
+                )
+            )
+            self.assertEqual(self.advance(), ())
+
     def setUp(self) -> None:
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -836,6 +925,47 @@ class ClientReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             DurableOperationCallerIdentity(identity_type="github_human", login="x", github_id=1)
 
+    def test_queued_promotion_waits_before_provider_effects_and_resumes_without_new_acceptance(
+        self,
+    ) -> None:
+        from control_plane.contracts.odoo_business_hours import (
+            BusinessHoursWindow,
+            OdooBusinessHoursPolicy,
+        )
+
+        accepted, source = self.queued_promotion()
+        self.store.write_product_profile_record(
+            self.store.read_product_profile_record(PRODUCT).model_copy(
+                update={
+                    "production_use": "live",
+                    "odoo_business_hours": OdooBusinessHoursPolicy(company_id=7),
+                }
+            )
+        )
+        with self.promotion_providers(failure="none"):
+            with patch(
+                "control_plane.odoo_business_hours.read_business_hours_window",
+                return_value=BusinessHoursWindow(applies=True, blocked_reason="business open"),
+            ):
+                with patch(
+                    "control_plane.workflows.odoo_prod_promotion_run.execute_odoo_prod_backup_gate"
+                ) as effects:
+                    self.run_release_worker()
+                    effects.assert_not_called()
+                waiting = self.store.read_odoo_prod_promotion_operation_record(source.operation_id)
+                self.assertEqual(waiting.status, "pending")
+                self.assertEqual(waiting.error_code, "business_hours_held")
+                self.assertFalse(waiting.lease_owner)
+                self.assertEqual(self.store.list_odoo_prod_rollback_operation_records(), ())
+            with patch(
+                "control_plane.odoo_business_hours.read_business_hours_window",
+                return_value=BusinessHoursWindow(applies=True),
+            ):
+                self.run_release_worker()
+            completed = self.store.read_odoo_prod_promotion_operation_record(source.operation_id)
+            self.assertEqual(completed.status, "pass", completed.error_message)
+            self.assertEqual(completed.authorization.release_decision_record_id, accepted.record_id)
+
     def queued_promotion(
         self,
     ) -> tuple[ReleaseReviewDecisionRecord, OdooProdPromotionOperationRecord]:
@@ -992,7 +1122,7 @@ class ClientReleaseTests(unittest.TestCase):
                     )
                 self.assertEqual(post_deploy.post_deploy_status, "fail")
             deployment = _deployment(
-                "failed-candidate-deployment", "artifact-testing", passed=False
+                "candidate-deployment", "artifact-testing", passed=failure == "none"
             )
             if failure == "health":
                 deployment = deployment.model_copy(
@@ -1011,14 +1141,14 @@ class ClientReleaseTests(unittest.TestCase):
                 strategy="recreate-in-place",
                 artifact_id="artifact-testing",
                 deployment_record_id=deployment.record_id,
-                deploy_status="fail",
+                deploy_status="pass" if failure == "none" else "fail",
                 post_deploy_status=cast(
                     Literal["pass", "fail", "skipped"], deployment.post_deploy_update.status
                 ),
                 health_status=cast(
                     Literal["pass", "fail", "skipped"], deployment.destination_health.status
                 ),
-                error_message="Candidate verification failed.",
+                error_message="" if failure == "none" else "Candidate verification failed.",
             )
 
         stack.enter_context(
