@@ -143,6 +143,27 @@ Historical records cannot substitute for a missing finalization checkpoint.
 Before apply, finish other provisioning for the product; the database cannot
 prove an independent provider operation that has not recorded its result.
 
+An approved managed-secret re-encryption can commit after finalization's secret
+snapshot and before a later secret's guarded disable. Earlier secrets and their
+bindings can already be disabled, with immutable disable audit events, and
+runtime settings can already be removed. The changed secret keeps its rotated
+version and audit event; the profile remains `retiring` and the original target
+reservation stays reconciliation-required. An expired lease does not resolve
+that authority change. The original-key retry still refuses, another key cannot
+take over the target, and planning a replacement retirement refuses the retiring
+profile. **Resume original retirement** supports unchanged reviewed authority;
+it cannot complete this changed-authority case.
+
+There is currently no service capability to review and accept that changed
+secret authority within the held retirement. Preserve its original request,
+caller, key, finalization checkpoint, rotated pointer and audit history; do not
+clear the fence or restore an older secret pointer to force a retry. A future
+recovery proposal would need an explicit review of the changed authority bound
+to that original operation, fresh provider-absence and ownership checks, and
+durable evidence for adopting only the reviewed secret delta while retaining
+already committed disable events. That capability requires separate design and
+review; this qualification supplies no operational recovery procedure.
+
 The existing transitional authorization selector is `product-retirement` in
 **Manage Launchplane Authorization**, backed by managed set
 `operator.product-retirement` and

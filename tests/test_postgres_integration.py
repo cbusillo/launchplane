@@ -1124,6 +1124,14 @@ class RealPostgresLegacyPreviewReconciliationTests(
 
 
 class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_partial_retirement_disable_preserves_approved_rotation(self) -> None:
+        from tests.test_retirement_approved_rotation import RetirementApprovedRotationTests
+
+        with _head_postgres_database() as url:
+            await RetirementApprovedRotationTests().assert_approved_rotation_survives(
+                url, partial_disable=True
+            )
+
     async def test_approved_rotation_survives_stale_retirement(self) -> None:
         from tests.test_retirement_approved_rotation import RetirementApprovedRotationTests
 
