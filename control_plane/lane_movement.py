@@ -156,9 +156,14 @@ class SourceReadRetryRecord(Protocol):
 
 
 def source_read_retry_ready(record: SourceReadRetryRecord, claimed_at: str) -> bool:
-    if record.error_code != "lane_movement.source_order_unavailable":
+    if record.error_code == "business_hours_held":
+        # Calendar deferrals yield to other products instead of reclaiming the
+        # oldest pending promotion on every worker poll. Timing is reread on retry.
+        delay = 30
+    elif record.error_code == "lane_movement.source_order_unavailable":
+        delay = min(30 * 2 ** min(max(record.attempt - 1, 0), 6), 1800)
+    else:
         return True
-    delay = min(30 * 2 ** min(max(record.attempt - 1, 0), 6), 1800)
     updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
     claimed = datetime.fromisoformat(claimed_at.replace("Z", "+00:00"))
     return claimed >= updated + timedelta(seconds=delay)

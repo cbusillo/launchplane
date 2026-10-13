@@ -304,6 +304,7 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         reason: str = "",
         digest: str = "",
         csrf: bool = True,
+        release_now: bool = False,
     ) -> Response:
         session = self.sessions.issue(_human(login=actor, github_id=github_id))
         headers = _browser_mutation_headers(self.sessions, session)
@@ -320,7 +321,37 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                 "checklist_digest": digest or current.checklist_digest,
                 "decision": outcome,
                 "reason": reason,
+                "release_during_business_hours": release_now,
             },
+        )
+
+    async def test_business_hours_escape_requires_human_acceptance_and_audits_the_reason(
+        self,
+    ) -> None:
+        self.store.write_product_profile_record(
+            profile().model_copy(update={"release_on_acceptance": "promote"})
+        )
+        denied = await self.post(
+            actor="other", github_id=999, reason="Urgent bug fix", release_now=True
+        )
+        self.assertEqual(denied.status_code, 403)
+        missing_reason = await self.post(release_now=True)
+        self.assertEqual(missing_reason.status_code, 400)
+        normal = await self.post()
+        normal_id = normal.json()["review"]["latest_decision"]["record_id"]
+        urgent = await self.post(reason="Staff cannot save orders", release_now=True)
+        self.assertEqual(urgent.status_code, 200, urgent.text)
+        saved = urgent.json()["review"]["latest_decision"]
+        self.assertNotEqual(saved["record_id"], normal_id)
+        self.assertTrue(saved["release_during_business_hours"])
+        record = self.store.read_release_review_decision_record(
+            product="example-site", record_id=saved["record_id"]
+        )
+        self.assertEqual(record.reason, "Staff cannot save orders")
+        self.assertEqual(record.actor_github_id, "9001")
+        repeated = await self.post(reason="Staff cannot save orders", release_now=True)
+        self.assertEqual(
+            repeated.json()["review"]["latest_decision"]["record_id"], record.record_id
         )
 
     async def test_owner_accepts_release_without_provider_or_merge_effects(self) -> None:

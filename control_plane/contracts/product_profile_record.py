@@ -5,6 +5,7 @@ import re
 from typing import Literal, get_args
 
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
+from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
@@ -626,6 +627,11 @@ class LaunchplaneProductProfileRecord(BaseModel):
     lifecycle_state: ProductLifecycleState = "active"
     # Unknown existing records require review; only explicit prelaunch records are exempt.
     production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
+    odoo_business_hours: OdooBusinessHoursPolicy | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     # Existing products keep requiring public authority until an admin declares otherwise.
     public_website: ProductPublicWebsite = Field(
         default="required",
@@ -664,6 +670,8 @@ class LaunchplaneProductProfileRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "LaunchplaneProductProfileRecord":
+        if self.odoo_business_hours is not None and self.driver_id != "odoo":
+            raise ValueError("Business-hours scheduling requires an Odoo product.")
         if self.public_website == "none" and any(
             lane.base_url.strip()
             or lane.health_url.strip()
