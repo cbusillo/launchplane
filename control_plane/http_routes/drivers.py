@@ -549,8 +549,12 @@ def register_operation_status_read_routes(
                 "for the requested product/context."
             ),
         )
+        recovery_diagnostics: list[str] = []
         recovery = testing_replacement_recovery_read(
-            cast(TestingRecoveryStore, record_store), operation, control_plane_root
+            cast(TestingRecoveryStore, record_store),
+            operation,
+            control_plane_root,
+            diagnostics=recovery_diagnostics,
         )
         if not full_record:
             status_view = operation_status_read_view(
@@ -564,12 +568,15 @@ def register_operation_status_read_routes(
             ):
                 # The maintained bounded helper already retains this public
                 # description even when it omits new structured response fields.
-                status_view["error_description"] = (
+                description = (
                     f"Recovery: {recovery['reason'] or recovery['status']}. "
                     f"Journal: {recovery['journal']}. "
                     f"Provider effects: {recovery['provider_effects']}. "
                     "The operation fence is retained; this read changes nothing."
                 )
+                if recovery_diagnostics:
+                    description += " " + " ".join(recovery_diagnostics)
+                status_view["error_description"] = description
             return OdooStableTargetReplacementOperationStatusResponse(
                 trace_id=trace_id,
                 recovery=TestingReplacementRecoveryRead.model_validate(recovery),

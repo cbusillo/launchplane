@@ -13,6 +13,7 @@ from time import monotonic
 from pydantic import BaseModel
 
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationCancellation,
@@ -34,6 +35,9 @@ from control_plane.launchplane_reconcile_authorization import (
 
 
 class TestingRecoveryStore(Protocol):
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[DeploymentRecord, ...]: ...
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
@@ -313,6 +317,8 @@ def testing_replacement_recovery_read(
     store: TestingRecoveryStore,
     operation: OdooStableTargetReplacementOperationRecord,
     root: Path,
+    *,
+    diagnostics: list[str] | None = None,
 ) -> dict[str, object]:
     """Classify persisted evidence without publishing or retiring an operation.
 
@@ -364,6 +370,26 @@ def testing_replacement_recovery_read(
             ):
                 return refuse("recovery_authorization_changed")
             if journal is None:
+                from control_plane.testing_legacy_replacement_inspection import (
+                    inspect_legacy_replacement,
+                )
+
+                fingerprint = current_binding_fingerprint(store, current)
+                inspected, summary = inspect_legacy_replacement(
+                    store, current, root, deadline_at=monotonic() + 15
+                )
+                check_lock()
+                if (
+                    store.read_odoo_stable_target_replacement_operation_record(
+                        operation.operation_id
+                    )
+                    != current
+                    or current_binding_fingerprint(store, current) != fingerprint
+                ):
+                    return refuse("recovery_operation_or_binding_changed")
+                view["provider_inspected"] = inspected
+                if diagnostics is not None:
+                    diagnostics.append(summary)
                 return refuse("recovery_journal_absent")
             if not view["attempt_matches"]:
                 return refuse("recovery_attempt_changed")
