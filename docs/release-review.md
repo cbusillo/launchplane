@@ -38,7 +38,9 @@ release page shows the reason and next closing time in the calendar's timezone.
 Closing is a forecast from a current read, not a stored timetable: the existing
 worker polls and rechecks the calendar before queuing each forward step and
 again before a promotion's first provider effect. A queued promotion whose
-window closes stays pending and resumes without another acceptance. Once
+window closes stays pending and resumes without another acceptance. A calendar
+deferral waits for the existing short read-retry delay before another claim, so
+other products' ready or urgent releases can proceed. Once
 production work starts, its gated release, rollback drill and recovery finish
 without another timing hold. Calendar reads never admit a release or modify
 Odoo records. Restarting Launchplane reads Odoo again; no in-memory timer owns

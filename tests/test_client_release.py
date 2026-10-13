@@ -957,14 +957,66 @@ class ClientReleaseTests(unittest.TestCase):
                 self.assertEqual(waiting.error_code, "business_hours_held")
                 self.assertFalse(waiting.lease_owner)
                 self.assertEqual(self.store.list_odoo_prod_rollback_operation_records(), ())
-            with patch(
-                "control_plane.odoo_business_hours.read_business_hours_window",
-                return_value=BusinessHoursWindow(applies=True),
+            with (
+                patch(
+                    "control_plane.odoo_business_hours.read_business_hours_window",
+                    return_value=BusinessHoursWindow(applies=True),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker._utc_now_timestamp",
+                    return_value=(
+                        datetime.fromisoformat(waiting.updated_at) + timedelta(minutes=5)
+                    ).isoformat(),
+                ),
             ):
                 self.run_release_worker()
             completed = self.store.read_odoo_prod_promotion_operation_record(source.operation_id)
             self.assertEqual(completed.status, "pass", completed.error_message)
             self.assertEqual(completed.authorization.release_decision_record_id, accepted.record_id)
+
+    def test_business_hours_deferral_does_not_starve_another_products_ready_promotion(self) -> None:
+        _, source = self.queued_promotion()
+        now = datetime.fromisoformat(source.updated_at)
+        held = source.model_copy(
+            update={"error_code": "business_hours_held", "updated_at": now.isoformat()}
+        )
+        self.store.write_odoo_prod_promotion_operation_record(held)
+        other_product = "another-site"
+        other = source.model_copy(
+            update={
+                "operation_id": source.operation_id + "-another",
+                "product": other_product,
+                "context": other_product,
+                "created_at": (now + timedelta(seconds=1)).isoformat(),
+                "request": source.request.model_copy(
+                    update={"product": other_product, "context": other_product}
+                ),
+                "authorization": source.authorization.model_copy(
+                    update={"product": other_product, "context": other_product}
+                ),
+            }
+        )
+        self.store.write_odoo_prod_promotion_operation_record(other)
+        claim_time = now + timedelta(seconds=2)
+        selected = self.store.claim_next_odoo_prod_promotion_operation_record(
+            lease_owner="other-product-worker",
+            claimed_at=claim_time.isoformat(),
+            lease_expires_at=(claim_time + timedelta(minutes=1)).isoformat(),
+        )
+        assert selected is not None
+        self.assertEqual(selected.operation_id, other.operation_id)
+        self.assertEqual(
+            self.store.read_odoo_prod_promotion_operation_record(held.operation_id).status,
+            "pending",
+        )
+        retry_time = now + timedelta(minutes=5)
+        resumed = self.store.claim_next_odoo_prod_promotion_operation_record(
+            lease_owner="held-product-worker",
+            claimed_at=retry_time.isoformat(),
+            lease_expires_at=(retry_time + timedelta(minutes=1)).isoformat(),
+        )
+        assert resumed is not None
+        self.assertEqual(resumed.operation_id, held.operation_id)
 
     def queued_promotion(
         self,
