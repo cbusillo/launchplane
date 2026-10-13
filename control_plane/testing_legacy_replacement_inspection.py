@@ -51,7 +51,11 @@ def inspect_legacy_replacement(
     if not operation.request.artifact_id or not operation.request.source_git_ref:
         return LegacyReplacementInspection(detail="original build request unavailable")
     records = store.list_deployment_records(
-        context_name=operation.context, instance_name=operation.instance, limit=51
+        context_name=operation.context,
+        instance_name=operation.instance,
+        artifact_id=operation.request.artifact_id,
+        source_git_ref=operation.request.source_git_ref,
+        limit=51,
     )
     if len(records) >= 51:
         return LegacyReplacementInspection(detail="retained deployment inventory truncated")
