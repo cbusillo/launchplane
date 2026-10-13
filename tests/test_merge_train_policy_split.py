@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from typing import cast
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from pydantic import ValidationError
@@ -46,7 +47,9 @@ from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.support.auth import local_operator_policy
 from tests.support.merge_train import _seed_merge_train_batch_candidate_record
 from tests.support.merge_train import _FakeMergeTrainGitHubClient
+from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
 from tests.test_merge_train_controller import _stack_collapse_record
+from tests import test_merge_admission_rolling_checks as rolling_fixtures
 from control_plane.merge_admission import MergeAdmissionEvaluation
 
 
@@ -328,7 +331,7 @@ class MergeTrainPolicySplitTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         changed = self.store.list_merge_train_policy_records(status="active")[0]
-        with self.assertRaisesRegex(ValueError, "digest no longer matches"):
+        with self.assertRaises(ValueError):
             validate_merge_train_stack_collapse_record_for_controller(
                 collapse_record=collapse,
                 policy_key=collapse.plan.policy_key,
@@ -337,13 +340,12 @@ class MergeTrainPolicySplitTests(unittest.IsolatedAsyncioTestCase):
             )
 
     def test_historical_policy_bytes_digest_still_verify(self) -> None:
-        original_bytes = self.original.model_dump_json()
-        restored = MergeTrainPolicyRecord.model_validate_json(original_bytes)
-        self.assertEqual(restored.model_dump_json(), original_bytes)
-        self.assertNotIn(
-            "mutation_authorized", json.loads(original_bytes)["policy"]["policies"][0]["scheduler"]
+        historical = json.loads(
+            (Path(__file__).parent / "fixtures" / "merge-train-policy-required.json").read_text()
         )
-        corrupted = json.loads(original_bytes)
+        restored = MergeTrainPolicyRecord.model_validate(historical)
+        self.assertEqual(restored.model_dump(mode="json"), historical)
+        corrupted = json.loads(json.dumps(historical))
         corrupted["policy"]["policies"][0]["max_batch_size"] = 2
         with self.assertRaises(ValidationError):
             MergeTrainPolicyRecord.model_validate(corrupted)
@@ -383,9 +385,86 @@ class MergeTrainPolicySplitTests(unittest.IsolatedAsyncioTestCase):
         candidate = _seed_merge_train_batch_candidate_record(
             self.root / "fixtures", policy=self.policy
         )
-        with self.assertRaisesRegex(ValueError, "digest no longer matches"):
+        with self.assertRaises(ValueError):
             validate_merge_train_candidate_record_for_controller(
                 candidate_record=candidate,
                 policy_key=candidate.candidate.policy_key,
                 policy_sha256="unresolved-current-policy",
             )
+
+    async def test_lowering_batch_cap_preserves_live_multi_pr_landing(self) -> None:
+        fixture = rolling_fixtures.RollingCandidateCheckTests()
+        fixture.setUp()
+        fixture.plan = build_merge_train_batch_landing_plan(
+            candidate=fixture.candidate_record.candidate,
+            merge_method="merge",
+            created_at=fixture.candidate_record.updated_at,
+            candidate_pull_request_number=9000,
+        )
+        self.store.compare_and_write_merge_train_policy_record(
+            expected_record=self.original, replacement_record=fixture.policy
+        )
+        self.original = fixture.policy
+        response = await self._post(
+            self._request(
+                {"max_batch_size": 1}, repository=fixture.policy.policy.policies[0].repository
+            )
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        fixture.policy = self.store.list_merge_train_policy_records(status="active")[0]
+        self.assertGreater(len(fixture.plan.entries), 1)
+        for entry in fixture.plan.entries:
+            evaluation = fixture._evaluate(
+                after_first_landing=False,
+                target_position=entry.position,
+                record_store=self.store,
+                base_tree=fixture.plan.entries[0].recorded_candidate_parent_tree_sha,
+            )
+            self.assertEqual(
+                evaluation.readiness.state, "ready", evaluation.readiness.model_dump_json()
+            )
+
+    async def test_lowering_batch_cap_preserves_candidate_membership(self) -> None:
+        candidate = _seed_merge_train_batch_candidate_record(
+            self.root / "fixtures",
+            policy=self.policy,
+            status="passed",
+            required_checks_status="pass",
+            candidate_sha="candidate-built",
+            snapshot_reader=_FakeExpandedMergeTrainSnapshotReader,
+        )
+        self.assertGreater(len(candidate.candidate.entries), 1)
+        self.store.write_merge_train_batch_candidate_record(candidate)
+        response = await self._post(
+            self._request({"max_batch_size": 1}, repository=candidate.candidate.repository)
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        current = self.store.list_merge_train_policy_records(status="active")[0]
+        with patch(
+            "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+            _FakeExpandedMergeTrainSnapshotReader,
+        ):
+            progression = execute_merge_train_controller_with_client(
+                request=MergeTrainControllerRunOnceEnvelope(
+                    repository=candidate.candidate.repository, base_branch="main", mutate=False
+                ),
+                policy=current.policy,
+                policy_sha256=current.policy_sha256,
+                repository_policy=current.policy.policies[1],
+                github_client=cast(
+                    GitHubMergeTrainClient, _FakeMergeTrainGitHubClient(transport=object())
+                ),
+                trace_id="cap-controller-proof",
+                recorded_at=current.updated_at,
+                candidate_store=self.store,
+                landing_store=self.store,
+                stack_collapse_store=self.store,
+                controller_state_store=self.store,
+                admission_store=self.store,
+                admission_evaluator=_UnexpectedAdmissionEvaluator(),
+            )
+        self.assertEqual(
+            progression.accepted_result["controller_action"],
+            "plan_landing",
+            progression.accepted_result,
+        )

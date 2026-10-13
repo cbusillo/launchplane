@@ -5562,6 +5562,7 @@ def _plan_failed_candidate_replacement(
         policy=policy,
         snapshot=_without_held_out_pull_requests(snapshot=snapshot, held_out=holds),
         batch_landing=True,
+        new_candidate=True,
     )
     if plan_dry_run.intended_next_action != "merge" or plan_dry_run.queue_order != expected_order:
         return None
