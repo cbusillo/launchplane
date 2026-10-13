@@ -2,6 +2,64 @@ import { expect, test } from "@playwright/test";
 import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
 import { RELEASE_PROGRESS_REFRESH_MS } from "../../src/OwnerReleaseReviewRoute";
 
+test("A new invitation has its own progress and formatted linked PR checks", { tag: "@layout" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
+  const { review, accepted } = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const fixtures = await import(modulePath);
+    const review = fixtures.releaseReviewForFixture("products");
+    review.review.checklist.items[0].owner_test_notes = "### Check the booking page\n\nConfirm the **booking button** is visible.\n\n- Open [testing](https://testing.example.invalid/).\n- Check `Contact`.\n\n<script>window.notesExecuted = true</script>\n\n[Bad link](javascript:alert(1))\n\n![Site image](https://images.example.invalid/pixel.png)";
+    return { review, accepted: fixtures.releaseDecisionForFixture(review, "accepted", "") };
+  });
+  let current = accepted;
+  current.release_run = {
+    decision_record_id: "earlier-finished-release", rollback_drill: false, state: "passed", blocked_reason: "",
+    steps: [{ step: "promote-1", kind: "promote", status: "pass", operation_id: "earlier-promotion", failure: null }],
+  };
+  const writes: string[] = [];
+  const imageRequests: string[] = [];
+  page.on("request", request => { if (request.url().includes("images.example.invalid")) imageRequests.push(request.url()); });
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: current }));
+  await page.route("**/v1/release-review/decisions", route => {
+    writes.push(route.request().method());
+    current = { ...accepted, release_run: { ...current.release_run!, decision_record_id: "new-release", state: "waiting", steps: [
+      { step: "backup-1", kind: "backup", status: "not_started", operation_id: "", failure: null },
+      { step: "promote-1", kind: "promote", status: "not_started", operation_id: "", failure: null },
+    ] } };
+    return route.fulfill({ json: current });
+  });
+  await page.goto("/ui/owner-review?product=example-site");
+  const progress = page.getByRole("region", { name: "Release progress" });
+  await expect(progress).toContainText("Release progress: Live");
+  // The API now projects a new checklist without that finished historical run.
+  current = { ...review, release_run: null };
+  await page.reload();
+  await expect(progress).toHaveCount(0);
+  const checks = page.locator(".release-review-checklist").first().locator(":scope > li");
+  await expect(checks).toHaveCount(2);
+  for (const item of review.review.checklist!.items.filter(item => !item.owner_test_notes.startsWith("Nothing for the owner to test"))) {
+    await expect(checks.getByRole("link", { name: item.title, exact: true })).toHaveAttribute("href", item.url);
+  }
+  await expect(checks.getByRole("heading", { name: "Check the booking page" })).toBeVisible();
+  await expect(checks.locator("strong")).toHaveText("booking button");
+  await expect(checks.locator("code")).toHaveText("Contact");
+  await expect(checks.getByRole("link", { name: "testing", exact: true })).toHaveAttribute("href", "https://testing.example.invalid/");
+  await expect(checks.first()).not.toContainText("###");
+  await expect(checks.locator("script, img")).toHaveCount(0);
+  await expect(checks.getByRole("link", { name: "Bad link" })).toHaveCount(0);
+  expect(imageRequests).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("new-release-invitation.png"), fullPage: true });
+  await page.getByRole("button", { name: "Accept release" }).click();
+  await expect(progress).toContainText("Release progress: Starting");
+  await expect(progress).toContainText("Verified backup: Not started");
+  await expect(progress).not.toContainText("Done");
+  await page.screenshot({ path: testInfo.outputPath("new-release-accepted.png"), fullPage: true });
+  expect(writes).toEqual(["POST"]);
+});
+
 test("Preview-era note markers identify each PR only in the engineering view", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
@@ -57,6 +115,7 @@ test("Failed releases distinguish automatic recovery from the rollback drill", a
   run.steps = [];
   run.blocked_reason = "Launchplane needs a verified previous passing version before this release can start.";
   await page.reload();
+  await expect(progress.getByRole("heading")).toHaveText("Release progress: Blocked");
   await expect(progress.getByRole("status")).toHaveText(run.blocked_reason);
   await page.screenshot({ path: testInfo.outputPath("release-no-baseline.png"), fullPage: true });
 });
@@ -86,9 +145,11 @@ test("Owner reviews the complete release and can request changes after accepting
   await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Open the testing site" })).toHaveAttribute("href", "https://testing.example.invalid/");
   const checks = page.locator(".release-review-checklist").first().locator(":scope > li");
-  await expect(checks).toHaveCount(1);
-  await expect(checks.getByText("On a phone, confirm the booking button is visible.", { exact: false })).toBeVisible();
-  await expect(checks.locator(".release-review-changes > li")).toHaveCount(2);
+  await expect(checks).toHaveCount(2);
+  for (const check of await checks.all()) {
+    await expect(check.getByText("On a phone, confirm the booking button is visible.", { exact: false })).toBeVisible();
+  }
+  await expect(checks.getByRole("heading")).toHaveCount(2);
   for (const repository of ["example/shared-addons", "example/disable-online"]) {
     const shared = page.getByRole("region", { name: `Shared website components from ${repository}`, exact: true });
     await expect(shared).toContainText("Sign in as a staff user and confirm your usual pages open.");
@@ -263,6 +324,46 @@ test("An open review page follows the release it started", async ({ page }, test
   await page.clock.runFor(3 * RELEASE_PROGRESS_REFRESH_MS);
   expect(reads).toBe(settledReads);
   expect(writes).toEqual(["POST"]);
+});
+
+test("Blocked release progress keeps completed steps and resumes after a hold is lifted", async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const fixtures = await import(modulePath);
+    return fixtures.releaseDecisionForFixture(fixtures.releaseReviewForFixture("products"), "accepted", "");
+  });
+  const run: ClientReleaseRunView = {
+    decision_record_id: "fixture-release-decision", rollback_drill: false, state: "waiting",
+    blocked_reason: "Releases are on hold. An admin must lift the hold before the next step.",
+    steps: [
+      { step: "backup-1", kind: "backup", status: "pass", operation_id: "backup-operation", failure: null },
+      { step: "promote-1", kind: "promote", status: "not_started", operation_id: "", failure: null },
+    ],
+  };
+  const writes: string[] = [];
+  await page.clock.install();
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: { ...response, release_run: run } }));
+  await page.route("**/v1/release-review/decisions", route => { writes.push(route.request().method()); return route.abort(); });
+  await page.goto("/ui/owner-review?product=example-site");
+  const progress = page.getByRole("region", { name: "Release progress" });
+  await expect(progress.getByRole("heading")).toHaveText("Release progress: Blocked");
+  await expect(progress.getByRole("status")).toHaveText(run.blocked_reason);
+  await expect(progress).toContainText("Verified backup: Done");
+  await expect(progress).toContainText("Put this version live: Not started");
+  await progress.screenshot({ path: testInfo.outputPath("release-held.png") });
+  run.blocked_reason = "";
+  run.state = "running";
+  run.steps[1].status = "running";
+  run.steps[1].operation_id = "promote-operation";
+  await page.clock.runFor(RELEASE_PROGRESS_REFRESH_MS);
+  await expect(progress.getByRole("heading")).toHaveText("Release progress: In progress");
+  await expect(progress.getByRole("status")).toHaveCount(0);
+  await expect(progress).toContainText("Verified backup: Done");
+  await expect(progress).toContainText("Put this version live: Running");
+  expect(writes).toEqual([]);
 });
 
 test("A stopped release stops refreshing and a newer decision discards an older read", async ({ page }) => {

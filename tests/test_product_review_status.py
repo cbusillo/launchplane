@@ -673,6 +673,8 @@ class OwnerReviewStatusTests(unittest.TestCase):
         )
 
     def test_owner_decision_persists_while_feedback_delivery_is_locked(self) -> None:
+        self.store.write_preview_record(_preview_read_record())
+        self.store.write_preview_generation_record(_preview_generation_read_record())
         owner = GitHubHumanIdentity(
             login="site-owner",
             github_id=_OWNER_GITHUB_ID,
@@ -692,7 +694,9 @@ class OwnerReviewStatusTests(unittest.TestCase):
                     profile=_profile(),
                     pull_request_number=_PULL_REQUEST,
                     preview=ProductReviewPreview(
-                        preview_url="https://pr-42.example.invalid", head_sha=_HEAD_SHA
+                        preview_url="https://pr-42.example.invalid",
+                        head_sha=_HEAD_SHA,
+                        generation_id=_preview_generation_read_record().generation_id,
                     ),
                     decision="changes_requested",
                     reason="Keep this feedback.",
@@ -754,6 +758,9 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
                 "pull_request": _PULL_REQUEST,
                 "decision": "changes_requested",
                 "reason": "The price is wrong.",
+                "reviewed_head_sha": _HEAD_SHA,
+                "reviewed_preview_url": _preview_read_record().canonical_url,
+                "reviewed_generation_id": _preview_generation_read_record().generation_id,
             },
         )
         return response.status_code

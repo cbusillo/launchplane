@@ -2867,6 +2867,7 @@ export function productReviewForFixture(
     pull_request_url: "https://github.com/example/control-plane/pull/308",
     preview_url: previewUrl,
     head_sha: previewUrl ? "a".repeat(40) : "",
+    preview_generation_id: previewUrl ? "fixture-review-generation" : "",
     owner_set: ownerSet,
     owner_github_login: ownerSet ? "example-owner" : "",
     viewer_is_owner: viewerIsOwner,
@@ -2907,6 +2908,7 @@ export function productReviewDecisionForFixture(
   return {
     schema_version: 1,
     record_id: `fixture-product-review-${decision}`,
+    preview_generation_id: "fixture-review-generation",
     feedback_requested: true,
     feedback_url: "https://github.com/example/control-plane/pull/308#issuecomment-1",
     product: "example-site",

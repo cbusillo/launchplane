@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from typing import cast
 import unittest
+import os
 
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
@@ -668,6 +669,17 @@ class _HistoricalActivityRecordStore(_PreviewRecordStore):
 
 
 class ProductEnvironmentReadModelTest(unittest.TestCase):
+    def setUp(self) -> None:
+        keys = patch.dict(
+            os.environ,
+            {
+                "LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "incident-test-key",
+                "LAUNCHPLANE_SECRET_KEYS_JSON": "",
+            },
+        )
+        keys.start()
+        self.addCleanup(keys.stop)
+
     def test_generated_incident_without_reminder_capability_fails_closed(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
             _site_profile_payload(preview_enabled=False)

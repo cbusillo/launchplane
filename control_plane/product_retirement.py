@@ -185,6 +185,14 @@ class BoundProductRetirement:
         self.previews = previews
 
 
+def _require_single_lane_retirement_profile(profile: LaunchplaneProductProfileRecord) -> None:
+    if len(profile.lanes) != 1:
+        raise ProductRetirementBlockedError(
+            "Product retirement requires a profile with exactly one stable lane; "
+            "retiring one instance cannot retire a multi-lane product."
+        )
+
+
 def bind_product_retirement_authority(
     *, record_store: ProductRetirementStore, request: ProductRetirementRequest
 ) -> BoundProductRetirement:
@@ -199,6 +207,7 @@ def bind_product_retirement_authority(
         )
     if profile.lifecycle_state not in {"active", "retiring"}:
         raise ProductRetirementBlockedError("Product profile is already retired.")
+    _require_single_lane_retirement_profile(profile)
     matching_lanes = tuple(
         lane for lane in profile.lanes if lane.instance.strip() == request.instance
     )
@@ -643,6 +652,9 @@ class DokployProductRetirementAdapter:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         try:
+            _require_single_lane_retirement_profile(
+                self._record_store.read_product_profile_record(self._request.product)
+            )
             self._write_started_record(provider_operation_key)
             if self._lifecycle_before_value in {"retiring", "retired"}:
                 # Restore the existing retirement checkpoint before retry validation.
