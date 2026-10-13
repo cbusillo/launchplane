@@ -18869,6 +18869,25 @@ class PostgresRecordStore(HumanSessionStore):
                 status="record_id_conflict", current_record=current_record
             )
 
+        # Operational writes share the atomic policy/CAS/audit transaction but
+        # may never use it to replace authority, even if a caller bypasses the DTO.
+        from control_plane.merge_train_policy_operations import (
+            MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE,
+            MERGE_TRAIN_OPERATIONAL_POLICY_SCOPE,
+            require_unchanged_merge_train_authority,
+        )
+
+        if mutation is not None and (
+            mutation.route_path == MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
+            or mutation.scope == MERGE_TRAIN_OPERATIONAL_POLICY_SCOPE
+        ):
+            if (
+                mutation.route_path != MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
+                or mutation.scope != MERGE_TRAIN_OPERATIONAL_POLICY_SCOPE
+            ):
+                raise ValueError("merge_train_operational_mutation_identity_mismatch")
+            require_unchanged_merge_train_authority(current_record, replacement_record)
+
         expectation_projection_changed = merge_train_policy_provider_expectation_projection(
             current_record
         ) != merge_train_policy_provider_expectation_projection(replacement_record)

@@ -1055,10 +1055,12 @@ export type ManagedMergeTrainPolicyImportHumanEvidence = {
     active_target_count: number;
     active_updated_at: string;
     added_policy_keys: Array<string>;
+    authority_changed_policy_keys?: Array<string>;
     candidate_policy_sha256: string;
     candidate_record_id: string;
     candidate_target_count: number;
     changed_policy_keys: Array<string>;
+    operational_changed_policy_keys?: Array<string>;
     plan_digest: string;
     removed_policy_keys: Array<string>;
     result_status: 'ok';
@@ -1619,6 +1621,7 @@ export type MergeTrainRunRecord = {
 export type MergeTrainSchedulerPolicy = {
     enabled: boolean;
     mutate: boolean;
+    mutation_authorized?: boolean;
     runner_mode: 'level1' | 'controller';
 };
 

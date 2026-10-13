@@ -49,6 +49,55 @@ If no active record exists, service routes fail closed with
 new DB-backed policy record, not by relying on checked-in config files,
 service-host env, or generic service-code conditionals.
 
+## Policy Changes And Bindings
+
+Director approval governs repository/base enrollment, merge identity, all
+credential-source bindings, service authorization, every enqueue-authority field,
+provider protection expectations, and authorization of a mutating scheduler
+lane. `enqueue_label` and `blocked_label` stay in this authority projection:
+renaming them can admit or exclude existing PRs. They are changed through the
+managed policy review, without an implicit label migration.
+
+Operational settings use `POST /v1/work-graph/merge-train/policy/operational`:
+`stack_child_disposition_label`, `max_batch_size`, `failure_policy`, `merge_method`,
+`config_authority_events_enabled`, and scheduling within standing lane authority.
+The request contains `repository`, `base_branch`, `expected_record_id`,
+`expected_policy_sha256`, `source_event_id`, `reason`, and a `patch` containing
+only those settings. Omitted fields are preserved; an explicit null clears
+`max_batch_size`. Authority fields and unknown keys are refused. The existing
+`merge_train_policy_operation.propose` capability authorizes this path; no new
+grant or signed-in approval is needed. Full-policy proposals retain the governed
+review lifecycle and report authority versus operational target changes.
+
+The database transaction compares the active baseline, independently rejects
+any authority difference, supersedes the old policy, and commits the new policy
+and audit/idempotency receipt together. The receipt records caller, reason,
+source event, changed fields, full provenance digest and scoped authority and
+execution digests. Replay returns that original receipt; a changed request with
+the same event or an out-of-date baseline refuses. File storage cannot provide
+this atomic audit path and is refused. No credentials or provider labels are
+changed by this endpoint.
+
+Existing enabled mutating scheduler lanes have standing authority. An optional
+`scheduler.mutation_authorized` marker preserves it across operational pauses;
+it is absent at its historical default and cannot be supplied in an operational
+patch. A lane without standing authority cannot enable mutation through this
+path. New authority still comes from the Director-reviewed policy lifecycle.
+
+The full `policy_sha256` remains immutable document provenance, with its original
+serialization and algorithm. Work records retain that original digest. Their
+applicability resolves the referenced policy history and compares canonical
+execution bindings for the relevant repository/base only. Missing or ambiguous
+history fails closed. Each binding includes that target's authority, merge method,
+failure policy, and historical review semantics. A relevant change invalidates
+work; a different target's settings, child annotation label, batch-size selection,
+event-wake setting or already-authorized scheduler setting does not invalidate
+an existing candidate, landing or collapse. Child labels are resolved from
+current policy at disposition time; batch size governs new candidate selection.
+Pure provenance relationships between a candidate and its own landing still
+require their original exact identities. Historical delivery-semantics evidence
+keeps its existing digest algorithm; scoped execution bindings are separate.
+
 ## GitHub Read Cost
 
 Controller snapshots retain the base-rooted open-PR graph, but read details,
@@ -151,11 +200,10 @@ current governance readiness use the same resolver. The controller's landing
 admission reads pull-request evidence with that same policy credential, so
 enrolling a repository never also requires the service-wide
 `LAUNCHPLANE_GITHUB_TOKEN` to reach it. Adding optional source fields
-does not change existing policy bytes or digests. Selecting a managed source
-changes the full policy digest and therefore requires a new reviewed policy
-revision. Check every repository in that policy for active train work before
-applying the revision: in-flight candidates, landings and controller fences bind
-the full digest. It does not change the repository's delivery-semantics digest.
+does not change existing policy bytes or digests. Selecting a managed source changes authority and requires a reviewed policy
+revision. See [policy changes and bindings](#policy-changes-and-bindings) for
+which work that revision invalidates. Historical delivery-semantics digests
+retain their original algorithm.
 
 `GET /v1/work-graph/merge-train/policy` returns the active persisted policy record
 for callers with the existing global `merge_train.policy_targets` read action.
@@ -1830,10 +1878,8 @@ performs at most one controller action per scheduled pass. Managed PR feedback
 comments are allowed in mutate mode and should summarize whether a PR is queued,
 blocked, waiting, stale, or completed.
 
-For rollback, import a replacement policy record or restore the previous record
-with `scheduler.mutate = false`. To disarm the scheduled lane entirely, import a
-replacement active policy record with no `scheduler.enabled = true` repository
-policies; scheduled runs without an enabled DB target complete as no-ops before
+For rollback, use the operational policy endpoint to set `scheduler.mutate =
+false`. To disarm the scheduled lane entirely, set `scheduler.enabled = false`; scheduled runs without an enabled DB target complete as no-ops before
 the admission call. Changing `scheduler.runner_mode` to `level1` returns the
 workflow to the Level 1 baseline after the next scheduled pass.
 
@@ -1865,8 +1911,9 @@ The controller record-action status is advisory evidence from saved records. It
 selects each collapse's latest progress, then interrupted execution, planned
 execution, and saved waits, in that order. It does not read GitHub readiness or
 validate live applicability; run-once makes that decision. A waiting collapse
-still requires the exact current policy digest. A policy change during that
-wait is refused rather than admitting the old collapse under a new policy.
+requires a compatible repository execution binding as described in
+[policy changes and bindings](#policy-changes-and-bindings). A relevant change
+during that wait refuses admission under the obsolete binding.
 Run-once reports obsolete saved waits and execution in its details rather
 than aborting the whole pass with HTTP 400. Disjoint current-policy saved
 execution, ready waits and fresh live work can proceed with that blocking

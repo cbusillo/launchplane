@@ -379,7 +379,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
         ):
             with self.subTest(name):
                 result = build_merge_train_dry_run_result(
-                    policy=batch_policy, snapshot=snapshot, batch_landing=True
+                    policy=batch_policy, snapshot=snapshot, batch_landing=True, new_candidate=True
                 )
                 self.assertEqual(result.queue_order, expected)
                 self.assertTrue(all(entry.eligible for entry in result.queue))

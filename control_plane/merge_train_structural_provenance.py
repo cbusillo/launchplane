@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
+
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchLandingPlanRecord,
@@ -60,6 +62,7 @@ def evaluate_merge_train_structural_candidate(
     candidate_record: MergeTrainBatchCandidateRecord | None,
     landing_plan_record: MergeTrainBatchLandingPlanRecord | None,
     stack_collapse_record: MergeTrainStackCollapsePlanRecord | None = None,
+    record_store: object | None = None,
 ) -> MergeTrainStructuralCandidateResult:
     if candidate_record is None:
         return _result("unknown", "structural_evidence_unavailable")
@@ -152,6 +155,7 @@ def evaluate_merge_train_structural_candidate(
         evaluation=evaluation,
         candidate_record=candidate_record,
         stack_collapse_record=stack_collapse_record,
+        record_store=record_store,
     )
     if stack_reason == "structural_stack_root_unproven":
         return _bound_result(
@@ -381,6 +385,7 @@ def _stack_root_reason(
     evaluation: MergeTrainStructuralEvaluationInput,
     candidate_record: MergeTrainBatchCandidateRecord,
     stack_collapse_record: MergeTrainStackCollapsePlanRecord | None,
+    record_store: object | None = None,
 ) -> MergeTrainStructuralReasonCode | None:
     candidate = candidate_record.candidate
     provenance = candidate.structural_provenance
@@ -399,7 +404,12 @@ def _stack_root_reason(
         or plan.repository.casefold() != evaluation.repository.casefold()
         or plan.base_branch != evaluation.base_branch
         or plan.policy_key != evaluation.policy_key
-        or plan.policy_sha256 != evaluation.policy_sha256
+        or not merge_train_policy_bindings_match(
+            record_store=record_store,
+            policy_key=plan.policy_key,
+            recorded_sha256=plan.policy_sha256,
+            current_sha256=evaluation.policy_sha256,
+        )
         or plan.status not in {"waiting_for_root_checks", "ready_for_train"}
     ):
         return "structural_stack_root_unproven"

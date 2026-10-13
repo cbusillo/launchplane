@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.merge_train_policy_operations import MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
 
 import hashlib
 import json
@@ -83,6 +84,15 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE,
+        "Update audited merge-train operational settings within existing authority, with a compared policy baseline and a stable source event.",
+        ("service_api",),
+        ("apply",),
+        "body",
+        ("expected_record_id", "expected_policy_sha256"),
+    ),
     OperationSpec(
         "POST",
         SERVICE_RESTART_ROUTE,

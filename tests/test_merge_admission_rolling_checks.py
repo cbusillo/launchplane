@@ -158,6 +158,7 @@ class RollingCandidateCheckTests(unittest.TestCase):
         base_tree: str | None = None,
         conclusion: str = "success",
         target_position: int | None = None,
+        record_store: object | None = None,
     ) -> MergeAdmissionEvaluation:
         plan = self.plan
         if after_first_landing:
@@ -192,7 +193,7 @@ class RollingCandidateCheckTests(unittest.TestCase):
             if item.status == "planned"
         )
         evaluator = LiveMergeAdmissionEvaluator(
-            store=object(),
+            store=record_store if record_store is not None else object(),
             repository_evidence_provider=_UnusedRepositoryEvidenceProvider(),
             technical_check_client=GitHubMergeTrainClient(
                 transport=_StrictCandidateChecks(conclusion=conclusion)

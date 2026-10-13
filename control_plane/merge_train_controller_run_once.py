@@ -1,4 +1,5 @@
 import hashlib
+from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -1056,7 +1057,14 @@ def latest_completed_merge_train_batch_landing_plan_record(
         landing_plan_records=tuple(
             record
             for record in records
-            if record.landing_plan.policy_sha256 == policy_sha256
+            if (
+                merge_train_policy_bindings_match(
+                    record_store=record_store,
+                    policy_key=record.landing_plan.policy_key,
+                    recorded_sha256=record.landing_plan.policy_sha256,
+                    current_sha256=policy_sha256,
+                )
+            )
             and (
                 include_lineage_retirements
                 or not record.source.startswith(_LINEAGE_RETIREMENT_SOURCE_PREFIX)
@@ -1088,6 +1096,7 @@ def latest_merge_train_stack_collapse_plan_record_for_landing(
             collapse_record=record,
             landing_plan=landing_plan,
             policy_sha256=policy_sha256,
+            record_store=record_store,
         )
     )
     return latest_merge_train_stack_collapse_progress_record(compatible_records)
@@ -1128,7 +1137,20 @@ def stack_collapse_records_for_completed_landing(
         if record is None or not (
             record.plan.status in {"waiting_for_root_checks", "ready_for_train"}
             and record.plan.policy_key == landing_plan.policy_key
-            and record.plan.policy_sha256 == policy_sha256 == landing_plan.policy_sha256
+            and (
+                merge_train_policy_bindings_match(
+                    record_store=record_store,
+                    policy_key=record.plan.policy_key,
+                    recorded_sha256=record.plan.policy_sha256,
+                    current_sha256=policy_sha256,
+                )
+                and merge_train_policy_bindings_match(
+                    record_store=record_store,
+                    policy_key=landing_plan.policy_key,
+                    recorded_sha256=policy_sha256,
+                    current_sha256=landing_plan.policy_sha256,
+                )
+            )
             and record.plan.root_pull_request_number in merged_root_heads
         ):
             continue
@@ -1221,7 +1243,12 @@ def _advance_active_landing_record(
                     retirement_source="original-review-recovery",
                 )
                 details = original_review_recovery_details(review_recovery)
-                if active_landing_record.landing_plan.policy_sha256 != policy_sha256:
+                if not merge_train_policy_bindings_match(
+                    record_store=landing_store,
+                    policy_key=active_landing_record.landing_plan.policy_key,
+                    recorded_sha256=active_landing_record.landing_plan.policy_sha256,
+                    current_sha256=policy_sha256,
+                ):
                     details["policy_changed"] = {
                         "code": "merge_train_stack_collapse_policy_changed",
                         "record_id": active_landing_record.record_id,
@@ -1242,7 +1269,14 @@ def _advance_active_landing_record(
     if (
         active_landing_record.ordinary_job_binding is None
         and active_landing_record.landing_plan.policy_key == repository_policy.policy_key
-        and active_landing_record.landing_plan.policy_sha256 != policy_sha256
+        and (
+            not merge_train_policy_bindings_match(
+                record_store=landing_store,
+                policy_key=active_landing_record.landing_plan.policy_key,
+                recorded_sha256=active_landing_record.landing_plan.policy_sha256,
+                current_sha256=policy_sha256,
+            )
+        )
     ):
         return _retire_changed_policy_landing(
             request=request,
@@ -1261,6 +1295,7 @@ def _advance_active_landing_record(
             landing_record=active_landing_record,
             policy_key=repository_policy.policy_key,
             policy_sha256=policy_sha256,
+            record_store=landing_store,
         )
     except ValueError as error:
         raise MergeTrainControllerRequestError(str(error)) from error
@@ -1277,6 +1312,7 @@ def _advance_active_landing_record(
                 collapse_record=collapse_record,
                 landing_plan=active_landing_record.landing_plan,
                 policy_sha256=policy_sha256,
+                record_store=stack_collapse_store,
             )
         except ValueError as error:
             raise MergeTrainControllerRequestError(str(error)) from error
@@ -1905,7 +1941,14 @@ def _finish_landed_merge_train_batch(
     if (
         landed_record.ordinary_job_binding is None
         and landed_plan.policy_key == repository_policy.policy_key
-        and landed_plan.policy_sha256 != policy_sha256
+        and (
+            not merge_train_policy_bindings_match(
+                record_store=stack_collapse_store,
+                policy_key=landed_plan.policy_key,
+                recorded_sha256=landed_plan.policy_sha256,
+                current_sha256=policy_sha256,
+            )
+        )
         and _landing_cleanup_allowed(landed_record)
     ):
         return _reconcile_completed_landing_after_policy_change(
@@ -1923,6 +1966,7 @@ def _finish_landed_merge_train_batch(
             landing_record=landed_record,
             policy_key=repository_policy.policy_key,
             policy_sha256=policy_sha256,
+            record_store=stack_collapse_store,
         )
     except ValueError as error:
         raise MergeTrainControllerRequestError(str(error)) from error
@@ -2202,7 +2246,12 @@ def _annotate_historical_closed_stack_children(
     annotated = {
         (child.pull_request_number, child.expected_head_sha)
         for record in records
-        if record.plan.policy_sha256 == landing.policy_sha256
+        if merge_train_policy_bindings_match(
+            record_store=stack_collapse_store,
+            policy_key=landing.policy_key,
+            recorded_sha256=record.plan.policy_sha256,
+            current_sha256=landing.policy_sha256,
+        )
         and record.plan.root_pull_request_number in roots
         for child in record.plan.child_dispositions
         if child.status == "closed"
@@ -2219,7 +2268,12 @@ def _annotate_historical_closed_stack_children(
             or plan.repository != landing.repository
             or plan.base_branch != landing.base_branch
             or plan.policy_key != landing.policy_key
-            or plan.policy_sha256 == landing.policy_sha256
+            or merge_train_policy_bindings_match(
+                record_store=stack_collapse_store,
+                policy_key=landing.policy_key,
+                recorded_sha256=plan.policy_sha256,
+                current_sha256=landing.policy_sha256,
+            )
             or not github_client.branch_contains_commit(
                 repository=landing.repository,
                 branch_ref=root.expected_head_sha,
@@ -2453,7 +2507,14 @@ def _advance_without_active_landing(
         candidate_record is not None
         and candidate_record.ordinary_job_binding is None
         and candidate_record.candidate.policy_key == repository_policy.policy_key
-        and candidate_record.candidate.policy_sha256 != policy_sha256
+        and (
+            not merge_train_policy_bindings_match(
+                record_store=candidate_store,
+                policy_key=candidate_record.candidate.policy_key,
+                recorded_sha256=candidate_record.candidate.policy_sha256,
+                current_sha256=policy_sha256,
+            )
+        )
     ):
         if request.mutate:
             lease.checkpoint(
@@ -2593,6 +2654,7 @@ def _advance_active_candidate_record(
             candidate_record=active_candidate_record,
             policy_key=repository_policy.policy_key,
             policy_sha256=policy_sha256,
+            record_store=candidate_store,
         )
     except ValueError as error:
         raise MergeTrainControllerRequestError(str(error)) from error
@@ -2927,6 +2989,7 @@ def _reflow_stale_candidate_record(
             [entry.pull_request_number for entry in candidate_record.candidate.entries],
         ),
         batch_landing=candidate_record.ordinary_job_binding is None,
+        existing_candidate_size=len(candidate_record.candidate.entries),
     )
     candidate_matches_queue = _merge_train_candidate_matches_dry_run_queue(
         candidate=candidate_record.candidate,
@@ -3007,7 +3070,14 @@ def _reflow_stale_candidate_record(
             record.source.startswith(_QUEUE_RETRY_RETIREMENT_SOURCE)
             and record.candidate.candidate_ref == candidate_record.candidate.candidate_ref
             and record.candidate.candidate_sha == candidate_record.candidate.candidate_sha
-            and record.candidate.policy_sha256 == policy_sha256
+            and (
+                merge_train_policy_bindings_match(
+                    record_store=candidate_store,
+                    policy_key=record.candidate.policy_key,
+                    recorded_sha256=record.candidate.policy_sha256,
+                    current_sha256=policy_sha256,
+                )
+            )
             for record in _candidate_history_on_base(
                 candidate_store=candidate_store,
                 repository=request.repository,
@@ -3097,6 +3167,7 @@ def _advance_passed_candidate_record(
             candidate_record=passed_candidate_record,
             policy_key=repository_policy.policy_key,
             policy_sha256=policy_sha256,
+            record_store=candidate_store,
         )
     except ValueError as error:
         raise MergeTrainControllerRequestError(str(error)) from error
@@ -3114,6 +3185,7 @@ def _advance_passed_candidate_record(
                 landing_record=completed_landing_record,
                 policy_key=repository_policy.policy_key,
                 policy_sha256=policy_sha256,
+                record_store=landing_store,
             )
         except ValueError as error:
             raise MergeTrainControllerRequestError(str(error)) from error
@@ -3260,6 +3332,7 @@ def _obsolete_stack_collapse_records(
     snapshot: MergeTrainDryRunSnapshot,
     repository_policy: MergeTrainRepositoryPolicy,
     policy_sha256: str,
+    record_store: object | None = None,
 ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
     latest = tuple(
         progress
@@ -3275,7 +3348,14 @@ def _obsolete_stack_collapse_records(
         and (record.status == "active" or "; retired:" in record.source)
         and (
             record.plan.policy_key != repository_policy.policy_key
-            or record.plan.policy_sha256 != policy_sha256
+            or (
+                not merge_train_policy_bindings_match(
+                    record_store=record_store,
+                    policy_key=record.plan.policy_key,
+                    recorded_sha256=record.plan.policy_sha256,
+                    current_sha256=policy_sha256,
+                )
+            )
         )
         and observed_heads.get(record.plan.root_pull_request_number)
         == _stack_collapse_current_head_shas(record.plan)[record.plan.root_pull_request_number]
@@ -3329,6 +3409,7 @@ def _read_obsolete_stack_collapse_records(
         snapshot=snapshot,
         repository_policy=repository_policy,
         policy_sha256=policy_sha256,
+        record_store=store,
     )
 
     review = original_review_recovery_records(
@@ -3408,6 +3489,7 @@ def _advance_without_candidate_record(
         snapshot=snapshot,
         repository_policy=repository_policy,
         policy_sha256=policy_sha256,
+        record_store=stack_collapse_store,
     )
     policy_obsolete_records = obsolete_records
     review_recovery = original_review_recovery_records(
@@ -3477,7 +3559,14 @@ def _advance_without_candidate_record(
         and progress.plan.status in {"planned", "collapsing"}
         and "; retired:" in progress.source
         and progress.plan.policy_key == repository_policy.policy_key
-        and progress.plan.policy_sha256 == policy_sha256
+        and (
+            merge_train_policy_bindings_match(
+                record_store=stack_collapse_store,
+                policy_key=progress.plan.policy_key,
+                recorded_sha256=progress.plan.policy_sha256,
+                current_sha256=policy_sha256,
+            )
+        )
     )
     if retired_executions:
         snapshot = snapshot or github_client.read_merge_train_snapshot(
@@ -3665,6 +3754,7 @@ def _advance_waiting_stack_collapse_record(
             collapse_record=waiting_collapse_record,
             policy_key=repository_policy.policy_key,
             policy_sha256=policy_sha256,
+            record_store=stack_collapse_store,
         )
     except ValueError as error:
         raise MergeTrainControllerRequestError(str(error)) from error
@@ -3824,9 +3914,13 @@ def _advance_planned_stack_collapse_record(
         )
 
     # Obsolete execution steps aside while its complete history stays available.
-    if (
-        planned_collapse_record.plan.policy_key != repository_policy.policy_key
-        or planned_collapse_record.plan.policy_sha256 != policy_sha256
+    if planned_collapse_record.plan.policy_key != repository_policy.policy_key or (
+        not merge_train_policy_bindings_match(
+            record_store=stack_collapse_store,
+            policy_key=planned_collapse_record.plan.policy_key,
+            recorded_sha256=planned_collapse_record.plan.policy_sha256,
+            current_sha256=policy_sha256,
+        )
     ):
         retire("policy_changed")
         return None
@@ -3906,6 +4000,7 @@ def _advance_planned_stack_collapse_record(
             collapse_record=planned_collapse_record,
             policy_key=repository_policy.policy_key,
             policy_sha256=policy_sha256,
+            record_store=stack_collapse_store,
         )
     except ValueError as error:
         raise MergeTrainControllerRequestError(str(error)) from error
@@ -4142,7 +4237,14 @@ def _advance_from_live_snapshot(
             and record.plan.status == "waiting_for_root_checks"
             and record.plan.root_pull_request_number == selected_pr.number
             and stack_collapse_expected_root_head_sha(record.plan) == selected_pr.head_sha
-            and record.plan.policy_sha256 == policy_sha256
+            and (
+                merge_train_policy_bindings_match(
+                    record_store=stack_collapse_store,
+                    policy_key=record.plan.policy_key,
+                    recorded_sha256=record.plan.policy_sha256,
+                    current_sha256=policy_sha256,
+                )
+            )
             and record.plan.policy_key == dry_run_result.policy_key
             and all(
                 pr.head_sha == disposition.expected_head_sha
@@ -4477,7 +4579,22 @@ def try_reflow_failed_merge_train_candidate(
         policy=policy,
         snapshot=snapshot,
         batch_landing=active_candidate_record.ordinary_job_binding is None,
+        existing_candidate_size=len(active_candidate_record.candidate.entries),
     )
+    queue_unchanged = _merge_train_candidate_matches_dry_run_queue(
+        candidate=active_candidate_record.candidate,
+        dry_run_result=dry_run_result,
+        base_sha=snapshot.base_sha,
+    )
+    current_queue = build_merge_train_dry_run_result(
+        policy=policy,
+        snapshot=snapshot,
+        batch_landing=active_candidate_record.ordinary_job_binding is None,
+    )
+    # Readiness of a changed queue belongs to its newly capped selection. A
+    # singleton replacement may also need a branch refresh before recovery.
+    if not queue_unchanged or current_queue.intended_next_action == "update_branch":
+        dry_run_result = current_queue
     if (
         dry_run_result.intended_next_action == "wait_for_checks"
         and active_candidate_record.ordinary_job_binding is None
@@ -4493,11 +4610,6 @@ def try_reflow_failed_merge_train_candidate(
         }
     if dry_run_result.intended_next_action not in {"merge", "update_branch"}:
         return None
-    queue_unchanged = _merge_train_candidate_matches_dry_run_queue(
-        candidate=active_candidate_record.candidate,
-        dry_run_result=dry_run_result,
-        base_sha=snapshot.base_sha,
-    )
     if (
         dry_run_result.intended_next_action == "merge"
         and queue_unchanged
@@ -4587,6 +4699,8 @@ def try_reflow_failed_merge_train_candidate(
                 mutate=mutate,
                 lease=lease,
             )
+    # The old membership comparison is complete; select a new capped replacement.
+    dry_run_result = current_queue
     probe = _ConflictProbeOutcome(snapshot, dry_run_result, held_out)
     if dry_run_result.intended_next_action == "merge":
         probe = _probe_queue_entry_conflicts(
@@ -4779,7 +4893,7 @@ def _resume_known_failed_batch(
     conflict_probe: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
     """Resume recorded failure isolation rather than rebuild identical failed inputs."""
-    matching_records = tuple(
+    compatible_history = tuple(
         record
         for record in _candidate_history_on_base(
             candidate_store=candidate_store,
@@ -4789,8 +4903,19 @@ def _resume_known_failed_batch(
         )
         if record.ordinary_job_binding is None
         and record.candidate.policy_key == dry_run_result.policy_key
-        and record.candidate.policy_sha256 == policy_sha256
-        and _merge_train_candidate_matches_dry_run_queue(
+        and (
+            merge_train_policy_bindings_match(
+                record_store=candidate_store,
+                policy_key=record.candidate.policy_key,
+                recorded_sha256=record.candidate.policy_sha256,
+                current_sha256=policy_sha256,
+            )
+        )
+    )
+    matching_records = tuple(
+        record
+        for record in compatible_history
+        if _merge_train_candidate_matches_dry_run_queue(
             candidate=record.candidate,
             dry_run_result=dry_run_result,
             base_sha=snapshot.base_sha,
@@ -4802,7 +4927,7 @@ def _resume_known_failed_batch(
         parent = next(
             (
                 record
-                for record in matching_records
+                for record in compatible_history
                 if record.record_id
                 in {retry.check_retry_of, retry.infrastructure_retry_of, retry.batch_body_retry_of}
                 and record.candidate.required_checks_status == "fail"
@@ -5307,7 +5432,11 @@ def _recover_failed_merge_train_candidate(
             },
         }
     if len(failed.entries) > 1:
-        retested = failed.entries[: len(failed.entries) // 2]
+        cap = policy.find_repository_policy(
+            repository=repository, base_branch=base_branch
+        ).max_batch_size
+        retest_size = len(failed.entries) // 2
+        retested = failed.entries[: min(retest_size, cap) if cap is not None else retest_size]
         waiting = failed.entries[len(retested) :]
         return _plan_failed_candidate_replacement(
             reason_code="failure_isolation",
@@ -5401,6 +5530,10 @@ def _plan_failed_candidate_replacement(
         snapshot=_without_held_out_pull_requests(snapshot=snapshot, held_out=holds),
         batch_landing=True,
     )
+    cap = policy.find_repository_policy(
+        repository=repository, base_branch=base_branch
+    ).max_batch_size
+    expected_order = expected_order[:cap]
     if plan_dry_run.intended_next_action != "merge" or plan_dry_run.queue_order != expected_order:
         return None
     if reason_code == "failure_isolation":
@@ -5676,10 +5809,16 @@ def validate_merge_train_candidate_record_for_controller(
     candidate_record: MergeTrainBatchCandidateRecord,
     policy_key: str,
     policy_sha256: str,
+    record_store: object | None = None,
 ) -> None:
     if candidate_record.candidate.policy_key != policy_key:
         raise ValueError("merge train candidate policy key no longer matches")
-    if candidate_record.candidate.policy_sha256 != policy_sha256:
+    if not merge_train_policy_bindings_match(
+        record_store=record_store,
+        policy_key=candidate_record.candidate.policy_key,
+        recorded_sha256=candidate_record.candidate.policy_sha256,
+        current_sha256=policy_sha256,
+    ):
         raise ValueError("merge train candidate policy digest no longer matches")
 
 
@@ -5688,10 +5827,16 @@ def validate_merge_train_landing_record_for_controller(
     landing_record: MergeTrainBatchLandingPlanRecord,
     policy_key: str,
     policy_sha256: str,
+    record_store: object | None = None,
 ) -> None:
     if landing_record.landing_plan.policy_key != policy_key:
         raise ValueError("merge train landing plan policy key no longer matches")
-    if landing_record.landing_plan.policy_sha256 != policy_sha256:
+    if not merge_train_policy_bindings_match(
+        record_store=record_store,
+        policy_key=landing_record.landing_plan.policy_key,
+        recorded_sha256=landing_record.landing_plan.policy_sha256,
+        current_sha256=policy_sha256,
+    ):
         raise ValueError("merge train landing plan policy digest no longer matches")
 
 
@@ -5700,10 +5845,16 @@ def validate_merge_train_stack_collapse_record_for_controller(
     collapse_record: MergeTrainStackCollapsePlanRecord,
     policy_key: str,
     policy_sha256: str,
+    record_store: object | None = None,
 ) -> None:
     if collapse_record.plan.policy_key != policy_key:
         raise ValueError("merge train stack collapse policy key no longer matches")
-    if collapse_record.plan.policy_sha256 != policy_sha256:
+    if not merge_train_policy_bindings_match(
+        record_store=record_store,
+        policy_key=collapse_record.plan.policy_key,
+        recorded_sha256=collapse_record.plan.policy_sha256,
+        current_sha256=policy_sha256,
+    ):
         raise ValueError("merge train stack collapse policy digest no longer matches")
 
 
@@ -5804,12 +5955,14 @@ def _merge_train_stack_collapse_record_matches_landing_plan(
     collapse_record: MergeTrainStackCollapsePlanRecord,
     landing_plan: MergeTrainBatchLandingPlan,
     policy_sha256: str,
+    record_store: object | None = None,
 ) -> bool:
     try:
         validate_stack_collapse_record_for_landing(
             collapse_record=collapse_record,
             landing_plan=landing_plan,
             policy_sha256=policy_sha256,
+            record_store=record_store,
         )
     except ValueError:
         return False

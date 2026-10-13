@@ -14602,6 +14602,15 @@
             "title": "Added Policy Keys",
             "type": "array"
           },
+          "authority_changed_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Authority Changed Policy Keys",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "candidate_policy_sha256": {
             "title": "Candidate Policy Sha256",
             "type": "string"
@@ -14622,6 +14631,15 @@
             },
             "title": "Changed Policy Keys",
             "type": "array"
+          },
+          "operational_changed_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Operational Changed Policy Keys",
+            "type": "array",
+            "x-launchplane-optional-response": true
           },
           "plan_digest": {
             "title": "Plan Digest",
@@ -18326,6 +18344,12 @@
             "default": false,
             "title": "Mutate",
             "type": "boolean"
+          },
+          "mutation_authorized": {
+            "default": false,
+            "title": "Mutation Authorized",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           },
           "runner_mode": {
             "default": "controller",

@@ -43,7 +43,10 @@ from control_plane.http_routes.governance_projection import (
     GovernanceProjectionRouteDependencies,
     register_governance_projection_routes,
 )
-from control_plane.http_routes.merge_train import register_merge_train_read_routes
+from control_plane.http_routes.merge_train import (
+    register_merge_train_read_routes,
+    register_merge_train_operational_route,
+)
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
     accepted_evidence_response,
@@ -181,6 +184,7 @@ __all__ = (
     "register_inventory_operation_read_routes",
     "register_managed_secret_read_routes",
     "register_merge_train_read_routes",
+    "register_merge_train_operational_route",
     "register_operation_status_read_routes",
     "register_preview_notification_attempt_read_routes",
     "register_preview_readiness_read_routes",

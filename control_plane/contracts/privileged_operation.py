@@ -556,6 +556,16 @@ class ManagedMergeTrainPolicyImportHumanEvidence(BaseModel):
     removed_policy_keys: tuple[str, ...] = ()
     changed_policy_keys: tuple[str, ...] = ()
     unchanged_policy_keys: tuple[str, ...] = ()
+    authority_changed_policy_keys: tuple[str, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    operational_changed_policy_keys: tuple[str, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_evidence(self) -> "ManagedMergeTrainPolicyImportHumanEvidence":
