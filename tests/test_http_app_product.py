@@ -1,6 +1,7 @@
 from tests.support.auth import scoped_agent_test
 import asyncio
 import json
+import os
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -1014,6 +1015,17 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
 
 
 class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        keys = patch.dict(
+            os.environ,
+            {
+                "LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "incident-test-key",
+                "LAUNCHPLANE_SECRET_KEYS_JSON": "",
+            },
+        )
+        keys.start()
+        self.addCleanup(keys.stop)
+
     async def test_product_incident_inventory_includes_generated_checks_and_resolution(
         self,
     ) -> None:
@@ -2415,6 +2427,42 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private-provider-id", response_text)
         self.assertNotIn("private.example.invalid", response_text)
         self.assertNotIn('"payload"', response_text)
+        self.assertNotIn("policy-1", response_text)
+        self.assertEqual(
+            detail_payload["events"][0]["event_id"],
+            detail_payload["notification_attempts"][0]["incident_event_id"],
+        )
+        self.assertEqual(
+            detail_payload["incident"]["latest_material_event_id"],
+            incidents_by_id["incident-example-site-prod"]["latest_material_event_id"],
+        )
+
+    async def test_incident_reads_fail_closed_without_bootstrap_reference_keys(self) -> None:
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+            database_url = _sqlite_database_url(Path(directory) / "state.db")
+            _seed_product_environment_read_records(database_url)
+            _seed_product_incident_read_records(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_product_environment_read_policy(context="example-site"),
+                    record_store_factory=lambda: store,
+                )
+                for suffix in ("", "/incident-example-site-prod"):
+                    response = await _asgi_get(
+                        app,
+                        "/v1/products/example-site/environments/prod/public-ingress/incidents"
+                        + suffix,
+                        headers={"Authorization": "Bearer valid-token"},
+                    )
+                    self.assertEqual(response.status_code, 503)
+                    self.assertEqual(
+                        response.json()["error"]["code"], "incident_reference_unavailable"
+                    )
+                    self.assertNotIn("policy-1", response.text)
+            finally:
+                store.close()
 
     async def test_product_environment_incident_detail_hides_other_lane_incidents(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
