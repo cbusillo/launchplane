@@ -1808,6 +1808,19 @@ def _recover_external_stack_landing(
         policy_sha256=policy_sha256,
         record_store=stack_collapse_store,
     )
+    if request.mutate:
+        # Intent is not proof. Keep the selector before the provider read so a
+        # transient read failure resumes fresh proof rather than losing the
+        # recovery discriminator when the failure replaces reconciliation_detail.
+        lease.checkpoint(
+            active_action="land_batch",
+            active_phase="observe_external_landing",
+            active_record_id=source.record_id,
+            step_payload={
+                **lease.record.step_payload,
+                "external_landing_source_record_id": source.record_id,
+            },
+        )
     evidence = github_client.observe_historical_batch_completion(
         landing_plan=plan, observed_at=recorded_at
     )

@@ -318,7 +318,7 @@ class StackDispositionConfigurationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_merge_landing_outcome_records(), ())
 
     async def test_external_recovery_keeps_unknown_provider_proof_fenced(self) -> None:
-        await self._prepare_external_landing()
+        proof = await self._prepare_external_landing()
         with patch.object(
             self.client_class,
             "observe_historical_batch_completion",
@@ -343,6 +343,25 @@ class StackDispositionConfigurationTests(unittest.IsolatedAsyncioTestCase):
             .status,
             "planned",
         )
+        state = self.store.list_merge_train_controller_state_records()[0]
+        self.assertIn("external_landing_source_record_id", state.step_payload)
+        collapse = self.store.list_merge_train_stack_collapse_plan_records()[0]
+        child = collapse.plan.child_dispositions[0]
+        with (
+            patch.object(
+                self.client_class, "observe_historical_batch_completion", return_value=proof
+            ) as observe,
+            patch.object(
+                self.client_class,
+                "read_pull_request_head",
+                return_value=(child.expected_head_sha, "closed"),
+            ),
+        ):
+            result = await self._run(collapsed=True)
+        observe.assert_called_once()
+        self.assertEqual(result["controller_action"], "retire_stale_landing")
+        self.assertNotIn("land", self.transport.effects)
+        self.assertNotIn("collapse", self.transport.effects)
 
     async def test_empty_label_repository_lands_stack_with_use_time_default(self) -> None:
         await self._prepare_landing()
