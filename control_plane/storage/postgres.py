@@ -168,6 +168,7 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetRecordChanged,
+    PublicHostEffect,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.durable_operation_authorization import (
@@ -6398,19 +6399,29 @@ class PostgresRecordStore(HumanSessionStore):
         expected_target: DokployTargetRecord,
         expected_target_id: DokployTargetIdRecord,
         expected_provider_target: ProviderTargetRecord,
-        apply_provider: Callable[[], None],
+        apply_provider: Callable[[Callable[[str, str, int], None]], None],
+        pending_effects: tuple[PublicHostEffect, ...] = (),
+        verify_provider: Callable[[], None] | None = None,
     ) -> None:
-        """Check ownership/binding before effects; commit only after provider read-back."""
+        """Checkpoint owned effects before the atomic config/success-receipt commit."""
 
         def guard(session: Any) -> None:
-            requested_hosts = set(bundle.dokploy_targets[0].public_hosts)
+            requested_hosts = set(bundle.dokploy_targets[0].public_hosts) | {
+                effect.host for effect in pending_effects
+            }
             for row in session.scalars(select(LaunchplaneDokployTargetRow)).all():
                 if (row.context, row.instance) != (
                     expected_target.context,
                     expected_target.instance,
                 ):
                     other = DokployTargetRecord.model_validate(row.payload)
-                    if requested_hosts.intersection((*other.domains, *other.public_hosts)):
+                    if requested_hosts.intersection(
+                        (
+                            *other.domains,
+                            *other.public_hosts,
+                            *(effect.host for effect in other.pending_public_host_effects),
+                        )
+                    ):
                         raise DokployTargetRecordChanged(
                             "A public host is already owned by another target."
                         )
@@ -6448,41 +6459,120 @@ class PostgresRecordStore(HumanSessionStore):
                         "Public-host target is shared with another lane."
                     )
 
-        if self.database_dialect_name == "sqlite":
+        # Validate the complete business bundle before any provider effect;
+        # prepare/checkpoint writes must not bypass runtime or secret fences.
+        self._write_product_authority_bundle(bundle, guard_provider=guard, validate_only=True)
+        prepared = expected_target.model_copy(
+            update={"pending_public_host_effects": pending_effects}
+        )
+        if prepared != expected_target:
             self._write_product_authority_bundle(
-                bundle, guard_provider=guard, apply_provider=apply_provider
+                ProductAuthorityBundle(
+                    dokploy_targets=(prepared,),
+                    expected_product_profiles=bundle.expected_product_profiles,
+                    required_context_owner=bundle.required_context_owner,
+                    required_context_owners=bundle.required_context_owners,
+                    required_product_config_target=bundle.required_product_config_target,
+                ),
+                guard_provider=guard,
             )
-            return
+            expected_target = prepared
+
+        # This transaction has no uncommitted business writes. Each successful
+        # addition can commit its provider identity even if the final bundle fails.
         with self._session_factory() as session:
-            # These outer transaction locks survive the validation savepoint.
-            # Database triggers refuse conflicting writes promptly, even writers
-            # which hold the global bundle lock, so they cannot convoy other products.
-            for table, record in (
-                (LaunchplaneDokployTargetRow, expected_target),
-                (LaunchplaneDokployTargetRow, bundle.dokploy_targets[0]),
-                (LaunchplaneDokployTargetIdRow, expected_target_id),
-                (LaunchplaneProviderTargetRow, expected_provider_target),
-            ):
-                session.execute(
-                    text(
-                        "SELECT launchplane_lock_public_host_authority("
-                        ":kind, CAST(:record AS jsonb))"
+
+            def fence() -> None:
+                # Checkpoint commits release the lock; do not reuse ORM state
+                # cached before another authority writer could acquire it.
+                session.expire_all()
+                if self.database_dialect_name == "postgresql":
+                    # Keep only target/name fences over I/O. A checkpoint commits
+                    # these locks, so acquire them anew before further effects.
+                    fenced_target = expected_target.model_copy(
+                        update={
+                            "public_hosts": tuple(
+                                sorted(
+                                    set(expected_target.public_hosts)
+                                    | {effect.host for effect in pending_effects}
+                                )
+                            )
+                        }
+                    )
+                    for table, record in (
+                        (LaunchplaneDokployTargetRow, fenced_target),
+                        (LaunchplaneDokployTargetRow, bundle.dokploy_targets[0]),
+                        (LaunchplaneDokployTargetIdRow, expected_target_id),
+                        (LaunchplaneProviderTargetRow, expected_provider_target),
+                    ):
+                        session.execute(
+                            text(
+                                "SELECT launchplane_lock_public_host_authority("
+                                ":kind, CAST(:record AS jsonb))"
+                            ),
+                            {"kind": table.__tablename__, "record": record.model_dump_json()},
+                        )
+                    # The global lock and business rows disappear with this
+                    # savepoint; the outer target/name locks survive.
+                    with session.begin_nested() as validation:
+                        self._write_product_authority_bundle(
+                            bundle, guard_provider=guard, write_session=session, commit=False
+                        )
+                        session.flush()
+                        validation.rollback()
+                    return
+                self._begin_serialized_write(session)
+                self._lock_product_authority_bundle_write(session)
+                require_bundle_context_owner(
+                    bundle,
+                    (
+                        self._read_product_profile_payload(row.payload)
+                        for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
                     ),
-                    {"kind": table.__tablename__, "record": record.model_dump_json()},
                 )
-            # Exercise every DB precondition/write before effects, but roll back
-            # its rows and global advisory lock before the network wait.
-            with session.begin_nested() as validation:
+                for profile in bundle.expected_product_profiles:
+                    row = session.get(LaunchplaneProductProfileRow, profile.product)
+                    if row is None or self._read_product_profile_payload(row.payload) != profile:
+                        raise ProductProfileConflictError(
+                            "Product profile changed before provider effects."
+                        )
+                guard(session)
+
+            def checkpoint(host: str, domain_id: str, runtime_port: int) -> None:
+                nonlocal expected_target
+                if not any(effect.host == host for effect in pending_effects):
+                    return
+                updated = expected_target.model_copy(
+                    update={
+                        "pending_public_host_effects": tuple(
+                            effect.model_copy(
+                                update={"domain_id": domain_id, "runtime_port": runtime_port}
+                            )
+                            if effect.host == host
+                            else effect
+                            for effect in expected_target.pending_public_host_effects
+                        )
+                    }
+                )
+                session.merge(self._dokploy_target_row(updated))
+                session.commit()
+                expected_target = updated
+                fence()
+
+            fence()
+            apply_provider(checkpoint)
+            if self.database_dialect_name == "postgresql":
+                if verify_provider is not None:
+                    verify_provider()
                 self._write_product_authority_bundle(
-                    bundle, guard_provider=guard, write_session=session, commit=False
+                    bundle, guard_provider=guard, write_session=session
                 )
-                session.flush()
-                validation.rollback()
-            apply_provider()
-            # Revalidate the entire bundle; configuration and receipt still commit
-            # atomically, and only after verified provider read-back.
+            else:
+                session.commit()
+
+        if self.database_dialect_name != "postgresql":
             self._write_product_authority_bundle(
-                bundle, guard_provider=guard, write_session=session
+                bundle, guard_provider=guard, apply_provider=verify_provider
             )
 
     def _write_product_authority_bundle(
@@ -6493,6 +6583,7 @@ class PostgresRecordStore(HumanSessionStore):
         apply_provider: Callable[[], None] | None = None,
         write_session: Session | None = None,
         commit: bool = True,
+        validate_only: bool = False,
     ) -> None:
         if not bundle.requires_write():
             return
@@ -6789,6 +6880,10 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             # All database preconditions (including runtime/secret writes) have
             # passed. Provider failure rolls the whole bundle and success receipt back.
+            if validate_only:
+                session.flush()
+                session.rollback()
+                return
             if apply_provider is not None:
                 session.flush()
                 apply_provider()

@@ -464,6 +464,7 @@ export type DokployTargetRecord = {
     healthcheck_path: string;
     healthcheck_timeout_seconds: number | null;
     instance: string;
+    pending_public_host_effects: Array<PublicHostEffect>;
     policies: DokployTargetPolicies;
     project_name: string;
     public_hosts: Array<string>;
@@ -4262,6 +4263,14 @@ export type ProxmoxStorageBackupDestinationReference = {
     username: string;
 };
 
+export type PublicHostEffect = {
+    domain_id: string;
+    host: string;
+    provider_host: string;
+    runtime_port: number;
+    target_id: string;
+};
+
 export type PublicPauseRecord = {
     began_at: string;
     binding: PublicSiteBinding;
@@ -4417,6 +4426,7 @@ export type ReleaseReviewStatus = {
     checklist_digest: string;
     invitation_notes_error?: string;
     latest_decision: ReleaseReviewDecisionRecord | null;
+    no_new_release?: boolean;
     required: boolean;
     unavailable_reason: 'testing_lane_missing' | 'source_control_access_unavailable' | 'production_identity_missing' | 'candidate_identity_missing' | 'release_record_missing' | 'github_read_failed' | null;
 };
