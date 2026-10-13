@@ -3931,7 +3931,8 @@ slug verified during installation-token resolution; the service resolves its
 numeric user id and compares marker authors against that id. It does not call
 GitHub `/user`, which requires user authentication. Destroyed previews are valid
 terminal feedback targets; this operation observes PR comments, not a serving
-preview runtime. Comments owned by a former user or another App remain blocked. An absent comment is reconciled as
+preview runtime. Comments owned by a former user or another App remain blocked. An absent comment
+is reconciled as
 `already_absent` with `mutated=false`; it is not rewritten as a deletion.
 
 The route follows [GitHub delivery identity](#github-delivery-identity), accepts only

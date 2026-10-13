@@ -1,5 +1,6 @@
 import unittest
 from collections.abc import Callable
+from urllib.parse import unquote
 from pathlib import Path
 from dataclasses import replace
 from types import SimpleNamespace
@@ -302,7 +303,7 @@ class PreviewPrFeedbackRemediationTests(unittest.TestCase):
                 calls.append((method, path))
                 if path == "/installation/token" and method == "DELETE":
                     return None
-                if path == "/users/example-delivery%5Bbot%5D":
+                if unquote(path) == "/users/example-delivery[bot]":
                     return actor
                 raise AssertionError((method, path))
 

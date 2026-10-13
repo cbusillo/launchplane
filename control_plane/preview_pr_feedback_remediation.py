@@ -109,13 +109,13 @@ def bind_preview_pr_feedback_target(
 
 def _actor(payload: object) -> tuple[int, str]:
     if not isinstance(payload, dict):
-        raise click.ClickException("GitHub authenticated user response must be an object.")
+        raise click.ClickException("GitHub actor response must be an object.")
     actor_id = payload.get("id")
     login = payload.get("login")
     if not isinstance(actor_id, int) or isinstance(actor_id, bool) or actor_id < 1:
-        raise click.ClickException("GitHub token identity is missing a stable actor id.")
+        raise click.ClickException("GitHub actor identity is missing a stable actor id.")
     if not isinstance(login, str) or not login.strip():
-        raise click.ClickException("GitHub token identity is missing a login.")
+        raise click.ClickException("GitHub actor identity is missing a login.")
     return actor_id, login.strip()
 
 
