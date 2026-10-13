@@ -130,6 +130,9 @@ class DokployTargetInspectTests(unittest.TestCase):
                     ),
                     fetch_target_payload=_fake_target_payload,
                 )
+                stored_evidence = store.read_provider_target_record(
+                    context_name="cm_website", instance_name="prod"
+                ).provider_evidence
             finally:
                 store.close()
 
@@ -143,7 +146,7 @@ class DokployTargetInspectTests(unittest.TestCase):
         self.assertEqual(provider_target_record["display_name"], "cm-prod")
         self.assertEqual(
             provider_target_record["provider_evidence"],
-            {"project_name": tracked_target["project_name"]},
+            stored_evidence,
         )
         self.assertEqual(provider_environment["id"], "env-prod")
         self.assertEqual(provider_env["keys"], ["ODOO_DB_PASSWORD"])

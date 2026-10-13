@@ -25,7 +25,6 @@ from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy_target_inspect import (
-    DokployTargetComparisonEvidenceUnavailableError,
     DokployTargetInspectRequest,
     DokployTargetInspectStore,
     inspect_dokploy_target,
@@ -1011,13 +1010,6 @@ def register_dokploy_target_inspect_read_routes(
                 token=token,
                 request=inspect_request,
             )
-        except DokployTargetComparisonEvidenceUnavailableError as error:
-            raise common.http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="dokploy_target_comparison_evidence_unavailable",
-                message=str(error),
-            ) from error
         except ValueError as error:
             raise common.http_error(
                 status_code=400,

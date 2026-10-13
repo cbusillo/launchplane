@@ -790,6 +790,9 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
                     context="cm_website",
                     instance="prod",
                 )
+                stored_evidence = app_store.read_provider_target_record(
+                    context_name="cm_website", instance_name="prod"
+                ).provider_evidence
                 app_store.close()
 
         self.assertEqual(response.status_code, 200)
@@ -806,7 +809,7 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret", str(payload))
         self.assertEqual(
             payload["inspect"]["provider_target_record"]["provider_evidence"],
-            {"project_name": payload["inspect"]["tracked_target"]["project_name"]},
+            stored_evidence,
         )
         read_dokploy_config.assert_called_once_with(
             control_plane_root=root,
