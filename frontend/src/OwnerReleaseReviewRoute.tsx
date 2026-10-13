@@ -40,7 +40,7 @@ const DECISION_HEADINGS: Record<ReleaseReviewDecisionEnvelope["decision"], strin
 
 function ReleaseRunProgress({ run, refreshFailed }: { run: ClientReleaseRunView; refreshFailed: boolean }) {
   return <section className="owner-review-latest" aria-label="Release progress">
-    <h3>Release progress: {RELEASE_RUN_STATE[run.state]}</h3>
+    <h3>Release progress: {run.state === "waiting" && run.blocked_reason ? "Blocked" : RELEASE_RUN_STATE[run.state]}</h3>
     {run.blocked_reason ? <p role="status">{run.blocked_reason}</p> : null}
     {refreshFailed ? <p role="alert" className="owner-review-alert">Release progress could not be updated. This page keeps trying; the progress shown may be out of date.</p> : null}
     <ol>{run.steps.map(step => <li key={step.step}>
