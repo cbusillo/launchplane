@@ -4635,6 +4635,20 @@ def try_reflow_failed_merge_train_candidate(
         batch_landing=active_candidate_record.ordinary_job_binding is None,
         existing_candidate_size=len(active_candidate_record.candidate.entries),
     )
+    queue_unchanged = _merge_train_candidate_matches_dry_run_queue(
+        candidate=active_candidate_record.candidate,
+        dry_run_result=dry_run_result,
+        base_sha=snapshot.base_sha,
+    )
+    current_queue = build_merge_train_dry_run_result(
+        policy=policy,
+        snapshot=snapshot,
+        batch_landing=active_candidate_record.ordinary_job_binding is None,
+    )
+    # Readiness of a changed queue belongs to its newly capped selection. A
+    # singleton replacement may also need a branch refresh before recovery.
+    if not queue_unchanged or current_queue.intended_next_action == "update_branch":
+        dry_run_result = current_queue
     if (
         dry_run_result.intended_next_action == "wait_for_checks"
         and active_candidate_record.ordinary_job_binding is None
@@ -4650,11 +4664,6 @@ def try_reflow_failed_merge_train_candidate(
         }
     if dry_run_result.intended_next_action not in {"merge", "update_branch"}:
         return None
-    queue_unchanged = _merge_train_candidate_matches_dry_run_queue(
-        candidate=active_candidate_record.candidate,
-        dry_run_result=dry_run_result,
-        base_sha=snapshot.base_sha,
-    )
     if (
         dry_run_result.intended_next_action == "merge"
         and queue_unchanged
@@ -4745,11 +4754,7 @@ def try_reflow_failed_merge_train_candidate(
                 lease=lease,
             )
     # The old membership comparison is complete; select a new capped replacement.
-    dry_run_result = build_merge_train_dry_run_result(
-        policy=policy,
-        snapshot=snapshot,
-        batch_landing=active_candidate_record.ordinary_job_binding is None,
-    )
+    dry_run_result = current_queue
     probe = _ConflictProbeOutcome(snapshot, dry_run_result, held_out)
     if dry_run_result.intended_next_action == "merge":
         probe = _probe_queue_entry_conflicts(

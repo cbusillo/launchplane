@@ -49,6 +49,9 @@ class _RerunProvider(_BatchProvider):
         return payload
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
+        if method == "PUT" and path.endswith("/update-branch"):
+            self.requests.append((method, path, body))
+            return {"message": "Branch update accepted"}
         if method == "GET" and path.endswith("/branches/main"):
             self.requests.append((method, path, body))
             return _protected_branch_with_checks("ci-gate")
@@ -166,7 +169,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         self.assertEqual([entry.pull_request_number for entry in replacement.entries], [1, 2])
         self.assertEqual(result["dry_run_result"]["queue_order"], [1, 2])
 
-    def test_lowered_cap_still_isolates_failed_existing_batch(self) -> None:
+    def _four_member_failed_candidate(self) -> MergeTrainBatchCandidate:
         extra = tuple(
             self.snapshot.pull_requests[-1].model_copy(
                 update={
@@ -200,6 +203,10 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             {entry.pull_request_number: entry.head_sha for entry in failed.entries}
         )
         self.provider.body = batch_pull_request_body(client=self.client, candidate=failed)
+        return failed
+
+    def test_lowered_cap_still_isolates_failed_existing_batch(self) -> None:
+        failed = self._four_member_failed_candidate()
         self.policy = self.policy.model_copy(
             update={"policies": (self.policy.policies[0].model_copy(update={"max_batch_size": 1}),)}
         )
@@ -209,6 +216,54 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "failure_isolation")
         self.assertEqual([entry.pull_request_number for entry in replacement.entries], [1])
         self.assertEqual([entry.pull_request_number for entry in replacement.held_out], [2, 3, 4])
+        self.reflow_client.add_pull_request_label.assert_not_called()
+
+    def test_lowered_cap_recovers_by_refreshing_behind_first_branch(self) -> None:
+        failed = self._four_member_failed_candidate()
+        self.snapshot = self.snapshot.model_copy(
+            update={
+                "pull_requests": (
+                    self.snapshot.pull_requests[0].model_copy(
+                        update={"branch_update_required": True}
+                    ),
+                    *self.snapshot.pull_requests[1:],
+                )
+            }
+        )
+        self.policy = self.policy.model_copy(
+            update={"policies": (self.policy.policies[0].model_copy(update={"max_batch_size": 1}),)}
+        )
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            result = self._reflow(store, failed)
+            self.assertEqual(store.list_merge_train_batch_candidate_records(status="active"), ())
+        self.assertEqual(result["controller_action"], "update_branch")
+        self.assertEqual(result["dry_run_result"]["queue_order"], [1])
+        self.reflow_client.update_pull_request_branch.assert_called_once()
+        self.reflow_client.add_pull_request_label.assert_not_called()
+
+    def test_changed_queue_does_not_wait_on_client_outside_lowered_cap(self) -> None:
+        failed = self._four_member_failed_candidate()
+        newcomer = self.snapshot.pull_requests[-1].model_copy(
+            update={
+                "number": 5,
+                "head_sha": "head-5",
+                "created_at": "2026-05-08T12:00:00Z",
+                "owner_review_required": True,
+                "required_checks_status": "pending",
+            }
+        )
+        self.snapshot = self.snapshot.model_copy(
+            update={"pull_requests": (*self.snapshot.pull_requests[1:], newcomer)}
+        )
+        self.policy = self.policy.model_copy(
+            update={"policies": (self.policy.policies[0].model_copy(update={"max_batch_size": 1}),)}
+        )
+        with TemporaryDirectory() as directory:
+            result = self._reflow(FilesystemRecordStore(state_dir=Path(directory)), failed)
+        replacement = MergeTrainBatchCandidate.model_validate(result["candidate"])
+        self.assertEqual(result["controller_action"], "plan_candidate")
+        self.assertEqual([entry.pull_request_number for entry in replacement.entries], [2])
         self.reflow_client.add_pull_request_label.assert_not_called()
 
     def test_passing_exact_sha_rebuilds_closed_unchanged_batch_without_blame(self) -> None:
