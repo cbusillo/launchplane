@@ -53,7 +53,9 @@ class _LabelTransport:
         if method == "POST" and path.endswith("/labels") and body is not None:
             if self.creation_denied:
                 raise MergeTrainGitHubError("Label creation denied", status_code=403)
-            self.labels.add(str(body["name"]))
+            name = body["name"]
+            assert isinstance(name, str)
+            self.labels.add(name)
             self.effects.append("create-label")
             return body
         raise AssertionError(f"Unexpected provider request: {method} {path}")
@@ -140,7 +142,7 @@ class StackDispositionConfigurationTests(unittest.IsolatedAsyncioTestCase):
             result = await self._run(collapsed=True)
             if result["controller_action"] == "plan_landing":
                 return
-        self.fail(f"Landing was not prepared: {result}")
+        self.fail("Landing was not prepared")
 
     async def test_empty_label_repository_lands_stack_with_use_time_default(self) -> None:
         await self._prepare_landing()

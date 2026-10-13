@@ -121,7 +121,9 @@ class _FakeMergeTrainGitHubClient:
     ) -> None:
         return None
 
-    def ensure_repository_label(self, *, repository: str, label: str, mutate: bool = True) -> bool:
+    @staticmethod
+    def ensure_repository_label(*, repository: str, label: str, mutate: bool = True) -> bool:
+        _ = repository, label, mutate
         return True
 
     def update_pull_request_branch(
