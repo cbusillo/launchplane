@@ -29,6 +29,32 @@ from tests.test_merge_admission_records import _guard_records
 
 
 class RecoveryDiagnosticsTests(TestCase):
+    def test_passing_original_checks_do_not_report_a_check_wait_for_unknown_mergeability(
+        self,
+    ) -> None:
+        _, _, state, _ = _guard_records()
+        result, _ = controller_last_result(
+            result={
+                "controller_action": "wait_for_checks",
+                "dry_run_result": {
+                    "selected_pr": {"mergeable": "unknown", "required_checks_status": "pass"}
+                },
+            },
+            state=state,
+            observations={},
+            pass_started_at=state.updated_at,
+            observed_at=state.updated_at,
+            trace_id="mergeability-wait",
+            policy_key=state.policy_key,
+            policy_sha256=state.policy_sha256,
+            reconciliation_required=False,
+            persisted=True,
+        )
+        self.assertEqual(result.reason_code, "head_mergeability_unknown")
+        self.assertEqual(result.next_actor, "provider")
+        self.assertEqual(result.base_checks_status, "not_observed")
+        self.assertEqual(result.candidate_checks_status, "not_observed")
+
     def test_unchanged_landing_evidence_in_a_narrower_projection_is_not_progress(self) -> None:
         candidate, landing, state, _ = _guard_records()
         planned, key = controller_last_result(

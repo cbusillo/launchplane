@@ -38,6 +38,7 @@ from control_plane.merge_train import MergeTrainQueueEntry
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainReviewConversations
 from control_plane.merge_train import review_conversations_reason
+from control_plane.merge_train import build_merge_train_dry_run_result
 from control_plane.merge_train_github import GitHubMergeTrainClient
 from control_plane.merge_train_github import MergeTrainGitHubCandidateEntryConflictError
 from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
@@ -54,6 +55,7 @@ from control_plane.merge_train_structural_provenance import (
 from control_plane.merge_train_candidate_failures import classify_candidate_check_failures
 
 from tests.test_merge_train_dependency_updates import INDIRECT_PATCH, SCOPED_MINOR
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 
 
 class _ReadOnlyMergeTrainTransport(RecordingMergeTrainGitHubTransport):
@@ -3119,6 +3121,71 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
 
 class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
+    def test_unknown_mergeability_uses_current_base_ancestry_for_refresh_only(self) -> None:
+        for status, expected in (
+            ("diverged", "update_branch"),
+            ("behind", "update_branch"),
+            ("ahead", "wait_for_checks"),
+            ("identical", "wait_for_checks"),
+        ):
+            with self.subTest(status=status):
+                pull_request = _github_pull_request(13, mergeable=None, mergeable_state="unknown")
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _github_branch(),
+                        [pull_request],
+                        pull_request,
+                        {"permission": "admin"},
+                        _label_events(),
+                        _combined_status(),
+                        {"check_runs": [_check_run("completed", "success")]},
+                        _conversation_rule(),
+                        [],
+                        {"base_commit": {"sha": "base-main-current"}, "status": status},
+                    )
+                )
+                snapshot = GitHubMergeTrainSnapshotReader(
+                    transport=transport
+                ).read_merge_train_snapshot(
+                    repository="cbusillo/sellyouroutboard", base_branch="main"
+                )
+                decision = build_merge_train_dry_run_result(
+                    policy=build_test_merge_train_policy(), snapshot=snapshot
+                )
+                self.assertEqual(decision.intended_next_action, expected)
+                self.assertEqual(snapshot.pull_requests[0].mergeable, "unknown")
+                self.assertIn(
+                    "/repos/cbusillo/sellyouroutboard/compare/base-main-current...head-13",
+                    [request.path for request in transport.requests],
+                )
+                self.assertTrue(
+                    all(
+                        request.method == "GET" or request.path == "/graphql"
+                        for request in transport.requests
+                    )
+                )
+
+    def test_unknown_mergeability_refuses_wrong_base_comparison(self) -> None:
+        pull_request = _github_pull_request(13, mergeable=None, mergeable_state="unknown")
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(),
+                [pull_request],
+                pull_request,
+                {"permission": "admin"},
+                _label_events(),
+                _combined_status(),
+                {"check_runs": [_check_run("completed", "success")]},
+                _conversation_rule(),
+                [],
+                {"base_commit": {"sha": "other-base"}, "status": "diverged"},
+            )
+        )
+        with self.assertRaisesRegex(MergeTrainGitHubError, "comparison is inconsistent"):
+            GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
     def setUp(self) -> None:
         # These adapter fixtures have no CODEOWNERS. Owned-file routing has its
         # own provider-backed tests in test_merge_train_codeowners.

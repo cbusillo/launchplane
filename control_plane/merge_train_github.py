@@ -2870,6 +2870,12 @@ class GitHubMergeTrainSnapshotReader:
                 for pr in enriched
             ),
         )
+        pull_requests = self._with_unknown_mergeability_refresh(
+            repository_path=repository_path,
+            base_branch=normalized_base_branch,
+            base_sha=base_sha,
+            pull_requests=pull_requests,
+        )
         pull_requests = individual_landing_snapshots(
             transport=self.transport,
             repository_path=repository_path,
@@ -2892,6 +2898,58 @@ class GitHubMergeTrainSnapshotReader:
             base_sha=base_sha,
             pull_requests=pull_requests,
         )
+
+    def _with_unknown_mergeability_refresh(
+        self,
+        *,
+        repository_path: str,
+        base_branch: str,
+        base_sha: str,
+        pull_requests: tuple[MergeTrainPullRequestSnapshot, ...],
+    ) -> tuple[MergeTrainPullRequestSnapshot, ...]:
+        result = []
+        for pull_request in pull_requests:
+            if (
+                pull_request.state == "open"
+                and not pull_request.is_draft
+                and pull_request.mergeable == "unknown"
+                and pull_request.required_checks_status == "pass"
+                and not pull_request.branch_update_required
+                and pull_request.head_repository == pull_request.base_repository
+                and pull_request.base_ref == base_branch
+            ):
+                # GitHub can leave mergeability unresolved even when the head
+                # is behind. Compare immutable commits against the branch read,
+                # not the PR detail's potentially stale base.sha. This permits
+                # only the existing guarded refresh, never an unknown merge.
+                comparison = _json_object(
+                    self.transport.request(
+                        method="GET",
+                        path=f"/repos/{repository_path}/compare/{quote(base_sha, safe='')}...{quote(pull_request.head_sha, safe='')}",
+                    ),
+                    "GitHub branch-refresh comparison",
+                )
+                comparison_base = _json_object(
+                    comparison.get("base_commit"), "GitHub comparison base commit"
+                )
+                status = comparison.get("status")
+                if (
+                    comparison_base.get("sha") != base_sha
+                    or not isinstance(status, str)
+                    or status
+                    not in {
+                        "ahead",
+                        "behind",
+                        "diverged",
+                        "identical",
+                    }
+                ):
+                    raise MergeTrainGitHubError("GitHub branch-refresh comparison is inconsistent.")
+                pull_request = pull_request.model_copy(
+                    update={"branch_update_required": status in {"behind", "diverged"}}
+                )
+            result.append(pull_request)
+        return tuple(result)
 
     def _needs_enrichment(self, pull_request: dict[str, object]) -> bool:
         policy = self._repository_policy
