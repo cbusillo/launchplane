@@ -4306,9 +4306,13 @@ truncated result is incomplete coverage; the read never acquires, renews,
 transitions or settles a reservation.
 
 New Odoo preview applies retain their service-issued plan and validated request
-atomically with the reservation, plus the original server-side data-schedule
+in a private companion receipt committed atomically with the reservation, plus
+the original server-side data-schedule
 binding when the provider read can establish it. This is the original-intent
-source; mutable reconcile plans are not recovery authority. Execution and
+source; mutable reconcile plans are not recovery authority. The receipt uses
+the existing completed idempotency envelope, keeping strict reservation payloads
+readable by older images during overlap or rollback and adding no held fence.
+Execution and
 recovery share a target execution lock. The periodic reconcile sweep includes
 retained original PR anchors independently of current desired previews; the
 report-only lifecycle sweep lists reservation residue and reports unresolved

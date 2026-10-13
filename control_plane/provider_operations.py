@@ -164,6 +164,10 @@ class ProviderEffectTimestampObserver(Protocol):
 
 
 class DurableProviderOperationStore(Protocol):
+    def read_original_mutation_intent(
+        self, reservation: LaunchplaneIdempotencyRecord
+    ) -> dict[str, object]: ...
+
     def reserve_mutation(
         self,
         *,
@@ -213,6 +217,7 @@ class DurableProviderOperationStore(Protocol):
         response_status_code: int,
         response_trace_id: str,
         response_payload: dict[str, object],
+        expected_original_intent: dict[str, object] | None = None,
     ) -> MutationReservationAdoptionResult: ...
 
     def supersede_expired_reconciled_mutation_and_reserve(
@@ -232,6 +237,7 @@ class DurableProviderOperationStore(Protocol):
         reconciliation_key: str,
         provider_target_key: str,
         original_intent: dict[str, object] | None = None,
+        expected_original_intent: dict[str, object] | None = None,
     ) -> MutationReconciliationSupersessionResult: ...
 
     def release_reserved_mutation(
@@ -459,11 +465,16 @@ def run_durable_provider_operation(
     if (
         reservation is not None
         and decision not in {"target_busy", "replayed"}
-        and reservation.original_intent
-        and original_intent != reservation.original_intent
+        and original_intent is not None
+        and original_intent != store.read_original_mutation_intent(reservation)
     ):
         return DurableProviderOperationResult("conflict", reservation, 409, {})
 
+    superseded_intent = (
+        store.read_original_mutation_intent(reservation)
+        if original_intent is not None and reservation is not None
+        else None
+    )
     if (
         allow_mutation
         and decision == "target_busy"
@@ -485,7 +496,11 @@ def run_durable_provider_operation(
             minimum_expired_seconds=target_supersession.minimum_expired_seconds,
             reconciliation_key=reconciliation_key,
             provider_target_key=provider_target_key,
-            **({"original_intent": original_intent} if original_intent else {}),
+            **(
+                {"original_intent": original_intent, "expected_original_intent": superseded_intent}
+                if original_intent
+                else {}
+            ),
         )
         if supersession.status == "acquired" and supersession.record is not None:
             decision = "acquired"
@@ -518,6 +533,7 @@ def run_durable_provider_operation(
             lease_seconds=lease_seconds,
             heartbeat_interval_seconds=resolved_heartbeat_interval,
             allow_mutation=allow_mutation,
+            original_intent=original_intent,
         )
     if decision != "acquired":
         raise RuntimeError(f"Unsupported mutation reservation decision: {decision}")
@@ -714,12 +730,14 @@ def _adopt_reconciled_result(
     response_status_code: int,
     response_trace_id: str,
     response_payload: dict[str, object],
+    original_intent: dict[str, object] | None = None,
 ) -> tuple[DurableProviderOperationResult | None, LaunchplaneIdempotencyRecord | None]:
     adoption = store.adopt_reconciled_mutation(
         reservation=reservation,
         response_status_code=response_status_code,
         response_trace_id=response_trace_id,
         response_payload=response_payload,
+        **({"expected_original_intent": original_intent} if original_intent is not None else {}),
     )
     if adoption.status == "adopted":
         return (
@@ -793,6 +811,7 @@ def _reconcile(
     lease_seconds: int,
     heartbeat_interval_seconds: float,
     allow_mutation: bool,
+    original_intent: dict[str, object] | None = None,
 ) -> DurableProviderOperationResult:
     bound_reconciliation_key = (
         fallback_record.reconciliation_key
@@ -878,6 +897,7 @@ def _reconcile(
         response_status_code=observation.response_status_code,
         response_trace_id=response_trace_id,
         response_payload=observation.response_payload,
+        original_intent=original_intent,
     )
     if adoption_result is not None:
         return adoption_result

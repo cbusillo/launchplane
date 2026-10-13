@@ -33,7 +33,11 @@ from control_plane.product_reconcile import (
     PreviewProviderHooks,
 )
 from control_plane.service_auth import LocalAdminIdentity
-from control_plane.storage.postgres import PostgresRecordStore, LaunchplaneIdempotencyRow
+from control_plane.storage.postgres import (
+    PostgresRecordStore,
+    LaunchplaneIdempotencyRow,
+    ORIGINAL_MUTATION_INTENT_ROUTE,
+)
 from tests.support.http import get
 from tests.support.profiles import _odoo_preview_profile_payload
 from tests.support.stores import _sqlite_database_url
@@ -215,12 +219,73 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             provider_target_key=self.reservation.provider_target_key,
             original_intent={"issued_plan": "overwritten"},
         )
-        self.assertEqual(result.record.original_intent, self.reservation.original_intent)
-        original = original_preview_intent(result.record, profile=self.profile)
+        self.assertEqual(
+            self.store.read_original_mutation_intent(result.record),
+            self.store.read_original_mutation_intent(self.reservation),
+        )
+        original = original_preview_intent(result.record, profile=self.profile, store=self.store)
         self.assertEqual(original.issued_plan, self.issued)
         holds = held_preview_reservations(self.store, product=self.profile.product)
         self.assertEqual(holds, (result.record,))
         self.assertEqual(held_preview_reservations(self.store, product="other"), ())
+
+    def test_companion_receipt_and_reservation_commit_or_rollback_together(self) -> None:
+        with patch.object(
+            self.store,
+            "_retain_original_mutation_intent",
+            side_effect=RuntimeError("receipt failure"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.store.reserve_mutation(
+                    scope="fresh-scope",
+                    route_path=ODOO_PREVIEW_APPLY_ROUTE,
+                    idempotency_key="fresh-key",
+                    request_fingerprint="fresh-fingerprint",
+                    lease_owner="fresh-executor",
+                    original_intent={"product": self.profile.product},
+                )
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope="fresh-scope",
+                route_path=ODOO_PREVIEW_APPLY_ROUTE,
+                idempotency_key="fresh-key",
+            )
+        )
+        self.assertEqual(
+            held_preview_reservations(self.store, product=self.profile.product), (self.reservation,)
+        )
+
+    def test_changed_companion_receipt_refuses_before_lifecycle_or_provider_writes(self) -> None:
+        def observe(**_: object) -> tuple[str, dict[str, object], bool]:
+            with self.store._session_factory() as session:
+                row = session.scalar(
+                    select(LaunchplaneIdempotencyRow).where(
+                        LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                        LaunchplaneIdempotencyRow.idempotency_key == self.reservation.record_id,
+                    )
+                )
+                assert row is not None
+                receipt = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+                body = {**receipt.response_payload, "original_intent": {"product": "changed"}}
+                changed = receipt.model_copy(update={"response_payload": body})
+                self.store._sync_idempotency_row(row, changed)
+                session.commit()
+            return "present", {"status": "pass"}, True
+
+        with patch(
+            "control_plane.odoo_preview_apply_execution.execute_odoo_preview_apply_result"
+        ) as write:
+            result = self.recover(observe=observe)
+        self.assertEqual(result["settlement"], "refused")
+        self.assertEqual(self.store.list_preview_records(), ())
+        write.assert_not_called()
+        current = self.store.read_idempotency_record(
+            scope=self.reservation.scope,
+            route_path=self.reservation.route_path,
+            idempotency_key=self.reservation.idempotency_key,
+        )
+        assert current is not None
+        self.assertNotEqual(current.state, "completed")
 
     def test_expired_running_and_reconcile_required_observe_without_provider_writes(self) -> None:
         original = self.reservation
@@ -237,7 +302,17 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 write.assert_not_called()
 
     def test_legacy_missing_intent_refuses_without_provider_reads_or_writes(self) -> None:
-        self.reservation = self.replace_record(original_intent={})
+        with self.store._session_factory() as session:
+            receipt = session.scalar(
+                select(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.scope == self.reservation.scope,
+                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                    LaunchplaneIdempotencyRow.idempotency_key == self.reservation.record_id,
+                )
+            )
+            assert receipt is not None
+            session.delete(receipt)
+            session.commit()
         observer, quiescence = Mock(), Mock()
         result = self.recover(observe=observer, quiescence=quiescence)
         self.assertEqual(result["settlement"], "refused")
@@ -251,7 +326,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 original = self.reservation
                 candidate = self.reservation.model_copy(update={field: "different"})
                 with self.assertRaises(ValueError):
-                    original_preview_intent(candidate, profile=self.profile)
+                    original_preview_intent(candidate, profile=self.profile, store=self.store)
                 self.reservation = original
 
     def test_active_executor_grace_and_unknown_quiescence_refuse_before_observation(self) -> None:
@@ -532,7 +607,10 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         )
         assert completed is not None
         self.assertEqual(completed.state, "completed")
-        self.assertEqual(completed.original_intent, original.original_intent)
+        self.assertEqual(
+            self.store.read_original_mutation_intent(completed),
+            self.store.read_original_mutation_intent(original),
+        )
         new = self.store.read_idempotency_record(
             scope=original.scope,
             route_path=original.route_path,
@@ -540,7 +618,9 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         )
         assert new is not None
         self.assertEqual(
-            new.original_intent["issued_plan"]["plan_provenance"]["plan_id"],
+            self.store.read_original_mutation_intent(new)["issued_plan"]["plan_provenance"][
+                "plan_id"
+            ],
             operation.idempotency_key,
         )
 

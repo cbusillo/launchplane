@@ -352,7 +352,10 @@ class OdooPreviewApplyOperation:
             route_path=self.route_path,
             idempotency_key=self.idempotency_key,
         )
-        if existing is not None and existing.state != "completed" and not existing.original_intent:
+        retained_intent = (
+            store.read_original_mutation_intent(existing) if existing is not None else {}
+        )
+        if existing is not None and existing.state != "completed" and not retained_intent:
             return DurableProviderOperationResult("reconcile_required", existing, 409, {})
         with store.testing_replacement_execution_lock(
             preview_execution_lock_name(self.adapter.target_key())
@@ -362,8 +365,8 @@ class OdooPreviewApplyOperation:
             check()
             if existing is None:
                 self.adapter.capture_schedule_binding()
-            elif isinstance(existing.original_intent.get("schedule_binding"), dict):
-                self.adapter.schedule_binding = existing.original_intent["schedule_binding"]
+            elif isinstance(retained_intent.get("schedule_binding"), dict):
+                self.adapter.schedule_binding = retained_intent["schedule_binding"]
             return self.run_excluded(store, allow_mutation=allow_mutation, check=check)
 
     def run_excluded(
@@ -457,6 +460,7 @@ def prepare_odoo_preview_apply_operation(
             root=control_plane_root,
             database_url=database_url,
             check=supersession_is_quiescent,
+            store=record_store,
         ),
     )
 
@@ -478,14 +482,19 @@ def _original_supersession_is_quiescent(
     root: Path,
     database_url: str | None,
     check: OdooPreviewSupersessionQuiescenceCheck,
+    store: object,
 ) -> bool:
     from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
     from control_plane.preview_reservation_recovery import original_preview_intent
 
-    if not isinstance(reservation, LaunchplaneIdempotencyRecord):
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if not isinstance(reservation, LaunchplaneIdempotencyRecord) or not isinstance(
+        store, PostgresRecordStore
+    ):
         return False
     try:
-        original = original_preview_intent(reservation, profile=profile)
+        original = original_preview_intent(reservation, profile=profile, store=store)
     except ValueError:
         return False
     if (
@@ -515,7 +524,7 @@ def _original_supersession_is_quiescent(
         control_plane_root_path=root,
         request=original.apply_request,
         database_url=database_url,
-        schedule_binding=reservation.original_intent.get("schedule_binding"),
+        schedule_binding=store.read_original_mutation_intent(reservation).get("schedule_binding"),
     )
 
 

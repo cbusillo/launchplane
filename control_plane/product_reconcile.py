@@ -1397,9 +1397,9 @@ def reconcile_preview_target(
     held = held_preview_reservations(record_store, product=profile.product)
     recovery: list[dict[str, object]] = []
     for reservation in held[:100]:
-        classified = classify_preview_reservation(reservation, profile=profile)
+        classified = classify_preview_reservation(reservation, profile=profile, store=record_store)
         try:
-            original = original_preview_intent(reservation, profile=profile)
+            original = original_preview_intent(reservation, profile=profile, store=record_store)
         except ValueError:
             # Unknown legacy intent is visible even when no PR can be bound to it.
             recovery.append(classified)
@@ -1841,7 +1841,11 @@ def _run_preview_operation(
 
     try:
         recovery_plan = (
-            reservation.original_intent.get("issued_plan") if reservation is not None else None
+            cast(PostgresRecordStore, record_store)
+            .read_original_mutation_intent(reservation)
+            .get("issued_plan")
+            if reservation is not None
+            else None
         )
         if unknown_destroy and isinstance(recovery_plan, dict):
             try:
@@ -1887,10 +1891,12 @@ def _run_preview_operation(
             plan["omitted_integration_credential_keys"] = list(
                 issued_plan.omitted_integration_credential_keys
             )
-        if reservation is not None and reservation.original_intent:
+        if reservation is not None and cast(
+            PostgresRecordStore, record_store
+        ).read_original_mutation_intent(reservation):
             from control_plane.preview_reservation_recovery import original_preview_intent
 
-            original = original_preview_intent(reservation, profile=profile)
+            original = original_preview_intent(reservation, profile=profile, store=record_store)
             validate_odoo_preview_profile_authority(
                 profile=profile, issued_plan=original.issued_plan
             )
@@ -2204,7 +2210,7 @@ def run_product_reconcile_once(
         failed_plan: dict[str, object] = {"target": request.target_kind}
         if request.target_kind == "preview":
             # A failed read or lost lease must not re-arm a previously exhausted destroy.
-            for key in ("destroy_retry_key", "destroy_failed_attempts", "preview_recovery_plan"):
+            for key in ("destroy_retry_key", "destroy_failed_attempts"):
                 if key in request.last_plan:
                     failed_plan[key] = request.last_plan[key]
             failed_plan["last_failed_error_code"] = getattr(error, "code", "")
@@ -2415,7 +2421,7 @@ def request_product_reconcile_sweep(
 
         for reservation in held_preview_reservations(record_store, product=profile.product):
             try:
-                original = original_preview_intent(reservation, profile=profile)
+                original = original_preview_intent(reservation, profile=profile, store=record_store)
             except ValueError:
                 continue
             targets.append(

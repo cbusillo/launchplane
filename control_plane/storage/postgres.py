@@ -5814,6 +5814,9 @@ def _ordinary_agent_snapshot_read_permissions() -> tuple[str, ...]:
     return ordinary_agent_effect_permissions("merge_train_snapshot")
 
 
+ORIGINAL_MUTATION_INTENT_ROUTE = "/internal/provider-original-intent"
+
+
 class PostgresRecordStore(HumanSessionStore):
     def __init__(
         self,
@@ -7617,7 +7620,6 @@ class PostgresRecordStore(HumanSessionStore):
             record.provider_target_key,
             record.provider_effect_phase,
             record.provider_effect_started_at,
-            record.original_intent,
             record.created_at,
         )
 
@@ -7972,12 +7974,88 @@ class PostgresRecordStore(HumanSessionStore):
                 for row in session.scalars(statement)
             )
 
+    def read_original_mutation_intent(
+        self, reservation: LaunchplaneIdempotencyRecord
+    ) -> dict[str, Any]:
+        with self._session_factory() as session:
+            return self._original_mutation_intent(session, reservation)
+
+    def _original_mutation_intent(
+        self, session: Any, reservation: LaunchplaneIdempotencyRecord, *, for_update: bool = False
+    ) -> dict[str, Any]:
+        statement = self._idempotency_statement(
+            scope=reservation.scope,
+            route_path=ORIGINAL_MUTATION_INTENT_ROUTE,
+            idempotency_key=reservation.record_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = session.scalar(statement)
+        if row is None:
+            return {}
+        receipt = self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+        if (
+            receipt.state != "completed"
+            or receipt.request_fingerprint != reservation.request_fingerprint
+            or receipt.response_payload.get("reservation_id") != reservation.record_id
+        ):
+            return {}
+        intent = receipt.response_payload.get("original_intent")
+        if not isinstance(intent, dict):
+            return {}
+        return intent
+
+    def _retain_original_mutation_intent(
+        self,
+        session: Any,
+        reservation: LaunchplaneIdempotencyRecord,
+        original_intent: dict[str, Any] | None,
+    ) -> None:
+        if not original_intent:
+            return
+        route = ORIGINAL_MUTATION_INTENT_ROUTE
+        receipt = LaunchplaneIdempotencyRecord(
+            record_id=build_launchplane_mutation_reservation_id(
+                scope=reservation.scope,
+                route_path=route,
+                idempotency_key=reservation.record_id,
+            ),
+            scope=reservation.scope,
+            route_path=route,
+            idempotency_key=reservation.record_id,
+            request_fingerprint=reservation.request_fingerprint,
+            response_status_code=202,
+            response_trace_id=reservation.lease_owner,
+            recorded_at=reservation.created_at,
+            response_payload={
+                "reservation_id": reservation.record_id,
+                "original_intent": original_intent,
+            },
+        )
+        # Called only in the transaction that acquires a fresh reservation. A
+        # released no-effect attempt may be replaced; a held/completed parent
+        # refuses acquisition before its immutable receipt can be overwritten.
+        session.merge(self._idempotency_row(receipt))
+
     def list_held_odoo_preview_reservations(
         self, *, product: str, limit: int = 101
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
         from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
         from control_plane.product_reconcile import reconcile_reservation_scope
 
+        original = aliased(LaunchplaneIdempotencyRow)
+        retained_product = (
+            select(original.record_id)
+            .where(
+                original.scope == LaunchplaneIdempotencyRow.scope,
+                original.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                original.idempotency_key == LaunchplaneIdempotencyRow.record_id,
+                original.request_fingerprint == LaunchplaneIdempotencyRow.request_fingerprint,
+                original.payload["response_payload"]["original_intent"]["product"].as_string()
+                == product,
+            )
+            .exists()
+        )
         return self._list_models(
             model_type=LaunchplaneIdempotencyRecord,
             orm_model=LaunchplaneIdempotencyRow,
@@ -7986,8 +8064,7 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
                 or_(
                     LaunchplaneIdempotencyRow.scope == reconcile_reservation_scope(product),
-                    LaunchplaneIdempotencyRow.payload["original_intent"]["product"].as_string()
-                    == product,
+                    retained_product,
                 ),
             ),
             order_by=(LaunchplaneIdempotencyRow.record_id,),
@@ -8345,9 +8422,9 @@ class PostgresRecordStore(HumanSessionStore):
                     reserved_at=observed_at,
                     reconciliation_key=reconciliation_key,
                     provider_target_key=normalized_provider_target_key,
-                    original_intent=original_intent,
                 )
                 session.add(self._idempotency_row(reservation))
+                self._retain_original_mutation_intent(session, reservation, original_intent)
                 session.commit()
             return MutationReservationResult(status="acquired", record=reservation)
         except IntegrityError as error:
@@ -8908,6 +8985,7 @@ class PostgresRecordStore(HumanSessionStore):
         response_status_code: int,
         response_trace_id: str,
         response_payload: dict[str, Any],
+        expected_original_intent: dict[str, Any] | None = None,
         expected_promotion_evidence: tuple[BaseModel, ...] = (),
         expected_binding_evidence: tuple[BaseModel, ...] = (),
         promotion_recovery_inventory: EnvironmentInventory | None = None,
@@ -8961,7 +9039,16 @@ class PostgresRecordStore(HumanSessionStore):
                     record=current_record,
                 )
             if (
-                reservation.original_intent and current_record != reservation
+                expected_original_intent is not None
+                and self._original_mutation_intent(session, reservation, for_update=True)
+                != expected_original_intent
+            ):
+                return MutationReservationAdoptionResult(
+                    status="reservation_mismatch", record=current_record
+                )
+            if (
+                self._original_mutation_intent(session, reservation)
+                and current_record != reservation
             ) or not self._mutation_reservation_matches(current_record, reservation):
                 return MutationReservationAdoptionResult(
                     status="reservation_mismatch",
@@ -9091,6 +9178,7 @@ class PostgresRecordStore(HumanSessionStore):
         reconciliation_key: str,
         provider_target_key: str,
         original_intent: dict[str, Any] | None = None,
+        expected_original_intent: dict[str, Any] | None = None,
     ) -> MutationReconciliationSupersessionResult:
         normalized_response_trace_id = response_trace_id.strip()
         normalized_reconciliation_key = reconciliation_key.strip()
@@ -9138,7 +9226,16 @@ class PostgresRecordStore(HumanSessionStore):
                         record=current_record,
                     )
                 if (
-                    reservation.original_intent and current_record != reservation
+                    expected_original_intent is not None
+                    and self._original_mutation_intent(session, reservation, for_update=True)
+                    != expected_original_intent
+                ):
+                    return MutationReconciliationSupersessionResult(
+                        status="reservation_mismatch", record=current_record
+                    )
+                if (
+                    self._original_mutation_intent(session, reservation)
+                    and current_record != reservation
                 ) or not self._mutation_reservation_matches(current_record, reservation):
                     return MutationReconciliationSupersessionResult(
                         status="reservation_mismatch",
@@ -9191,10 +9288,10 @@ class PostgresRecordStore(HumanSessionStore):
                     reserved_at=observed_at,
                     reconciliation_key=normalized_reconciliation_key,
                     provider_target_key=normalized_provider_target_key,
-                    original_intent=original_intent,
                 )
                 self._sync_idempotency_row(row, superseded_record)
                 session.add(self._idempotency_row(replacement))
+                self._retain_original_mutation_intent(session, replacement, original_intent)
                 session.commit()
                 return MutationReconciliationSupersessionResult(
                     status="acquired",

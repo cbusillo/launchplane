@@ -300,7 +300,8 @@ def build_preview_lifecycle_sweep(
 
         holds = held_preview_reservations(record_store, product=profile.product)
         entry["held_reservations"] = [
-            classify_preview_reservation(record, profile=profile) for record in holds[:100]
+            classify_preview_reservation(record, profile=profile, store=record_store)
+            for record in holds[:100]
         ]
         entry["held_reservations_truncated"] = len(holds) > 100
         if profile.product in denied_actions:

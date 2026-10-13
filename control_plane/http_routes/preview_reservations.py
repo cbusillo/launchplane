@@ -64,7 +64,8 @@ def register_preview_reservation_read_routes(
             trace_id=trace_id,
             product=product,
             reservations=tuple(
-                classify_preview_reservation(record, profile=profile) for record in held[:limit]
+                classify_preview_reservation(record, profile=profile, store=record_store)
+                for record in held[:limit]
             ),
             truncated=len(held) > limit,
         )

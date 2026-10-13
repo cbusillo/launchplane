@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import timedelta
 import hashlib
+import json
 from pathlib import Path
 from typing import Callable
 
@@ -40,11 +41,14 @@ def original_preview_intent(
     reservation: LaunchplaneIdempotencyRecord,
     *,
     profile: LaunchplaneProductProfileRecord,
+    store: object,
 ) -> OriginalPreviewIntent:
     """Accept only reservation-owned issued intent and its exact target binding."""
-    if reservation.route_path != ODOO_PREVIEW_APPLY_ROUTE or not reservation.original_intent:
+    if not isinstance(store, PostgresRecordStore):
+        raise ValueError("Preview original intent requires database storage.")
+    intent = store.read_original_mutation_intent(reservation)
+    if reservation.route_path != ODOO_PREVIEW_APPLY_ROUTE or not intent:
         raise ValueError("preview_original_intent_unavailable")
-    intent = reservation.original_intent
     issued = OdooPreviewApplyInputsResult.model_validate(intent.get("issued_plan"))
     request = validate_odoo_preview_issued_plan(
         plan_id=reservation.idempotency_key,
@@ -63,23 +67,32 @@ def original_preview_intent(
     return OriginalPreviewIntent(issued, request)
 
 
-def preview_reservation_reference(reservation: LaunchplaneIdempotencyRecord) -> str:
-    return (
-        "preview-reservation-" + hashlib.sha256(reservation.model_dump_json().encode()).hexdigest()
+def preview_reservation_reference(
+    reservation: LaunchplaneIdempotencyRecord, retained_intent: dict[str, object]
+) -> str:
+    snapshot = json.dumps(
+        {"reservation": reservation.model_dump(mode="json"), "original_intent": retained_intent},
+        sort_keys=True,
+        separators=(",", ":"),
     )
+    return "preview-reservation-" + hashlib.sha256(snapshot.encode()).hexdigest()
 
 
 def classify_preview_reservation(
     reservation: LaunchplaneIdempotencyRecord,
     *,
     profile: LaunchplaneProductProfileRecord,
+    store: object,
 ) -> dict[str, object]:
     """Database-only projection: never return coordinates, keys, plans or request bodies."""
+    if not isinstance(store, PostgresRecordStore):
+        raise ValueError("Preview classification requires database storage.")
+    retained_intent = store.read_original_mutation_intent(reservation)
     available = False
     action = "unavailable"
     number = 0
     try:
-        intent = original_preview_intent(reservation, profile=profile)
+        intent = original_preview_intent(reservation, profile=profile, store=store)
         available = True
         action = intent.issued_plan.operation
         number = intent.issued_plan.plan_request.pr_number
@@ -87,16 +100,14 @@ def classify_preview_reservation(
         pass
     return {
         "reservation_id": reservation.record_id,
-        "recovery_reference": preview_reservation_reference(reservation),
+        "recovery_reference": preview_reservation_reference(reservation, retained_intent),
         "state": reservation.state,
         "attempt": reservation.attempt,
-        "original_plan_available": bool(reservation.original_intent.get("issued_plan")),
+        "original_plan_available": bool(retained_intent.get("issued_plan")),
         "original_action_available": available,
         "original_attempt_available": available,
         "original_binding_available": available,
-        "original_schedule_binding_available": bool(
-            reservation.original_intent.get("schedule_binding")
-        ),
+        "original_schedule_binding_available": bool(retained_intent.get("schedule_binding")),
         "action": action,
         "pull_request_number": number,
         "classification": "original_available" if available else "original_evidence_unavailable",
@@ -121,13 +132,14 @@ def recover_held_preview(
     observe: ObserveOdooPreviewApply,
     quiescence: Callable[..., bool] = odoo_preview_supersession_is_quiescent,
 ) -> dict[str, object]:
-    result = classify_preview_reservation(reservation, profile=profile)
+    retained_intent = store.read_original_mutation_intent(reservation)
+    result = classify_preview_reservation(reservation, profile=profile, store=store)
 
     def refuse(code: str) -> dict[str, object]:
         return {**result, "settlement": "refused", "reason": code}
 
     try:
-        intent = original_preview_intent(reservation, profile=profile)
+        intent = original_preview_intent(reservation, profile=profile, store=store)
         with store.testing_replacement_execution_lock(
             preview_execution_lock_name(reservation.provider_target_key)
         ) as check:
@@ -153,7 +165,7 @@ def recover_held_preview(
                 control_plane_root_path=root,
                 request=intent.apply_request,
                 database_url=store.database_url,
-                schedule_binding=reservation.original_intent.get("schedule_binding"),
+                schedule_binding=retained_intent.get("schedule_binding"),
             ):
                 return refuse("preview_quiescence_unproven")
             check()
@@ -186,7 +198,11 @@ def recover_held_preview(
                     route_path=reservation.route_path,
                     idempotency_key=reservation.idempotency_key,
                 )
-                if after != before or store.read_product_profile_record(profile.product) != profile:
+                if (
+                    after != before
+                    or store.read_original_mutation_intent(reservation) != retained_intent
+                    or store.read_product_profile_record(profile.product) != profile
+                ):
                     raise ValueError("preview_reservation_changed")
                 return observed
 
@@ -205,7 +221,7 @@ def recover_held_preview(
                 ),
                 observe_apply=observe_exact,
             )
-            binding = reservation.original_intent.get("schedule_binding")
+            binding = retained_intent.get("schedule_binding")
             if isinstance(binding, dict):
                 operation.adapter.schedule_binding = binding
             outcome = operation.run_excluded(store, allow_mutation=False, check=check)

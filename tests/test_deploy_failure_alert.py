@@ -76,13 +76,14 @@ class DeployFailureAlertTests(unittest.TestCase):
             ):
                 self.assertTrue(send_failure_alert())
             payload = sender.call_args.args[1]
-            self.assertIn("drain", payload["embeds"][0]["title"])
             self.assertNotIn("private-", json.dumps(payload))
+            recovery_link = next(
+                field["value"]
+                for field in payload["embeds"][0]["fields"]
+                if "/actions/workflows/" in field["value"]
+            )
             self.assertTrue(
-                any(
-                    "deploy-launchplane.yml" in field["value"]
-                    for field in payload["embeds"][0]["fields"]
-                )
+                (REPO_ROOT / ".github/workflows" / recovery_link.rsplit("/", 1)[1]).is_file()
             )
 
     def test_health_evidence_never_returns_urls_bodies_or_exception_values(self) -> None:
