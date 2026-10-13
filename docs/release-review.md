@@ -24,7 +24,9 @@ bounded evidence holds the release with a public-safe reason.
 
 The fixed company calendar supplies its timezone, weekly or alternating-week
 attendance, and company-wide calendar leave. A business day includes meal
-breaks between its first and last attendance; personal leave does not close
+breaks between its first and last attendance. Optional resource-specific
+attendance is discovered through Odoo field metadata and excluded; base Odoo 19
+needs no such addon field. Personal leave does not close
 the company. Flexible or duration-based calendars cannot establish closing
 and hold the release. Reads are bounded to 128 rows per source and a 15-day
 horizon; truncation or no proved closing window also holds. DST fallback spans

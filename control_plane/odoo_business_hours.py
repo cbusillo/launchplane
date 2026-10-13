@@ -146,10 +146,33 @@ def read_company_calendar(
         )
         if len(calendars) != 1:
             raise ValueError("The company calendar is unavailable.")
+        # Resource-specific attendance is an optional addon extension, not a
+        # field in base Odoo 19. Read its schema before requesting that column.
+        attendance_schema = _rpc(
+            opener,
+            origin,
+            "/web/dataset/call_kw",
+            {
+                "model": "resource.calendar.attendance",
+                "method": "fields_get",
+                "args": [["resource_id"]],
+                "kwargs": {"attributes": ["type"]},
+            },
+        )
+        if not isinstance(attendance_schema, dict):
+            raise ValueError("Attendance schema is unavailable.")
+        resource_field = attendance_schema.get("resource_id")
+        if resource_field is not None and (
+            not isinstance(resource_field, dict) or resource_field.get("type") != "many2one"
+        ):
+            raise ValueError("Resource-specific attendance has an unsupported schema.")
+        attendance_fields = ["dayofweek", "hour_from", "hour_to", "week_type", "display_type"]
+        if resource_field is not None:
+            attendance_fields.append("resource_id")
         attendance = search(
             "resource.calendar.attendance",
             [["calendar_id", "=", calendar_id]],
-            ["dayofweek", "hour_from", "hour_to", "week_type", "display_type", "resource_id"],
+            attendance_fields,
         )
         # Odoo dates are naive UTC. Include calendar-independent company holidays.
         leaves = search(

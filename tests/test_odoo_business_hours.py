@@ -44,6 +44,7 @@ class BusinessHoursTests(unittest.TestCase):
         }
         now = datetime(2026, 10, 13, 15, tzinfo=UTC)
         rows = [attendance(now.weekday())]
+        rows[0].pop("resource_id")
         seen: list[dict[str, Any]] = []
 
         def rpc(
@@ -53,13 +54,20 @@ class BusinessHoursTests(unittest.TestCase):
                 return {"uid": 1}
             if path == "/web/session/destroy":
                 return None
+            if params["method"] == "fields_get":
+                return {"resource_id": {"type": "many2one"}} if "resource_id" in rows[0] else {}
             seen.append(params)
-            return {
+            if params["model"] == "resource.calendar.attendance":
+                if any(field not in rows[0] for field in params["kwargs"]["fields"]):
+                    raise ValueError("Odoo rejected an unsupported attendance field.")
+            responses: dict[str, list[dict[str, object]]] = {
                 "res.company": [{"resource_calendar_id": [17, "Company calendar"]}],
                 "resource.calendar": [calendar()],
                 "resource.calendar.attendance": rows,
                 "resource.calendar.leaves": [],
-            }[params["model"]]
+            }
+            result = responses[params["model"]]
+            return [{field: row[field] for field in params["kwargs"]["fields"]} for row in result]
 
         with (
             patch("control_plane.odoo_business_hours._rpc", side_effect=rpc),
@@ -75,6 +83,16 @@ class BusinessHoursTests(unittest.TestCase):
             for call in seen:
                 self.assertEqual(call["method"], "search_read")
                 self.assertEqual(call["kwargs"]["context"]["allowed_company_ids"], [7])
+            closing = calendar_window(config, actual, leaves, observed_at=now).next_release_at
+            rows[0]["resource_id"] = False
+            personal = attendance(now.weekday(), 0, 24) | {"resource_id": [99, "Personal schedule"]}
+            rows.append(personal)
+            config, actual, leaves = read_company_calendar(
+                connection, company_id=7, observed_at=now
+            )
+            self.assertEqual(
+                calendar_window(config, actual, leaves, observed_at=now).next_release_at, closing
+            )
             rows.extend(attendance(1) for _ in range(200))
             with self.assertRaises(ValueError):
                 read_company_calendar(connection, company_id=7, observed_at=now)
