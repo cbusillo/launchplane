@@ -132,7 +132,7 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         observed: list[LaunchplaneProductProfileRecord] = []
 
         def authorize(
-            profiles: tuple[LaunchplaneProductProfileRecord, ...], inventory: tuple[object, ...]
+            profiles: tuple[LaunchplaneProductProfileRecord, ...], _inventory: tuple[object, ...]
         ) -> bool:
             observed.extend(profiles)
             return profiles == (expected,)
@@ -410,6 +410,151 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         finally:
             if not already_tracing:
                 tracemalloc.stop()
+
+    def test_compressed_history_exceeds_legacy_bound_without_losing_any_row(self) -> None:
+        from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
+
+        with self.store._engine.begin() as connection:
+            original = dict(
+                connection.execute(select(LaunchplaneAuthzPolicyRow.__table__)).mappings().one()
+            )
+            for revision in range(2, 14):
+                historical = dict(original)
+                historical.update(
+                    record_id=f"history-{revision}", revision=revision, status="superseded"
+                )
+                historical["payload"] = dict(
+                    original["payload"], record_id=historical["record_id"], status="superseded"
+                )
+                # Field absence in just one old revision must reach the reader.
+                historical["payload"]["policy"] = json.loads(
+                    json.dumps(original["payload"]["policy"])
+                )
+                if revision == 5:
+                    del historical["payload"]["policy"]["github_actions"][0]["instances"]
+                connection.execute(insert(LaunchplaneAuthzPolicyRow).values(**historical))
+        before = self.store.list_authz_policy_records()
+        legacy = self.store.export_stored_record_snapshot()
+        bound = len(legacy.model_dump_json().encode()) // 2
+        with (
+            patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", bound),
+            patch("control_plane.stored_record_snapshot_codec.SNAPSHOT_MAX_BYTES", bound),
+        ):
+            with self.assertRaisesRegex(ValueError, "snapshot_byte_limit"):
+                self.store.export_stored_record_snapshot()
+            compact = self.store.export_stored_record_snapshot(format_version=2)
+        self.assertLess(len(compact.model_dump_json().encode()), bound)
+        rows = list(iter_snapshot_rows(compact))
+        self.assertEqual(sorted(row["revision"] for _, row in rows), list(range(1, 14)))
+        old = next(row for _, row in rows if row["revision"] == 5)
+        self.assertNotIn("instances", old["payload"]["policy"]["github_actions"][0])
+        restored = PostgresRecordStore(database_url=_sqlite_database_url(self.root / "compact.db"))
+        self.addCleanup(restored.close)
+        restored.ensure_schema()
+        with restored._engine.begin() as connection:
+            for table, row in rows:
+                self.assertEqual(table, LaunchplaneAuthzPolicyRow.__tablename__)
+                connection.execute(insert(LaunchplaneAuthzPolicyRow).values(**row))
+        check_restored_records(restored, state_dir=self.root)
+        with patch(
+            "control_plane.service_auth.exclusively_instance_scoped_authz_actions",
+            return_value=frozenset({"live_target_runtime.plan"}),
+        ):
+            with self.assertRaises(ValidationError):
+                check_restored_records(restored, state_dir=self.root)
+        self.assertEqual(before, self.store.list_authz_policy_records())
+        self.assertNotIn("plaintext-sentinel", json.dumps(rows))
+
+    def test_compressed_route_negotiates_format_and_keeps_read_authority(self) -> None:
+        from control_plane.contracts.stored_record_snapshot import StoredRecordSnapshotResponse
+        from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
+
+        caller = identity(
+            repository="private/example",
+            workflow_ref="private/example/.github/workflows/deploy.yml@refs/heads/main",
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(caller),
+            authz_policy=self.policy,
+            record_store_factory=lambda: self.store,
+        )
+        response = asyncio.run(
+            request(
+                app,
+                "GET",
+                "/v1/service/stored-record-snapshot?format_version=2",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        snapshot = StoredRecordSnapshotResponse.model_validate(response.json()).snapshot
+        self.assertEqual(
+            len(list(iter_snapshot_rows(snapshot))), len(self.store.list_authz_policy_records())
+        )
+        legacy = asyncio.run(
+            request(
+                app,
+                "GET",
+                "/v1/service/stored-record-snapshot",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+        )
+        self.assertIn("tables", legacy.json()["snapshot"])
+        denied = create_launchplane_fastapi_app(
+            verifier=StubVerifier(identity(repository="other/repo")),
+            authz_policy=self.policy,
+            record_store_factory=lambda: self.store,
+        )
+        refused = asyncio.run(
+            request(
+                denied,
+                "GET",
+                "/v1/service/stored-record-snapshot?format_version=2",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+        )
+        self.assertEqual(refused.status_code, 403)
+
+    def test_compressed_truncation_counts_and_decoded_budgets_refuse(self) -> None:
+        import base64
+        from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
+
+        snapshot = self.store.export_stored_record_snapshot(format_version=2)
+        validate_snapshot(snapshot, now=datetime.now(timezone.utc))
+        invalid_count = snapshot.model_copy(
+            update={"table_counts": dict(snapshot.table_counts, launchplane_authz_policies=2)}
+        )
+        with self.assertRaisesRegex(ValueError, "snapshot_incomplete_records"):
+            list(iter_snapshot_rows(invalid_count))
+        from sqlalchemy import create_engine, inspect
+        from control_plane.stored_record_preflight import restore_snapshot
+
+        empty_engine = create_engine(_sqlite_database_url(self.root / "invalid-compact.db"))
+        self.addCleanup(empty_engine.dispose)
+        with self.assertRaisesRegex(ValueError, "snapshot_incomplete_records"):
+            restore_snapshot(empty_engine, invalid_count)
+        self.assertEqual(inspect(empty_engine).get_table_names(), [])
+        truncated = snapshot.model_copy(
+            update={
+                "rows_gzip_base64": base64.b64encode(
+                    base64.b64decode(snapshot.rows_gzip_base64)[:-4]
+                ).decode()
+            }
+        )
+        with self.assertRaises(EOFError):
+            list(iter_snapshot_rows(truncated))
+        with patch(
+            "control_plane.stored_record_snapshot_codec.SNAPSHOT_MAX_EXPANDED_BYTES",
+            snapshot.expanded_bytes // 2,
+        ):
+            with self.assertRaisesRegex(ValueError, "snapshot_expanded_byte_limit"):
+                list(iter_snapshot_rows(snapshot))
+            with self.assertRaisesRegex(ValueError, "snapshot_expanded_byte_limit"):
+                self.store.export_stored_record_snapshot(format_version=2)
+        row_bytes = len(next(iter_snapshot_rows(snapshot))[1]["payload"]["policy_sha256"])
+        with patch("control_plane.stored_record_snapshot_codec.SNAPSHOT_MAX_BYTES", row_bytes):
+            with self.assertRaises(ValueError):
+                self.store.export_stored_record_snapshot(format_version=2)
 
     def test_train_run_history_samples_latest_without_deleting_source_records(self) -> None:
         earlier = _merge_train_run_record()

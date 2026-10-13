@@ -3181,6 +3181,43 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                         if operation == "destroy"
                         else _ready_odoo_preview_apply_payload(include_manifest=True)
                     )
+                    # Supersession requires the original issued refresh and exact
+                    # surviving compose binding, not just an expired row.
+                    request = OdooPreviewApplyEnvelope.model_validate(payload)
+                    request = request.model_copy(
+                        update={
+                            "apply": request.apply.model_copy(
+                                update={
+                                    "dry_run_plan": request.apply.dry_run_plan.model_copy(
+                                        update={"compose_ref": "compose-cm-pr-42"}
+                                    )
+                                }
+                            )
+                        }
+                    )
+                    payload = request.model_dump(mode="json")
+                    old_payload = _ready_odoo_preview_apply_payload(include_manifest=True)
+                    old_request = OdooPreviewApplyEnvelope.model_validate(old_payload)
+                    old_request = old_request.model_copy(
+                        update={
+                            "apply": old_request.apply.model_copy(
+                                update={
+                                    "dry_run_plan": old_request.apply.dry_run_plan.model_copy(
+                                        update={"compose_ref": "compose-cm-pr-42"}
+                                    )
+                                }
+                            )
+                        }
+                    )
+                    old_plan = issue_odoo_preview_apply_plan(
+                        result=self._planned_preview_result(old_request.model_dump(mode="json")),
+                        plan_id="odoo-preview-stale-refresh",
+                    )
+                    original_intent = {
+                        "product": "odoo-tenant-cm",
+                        "issued_plan": old_plan.model_dump(mode="json"),
+                        "apply_request": old_request.model_dump(mode="json"),
+                    }
                     plan_id = self._store_issued_preview_plan(
                         store=store,
                         identity=identity,
@@ -3207,6 +3244,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                             lease_seconds=60,
                             reconciliation_key=reconciliation_key,
                             provider_target_key=provider_target_key,
+                            original_intent=original_intent,
                         )
                         with (
                             patch(

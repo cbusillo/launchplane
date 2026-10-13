@@ -2132,7 +2132,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
                 self.assertFalse(quiescent)
 
-    def test_preview_supersession_allows_missing_compose(self) -> None:
+    def test_preview_supersession_refuses_missing_compose_without_schedule_proof(self) -> None:
         operations: tuple[Literal["refresh", "destroy"], ...] = ("refresh", "destroy")
         for operation in operations:
             with self.subTest(operation=operation):
@@ -2162,7 +2162,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                         database_url=None,
                     )
 
-                self.assertTrue(quiescent)
+                self.assertFalse(quiescent)
 
     def test_observe_refresh_does_not_retry_missing_marker_after_trigger_checkpoint(
         self,

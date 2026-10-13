@@ -82,7 +82,13 @@ def health_results(urls: list[str]) -> list[dict[str, str | int]]:
 
 def send_failure_alert() -> bool:
     response_file = Path(os.environ["SELF_DEPLOY_RESPONSE_FILE"])
-    if not replacement_may_have_dispatched(response_file):
+    try:
+        response = json.loads(response_file.read_text())
+    except (OSError, ValueError):
+        response = None
+    error = response.get("error") if isinstance(response, dict) else None
+    drain_timeout = isinstance(error, dict) and error.get("code") == "self_deploy_drain_timeout"
+    if not drain_timeout and not replacement_may_have_dispatched(response_file):
         return False
     sender = validate_sender()
     image = os.environ["DEPLOYED_IMAGE_REFERENCE"]
@@ -139,8 +145,15 @@ def send_failure_alert() -> bool:
             "allowed_mentions": {"parse": []},
             "embeds": [
                 {
-                    "title": "Launchplane replacement failed verification",
-                    "description": "Manual break-glass may be needed. Dispatch recovery, then approve the protected job.",
+                    "title": "Launchplane self-deploy drain timed out"
+                    if drain_timeout
+                    else "Launchplane replacement failed verification",
+                    "description": (
+                        "Held provider operations prevented replacement. No replacement was dispatched. "
+                        "Inspect the held reservations; manual break-glass remains gated by approval."
+                        if drain_timeout
+                        else "Manual break-glass may be needed. Dispatch recovery, then approve the protected job."
+                    ),
                     "fields": [
                         {"name": "Image", "value": image},
                         *(

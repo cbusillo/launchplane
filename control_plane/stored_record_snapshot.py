@@ -11,7 +11,7 @@ import json
 import re
 import secrets
 from time import monotonic
-from typing import Any
+from typing import Any, Literal, overload
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import LargeBinary, Text, case, cast, func, select, text
@@ -30,9 +30,11 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.stored_record_snapshot import (
     SNAPSHOT_MAX_BYTES,
     SNAPSHOT_MAX_ROWS,
+    CompressedStoredRecordSnapshot,
     StoredRecordSnapshot,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.stored_record_snapshot_codec import SnapshotRowEncoder
 from control_plane.merge_train import MergeTrainDryRunResult, MergeTrainDryRunSnapshot
 from control_plane.workflows.merge_train_worker import MergeTrainWorkerStepResult
 from control_plane.storage.postgres import (
@@ -270,9 +272,30 @@ def _snapshot_cursor(
         raise
 
 
+@overload
 def export_stored_record_snapshot(
-    engine: Engine, *, authorize_records: SnapshotAuthorization | None = None
-) -> StoredRecordSnapshot:
+    engine: Engine,
+    *,
+    authorize_records: SnapshotAuthorization | None = None,
+    format_version: Literal[1] = 1,
+) -> StoredRecordSnapshot: ...
+
+
+@overload
+def export_stored_record_snapshot(
+    engine: Engine,
+    *,
+    authorize_records: SnapshotAuthorization | None = None,
+    format_version: Literal[2],
+) -> CompressedStoredRecordSnapshot: ...
+
+
+def export_stored_record_snapshot(
+    engine: Engine,
+    *,
+    authorize_records: SnapshotAuthorization | None = None,
+    format_version: Literal[1, 2] = 1,
+) -> StoredRecordSnapshot | CompressedStoredRecordSnapshot:
     scrubber = _Scrubber()
     tables: dict[str, list[dict[str, Any]]] = {}
     profiles: list[LaunchplaneProductProfileRecord] = []
@@ -282,6 +305,8 @@ def export_stored_record_snapshot(
     source_row_bytes = 0
     family = ""
     deadline = monotonic() + 20
+    encoder = SnapshotRowEncoder() if format_version == 2 else None
+    active_policy_count = 0
 
     def refuse(reason: str) -> SnapshotUnavailable:
         return SnapshotUnavailable(
@@ -312,6 +337,8 @@ def export_stored_record_snapshot(
             family = table.name
             schema = model_type.model_json_schema()
             rows: list[dict[str, Any]] = []
+            if encoder is not None:
+                encoder.table_counts[table.name] = 0
             remaining = int((deadline - monotonic()) * 1000)
             if remaining <= 0:
                 raise refuse("snapshot_time_limit")
@@ -418,19 +445,28 @@ def export_stored_record_snapshot(
                                 raise refuse("snapshot_projection_conflict")
                             row[key] = payload[key]
                     row["payload"] = payload
-                    row_size = sum(
-                        len(chunk.encode())
-                        for chunk in json.JSONEncoder(
-                            separators=(",", ":"), ensure_ascii=False
-                        ).iterencode(row)
-                    )
-                    scrubbed_bytes += row_size
-                    if scrubbed_bytes > SNAPSHOT_MAX_BYTES:
-                        raise refuse("snapshot_byte_limit")
+                    if encoder is None:
+                        scrubbed_bytes += sum(
+                            len(chunk.encode())
+                            for chunk in json.JSONEncoder(
+                                separators=(",", ":"), ensure_ascii=False
+                            ).iterencode(row)
+                        )
+                        if scrubbed_bytes > SNAPSHOT_MAX_BYTES:
+                            raise refuse("snapshot_byte_limit")
+                        rows.append(row)
+                    else:
+                        try:
+                            encoder.add(table.name, row)
+                        except ValueError as error:
+                            scrubbed_bytes = encoder.expanded_bytes
+                            raise refuse(str(error)) from error
+                        scrubbed_bytes = encoder.expanded_bytes
+                    if row_type is LaunchplaneAuthzPolicyRow and row["status"] == "active":
+                        active_policy_count += 1
                     if monotonic() > deadline:
                         raise refuse("snapshot_time_limit")
                     row_count += 1
-                    rows.append(row)
                     # FETCH is a new statement on the server cursor. Clip its
                     # timeout to the budget left after processing this row.
                     remaining = int((deadline - monotonic()) * 1000)
@@ -448,16 +484,21 @@ def export_stored_record_snapshot(
             tuple(profiles), tuple(inventory)
         ):
             raise SnapshotAuthorizationDenied("Snapshot records exceed the reader scope.")
-        snapshot = StoredRecordSnapshot(
-            captured_at=datetime.now(timezone.utc).isoformat(),
-            database_schema_revision=revision,
-            tables=tables,
-        )
-    active_policies = [
-        row for row in tables[LaunchplaneAuthzPolicyRow.__tablename__] if row["status"] == "active"
-    ]
-    if len(active_policies) != 1:
-        raise SnapshotUnavailable("snapshot_requires_one_active_policy")
+        if active_policy_count != 1:
+            raise SnapshotUnavailable("snapshot_requires_one_active_policy")
+        captured_at = datetime.now(timezone.utc).isoformat()
+        snapshot: StoredRecordSnapshot | CompressedStoredRecordSnapshot
+        if encoder is None:
+            snapshot = StoredRecordSnapshot(
+                captured_at=captured_at,
+                database_schema_revision=revision,
+                tables=tables,
+            )
+        else:
+            try:
+                snapshot = encoder.finish(captured_at=captured_at, revision=revision)
+            except ValueError as error:
+                raise refuse(str(error)) from error
     # Envelope overhead and final encoding apply to the whole export, not the
     # last record family visited. rows_exported always counts all accepted rows.
     family = ""
