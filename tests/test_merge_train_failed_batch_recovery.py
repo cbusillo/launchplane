@@ -148,6 +148,69 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         assert result is not None
         return result
 
+    def test_failed_candidate_reflow_does_not_admit_new_arrivals_over_cap(self) -> None:
+        self.policy = self.policy.model_copy(
+            update={"policies": (self.policy.policies[0].model_copy(update={"max_batch_size": 2}),)}
+        )
+        third = self.snapshot.pull_requests[-1].model_copy(
+            update={"number": 3, "head_sha": "head-3", "created_at": "2026-05-08T11:00:00Z"}
+        )
+        self.snapshot = self.snapshot.model_copy(
+            update={"pull_requests": (*self.snapshot.pull_requests, third)}
+        )
+        # An unbuilt failure follows the ordinary reflow/probe replacement path.
+        unbuilt = self.candidate.model_copy(update={"candidate_sha": ""})
+        with TemporaryDirectory() as directory:
+            result = self._reflow(FilesystemRecordStore(state_dir=Path(directory)), unbuilt)
+        replacement = MergeTrainBatchCandidate.model_validate(result["candidate"])
+        self.assertEqual([entry.pull_request_number for entry in replacement.entries], [1, 2])
+        self.assertEqual(result["dry_run_result"]["queue_order"], [1, 2])
+
+    def test_lowered_cap_still_isolates_failed_existing_batch(self) -> None:
+        extra = tuple(
+            self.snapshot.pull_requests[-1].model_copy(
+                update={
+                    "number": number,
+                    "head_sha": f"head-{number}",
+                    "created_at": f"2026-05-08T11:0{number}:00Z",
+                }
+            )
+            for number in (3, 4)
+        )
+        self.snapshot = self.snapshot.model_copy(
+            update={"pull_requests": (*self.snapshot.pull_requests, *extra)}
+        )
+        failed = build_merge_train_batch_candidate(
+            dry_run_result=build_merge_train_dry_run_result(
+                policy=self.policy, snapshot=self.snapshot, batch_landing=True
+            ),
+            base_sha=self.snapshot.base_sha,
+            policy_sha256="policy-digest",
+            created_at="2026-10-03T12:00:00Z",
+        ).model_copy(
+            update={
+                "candidate_sha": "failed-sha",
+                "status": "failed",
+                "required_checks_status": "fail",
+            }
+        )
+        self.assertEqual(len(failed.entries), 4)
+        self.provider.candidate = failed
+        self.provider.heads.update(
+            {entry.pull_request_number: entry.head_sha for entry in failed.entries}
+        )
+        self.provider.body = batch_pull_request_body(client=self.client, candidate=failed)
+        self.policy = self.policy.model_copy(
+            update={"policies": (self.policy.policies[0].model_copy(update={"max_batch_size": 1}),)}
+        )
+        with TemporaryDirectory() as directory:
+            result = self._reflow(FilesystemRecordStore(state_dir=Path(directory)), failed)
+        replacement = MergeTrainBatchCandidate.model_validate(result["candidate"])
+        self.assertEqual(result["reason_code"], "failure_isolation")
+        self.assertEqual([entry.pull_request_number for entry in replacement.entries], [1])
+        self.assertEqual([entry.pull_request_number for entry in replacement.held_out], [2, 3, 4])
+        self.reflow_client.add_pull_request_label.assert_not_called()
+
     def test_passing_exact_sha_rebuilds_closed_unchanged_batch_without_blame(self) -> None:
         failed_observation = self.client.observe_batch_candidate_checks(candidate=self.candidate)
         self.assertEqual(failed_observation.required_checks_status, "fail")

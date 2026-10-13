@@ -3093,6 +3093,7 @@ def _reflow_stale_candidate_record(
             [entry.pull_request_number for entry in candidate_record.candidate.entries],
         ),
         batch_landing=candidate_record.ordinary_job_binding is None,
+        existing_candidate_size=len(candidate_record.candidate.entries),
     )
     candidate_matches_queue = _merge_train_candidate_matches_dry_run_queue(
         candidate=candidate_record.candidate,
@@ -4632,6 +4633,7 @@ def try_reflow_failed_merge_train_candidate(
         policy=policy,
         snapshot=snapshot,
         batch_landing=active_candidate_record.ordinary_job_binding is None,
+        existing_candidate_size=len(active_candidate_record.candidate.entries),
     )
     if (
         dry_run_result.intended_next_action == "wait_for_checks"
@@ -4742,6 +4744,12 @@ def try_reflow_failed_merge_train_candidate(
                 mutate=mutate,
                 lease=lease,
             )
+    # The old membership comparison is complete; select a new capped replacement.
+    dry_run_result = build_merge_train_dry_run_result(
+        policy=policy,
+        snapshot=snapshot,
+        batch_landing=active_candidate_record.ordinary_job_binding is None,
+    )
     probe = _ConflictProbeOutcome(snapshot, dry_run_result, held_out)
     if dry_run_result.intended_next_action == "merge":
         probe = _probe_queue_entry_conflicts(
@@ -5469,7 +5477,11 @@ def _recover_failed_merge_train_candidate(
             },
         }
     if len(failed.entries) > 1:
-        retested = failed.entries[: len(failed.entries) // 2]
+        cap = policy.find_repository_policy(
+            repository=repository, base_branch=base_branch
+        ).max_batch_size
+        retest_size = len(failed.entries) // 2
+        retested = failed.entries[: min(retest_size, cap) if cap is not None else retest_size]
         waiting = failed.entries[len(retested) :]
         return _plan_failed_candidate_replacement(
             reason_code="failure_isolation",
@@ -5562,8 +5574,11 @@ def _plan_failed_candidate_replacement(
         policy=policy,
         snapshot=_without_held_out_pull_requests(snapshot=snapshot, held_out=holds),
         batch_landing=True,
-        new_candidate=True,
     )
+    cap = policy.find_repository_policy(
+        repository=repository, base_branch=base_branch
+    ).max_batch_size
+    expected_order = expected_order[:cap]
     if plan_dry_run.intended_next_action != "merge" or plan_dry_run.queue_order != expected_order:
         return None
     if reason_code == "failure_isolation":

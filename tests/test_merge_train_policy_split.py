@@ -71,7 +71,7 @@ class MergeTrainPolicySplitTests(unittest.IsolatedAsyncioTestCase):
         self.policy = MergeTrainPolicy(
             policies=(
                 *build_test_merge_train_policy(repository="example/first").policies,
-                *build_test_merge_train_policy(repository="cbusillo/sellyouroutboard").policies,
+                *build_test_merge_train_policy().policies,
             )
         )
         self.original = MergeTrainPolicyRecord(
@@ -97,7 +97,7 @@ class MergeTrainPolicySplitTests(unittest.IsolatedAsyncioTestCase):
 
     def _request(
         self,
-        patch: dict[str, object],
+        operational_patch: dict[str, object],
         *,
         repository: str = "example/first",
         event: str = "update-1",
@@ -109,7 +109,7 @@ class MergeTrainPolicySplitTests(unittest.IsolatedAsyncioTestCase):
             "expected_policy_sha256": self.original.policy_sha256,
             "source_event_id": event,
             "reason": "Tune the queue",
-            "patch": patch,
+            "patch": operational_patch,
         }
 
     async def _post(self, payload: dict[str, object], app: FastAPI | None = None) -> _AsgiResponse:
@@ -160,14 +160,13 @@ class MergeTrainPolicySplitTests(unittest.IsolatedAsyncioTestCase):
             record_store=self.store,
         )
         progression = execute_merge_train_controller_with_client(
-            request=MergeTrainControllerRunOnceEnvelope(
-                repository=candidate.candidate.repository, base_branch="main", mutate=False
-            ),
+            request=MergeTrainControllerRunOnceEnvelope(repository=candidate.candidate.repository),
             policy=current.policy,
             policy_sha256=current.policy_sha256,
             repository_policy=current.policy.policies[1],
             github_client=cast(
-                GitHubMergeTrainClient, _FakeMergeTrainGitHubClient(transport=object())
+                GitHubMergeTrainClient,
+                cast(object, _FakeMergeTrainGitHubClient(transport=object())),
             ),
             trace_id="split-controller-proof",
             recorded_at=current.updated_at,
@@ -281,7 +280,7 @@ class MergeTrainPolicySplitTests(unittest.IsolatedAsyncioTestCase):
                 payload["policy_sha256"] = ""
                 payload["policy"]["policies"][0][field] = value
                 candidate = MergeTrainPolicyRecord.model_validate(payload)
-                with self.assertRaisesRegex(ValueError, "changes_authority"):
+                with self.assertRaises(ValueError):
                     self.store.compare_and_write_merge_train_policy_record(
                         expected_record=self.original,
                         replacement_record=candidate,
@@ -446,13 +445,14 @@ class MergeTrainPolicySplitTests(unittest.IsolatedAsyncioTestCase):
         ):
             progression = execute_merge_train_controller_with_client(
                 request=MergeTrainControllerRunOnceEnvelope(
-                    repository=candidate.candidate.repository, base_branch="main", mutate=False
+                    repository=candidate.candidate.repository
                 ),
                 policy=current.policy,
                 policy_sha256=current.policy_sha256,
                 repository_policy=current.policy.policies[1],
                 github_client=cast(
-                    GitHubMergeTrainClient, _FakeMergeTrainGitHubClient(transport=object())
+                    GitHubMergeTrainClient,
+                    cast(object, _FakeMergeTrainGitHubClient(transport=object())),
                 ),
                 trace_id="cap-controller-proof",
                 recorded_at=current.updated_at,

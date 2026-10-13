@@ -311,6 +311,7 @@ class LiveMergeAdmissionEvaluator:
                     snapshot, [number for number, _ in expected_queue]
                 ),
                 batch_landing=candidate_record.ordinary_job_binding is None,
+                existing_candidate_size=len(expected_queue),
                 # Already verified heads can briefly report unknown mergeability
                 # after the base moves. Unplanned heads retain their queue hold.
                 planned_dependency_heads=frozenset(expected_queue),

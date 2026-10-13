@@ -310,6 +310,7 @@ def build_merge_train_dry_run_result(
     snapshot: MergeTrainDryRunSnapshot,
     batch_landing: bool = False,
     new_candidate: bool = False,
+    existing_candidate_size: int | None = None,
     planned_dependency_heads: frozenset[tuple[int, str]] = frozenset(),
 ) -> MergeTrainDryRunResult:
     repository_policy = policy.find_repository_policy(
@@ -395,9 +396,14 @@ def build_merge_train_dry_run_result(
                 for entry in queue
             )
             eligible_entries = tuple(entry for entry in queue if entry.eligible)
+        # Recorded work keeps its membership limit when an operational cap changes.
+        # Every newly selected replacement still uses the current policy cap.
+        batch_size = repository_policy.max_batch_size
+        if batch_size is not None and existing_candidate_size is not None:
+            batch_size = max(batch_size, existing_candidate_size)
         batch_entries: list[MergeTrainQueueEntry] = []
         for entry in eligible_entries:
-            if new_candidate and len(batch_entries) == repository_policy.max_batch_size:
+            if batch_size is not None and len(batch_entries) == batch_size:
                 break
             if entry.requires_individual_landing:
                 if not batch_entries:
