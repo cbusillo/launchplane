@@ -104,6 +104,7 @@ from control_plane.release_review import (
 )
 from control_plane.release_review_record import publish_release_decision
 from control_plane.release_invitation import ReleaseInvitationBackoff, publish_release_invitation
+from control_plane.release_invitation_changes import ReleaseInvitationNotesUnavailable
 from control_plane.generic_web_promotion_http import (
     GENERIC_WEB_PROD_PROMOTION_ROUTE,
     GenericWebProdPromotionEnvelope,
@@ -1079,6 +1080,15 @@ def advance_client_releases(
                 control_plane_root=control_plane_root,
                 profile=profile,
                 backoff=invitation_backoff,
+            )
+        except ReleaseInvitationNotesUnavailable as error:
+            # Fixed diagnostic wording plus recorded repository/PR identifiers;
+            # never log a PR body or an arbitrary provider exception message.
+            _LOGGER.warning(
+                "release invitation unavailable product=%s error_type=%s reason=%s",
+                profile.product,
+                type(error).__name__,
+                error,
             )
         except Exception as error:
             _LOGGER.warning(

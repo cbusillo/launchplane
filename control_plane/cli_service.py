@@ -1620,6 +1620,36 @@ def service_audit_config_authority(
         )
 
 
+@service.command("plan-config-authority-transition")
+@click.option("--base-branch", required=True)
+@click.option(
+    "--required-checks-file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--checks-app-id", type=click.IntRange(min=1), default=None)
+def service_plan_config_authority_transition(
+    base_branch: str,
+    required_checks_file: Path,
+    checks_app_id: int | None,
+) -> None:
+    """Plan from supplied GitHub protection metadata; performs no provider calls."""
+    from control_plane.config_authority_comparison import plan_config_authority_transition
+
+    try:
+        checks = json.loads(required_checks_file.read_text())
+        if not isinstance(checks, list) or not all(isinstance(check, dict) for check in checks):
+            raise ValueError("Required-check evidence must be a JSON list of check identities.")
+        result = plan_config_authority_transition(
+            base_branch=base_branch,
+            required_checks=checks,
+            app_id=checks_app_id,
+        )
+    except (OSError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(json.dumps(result, indent=2, sort_keys=True))
+
+
 @service.command("inspect-data-freshness")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True

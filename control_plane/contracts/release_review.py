@@ -183,3 +183,9 @@ class ReleaseReviewStatus(BaseModel):
     blockers: tuple[str, ...] = ()
     latest_decision: ReleaseReviewDecisionRecord | None = None
     unavailable_reason: ReleaseEvidenceReason | None = None
+    # Delivery-only annotation, outside the checklist digest and release gates.
+    invitation_notes_error: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )

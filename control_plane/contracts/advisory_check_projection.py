@@ -87,6 +87,7 @@ class AdvisoryCheckProjection(GitHubCheckProjection):
 
 
 CONFIG_AUTHORITY_CHECK_NAME: Final = "launchplane/config-authority"
+CONFIG_AUTHORITY_CURRENT_CHECK_NAME: Final = CONFIG_AUTHORITY_CHECK_NAME + "/current-comparison"
 
 
 class ConfigAuthorityCheckProjection(GitHubCheckProjection):
@@ -96,7 +97,7 @@ class ConfigAuthorityCheckProjection(GitHubCheckProjection):
         if (
             len(parts) != 4
             or "/".join(parts[:2]) != CONFIG_AUTHORITY_CHECK_NAME
-            or parts[2] not in {"pull-request", "push", "merge-group"}
+            or parts[2] not in {"pull-request", "push", "merge-group", "current-comparison"}
             or not parts[3]
             or quote(unquote(parts[3]), safe="") != parts[3]
         ):
