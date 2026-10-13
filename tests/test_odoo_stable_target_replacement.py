@@ -3597,7 +3597,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         public_hosts=("public.example.test",),
                         external_checkpoint=effects,
                     )
-                self.assertIn("deploy-enabled website bootstrap", str(caught.exception))
+                self.assertEqual(
+                    caught.exception.code, "plan_not_ready.compose_or_override_render_failed"
+                )
                 effects.assert_not_called()
 
     def test_public_restore_rechecks_website_intent_after_planning(self) -> None:
@@ -3615,7 +3617,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 public_hosts=("public.example.test",),
                 external_checkpoint=effects,
             )
-        self.assertIn("deploy-enabled website bootstrap", str(caught.exception))
+        self.assertEqual(caught.exception.code, "plan_not_ready.compose_or_override_render_failed")
         effects.assert_not_called()
 
     def test_restore_applies_website_bootstrap_before_verification(self) -> None:

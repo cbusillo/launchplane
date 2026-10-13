@@ -238,7 +238,7 @@ class OdooPublicBaseUrlTests(unittest.TestCase):
                     context="example",
                     instance=instance,
                     public_hosts=(),
-                    origin_base_url=origin,
+                    origin_domains=(origin,) if origin else (),
                     updated_at=explicit.updated_at,
                 )
                 self.assertIs(rendered, record)

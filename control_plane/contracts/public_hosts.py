@@ -1,4 +1,5 @@
 import re
+from urllib.parse import urlparse
 
 
 def normalize_public_hosts(value: object) -> tuple[str, ...]:
@@ -30,4 +31,13 @@ def resolve_public_base_url(*, instance: str, public_hosts: tuple[str, ...]) -> 
     """Resolve presentation intent without changing origin/health authority."""
     if instance == "prod" and public_hosts:
         return f"https://{public_hosts[0]}"
+    return ""
+
+
+def resolve_origin_base_url(*, domains: tuple[str, ...]) -> str:
+    """Use the first recorded origin domain, never presentation intent."""
+    for domain in domains:
+        origin = domain.strip().rstrip("/")
+        if origin:
+            return origin if urlparse(origin).scheme else f"https://{origin}"
     return ""
