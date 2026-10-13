@@ -3061,6 +3061,10 @@ context only, and `context_instance` has both context and instance.
   lift applies remain refused). See the hold's
   [dispatch limits](event-driven-deploys.md#staff-testing-hold) before isolation
   staging; a hold is not proof of executor/provider quiescence.
+  The [generic-web exclusion read and maintained-transport consumer](event-driven-deploys.md#generic-web-testing-exclusion-inspection)
+  independently report current execution and complete provider inventories
+  without historical recovery inputs. Preserve the bound hold and reservation
+  through staging; unknown observations cannot clear the recovery fence.
 - `odoo-overrides put-addon-setting --allow-direct-db-mutation` writes
   addon-shaped Odoo override intent such as Authentik or Shopify settings for a
   context and instance. Use it only for explicit local/bootstrap repair.

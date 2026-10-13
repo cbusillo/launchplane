@@ -740,6 +740,19 @@ def _deploy_generic_web_testing(
         with execution_lock as check_execution_lock:
             if check_execution_lock is None:
                 return ReconcileOutcome({**plan, "deferred": "lane_busy"}, deferred=True)
+            # A hold may have been set while this worker was preparing the
+            # adapter. Re-read under the same lock the staging inspector probes.
+            hold = read_staff_testing_hold(record_store=record_store, context=lane.context)
+            if hold is not None:
+                plan.update(
+                    action="wait",
+                    held=True,
+                    reason=STAFF_TESTING_HOLD_REASON,
+                    hold_reason=hold.reason,
+                    hold_recorded_by=hold.recorded_by,
+                    hold_recorded_at=hold.recorded_at,
+                )
+                return ReconcileOutcome(plan)
             adapter.execution_check = check_execution_lock
             # The target execution lock excludes an old worker through provider effects. A new
             # authority key must not bypass an unresolved old attempt, even after a

@@ -430,14 +430,69 @@ An admin holds the lane, and lifts the hold when staff are done.
 - Previews are unaffected.
 
 For generic-web, the in-process testing reconciler reads the hold before
-entering deployment/recovery. It does not start a new provider operation while
-held. The hold does not cancel an executor that already passed that check,
+entering deployment/recovery and again after acquiring its target execution
+lock. It does not start a new provider operation while held. The hold does not
+cancel an executor already performing effects,
 drain queued provider jobs, disable provider schedules, stop containers, or
 settle an unknown-outcome reservation. An isolation procedure must separately
 prove those effects quiescent and the actual rendered storage/ports safe;
 the hold's read-back alone proves neither. Keep the hold through staging and
 historical settlement. Once those gates pass, an authorized admin uses the
 same reviewed lift path to request ordinary testing reconciliation.
+
+### Generic-web testing exclusion inspection
+
+`GET /v1/generic-web/testing/exclusion?product=P&context=C&instance=testing`
+uses standing `product_environment.read` on the exact lane. It resolves the
+generic-web profile and all three tracked target records, refuses shared
+physical targets, production, foreign lanes and additional effect executors,
+and binds the observation to their revision digest. It neither requires nor
+reconstructs an original request or operation title.
+
+The response separates the staff hold, old service execution exclusion,
+provider target state, complete deployment history, global deployment queue
+and target schedules. Missing, malformed, unreadable or over-bound arrays
+remain unknown; any schedule or nonterminal target job keeps exclusion
+unproved. Terminal untitled history can prove current job quiescence while
+historical settlement remains `not_evaluated`. Container status and storage
+isolation are separate gates; this read starts no container and mounts nothing.
+
+The existing target execution lock stays held across inspection. An expired
+service-owned `reconcile_required` reservation must still fence this exact
+target; lease expiry alone is insufficient. Without that durable reservation,
+the staff hold cannot exclude a manual deploy, so the result stays unknown.
+Running or other-family reservations also remain unknown. The reconciler's
+second hold read catches a worker which prepared before the hold was set.
+
+`status=excluded` is a conditional current observation, not an authorization
+or a durable new interlock. Keep the hold and unknown-outcome reservation set
+through staging, preserve the bound target/profile revisions, and exclude
+concurrent admin recovery, direct provider dispatch and schedule changes. The
+hold covers Launchplane event reconciliation; it cannot prevent an external
+provider admin. Provider inventories are point-in-time reads, not an atomic
+provider snapshot. Re-read before each dependent stage and on any drift, lift,
+settlement or out-of-band action. The response/digest is never recovery apply
+evidence; original correlation and atomic settlement gates are unchanged.
+
+The source-owned consumer reuses the installed `launchplane-write-action.py` helper's configuration,
+same identity, safe URL transport and error projection; it accepts no token on
+the command line and offers only this GET:
+
+```bash
+uv run python scripts/read-generic-web-testing-exclusion.py \
+  --operator-helper /path/to/installed/launchplane/scripts/launchplane-write-action.py \
+  --product PRODUCT --context CONTEXT
+```
+
+Optional `--config`, `--env-config` and `--url` follow that helper's existing
+configuration contract. Unknown results and refusals exit nonzero; invalid or
+wrong-lane envelopes never become clearance. Output contains codes, counts,
+timestamps, revision digests and a request trace, with no provider coordinates,
+hold prose, environment values, job titles or logs. This consumer requires the
+maintained helper's `prepare_operator_settings`, `request_launchplane_read`,
+`assert_public_safe_shape` and `emit_http_error_payload` functions; missing
+support stays unavailable. Qualification runs from landed source after service
+deployment, under the consumer issue's authority.
 
 ## Bounded work
 
