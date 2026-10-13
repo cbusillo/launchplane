@@ -661,6 +661,16 @@ A timeout never means that an effect did not happen. Legacy attempts without a
 journal, including attempts started before this capability, remain fenced;
 provider idleness or a newer runtime identity cannot replace their missing proof.
 
+For a legacy attempt, the operation status read also inspects independently
+retained deployment candidates for the original requested artifact and commit
+within the attempt's running interval. A unique candidate supplies the provider
+target for read-only deployment and data-workflow schedule history inspection;
+ambiguous, truncated or changed evidence is reported as unavailable. The fixed
+error description reports these observations without exposing provider
+coordinates. Current schedule names identify observation candidates only: missing
+dispatch acknowledgements and historical data-effect attribution remain unknown.
+This inspection never creates a journal or enables cancellation or a fresh deploy.
+
 The existing target-replacement operation GET also returns a value-free
 `recovery` classification under scoped `operations.read`. It reports persisted
 journal presence or absence, attempt/binding agreement, effect acknowledgement,

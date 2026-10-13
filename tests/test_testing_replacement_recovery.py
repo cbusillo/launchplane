@@ -1,13 +1,16 @@
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from inspect import signature
 from pathlib import Path
 import json
 from tempfile import TemporaryDirectory
+from time import monotonic
 import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
@@ -17,6 +20,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy import api
+from control_plane.dokploy.post_deploy import _build_dokploy_data_workflow_schedule_app_name
 from control_plane.launchplane_reconcile_authorization import (
     build_launchplane_reconcile_authorization,
 )
@@ -29,6 +33,7 @@ from control_plane.testing_replacement_recovery import (
     recover_stranded_testing_replacements,
     testing_replacement_recovery_read,
 )
+from control_plane.testing_legacy_replacement_inspection import inspect_legacy_replacement
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerStore,
     _execute_target_replacement_operation,
@@ -63,6 +68,122 @@ class _FilesystemServiceStore(FilesystemRecordStore):
 
 
 class TestingReplacementRecoveryTests(unittest.TestCase):
+    def test_legacy_read_observes_retained_target_and_schedules_without_release(self) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            operation = operation.model_copy(
+                update={
+                    "request": operation.request.model_copy(
+                        update={"artifact_id": "original-artifact", "source_git_ref": "a" * 40}
+                    )
+                }
+            )
+            getattr(store, "write_odoo_stable_target_replacement_operation_record")(operation)
+            deployment = DeploymentRecord.model_validate(
+                {
+                    "record_id": "original-pending",
+                    "context": operation.context,
+                    "instance": operation.instance,
+                    "source_git_ref": operation.request.source_git_ref,
+                    "artifact_identity": {"artifact_id": operation.request.artifact_id},
+                    "resolved_target": {
+                        "target_type": "compose",
+                        "target_id": "compose-123",
+                        "target_name": "private-target-name",
+                    },
+                    "deploy": {
+                        "deploy_mode": "image",
+                        "target_name": "private-target-name",
+                        "status": "pending",
+                        "target_type": "compose",
+                        "started_at": operation.started_at,
+                    },
+                }
+            )
+            getattr(store, "write_deployment_record")(deployment)
+            fenced = self.fence(store)
+            default_method = signature(api.dokploy_request).parameters["method"].default
+            for schedule_status, enabled, expected_history, expected_timer in (
+                ("done", False, "terminal", "disabled"),
+                ("running", False, "active", "disabled"),
+                ("unexpected-status", False, "unknown", "disabled"),
+                ("done", None, "terminal", "unknown"),
+                ("unexpected-status", True, "unknown", "enabled"),
+                ("done", "false", "terminal", "unknown"),
+            ):
+                with self.subTest(
+                    backend=type(store).__name__, schedule_status=schedule_status, enabled=enabled
+                ):
+                    calls: list[str] = []
+
+                    def read(**kwargs: object) -> api.JsonValue:
+                        self.assertEqual(kwargs.get("method", default_method), "GET")
+                        self.assertGreater(float(cast(float, kwargs["timeout_seconds"])), 0)
+                        self.assertLessEqual(float(cast(float, kwargs["timeout_seconds"])), 5)
+                        path = str(kwargs["path"])
+                        calls.append(path)
+                        if path == "/api/compose.one":
+                            return {"composeId": "compose-123", "serverId": "private-server"}
+                        if path == "/api/schedule.list":
+                            return [
+                                {
+                                    "scheduleId": "private-schedule",
+                                    "appName": _build_dokploy_data_workflow_schedule_app_name(
+                                        context_name=operation.context,
+                                        instance_name=operation.instance,
+                                    ),
+                                    "enabled": enabled,
+                                }
+                            ]
+                        query = cast(dict[str, str], kwargs["query"])
+                        if query["type"] == "schedule":
+                            return [{"deploymentId": "job", "status": schedule_status}]
+                        return [{"deploymentId": "old-deploy", "status": "done"}]
+
+                    diagnostics: list[str] = []
+                    with (
+                        patch(
+                            "control_plane.testing_legacy_replacement_inspection.source.read_dokploy_config",
+                            return_value=("https://provider.test", "fixture-token"),
+                        ),
+                        patch.object(api, "dokploy_request", side_effect=read),
+                    ):
+                        observation = inspect_legacy_replacement(
+                            store, fenced, root, deadline_at=monotonic() + 15
+                        )
+                        self.assertEqual(observation.schedule_history, expected_history)
+                        self.assertEqual(observation.schedule_timers, expected_timer)
+                        view = testing_replacement_recovery_read(
+                            store, fenced, root, diagnostics=diagnostics
+                        )
+                    self.assertIn("/api/schedule.list", calls)
+                    self.assertTrue(view["provider_inspected"])
+                    self.assertEqual(view["journal"], "absent")
+                    self.assertEqual(view["provider_effects"], "unknown")
+                    self.assertEqual(view["status"], "refused")
+                    self.assertFalse(view["safe_to_release"])
+                    self.assertNotIn("private", str(view) + str(diagnostics))
+                    self.assertEqual(
+                        store.read_odoo_stable_target_replacement_operation_record(
+                            operation.operation_id
+                        ),
+                        fenced,
+                    )
+                    self.assertEqual(
+                        getattr(store, "read_deployment_record")(deployment.record_id), deployment
+                    )
+                    self.assertFalse(
+                        getattr(store, "list_product_reconcile_requests")(product="site")
+                    )
+            getattr(store, "write_deployment_record")(
+                deployment.model_copy(update={"record_id": "another-candidate"})
+            )
+            with patch.object(api, "dokploy_request") as provider_read:
+                view = testing_replacement_recovery_read(store, fenced, root)
+            provider_read.assert_not_called()
+            self.assertFalse(view["provider_inspected"])
+            self.assertEqual(view["status"], "refused")
+
     def test_inspection_deadline_refuses_before_another_provider_read(self) -> None:
         for store, root in self.stores():
             operation = self.running(store)
