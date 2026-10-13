@@ -2908,6 +2908,7 @@ export function productReviewDecisionForFixture(
   return {
     schema_version: 1,
     record_id: `fixture-product-review-${decision}`,
+    preview_generation_id: "fixture-review-generation",
     feedback_requested: true,
     feedback_url: "https://github.com/example/control-plane/pull/308#issuecomment-1",
     product: "example-site",
