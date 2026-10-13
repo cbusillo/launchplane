@@ -327,7 +327,10 @@ from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
 )
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
-from control_plane.contracts.stored_record_snapshot import StoredRecordSnapshot
+from control_plane.contracts.stored_record_snapshot import (
+    CompressedStoredRecordSnapshot,
+    StoredRecordSnapshot,
+)
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyCompareWriteResult,
     MergeTrainPolicyRecord,
@@ -5875,11 +5878,34 @@ class PostgresRecordStore(HumanSessionStore):
                 ).scalars()
             )
 
+    @overload
     def export_stored_record_snapshot(
-        self, *, authorize_records: SnapshotAuthorization | None = None
-    ) -> StoredRecordSnapshot:
+        self,
+        *,
+        authorize_records: SnapshotAuthorization | None = None,
+        format_version: Literal[1] = 1,
+    ) -> StoredRecordSnapshot: ...
+
+    @overload
+    def export_stored_record_snapshot(
+        self,
+        *,
+        authorize_records: SnapshotAuthorization | None = None,
+        format_version: Literal[2],
+    ) -> CompressedStoredRecordSnapshot: ...
+
+    def export_stored_record_snapshot(
+        self,
+        *,
+        authorize_records: SnapshotAuthorization | None = None,
+        format_version: Literal[1, 2] = 1,
+    ) -> StoredRecordSnapshot | CompressedStoredRecordSnapshot:
         from control_plane.stored_record_snapshot import export_stored_record_snapshot
 
+        if format_version == 2:
+            return export_stored_record_snapshot(
+                self._engine, authorize_records=authorize_records, format_version=2
+            )
         return export_stored_record_snapshot(self._engine, authorize_records=authorize_records)
 
     def verify_schema(self) -> None:

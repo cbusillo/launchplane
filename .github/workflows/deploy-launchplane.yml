@@ -1740,7 +1740,7 @@ jobs:
         with:
           launchplane-url: ${{ steps.service.outputs.service_url }}
           audience: ${{ steps.service.outputs.service_audience }}
-          route-path: /v1/service/stored-record-snapshot
+          route-path: /v1/service/stored-record-snapshot?format_version=2
           method: GET
           expected-status: "200"
           timeout-ms: "30000"
