@@ -516,6 +516,7 @@ def resolve_launchplane_github_token(
     repository: str = "",
     purpose: str = "repository_read",
     retry_provider_errors: bool = False,
+    report_failure: bool = False,
 ) -> str:
     """Resolve a repository-scoped Delivery App token; never a context PAT."""
     # The identity module uses this module's provider transport.
@@ -527,6 +528,7 @@ def resolve_launchplane_github_token(
         repository=repository,
         purpose=purpose,
         retry_provider_errors=retry_provider_errors,
+        report_failure=report_failure,
     )
 
 
@@ -538,6 +540,7 @@ def launchplane_github_token(
     repository: str = "",
     purpose: str = "repository_read",
     retry_provider_errors: bool = False,
+    report_failure: bool = False,
     token_resolver: Callable[..., str] | None = None,
     api_request: Callable[..., object] | None = None,
 ) -> Iterator[str]:
@@ -555,6 +558,7 @@ def launchplane_github_token(
         repository=repository,
         purpose=purpose,
         **({"retry_provider_errors": True} if retry_provider_errors else {}),
+        **({"report_failure": True} if report_failure else {}),
     )
     try:
         yield token
