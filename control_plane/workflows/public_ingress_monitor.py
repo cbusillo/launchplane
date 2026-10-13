@@ -429,9 +429,22 @@ def discover_public_ingress_monitor_targets(
                         testing_replacement=replacement,
                     )
                 )
+    targets.extend(discover_preview_fence_monitor_targets(record_store, profiles=product_profiles))
+    return tuple(targets)
+
+
+def discover_preview_fence_monitor_targets(
+    record_store: PublicIngressMonitorStore,
+    *,
+    profiles: tuple[LaunchplaneProductProfileRecord, ...],
+) -> tuple[PublicIngressMonitorTarget, ...]:
+    """Reservation-owned lanes, including open incidents awaiting resolution."""
     from control_plane.preview_reservation_recovery import held_preview_reservations
 
-    for profile in product_profiles:
+    targets: list[PublicIngressMonitorTarget] = []
+    open_deploy_fence_lanes = _open_deploy_fence_incident_lanes(record_store)
+
+    for profile in profiles:
         holds = held_preview_reservations(record_store, product=profile.product, limit=1001)
         by_instance = {"preview-" + record.record_id: record for record in holds}
         # Keep a probe after settlement long enough to resolve its existing incident.

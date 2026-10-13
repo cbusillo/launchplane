@@ -219,6 +219,8 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
     observed_at = parse_launchplane_mutation_timestamp(now, field_name="observed_at")
     from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
     from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+    from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
+    from control_plane.odoo_preview_apply_execution import preview_execution_lock_name
 
     for row in session.scalars(
         select(LaunchplaneIdempotencyRow).where(
@@ -236,21 +238,26 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
             )
             > observed_at
         )
-        # Lease expiry alone cannot rule out a provider call. The event-testing
-        # worker already holds this execution lock through its effects. Admission
+        # Lease expiry alone cannot rule out a provider call. The worker holds
+        # its target execution lock through its effects. Admission
         # stays serialized until our fence commits, so a new lock owner cannot
         # start an effect between this probe and dispatch admission.
         execution_excluded = False
+        execution_lock_name = ""
         if (
-            row.state == "reconcile_required"
-            and not lease_active
+            not lease_active
             and row.scope.startswith(f"{RECONCILE_SOURCE}:")
-            and row.route_path == GENERIC_WEB_DEPLOY_ROUTE
             and row.provider_target_key
         ):
-            with store.testing_replacement_execution_lock(
-                testing_event_execution_lock_name(row.provider_target_key)
-            ) as check:
+            if row.route_path == GENERIC_WEB_DEPLOY_ROUTE and row.state == "reconcile_required":
+                execution_lock_name = testing_event_execution_lock_name(row.provider_target_key)
+            elif row.route_path == ODOO_PREVIEW_APPLY_ROUTE and row.lease_expires_at:
+                # Legacy preview rows may still say running. Exclusion, not
+                # their persisted state or missing original intent, proves that
+                # replacement will not interrupt an executor. Keep the row held.
+                execution_lock_name = preview_execution_lock_name(row.provider_target_key)
+        if execution_lock_name:
+            with store.testing_replacement_execution_lock(execution_lock_name) as check:
                 if check is not None:
                     check()
                     execution_excluded = True

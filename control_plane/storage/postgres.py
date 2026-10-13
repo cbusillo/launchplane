@@ -6063,8 +6063,6 @@ class PostgresRecordStore(HumanSessionStore):
         )
         snapshots: dict[tuple[str, str], list[object]] = {}
         contexts = {lane.context for profile in profiles for lane in profile.lanes}
-        if not contexts:
-            return {}
         with self._session_factory() as session:
             for row_type in lane_rows:
                 for context, instance, payload in session.execute(
@@ -6117,6 +6115,21 @@ class PostgresRecordStore(HumanSessionStore):
                 revisions[(profile.product, lane.context, lane.instance)] = hashlib.sha256(
                     "\n".join(fragments).encode()
                 ).hexdigest()
+        from control_plane.workflows.public_ingress_monitor import (
+            discover_preview_fence_monitor_targets,
+        )
+
+        for preview_target in discover_preview_fence_monitor_targets(self, profiles=profiles):
+            fence = preview_target.deploy_fence
+            preview_material = (
+                preview_target.profile_sha256,
+                (fence.record_id, fence.state, fence.lease_expires_at) if fence else None,
+            )
+            revisions[(preview_target.product, preview_target.context, preview_target.instance)] = (
+                hashlib.sha256(
+                    json.dumps(preview_material, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+            )
         return revisions
 
     def __del__(self) -> None:

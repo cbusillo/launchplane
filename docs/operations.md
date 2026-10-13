@@ -4317,11 +4317,28 @@ not quiescence proof: its retained server schedule binding is still checked.
 Created composes are resolved only from complete inventory matching the retained
 original environment and compose name, never reconstructed history.
 
+Self-deploy can pass an expired preview reservation only after acquiring and
+checking the same target execution lock used by preview execution and recovery.
+This applies to legacy `running` and `reconcile_required` rows; an active lease,
+occupied/unavailable lock, or missing target/expiry still blocks replacement.
+Exclusion never settles the reservation or proves provider effects harmless:
+its target fence and missing-original-proof classification remain unchanged.
+New work on that target is still refused after service replacement.
+
 The existing provider-fence monitor also watches Odoo preview reservations,
 including reservation-only legacy residue. Its incident uses the opaque
 reservation id, never private keys/target coordinates, and routes through
 existing matching notification policies and the Discord outbox. It resolves
-after supported settlement; monitoring itself never clears a hold. Separately,
+after supported settlement; monitoring itself never clears a hold. The hosted
+scheduler includes these synthetic lanes in its one-minute authority selection,
+independently of configured testing/prod lanes, and keeps open incident lanes
+until resolution. Their list/detail reads use the existing environment incident
+URLs with `preview-<reservation-id>` as the environment selector and the existing
+`preview.read` permission. A selector must belong to that product's held
+reservation or recorded fence incident history; an arbitrary preview name is
+not an environment. Original intent absent in legacy records stays unavailable:
+current plans and provider idleness cannot reconstruct the original proof.
+Separately,
 a typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
 reporter and manual break-glass link. It explicitly reports zero replacement
 dispatch; the rollback dispatch classifier still treats that refusal as
