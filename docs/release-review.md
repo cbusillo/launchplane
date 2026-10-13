@@ -814,6 +814,15 @@ in `records`. Reading this evidence never retries a stopped release.
 and `release_run`, derived from the step operations, whose ids come from the
 decision.
 
+For an unfinished run, `blocked_reason` also explains locally recorded holds,
+unpublished approval, a decision that no longer covers the product, unavailable
+lane evidence, or changed testing/production versions. Waiting runs with a reason
+display **Blocked**, while queued/running operations and their completed steps
+remain visible. The page keeps refreshing so a lifted hold can resume its display.
+These reads do not recompile the checklist, contact a provider, publish approval,
+or authorize a release. Completed and stopped runs retain their recorded outcome
+and failure details when a later hold or candidate change occurs.
+
 Shared Odoo source changes use the detailed checklist coverage requirements
 above. The Client cannot undo a live release; that is an admin rollback.
 

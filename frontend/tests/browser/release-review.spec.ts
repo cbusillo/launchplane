@@ -115,6 +115,7 @@ test("Failed releases distinguish automatic recovery from the rollback drill", a
   run.steps = [];
   run.blocked_reason = "Launchplane needs a verified previous passing version before this release can start.";
   await page.reload();
+  await expect(progress.getByRole("heading")).toHaveText("Release progress: Blocked");
   await expect(progress.getByRole("status")).toHaveText(run.blocked_reason);
   await page.screenshot({ path: testInfo.outputPath("release-no-baseline.png"), fullPage: true });
 });
@@ -323,6 +324,46 @@ test("An open review page follows the release it started", async ({ page }, test
   await page.clock.runFor(3 * RELEASE_PROGRESS_REFRESH_MS);
   expect(reads).toBe(settledReads);
   expect(writes).toEqual(["POST"]);
+});
+
+test("Blocked release progress keeps completed steps and resumes after a hold is lifted", async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const fixtures = await import(modulePath);
+    return fixtures.releaseDecisionForFixture(fixtures.releaseReviewForFixture("products"), "accepted", "");
+  });
+  const run: ClientReleaseRunView = {
+    decision_record_id: "fixture-release-decision", rollback_drill: false, state: "waiting",
+    blocked_reason: "Releases are on hold. An admin must lift the hold before the next step.",
+    steps: [
+      { step: "backup-1", kind: "backup", status: "pass", operation_id: "backup-operation", failure: null },
+      { step: "promote-1", kind: "promote", status: "not_started", operation_id: "", failure: null },
+    ],
+  };
+  const writes: string[] = [];
+  await page.clock.install();
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: { ...response, release_run: run } }));
+  await page.route("**/v1/release-review/decisions", route => { writes.push(route.request().method()); return route.abort(); });
+  await page.goto("/ui/owner-review?product=example-site");
+  const progress = page.getByRole("region", { name: "Release progress" });
+  await expect(progress.getByRole("heading")).toHaveText("Release progress: Blocked");
+  await expect(progress.getByRole("status")).toHaveText(run.blocked_reason);
+  await expect(progress).toContainText("Verified backup: Done");
+  await expect(progress).toContainText("Put this version live: Not started");
+  await progress.screenshot({ path: testInfo.outputPath("release-held.png") });
+  run.blocked_reason = "";
+  run.state = "running";
+  run.steps[1].status = "running";
+  run.steps[1].operation_id = "promote-operation";
+  await page.clock.runFor(RELEASE_PROGRESS_REFRESH_MS);
+  await expect(progress.getByRole("heading")).toHaveText("Release progress: In progress");
+  await expect(progress.getByRole("status")).toHaveCount(0);
+  await expect(progress).toContainText("Verified backup: Done");
+  await expect(progress).toContainText("Put this version live: Running");
+  expect(writes).toEqual([]);
 });
 
 test("A stopped release stops refreshing and a newer decision discards an older read", async ({ page }) => {
