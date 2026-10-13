@@ -417,6 +417,146 @@ class ClientReleaseTests(unittest.TestCase):
         )
         self.assertEqual(self.advance(), ())
 
+    def test_progress_explains_a_hold_and_clears_it_without_starting_work(self) -> None:
+        self.switch("promote")
+        accepted = self.accept()
+        self.switch("held")
+        with (
+            patch(
+                "control_plane.client_release.current_release_review",
+                side_effect=AssertionError("Progress reads must not recompile the checklist"),
+            ),
+            patch("control_plane.client_release.enqueue_production_backup_gate") as enqueue,
+        ):
+            run = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(PRODUCT),
+                decision=accepted,
+            )
+            assert run is not None
+            self.assertEqual(run.state, "waiting")
+            self.assertIn("hold", run.blocked_reason)
+            self.assertTrue(all(step.status == "not_started" for step in run.steps))
+            self.switch("promote")
+            resumed = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(PRODUCT),
+                decision=accepted,
+            )
+            assert resumed is not None
+            self.assertEqual(resumed.blocked_reason, "")
+            self.assertEqual(resumed.steps, run.steps)
+            enqueue.assert_not_called()
+
+    def test_progress_distinguishes_unpublished_and_replaced_decisions(self) -> None:
+        self.switch("promote")
+        accepted = self.accept()
+        unpublished = accepted.model_copy(update={"release_issue_url": ""})
+        self.store.write_release_review_decision_record(unpublished)
+        run = read_client_release_run(
+            store=self.store,
+            profile=self.store.read_product_profile_record(PRODUCT),
+            decision=unpublished,
+        )
+        assert run is not None
+        self.assertIn("published", run.blocked_reason)
+        self.assertEqual(self.advance(), ())
+        self.store.write_release_review_decision_record(accepted)
+        self.store.write_release_review_decision_record(
+            decision(self.store, outcome="changes_requested", date="2026-09-23T02:00:00Z")
+        )
+        replaced = read_client_release_run(
+            store=self.store,
+            profile=self.store.read_product_profile_record(PRODUCT),
+            decision=accepted,
+        )
+        assert replaced is not None
+        self.assertTrue(replaced.blocked_reason)
+        self.assertNotEqual(replaced.blocked_reason, run.blocked_reason)
+        self.assertEqual(self.advance(), ())
+
+    def test_progress_explains_changed_lanes_and_preserves_finished_backup(self) -> None:
+        self.switch("promote")
+        accepted = self.accept()
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        testing = self.store.read_release_tuple_record(context_name=CONTEXT, channel_name="testing")
+        # Use the existing production artifact as a different, fully readable candidate.
+        self.store.write_release_tuple_record(
+            testing.model_copy(update={"artifact_id": "artifact-prod"})
+        )
+        with patch(
+            "control_plane.client_release.current_release_review",
+            side_effect=AssertionError("Known stale lanes need no source-control read"),
+        ):
+            changed_testing = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(PRODUCT),
+                decision=accepted,
+            )
+            assert changed_testing is not None
+            self.assertIn("testing", changed_testing.blocked_reason)
+            self.assertEqual(changed_testing.steps[0].status, "pass")
+            self.assertEqual(changed_testing.steps[0].operation_id, backup_id)
+            self.assertEqual(self.advance(), ())
+            self.store.write_release_tuple_record(testing)
+            self.set_prod("artifact-testing")
+            changed_production = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(PRODUCT),
+                decision=accepted,
+            )
+            assert changed_production is not None
+            self.assertIn("production", changed_production.blocked_reason)
+            self.assertEqual(changed_production.steps, changed_testing.steps)
+            self.assertEqual(self.advance(), ())
+
+    def test_terminal_progress_survives_later_holds_and_lane_changes(self) -> None:
+        for status in ("pass", "fail"):
+            with self.subTest(status=status):
+                self.setUp()
+                self.switch("promote")
+                accepted = self.accept()
+                (backup_id,) = self.advance()
+                self.finish(backup_id)
+                (promotion_id,) = self.advance()
+                self.finish(promotion_id, status)
+                before = read_client_release_run(
+                    store=self.store,
+                    profile=self.store.read_product_profile_record(PRODUCT),
+                    decision=accepted,
+                )
+                assert before is not None
+                self.assertEqual(before.state, "passed" if status == "pass" else "stopped")
+                self.switch("held")
+                self.set_prod("artifact-testing")
+                after = read_client_release_run(
+                    store=self.store,
+                    profile=self.store.read_product_profile_record(PRODUCT),
+                    decision=accepted,
+                )
+                self.assertEqual(after, before)
+
+    def test_drill_progress_allows_its_own_production_transition(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        (promotion_id,) = self.advance()
+        self.set_prod("artifact-testing")
+        for completed in (False, True):
+            with self.subTest(completed=completed):
+                if completed:
+                    self.finish(promotion_id)
+                run = read_client_release_run(
+                    store=self.store,
+                    profile=self.store.read_product_profile_record(PRODUCT),
+                    decision=accepted,
+                )
+                assert run is not None
+                self.assertEqual(run.blocked_reason, "")
+                self.assertEqual(run.state, "waiting" if completed else "running")
+
     def test_a_stale_acceptance_starts_nothing(self) -> None:
         self.switch("promote")
         self.accept()
