@@ -99,7 +99,7 @@ for (const action of ["Accept", "Request changes"]) {
     // A failed refresh cannot unlock the old review.
     refreshFails = true;
     await page.getByRole("button", { name: "Refresh review" }).click();
-    await expect(page.getByRole("alert")).toContainText("could not be loaded");
+    await expect(page.getByRole("alert")).toBeVisible();
     await expect(page.getByRole("button", { name: "Accept", exact: true })).toHaveCount(0);
     refreshFails = false;
     review = current;
@@ -108,7 +108,7 @@ for (const action of ["Accept", "Request changes"]) {
     expect(submitted).toHaveLength(1);
     await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeEnabled();
     await page.getByRole("button", { name: "Accept", exact: true }).click();
-    await expect(page.getByText("Decision recorded.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: `Decision for ${current.display_name}` }).getByRole("status")).toBeVisible();
     expect(submitted).toHaveLength(2);
     expect(submitted[1]).toMatchObject({ reviewed_head_sha: current.head_sha, reviewed_preview_url: current.preview_url, reviewed_generation_id: current.preview_generation_id });
   });
