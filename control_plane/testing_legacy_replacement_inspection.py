@@ -116,23 +116,26 @@ def inspect_legacy_replacement(
             schedules[key] for key in ("data", "schedules", "items", "result") if key in schedules
         ]
         schedules = wrappers[0] if len(wrappers) == 1 else None
-    if (
-        not isinstance(schedules, list)
-        or len(schedules) > 50
-        or any(not isinstance(item, dict) for item in schedules)
-    ):
+    if not isinstance(schedules, list) or any(not isinstance(item, dict) for item in schedules):
         return LegacyReplacementInspection(detail="provider schedule inventory incomplete")
     # Reuse the executor's naming rule. Matching a mutable name is only a
     # candidate for observation, never attribution to the historical attempt.
     app_name = post_deploy._build_dokploy_data_workflow_schedule_app_name(
         context_name=operation.context, instance_name=operation.instance
     )
+    schedules = [
+        schedule
+        for schedule in schedules
+        if isinstance(schedule, dict) and schedule.get("appName") == app_name
+    ]
+    if len(schedules) > 50:
+        return LegacyReplacementInspection(
+            detail="lane schedule inventory exceeds inspection bound"
+        )
     schedule_states = []
     timer_states = []
     for schedule in schedules:
         assert isinstance(schedule, dict)
-        if schedule.get("appName") != app_name:
-            continue
         enabled = schedule.get("enabled")
         timer_states.append(
             "enabled" if enabled is True else "disabled" if enabled is False else "unknown"

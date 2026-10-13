@@ -683,8 +683,11 @@ inspection. A unique candidate supplies the provider
 target for read-only deployment and data-workflow schedule history inspection;
 ambiguous, truncated or changed evidence is reported as unavailable. The fixed
 error description reports these observations without exposing provider
-coordinates. Current schedule names identify observation candidates only: missing
-dispatch acknowledgements and historical data-effect attribution remain unknown.
+coordinates. The schedule inspection bound applies to the lane's matching
+data-workflow schedules after validating the server's complete schedule list;
+unrelated schedules do not consume it. Current schedule names identify observation
+candidates only: missing dispatch acknowledgements and historical data-effect
+attribution remain unknown.
 This inspection never creates a journal or enables cancellation or a fresh deploy.
 
 The existing target-replacement operation GET also returns a value-free
