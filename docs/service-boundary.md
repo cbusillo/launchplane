@@ -2161,9 +2161,11 @@ of public DNS hostnames for an exact owned `prod` compose lane. For example,
 `{"mode":"dry-run","product":"example-site","context":"example-site",
 "instance":"prod","public_hosts":["example.com","www.example.com"]}`.
 Omitting the field preserves it; `[]` removes only names previously managed by
-this field. The tracked target's `public_hosts` is the single configuration
+this field or additions identified in its pending-effect journal. The tracked target's `public_hosts` is the single configuration
 source; its separate `domains` retains origin health and ingress authority.
-Existing internal domains cannot be adopted into the managed public set.
+Existing internal domains and pre-existing unmanaged provider routes cannot be
+adopted into the managed public set. Use an unoccupied public hostname rather
+than taking over an existing route.
 
 Use the supported `product-config-dry-run` and `product-config-apply` write-action
 helper commands with a private payload file. Apply needs a stable idempotency key
@@ -2184,9 +2186,24 @@ and idempotent success receipt. `verified: true` and `read_back_hosts` prove
 provider Host-route configuration for the reported web port, not an HTTP probe
 or public reachability. Partial provider failure returns
 `public_hosts_provider_outcome_unknown` and commits no successful config receipt;
-some routes may already exist. Rerun dry-run with the same requested host list
-and finish reconciliation before dropping names, so partial additions become
-managed and can later be removed explicitly. Provider operations are idempotent,
+some routes may already exist. Launchplane commits write-ahead addition intent
+in the target's `pending_public_host_effects` before provider writes, then
+checkpoints each returned route identity independently of the final config
+transaction. A fresh dry-run may keep or drop those additions: `removed` includes
+abandoned additions even when `before` (committed configuration) is empty.
+Recovery requires the same provider/compose binding, exact saved route ID and
+route shape; changed identities are never adopted or deleted. The journal also
+reserves its hostnames against other targets and survives definition round trips
+and re-onboarding. Successful configuration and its receipt commit together with
+journal clearance, after a fresh provider read-back.
+
+If the provider created a route but its response or identity checkpoint was
+lost, the intent remains tracked without claiming success or ownership of an
+observed route. Dry-run refuses while an unidentified route exists. Use the
+supported target inspection to establish what happened; if the route is absent,
+a fresh dry-run can retry or abandon the intent safely. This path cannot infer
+ownership from a hostname alone or authorize a manual provider deletion.
+Provider operations are idempotent,
 and internal/unmanaged routes are checked for preservation. The local file CLI
 refuses this field; use the service path for dry-run and apply.
 

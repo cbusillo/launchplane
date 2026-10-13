@@ -1,6 +1,7 @@
 """Service-owned prod routing from product configuration, without caller target grants."""
 
 from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 import hashlib
@@ -10,7 +11,7 @@ import click
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord, PublicHostEffect
 from control_plane.dokploy import api, compose, source
 from control_plane.dokploy_target_setup_http import (
     delete_dokploy_domain_for_target_setup,
@@ -54,8 +55,19 @@ class PublicHostsPlan:
     host: str
     token: str
     routes: tuple[api.JsonObject, ...]
+    effects: tuple[PublicHostEffect, ...]
+    observed: tuple[api.JsonObject, ...] = ()
 
-    def apply_provider(self) -> None:
+    def verify_provider(self) -> None:
+        if (
+            fetch_dokploy_compose_domains_for_target_setup(
+                host=self.host, token=self.token, compose_id=self.target_id.target_id
+            )
+            != self.observed
+        ):
+            raise PublicHostsProviderError("Provider routes changed before configuration commit.")
+
+    def apply_provider(self, checkpoint: Callable[[str, str], None]) -> None:
         def read() -> tuple[api.JsonObject, ...]:
             return fetch_dokploy_compose_domains_for_target_setup(
                 host=self.host, token=self.token, compose_id=self.target_id.target_id
@@ -65,13 +77,14 @@ class PublicHostsPlan:
             if read() != self.routes:
                 raise PublicHostsProviderError("Provider routes changed; review a fresh dry-run.")
             for host in (*self.result.added, *self.result.updated):
-                compose.ensure_compose_web_domain_route(
+                domain_id = compose.ensure_compose_web_domain_route(
                     host=self.host,
                     token=self.token,
                     compose_id=self.target_id.target_id,
                     domain_host=host,
                     runtime_port=self.result.runtime_port,
                 )
+                checkpoint(host, domain_id)
             for route in self.routes:
                 if route.get("host") in self.result.removed:
                     delete_dokploy_domain_for_target_setup(
@@ -86,16 +99,17 @@ class PublicHostsPlan:
                     raise PublicHostsProviderError("Public-host provider read-back did not match.")
             if any(route.get("host") in self.result.removed for route in observed):
                 raise PublicHostsProviderError("Removed public hosts remain on the provider.")
-            managed = set(self.result.before) | set(self.result.after)
+            managed = set(self.result.before) | set(self.result.after) | set(self.result.removed)
             if tuple(route for route in observed if route.get("host") not in managed) != tuple(
                 route for route in self.routes if route.get("host") not in managed
             ):
                 raise PublicHostsProviderError("Unmanaged provider routes changed during apply.")
+            self.observed = observed
         except Exception as error:
             raise PublicHostsProviderError(
                 "Public-host provider outcome needs inspection; no successful config receipt "
-                "was committed. Routes may already exist. Rerun dry-run with the same host "
-                "list and complete reconciliation before dropping names."
+                "was committed. Pending effects remain tracked. Review a fresh dry-run; "
+                "effects without a saved provider identity require inspection."
             ) from error
 
 
@@ -133,7 +147,11 @@ def plan_public_hosts(
             raise ValueError("Public hosts cannot take ownership of an existing internal domain.")
         for other in record_store.list_dokploy_target_records():
             if (other.context, other.instance) != (context, instance) and set(hosts).intersection(
-                (*other.domains, *other.public_hosts)
+                (
+                    *other.domains,
+                    *other.public_hosts,
+                    *(effect.host for effect in other.pending_public_host_effects),
+                )
             ):
                 raise ValueError("A public host is already owned by another target.")
         host, token = source.read_dokploy_config(control_plane_root=control_plane_root)
@@ -157,10 +175,30 @@ def plan_public_hosts(
             or not all(_route_matches(route, target_id.target_id, port) for route in origins)
         ):
             raise ValueError("Public hosts require an existing HTTPS web origin route.")
-        before, after = set(target.public_hosts), set(hosts)
+        effects = {effect.host: effect for effect in target.pending_public_host_effects}
+        for effect in effects.values():
+            if effect.target_id != target_id.target_id or effect.provider_host != host:
+                raise ProductConfigError(
+                    "Pending public-host effects belong to a different provider binding; inspect the target before retrying.",
+                    code="public_hosts_effect_ownership_unknown",
+                )
+            selected = [route for route in routes if route.get("host") == effect.host]
+            if selected and (
+                len(selected) != 1
+                or not effect.domain_id
+                or selected[0].get("domainId") != effect.domain_id
+                or not _route_matches(selected[0], effect.target_id, effect.runtime_port)
+            ):
+                raise ProductConfigError(
+                    "Pending public-host effect has uncertain or changed ownership; inspect the target before retrying.",
+                    code="public_hosts_effect_ownership_unknown",
+                )
+        before, after = set(target.public_hosts) | set(effects), set(hosts)
         added, updated, unchanged = [], [], []
         for public_host in sorted(before | after):
             selected = [route for route in routes if route.get("host") == public_host]
+            if selected and public_host not in before:
+                raise ValueError("Cannot adopt a pre-existing unmanaged public-host route.")
             if len(selected) > 1 or any(not route.get("domainId") for route in selected):
                 raise ValueError("Public-host routes must have unique provider identities.")
             if selected and (
@@ -181,6 +219,13 @@ def plan_public_hosts(
                     )
             elif not selected:
                 added.append(public_host)
+                if public_host not in target.public_hosts:
+                    effects[public_host] = PublicHostEffect(
+                        host=public_host,
+                        provider_host=host,
+                        target_id=target_id.target_id,
+                        runtime_port=port,
+                    )
             elif _route_matches(selected[0], target_id.target_id, port):
                 unchanged.append(public_host)
             else:
@@ -188,10 +233,11 @@ def plan_public_hosts(
         removed = sorted(before - after)
         replacement = (
             target
-            if hosts == target.public_hosts
+            if hosts == target.public_hosts and not target.pending_public_host_effects
             else target.model_copy(
                 update={
                     "public_hosts": hosts,
+                    "pending_public_host_effects": (),
                     "updated_at": utc_now_timestamp(),
                     "source_label": "service:product-config:public-hosts",
                 }
@@ -221,8 +267,18 @@ def plan_public_hosts(
             read_back_hosts=list(hosts) if mode == "apply" else [],
         )
         return PublicHostsPlan(
-            target, target_id, provider_target, replacement, result, host, token, routes
+            target,
+            target_id,
+            provider_target,
+            replacement,
+            result,
+            host,
+            token,
+            routes,
+            tuple(effects.values()),
         )
+    except ProductConfigError:
+        raise
     except (FileNotFoundError, ValueError, click.ClickException) as error:
         raise ProductConfigError(
             "Public-host reconciliation needs an owned prod compose target and an "

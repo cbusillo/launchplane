@@ -8,10 +8,11 @@ from typing import ClassVar, cast
 from fastapi import FastAPI
 from httpx2 import Response
 from unittest.mock import patch
+from sqlalchemy import event
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord, PublicHostEffect
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy import api
 from control_plane.dokploy import source
@@ -49,6 +50,7 @@ class StubProvider:
         self.writes: list[str] = []
         self.fail_host = ""
         self.drop_writes = False
+        self.lose_create_response = False
 
     def call(self, **kwargs: object) -> api.JsonValue:
         path = kwargs["path"]
@@ -63,6 +65,8 @@ class StubProvider:
             route = {"domainId": f"public-{len(self.routes)}", **payload}
             if not self.drop_writes:
                 self.routes.append(route)
+            if self.lose_create_response:
+                raise RuntimeError("provider created the route then disconnected")
             return route
         if path == "/api/domain.update":
             for route in self.routes:
@@ -252,7 +256,9 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
         self.provider.fail_host = HOSTS[1]
         response = await self.config(mode="apply", key="partial")
         self.assertEqual(response.status_code, 502, response.text)
-        self.assertEqual(self.recorded(), self.target)
+        self.assertEqual(self.recorded().public_hosts, self.target.public_hosts)
+        self.assertEqual(self.recorded().domains, self.target.domains)
+        self.assertTrue(self.recorded().pending_public_host_effects[0].domain_id)
         self.provider.fail_host = ""
         response = await self.config(mode="apply", key="partial")
         self.assertEqual(response.status_code, 409, response.text)
@@ -266,7 +272,147 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
         self.provider.drop_writes = True
         response = await self.config(mode="apply", key="ignored")
         self.assertEqual(response.status_code, 502, response.text)
+        self.assertEqual(self.recorded().public_hosts, self.target.public_hosts)
+        self.assertEqual(self.recorded().domains, self.target.domains)
+
+    async def test_storage_failure_then_abandoned_addition_is_removed(self) -> None:
+        unmanaged = {
+            **self.provider.routes[0],
+            "host": "unmanaged.example.com",
+            "domainId": "unmanaged",
+        }
+        self.provider.routes.append(unmanaged)
+        await self.config()
+        completing = False
+
+        def step(name: str) -> None:
+            nonlocal completing
+            completing = name == "write_idempotency"
+
+        def fail_commit(session: object) -> None:
+            if completing:
+                raise RuntimeError("injected final storage commit failure")
+
+        event.listen(self.store._session_factory, "before_commit", fail_commit)
+        try:
+            with patch.object(self.store, "_after_product_authority_bundle_step", side_effect=step):
+                with self.assertRaisesRegex(RuntimeError, "injected final storage"):
+                    await self.config(mode="apply", key="storage-failure")
+        finally:
+            event.remove(self.store._session_factory, "before_commit", fail_commit)
+        self.assertEqual(self.recorded().public_hosts, ())
+        self.assertTrue(set(HOSTS).issubset({route["host"] for route in self.provider.routes}))
+        # Resume through a fresh store, as after a service restart.
+        self.store = PostgresRecordStore(database_url=self.store.database_url)
+        token = self.current_store.set(self.store)
+        self.addCleanup(self.current_store.reset, token)
+        dry = await self.config([HOSTS[1]])
+        self.assertEqual(dry.status_code, 202, dry.text)
+        self.assertEqual(dry.json()["result"]["public_hosts"]["removed"], [HOSTS[0]])
+        response = await self.config([HOSTS[1]], mode="apply", key="recover-revised")
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(
+            {route["host"] for route in self.provider.routes},
+            {"cm-website-prod", "unmanaged.example.com", HOSTS[1]},
+        )
+        self.assertIn(unmanaged, self.provider.routes)
+        self.assertEqual(self.recorded().pending_public_host_effects, ())
+        writes = list(self.provider.writes)
+        replay = await self.config([HOSTS[1]], mode="apply", key="recover-revised")
+        self.assertTrue(replay.json()["replayed"])
+        self.assertEqual(self.provider.writes, writes)
+
+    async def test_lost_provider_identity_stays_tracked_without_adoption_or_deletion(self) -> None:
+        await self.config()
+        self.provider.lose_create_response = True
+        response = await self.config(mode="apply", key="lost-response")
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertEqual(self.recorded().public_hosts, ())
+        self.assertTrue(self.recorded().pending_public_host_effects)
+        writes = list(self.provider.writes)
+        for hosts in (HOSTS, []):
+            response = await self.config(hosts)
+            self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.provider.writes, writes)
+        self.assertIn(HOSTS[0], {route["host"] for route in self.provider.routes})
+
+    async def test_replaced_pending_route_identity_refuses_removal(self) -> None:
+        await self.config()
+        self.provider.fail_host = HOSTS[1]
+        response = await self.config(mode="apply", key="partial-identity")
+        self.assertEqual(response.status_code, 502, response.text)
+        self.provider.routes[-1]["domainId"] = "foreign-replacement"
+        writes = list(self.provider.writes)
+        response = await self.config([])
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.provider.writes, writes)
+
+    async def test_preexisting_matching_public_route_is_not_adopted(self) -> None:
+        self.provider.routes.append(
+            {**self.provider.routes[0], "host": HOSTS[0], "domainId": "unmanaged"}
+        )
+        response = await self.config()
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.provider.writes, [])
         self.assertEqual(self.recorded(), self.target)
+
+    async def test_intent_commit_failure_has_no_provider_effect(self) -> None:
+        await self.config()
+        with patch.object(
+            self.store,
+            "_after_product_authority_bundle_step",
+            side_effect=RuntimeError("intent unavailable"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "intent unavailable"):
+                await self.config(mode="apply", key="intent-failure")
+        self.assertEqual(self.provider.writes, [])
+        self.assertEqual(self.recorded(), self.target)
+
+    async def test_checkpoint_failure_retains_intent_without_guessing_identity(self) -> None:
+        await self.config()
+
+        def fail_checkpoint(session: object) -> None:
+            if self.provider.writes:
+                raise RuntimeError("provider identity commit unavailable")
+
+        event.listen(self.store._session_factory, "before_commit", fail_checkpoint)
+        try:
+            response = await self.config(mode="apply", key="checkpoint-failure")
+        finally:
+            event.remove(self.store._session_factory, "before_commit", fail_checkpoint)
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertTrue(self.recorded().pending_public_host_effects)
+        self.assertFalse(self.recorded().pending_public_host_effects[0].domain_id)
+        writes = list(self.provider.writes)
+        response = await self.config([])
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.provider.writes, writes)
+
+    async def test_writer_between_checkpoints_is_rechecked_before_more_effects(self) -> None:
+        await self.config()
+        changed = False
+        other_store = PostgresRecordStore(database_url=self.store.database_url)
+
+        def change_after_checkpoint(session: object) -> None:
+            nonlocal changed
+            if not changed and self.provider.writes:
+                changed = True
+                current = other_store.read_dokploy_target_record(
+                    context_name=CONTEXT, instance_name="prod"
+                )
+                other_store.write_dokploy_target_record(
+                    current.model_copy(update={"source_label": "concurrent-writer"})
+                )
+
+        event.listen(self.store._session_factory, "after_commit", change_after_checkpoint)
+        try:
+            response = await self.config(mode="apply", key="checkpoint-race")
+        finally:
+            event.remove(self.store._session_factory, "after_commit", change_after_checkpoint)
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertNotIn(HOSTS[1], {route["host"] for route in self.provider.routes})
+        self.assertEqual(self.recorded().public_hosts, ())
+        self.assertEqual(self.recorded().source_label, "concurrent-writer")
 
     async def test_binding_changed_at_commit_refuses_before_provider_write(self) -> None:
         await self.config()
@@ -278,7 +424,9 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
             expected_target: DokployTargetRecord,
             expected_target_id: DokployTargetIdRecord,
             expected_provider_target: ProviderTargetRecord,
-            apply_provider: Callable[[], None],
+            apply_provider: Callable[[Callable[[str, str], None]], None],
+            pending_effects: tuple[PublicHostEffect, ...],
+            verify_provider: Callable[[], None],
         ) -> None:
             self.store.write_dokploy_target_id_record(
                 self.target_id.model_copy(update={"target_id": "replacement-compose"})
@@ -289,6 +437,8 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
                 expected_target_id=expected_target_id,
                 expected_provider_target=expected_provider_target,
                 apply_provider=apply_provider,
+                pending_effects=pending_effects,
+                verify_provider=verify_provider,
             )
 
         with patch.object(self.store, "write_product_public_hosts_bundle", side_effect=changed):

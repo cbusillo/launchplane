@@ -16584,6 +16584,8 @@ def create_launchplane_fastapi_app(
                         expected_target_id=public_hosts_plan.target_id,
                         expected_provider_target=public_hosts_plan.provider_target,
                         apply_provider=public_hosts_plan.apply_provider,
+                        pending_effects=public_hosts_plan.effects,
+                        verify_provider=public_hosts_plan.verify_provider,
                     )
             except product_public_hosts.PublicHostsProviderError as error:
                 raise _launchplane_http_error(

@@ -464,6 +464,7 @@ export type DokployTargetRecord = {
     healthcheck_path: string;
     healthcheck_timeout_seconds: number | null;
     instance: string;
+    pending_public_host_effects: Array<PublicHostEffect>;
     policies: DokployTargetPolicies;
     project_name: string;
     public_hosts: Array<string>;
@@ -4254,6 +4255,14 @@ export type ProxmoxStorageBackupDestinationReference = {
     provider_type?: 'proxmox';
     storage_id: string;
     username: string;
+};
+
+export type PublicHostEffect = {
+    domain_id: string;
+    host: string;
+    provider_host: string;
+    runtime_port: number;
+    target_id: string;
 };
 
 export type PublicPauseRecord = {
