@@ -2990,10 +2990,11 @@ context only, and `context_instance` has both context and instance.
   stopped, before web starts again, on every Odoo lane that is not production,
   previews included. A preview has no allowances of its own and never inherits
   its template lane's, so a `pre_live` setting copied into a preview is refused.
-  - Code owns the integration families in `control_plane/integration_readback.py`:
-    `shopify`, `printnode`, `fishbowl`, `repairshopr`, `cm_data`,
-    `outgoing_mail`, `incoming_mail`, `payment`, `mapbox`, `unsplash`, `tenor`
-    and `web_push`. An allowance under any other name has no effect.
+  - `INTEGRATION_FAMILIES` in `control_plane/integration_readback.py` owns the
+    integrations checked. An allowance under any other name has no effect.
+    Display-only map and media settings need no allowance and do not hold web
+    stopped; the runtime key-safety defaults follow the same boundary in
+    [secrets](secrets.md#runtime-key-safety-gates).
   - A setting passes when it is empty, or when the lane has an allowance for its
     integration. An active outgoing mail server whose host is the reserved name
     `invalid` never delivers, and a wire-transfer or demo payment provider
