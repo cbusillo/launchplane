@@ -613,11 +613,11 @@ class ReleaseInvitationTests(unittest.TestCase):
     def test_historical_engineering_only_batch_does_not_open_a_request(self) -> None:
         self.seed_historical_batch()
         for number in (43, 44):
-            decision = self.store.list_product_review_decision_records(
+            preview_decision = self.store.list_product_review_decision_records(
                 repository=self.profile.repository, pull_request_number=number
             )[0]
             self.store.write_product_review_decision_record(
-                decision.model_copy(update={"product": "another-site"})
+                preview_decision.model_copy(update={"product": "another-site"})
             )
         self.assertFalse(self.publish())
         self.assertEqual(self.posts, [])
@@ -803,7 +803,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertTrue(self.publish())
         assert self.review.checklist is not None
         self.store.write_release_review_decision_record(
-            decision(self.store, outcome="accepted", date=self.now.isoformat()).model_copy(
+            decision(self.store, date=self.now.isoformat()).model_copy(
                 update={"checklist": self.review.checklist}
             )
         )
@@ -863,7 +863,7 @@ class ReleaseInvitationTests(unittest.TestCase):
     def test_changed_engineering_notes_require_a_new_deliberate_opening(self) -> None:
         self.make_engineering_only()
         self.assertTrue(self.publish(urgent_reason="Security fix."))
-        accepted = decision(self.store, outcome="accepted", date=self.now.isoformat())
+        accepted = decision(self.store, date=self.now.isoformat())
         self.store.create_release_review_decision_record_if_absent(accepted)
         self.assertIs(self.publish(), False)
 
