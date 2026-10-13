@@ -7,7 +7,7 @@ leases, candidate history and landing checkpoints use the production code.
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
@@ -180,7 +180,10 @@ class RecoveryReplayTests(unittest.IsolatedAsyncioTestCase):
             failed_tests = culprit["details"]["failed_tests"]
             self.assertTrue(failed_tests)
             self.assertTrue(
-                all(any(test_id in p["message"] for p in feedback) for test_id in failed_tests)
+                all(
+                    any(test_id in cast(str, p["message"]) for p in feedback)
+                    for test_id in failed_tests
+                )
             )
             restarted = FilesystemRecordStore(state_dir=state_dir)
             records = restarted.list_merge_train_batch_landing_plan_records()
