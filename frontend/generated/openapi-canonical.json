@@ -15189,6 +15189,15 @@
             "title": "Added Policy Keys",
             "type": "array"
           },
+          "authority_changed_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Authority Changed Policy Keys",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "candidate_policy_sha256": {
             "title": "Candidate Policy Sha256",
             "type": "string"
@@ -15209,6 +15218,15 @@
             },
             "title": "Changed Policy Keys",
             "type": "array"
+          },
+          "operational_changed_policy_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Operational Changed Policy Keys",
+            "type": "array",
+            "x-launchplane-optional-response": true
           },
           "plan_digest": {
             "title": "Plan Digest",
@@ -18685,6 +18703,257 @@
         "title": "MergeTrainLatestDryRunSummary",
         "type": "object"
       },
+      "MergeTrainOperationalPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "config_authority_events_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config Authority Events Enabled"
+          },
+          "failure_policy": {
+            "anyOf": [
+              {
+                "enum": [
+                  "pause_train",
+                  "continue_after_blocking_pr"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Policy"
+          },
+          "max_batch_size": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Batch Size"
+          },
+          "merge_method": {
+            "anyOf": [
+              {
+                "enum": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merge Method"
+          },
+          "scheduler": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergeTrainOperationalSchedulerPatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stack_child_disposition_label": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stack Child Disposition Label"
+          }
+        },
+        "title": "MergeTrainOperationalPatch",
+        "type": "object"
+      },
+      "MergeTrainOperationalReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "authority_sha256": {
+            "title": "Authority Sha256",
+            "type": "string"
+          },
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "changed_fields": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Fields",
+            "type": "array"
+          },
+          "execution_sha256": {
+            "title": "Execution Sha256",
+            "type": "string"
+          },
+          "policy_sha256": {
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "previous_record_id": {
+            "title": "Previous Record Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "source_event_id": {
+            "title": "Source Event Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "actor",
+          "reason",
+          "source_event_id",
+          "changed",
+          "previous_record_id",
+          "record_id",
+          "policy_sha256",
+          "authority_sha256",
+          "execution_sha256",
+          "changed_fields"
+        ],
+        "title": "MergeTrainOperationalReceipt",
+        "type": "object"
+      },
+      "MergeTrainOperationalSchedulerPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "mutate": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mutate"
+          },
+          "runner_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "level1",
+                  "controller"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runner Mode"
+          }
+        },
+        "title": "MergeTrainOperationalSchedulerPatch",
+        "type": "object"
+      },
+      "MergeTrainOperationalUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "base_branch": {
+            "minLength": 1,
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "expected_policy_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Expected Policy Sha256",
+            "type": "string"
+          },
+          "expected_record_id": {
+            "minLength": 1,
+            "title": "Expected Record Id",
+            "type": "string"
+          },
+          "patch": {
+            "$ref": "#/components/schemas/MergeTrainOperationalPatch"
+          },
+          "reason": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "repository": {
+            "minLength": 1,
+            "title": "Repository",
+            "type": "string"
+          },
+          "source_event_id": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "base_branch",
+          "expected_record_id",
+          "expected_policy_sha256",
+          "source_event_id",
+          "reason",
+          "patch"
+        ],
+        "title": "MergeTrainOperationalUpdate",
+        "type": "object"
+      },
       "MergeTrainPolicy-Input": {
         "additionalProperties": false,
         "properties": {
@@ -19420,6 +19689,12 @@
             "default": false,
             "title": "Mutate",
             "type": "boolean"
+          },
+          "mutation_authorized": {
+            "default": false,
+            "title": "Mutation Authorized",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           },
           "runner_mode": {
             "default": "controller",
@@ -71379,6 +71654,12 @@
                         "title": "Mutate",
                         "type": "boolean"
                       },
+                      "mutation_authorized": {
+                        "default": false,
+                        "title": "Mutation Authorized",
+                        "type": "boolean",
+                        "x-launchplane-optional-response": true
+                      },
                       "runner_mode": {
                         "default": "controller",
                         "enum": [
@@ -89628,6 +89909,96 @@
           }
         },
         "summary": "Read merge train policy targets"
+      }
+    },
+    "/v1/work-graph/merge-train/policy/operational": {
+      "post": {
+        "operationId": "update_merge_train_operational_policy",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeTrainOperationalUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeTrainOperationalReceipt"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Update audited operational settings within existing merge authority"
       }
     },
     "/v1/work-graph/merge-train/pr-feedback": {

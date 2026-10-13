@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
+
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 
 from datetime import datetime, timezone
@@ -312,6 +314,7 @@ def evaluate_merge_train_admission_from_store(
         current_policy_key=current_policy_key,
         current_policy_sha256=current_policy_sha256,
         controller_state=controller_state,
+        record_store=store,
     )
     controller_decision = build_merge_train_controller_admission_decision(
         candidate_records=actionable_records.candidate_records,
@@ -365,6 +368,7 @@ def build_merge_train_controller_status_read_model(
         current_policy_key=current_policy_key,
         current_policy_sha256=current_policy_sha256,
         controller_state=controller_state,
+        record_store=store,
     )
     controller_decision = build_merge_train_controller_admission_decision(
         candidate_records=actionable_records.candidate_records,
@@ -424,7 +428,12 @@ def build_merge_train_controller_status_read_model(
             or not current_policy_sha256
             else "current"
             if controller_state.last_result.policy_key == current_policy_key
-            and controller_state.last_result.policy_sha256 == current_policy_sha256
+            and merge_train_policy_bindings_match(
+                record_store=store,
+                policy_key=current_policy_key,
+                recorded_sha256=controller_state.last_result.policy_sha256,
+                current_sha256=current_policy_sha256,
+            )
             else "stale"
         ),
         controller_diagnostics=_controller_lease_diagnostics(
@@ -496,9 +505,11 @@ def _reconciliation_diagnostics(
                 binding_detail="current_policy_unavailable",
             ),
         )
-    if (
-        controller_state.policy_key != current_policy_key
-        or controller_state.policy_sha256 != current_policy_sha256
+    if controller_state.policy_key != current_policy_key or not merge_train_policy_bindings_match(
+        record_store=store,
+        policy_key=current_policy_key,
+        recorded_sha256=controller_state.policy_sha256,
+        current_sha256=current_policy_sha256,
     ):
         return (
             _diagnostic(
@@ -556,7 +567,12 @@ def _reconciliation_diagnostics(
         or plan.repository != controller_state.repository.strip().lower()
         or plan.base_branch != controller_state.base_branch
         or plan.policy_key != current_policy_key
-        or plan.policy_sha256 != current_policy_sha256
+        or not merge_train_policy_bindings_match(
+            record_store=store,
+            policy_key=current_policy_key,
+            recorded_sha256=plan.policy_sha256,
+            current_sha256=current_policy_sha256,
+        )
     ):
         return (
             _diagnostic(
@@ -905,6 +921,7 @@ def _summarize_controller_records(
                 record,
                 current_policy_key=current_policy_key,
                 current_policy_sha256=current_policy_sha256,
+                record_store=store,
             )
             for record in controller_records.candidate_records
         ),
@@ -913,6 +930,7 @@ def _summarize_controller_records(
                 record,
                 current_policy_key=current_policy_key,
                 current_policy_sha256=current_policy_sha256,
+                record_store=store,
             )
             for record in controller_records.landing_plan_records
         ),
@@ -921,6 +939,7 @@ def _summarize_controller_records(
                 record,
                 current_policy_key=current_policy_key,
                 current_policy_sha256=current_policy_sha256,
+                record_store=store,
             )
             for record in controller_records.stack_collapse_plan_records
         ),
@@ -1030,6 +1049,7 @@ def _candidate_summary(
     *,
     current_policy_key: str = "",
     current_policy_sha256: str = "",
+    record_store: object | None = None,
 ) -> MergeTrainControllerRecordSummary:
     candidate = record.candidate
     policy_status, stale_reason = _policy_status_fields(
@@ -1037,6 +1057,7 @@ def _candidate_summary(
         policy_sha256=candidate.policy_sha256,
         current_policy_key=current_policy_key,
         current_policy_sha256=current_policy_sha256,
+        record_store=record_store,
     )
     return MergeTrainControllerRecordSummary(
         record_id=record.record_id,
@@ -1068,6 +1089,7 @@ def _landing_plan_summary(
     *,
     current_policy_key: str = "",
     current_policy_sha256: str = "",
+    record_store: object | None = None,
 ) -> MergeTrainControllerRecordSummary:
     entries = record.landing_plan.entries
     plan = record.landing_plan
@@ -1076,6 +1098,7 @@ def _landing_plan_summary(
         policy_sha256=plan.policy_sha256,
         current_policy_key=current_policy_key,
         current_policy_sha256=current_policy_sha256,
+        record_store=record_store,
     )
     return MergeTrainControllerRecordSummary(
         record_id=record.record_id,
@@ -1102,6 +1125,7 @@ def _stack_collapse_summary(
     *,
     current_policy_key: str = "",
     current_policy_sha256: str = "",
+    record_store: object | None = None,
 ) -> MergeTrainControllerRecordSummary:
     plan = record.plan
     policy_status, stale_reason = _policy_status_fields(
@@ -1109,6 +1133,7 @@ def _stack_collapse_summary(
         policy_sha256=plan.policy_sha256,
         current_policy_key=current_policy_key,
         current_policy_sha256=current_policy_sha256,
+        record_store=record_store,
     )
     return MergeTrainControllerRecordSummary(
         record_id=record.record_id,
@@ -1144,6 +1169,7 @@ def _filter_actionable_controller_records(
     current_policy_key: str,
     current_policy_sha256: str,
     controller_state: MergeTrainControllerStateRecord | None,
+    record_store: object | None = None,
 ) -> MergeTrainControllerRecords:
     controller_records = _filter_ordinary_job_binding_records(
         controller_records=controller_records,
@@ -1169,6 +1195,7 @@ def _filter_actionable_controller_records(
                 policy_sha256=record.candidate.policy_sha256,
                 current_policy_key=current_policy_key,
                 current_policy_sha256=current_policy_sha256,
+                record_store=record_store,
             )
         ),
         landing_plan_records=tuple(
@@ -1179,6 +1206,7 @@ def _filter_actionable_controller_records(
                 policy_sha256=record.landing_plan.policy_sha256,
                 current_policy_key=current_policy_key,
                 current_policy_sha256=current_policy_sha256,
+                record_store=record_store,
             )
         ),
         stack_collapse_plan_records=tuple(
@@ -1189,6 +1217,7 @@ def _filter_actionable_controller_records(
                 policy_sha256=record.plan.policy_sha256,
                 current_policy_key=current_policy_key,
                 current_policy_sha256=current_policy_sha256,
+                record_store=record_store,
             )
         ),
     )
@@ -1299,6 +1328,7 @@ def _policy_status_fields(
     policy_sha256: str,
     current_policy_key: str,
     current_policy_sha256: str,
+    record_store: object | None = None,
 ) -> tuple[MergeTrainControllerPolicyStatus, str]:
     if not current_policy_key and not current_policy_sha256:
         return "unchecked", ""
@@ -1307,6 +1337,7 @@ def _policy_status_fields(
         policy_sha256=policy_sha256,
         current_policy_key=current_policy_key,
         current_policy_sha256=current_policy_sha256,
+        record_store=record_store,
     ):
         return "current", ""
     if policy_key != current_policy_key:
@@ -1320,5 +1351,11 @@ def _policy_is_current(
     policy_sha256: str,
     current_policy_key: str,
     current_policy_sha256: str,
+    record_store: object | None = None,
 ) -> bool:
-    return policy_key == current_policy_key and policy_sha256 == current_policy_sha256
+    return policy_key == current_policy_key and merge_train_policy_bindings_match(
+        record_store=record_store,
+        policy_key=current_policy_key,
+        recorded_sha256=policy_sha256,
+        current_sha256=current_policy_sha256,
+    )

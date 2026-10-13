@@ -183,7 +183,10 @@ def validate_stack_collapse_record_for_landing(
     collapse_record: MergeTrainStackCollapsePlanRecord,
     landing_plan: MergeTrainBatchLandingPlan,
     policy_sha256: str,
+    record_store: object | None = None,
 ) -> None:
+    from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
+
     stack_collapse_plan = collapse_record.plan
     if stack_collapse_plan.repository.casefold() != landing_plan.repository.casefold():
         raise ValueError("merge train stack collapse repository does not match landing plan")
@@ -191,9 +194,19 @@ def validate_stack_collapse_record_for_landing(
         raise ValueError("merge train stack collapse base branch does not match landing plan")
     if stack_collapse_plan.policy_key != landing_plan.policy_key:
         raise ValueError("merge train stack collapse policy key does not match landing plan")
-    if stack_collapse_plan.policy_sha256 != policy_sha256:
+    if not merge_train_policy_bindings_match(
+        record_store=record_store,
+        policy_key=stack_collapse_plan.policy_key,
+        recorded_sha256=stack_collapse_plan.policy_sha256,
+        current_sha256=policy_sha256,
+    ):
         raise ValueError("merge train stack collapse policy digest no longer matches")
-    if stack_collapse_plan.policy_sha256 != landing_plan.policy_sha256:
+    if not merge_train_policy_bindings_match(
+        record_store=record_store,
+        policy_key=stack_collapse_plan.policy_key,
+        recorded_sha256=stack_collapse_plan.policy_sha256,
+        current_sha256=landing_plan.policy_sha256,
+    ):
         raise ValueError("merge train stack collapse policy digest does not match landing plan")
     if stack_collapse_plan.status != "waiting_for_root_checks":
         raise ValueError("merge train stack collapse plan is not ready for landing")
@@ -473,6 +486,7 @@ def _read_and_validate_stack_record(
         collapse_record=collapse_existing_record,
         landing_plan=landing_plan,
         policy_sha256=policy_sha256,
+        record_store=stack_collapse_store,
     )
     if not repository_policy.stack_child_disposition_label:
         raise ValueError(

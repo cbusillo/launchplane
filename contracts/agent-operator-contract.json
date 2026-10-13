@@ -46,6 +46,35 @@
     },
     "operations": [
       {
+        "idempotency": "body",
+        "identity_dependencies": [
+          "read_write_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "apply"
+        ],
+        "operation_id": "update_merge_train_operational_policy",
+        "path": "/v1/work-graph/merge-train/policy/operational",
+        "purpose": "Update audited merge-train operational settings within existing authority, with a compared policy baseline and a stable source event.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "expected_record_id",
+          "expected_policy_sha256"
+        ],
+        "schema_fingerprint_sha256": "a29328e09a0fc505068a33925bd447a2fbf8aaf1ea12576ab6139ca58c438526",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "apply",
         "identity_dependencies": [
           "read_operator_mutation_identity"
@@ -471,8 +500,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "c90b8b8b756d17a4764c493b09dc9f1865dcec0b"
+    "source_commit_sha": "db95d57229aa4d8ef23fad0bde1697a9ec681191"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "34d0ddea7159d45a12b643282e295b9010cee21b286c031ce14327930f712dd0"
+  "semantic_digest_sha256": "6593332a819481b340859d83b70cd797562a94646451cd14c308fc9d593f457f"
 }

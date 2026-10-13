@@ -198,7 +198,14 @@ def _execute_admit_mode(
         )
     if existing_plan.status != "waiting_for_root_checks":
         raise ValueError("merge train stack collapse plan is not ready for train admission")
-    if existing_plan.policy_sha256 != policy_sha256:
+    from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
+
+    if not merge_train_policy_bindings_match(
+        record_store=batch_candidate_store,
+        policy_key=existing_plan.policy_key,
+        recorded_sha256=existing_plan.policy_sha256,
+        current_sha256=policy_sha256,
+    ):
         raise ValueError("merge train stack collapse policy digest no longer matches")
     snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
         repository=request.repository,

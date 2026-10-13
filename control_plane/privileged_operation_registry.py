@@ -532,7 +532,14 @@ def plan_managed_merge_train_policy_import(
         "reason": request.reason,
         "related_issue": request.related_issue,
     }
+    from control_plane.contracts.merge_train_policy import classify_merge_train_policy_changes
+
+    authority_keys, operational_keys = classify_merge_train_policy_changes(
+        active_record, candidate_record
+    )
     return ManagedMergeTrainPolicyImportHumanEvidence(
+        authority_changed_policy_keys=authority_keys,
+        operational_changed_policy_keys=operational_keys,
         plan_digest=canonical_json_sha256(plan_payload),
         active_record_id=active_record.record_id,
         active_updated_at=active_updated_at,

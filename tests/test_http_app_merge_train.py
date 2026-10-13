@@ -1099,6 +1099,8 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
                         "candidate_record_id": passed_candidate_record.record_id,
                     },
                 )
+            replacement_policy = build_test_merge_train_policy_with_codex_skills()
+            replacement_policy.policies[0].blocked_label = "new-authority-hold"
             _seed_merge_train_policy(
                 state_dir,
                 policy=MergeTrainPolicyRecord(
@@ -1106,7 +1108,7 @@ class FastApiMergeTrainBatchLandingRunOnceTests(unittest.IsolatedAsyncioTestCase
                     status="active",
                     source="test",
                     updated_at="2026-05-13T22:00:00Z",
-                    policy=build_test_merge_train_policy_with_codex_skills(),
+                    policy=replacement_policy,
                 ),
             )
             _FakeMergeTrainGitHubClient.land_batch_candidate_calls = 0

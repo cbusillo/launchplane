@@ -377,6 +377,7 @@ class LiveMergeAdmissionEvaluator:
                 reason_code = "repository_evidence_unavailable"
             raise MergeAdmissionDeniedError(message, reason_code=reason_code) from error
         structural_result = evaluate_merge_train_structural_candidate(
+            record_store=self.store,
             evaluation=MergeTrainStructuralEvaluationInput(
                 repository=landing_plan.repository,
                 base_branch=landing_plan.base_branch,
@@ -439,13 +440,28 @@ class LiveMergeAdmissionEvaluator:
             head_sha=check_head_sha,
             evaluated_at=evaluated_at,
         )
+        from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
+
+        policy_binding_matches = merge_train_policy_bindings_match(
+            record_store=self.store,
+            policy_key=landing_plan.policy_key,
+            recorded_sha256=landing_plan.policy_sha256,
+            current_sha256=policy_record.policy_sha256,
+        )
+        # Readiness attests which current policy applies to this lineage. Its
+        # lease fence retains the current full digest; the immutable landing
+        # still owns the original document provenance.
         policy_fingerprints = self._policy_fingerprints(
             engineering_decision=engineering_decision,
             engineering_authority_digest=(
                 active_authority.authority_digest if active_authority is not None else None
             ),
             technical_checks=technical_checks,
-            landing_policy_sha256=landing_plan.policy_sha256,
+            landing_policy_sha256=(
+                policy_record.policy_sha256
+                if policy_binding_matches
+                else landing_plan.policy_sha256
+            ),
             current_merge_train_policy_sha256=policy_record.policy_sha256,
         )
         readiness = evaluate_merge_readiness_from_live_evidence(

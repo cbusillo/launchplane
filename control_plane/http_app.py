@@ -225,6 +225,7 @@ from control_plane.http_routes import (
     register_inventory_operation_read_routes,
     register_managed_secret_read_routes,
     register_merge_train_read_routes,
+    register_merge_train_operational_route,
     register_product_review_routes,
     register_privileged_operation_routes,
     register_operation_status_read_routes,
@@ -26823,6 +26824,9 @@ def create_launchplane_fastapi_app(
     )
 
     register_merge_train_read_routes(app, dependencies=read_route_dependencies)
+    register_merge_train_operational_route(
+        app, dependencies=read_route_dependencies, read_write_identity=read_write_identity
+    )
 
     app.add_api_route(
         _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE,

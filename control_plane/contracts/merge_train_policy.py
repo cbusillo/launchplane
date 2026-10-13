@@ -180,6 +180,11 @@ class MergeTrainSchedulerPolicy(BaseModel):
     enabled: bool = False
     runner_mode: MergeTrainSchedulerRunnerMode = "controller"
     mutate: bool = False
+    mutation_authorized: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class ProviderRequiredStatusCheckExpectationV1(BaseModel):
@@ -588,3 +593,75 @@ def _normalize_required_value(value: str, message: str) -> str:
     if "\n" in normalized or "\r" in normalized:
         raise ValueError(f"{message}; value must be a single line")
     return normalized
+
+
+def merge_train_scheduler_mutation_authorized(policy: MergeTrainRepositoryPolicy) -> bool:
+    return policy.scheduler.mutation_authorized or (
+        policy.scheduler.enabled and policy.scheduler.mutate
+    )
+
+
+def merge_train_repository_authority_projection(
+    policy: MergeTrainRepositoryPolicy,
+) -> dict[str, object]:
+    """Authority is independent of annotations and already-authorized scheduling."""
+    return {
+        "repository": policy.repository.casefold(),
+        "base_branch": policy.base_branch,
+        "enqueue_label": policy.enqueue_label,
+        "blocked_label": policy.blocked_label,
+        "merge_identity": policy.merge_identity.model_dump(mode="json"),
+        "github_token": policy.github_token.model_dump(mode="json"),
+        "service_authz": policy.service_authz.model_dump(mode="json"),
+        "enqueue": policy.enqueue.model_dump(mode="json"),
+        "provider_delivery_protection_expectation": (
+            policy.provider_delivery_protection_expectation.model_dump(mode="json")
+            if policy.provider_delivery_protection_expectation is not None
+            else None
+        ),
+        "scheduler_mutation_authorized": merge_train_scheduler_mutation_authorized(policy),
+    }
+
+
+def _projection_sha256(payload: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def merge_train_repository_authority_sha256(policy: MergeTrainRepositoryPolicy) -> str:
+    return _projection_sha256(merge_train_repository_authority_projection(policy))
+
+
+def merge_train_repository_execution_sha256(policy: MergeTrainRepositoryPolicy) -> str:
+    return _projection_sha256(
+        {
+            "binding_version": 1,
+            "authority": merge_train_repository_authority_projection(policy),
+            "merge_method": policy.merge_method,
+            "failure_policy": policy.failure_policy,
+            "engineering_review_mode": policy.engineering_review_mode,
+        }
+    )
+
+
+def classify_merge_train_policy_changes(
+    before: MergeTrainPolicyRecord, after: MergeTrainPolicyRecord
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    old = {item.policy_key: item for item in before.policy.policies}
+    new = {item.policy_key: item for item in after.policy.policies}
+    authority = set(old.keys() ^ new.keys())
+    operational: set[str] = set()
+    for key in old.keys() & new.keys():
+        if merge_train_repository_authority_sha256(
+            old[key]
+        ) != merge_train_repository_authority_sha256(new[key]):
+            authority.add(key)
+        if (
+            old[key].model_dump(mode="json") != new[key].model_dump(mode="json")
+            and key not in authority
+        ):
+            operational.add(key)
+    if before.policy.schema_version != after.policy.schema_version:
+        authority.update(old.keys() | new.keys())
+    return tuple(sorted(authority)), tuple(sorted(operational))

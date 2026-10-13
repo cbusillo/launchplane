@@ -189,9 +189,12 @@ class StackDispositionConfigurationTests(unittest.IsolatedAsyncioTestCase):
                             store.list_merge_train_stack_collapse_plan_records(), stack_history
                         )
                         self.assertEqual(store.list_merge_admission_records(), ())
-                    # Installing a reviewed replacement changes the digest. The
-                    # controller must honor that change rather than clearing the
-                    # old candidate's fence and merging on obsolete authority.
+                    # Changing admission authority requires fresh work even when
+                    # the same replacement fixes an annotation prerequisite.
+                    configured.policy.policies[0].blocked_label = "changed-authority-hold"
+                    configured = MergeTrainPolicyRecord.model_validate(
+                        {**configured.model_dump(), "policy_sha256": ""}
+                    )
                     configured = configured.model_copy(
                         update={
                             "record_id": "configured-disposition-policy",

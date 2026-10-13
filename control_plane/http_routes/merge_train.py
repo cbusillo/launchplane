@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Annotated, Literal, cast
 
 from fastapi import Depends, Query
@@ -29,8 +30,15 @@ from control_plane.merge_train_review_history import (
     OriginalReviewHistoryResponse,
     read_original_review_history,
 )
-from control_plane.service_auth import LaunchplaneIdentity
+from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.contracts.privileged_operation import MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION
+from control_plane.merge_train_policy_operations import (
+    MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE,
+    MergeTrainOperationalUpdate,
+    MergeTrainOperationalReceipt,
+    apply_merge_train_operational_update,
+)
 
 
 class MergeTrainAdmissionQuery(BaseModel):
@@ -161,6 +169,77 @@ def merge_train_diagnostic_read_allowed(
         action=MERGE_TRAIN_POLICY_TARGETS_READ_ACTION,
         product="launchplane",
         context=LAUNCHPLANE_SERVICE_CONTEXT,
+    )
+
+
+def register_merge_train_operational_route(
+    app: ApiRouteRegistrar,
+    *,
+    dependencies: ReadRouteDependencies,
+    read_write_identity: Callable[..., LaunchplaneIdentity],
+) -> None:
+    def update_merge_train_operational_policy(
+        request: MergeTrainOperationalUpdate,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+    ) -> MergeTrainOperationalReceipt:
+        trace_id = dependencies.next_trace_id()
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action=MERGE_TRAIN_POLICY_OPERATION_PROPOSE_ACTION,
+            product="launchplane",
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
+            inherit_agent_read_role=False,
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot update merge train operational settings.",
+            )
+        try:
+            return apply_merge_train_operational_update(
+                record_store=record_store,
+                request=request,
+                actor=(
+                    f"github:{identity.github_id}"
+                    if isinstance(identity, GitHubHumanIdentity)
+                    else identity.subject
+                ),
+                trace_id=trace_id,
+            )
+        except (FileNotFoundError, KeyError) as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="merge_train_policy_baseline_missing",
+                message="The expected policy record is unavailable.",
+            ) from error
+        except ValueError as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="merge_train_operational_update_refused",
+                message=str(error),
+            ) from error
+        except (AttributeError, TypeError) as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Operational policy updates require atomic database-backed audit storage.",
+            ) from error
+
+    app.add_api_route(
+        MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE,
+        update_merge_train_operational_policy,
+        methods=["POST"],
+        response_model=MergeTrainOperationalReceipt,
+        operation_id="update_merge_train_operational_policy",
+        summary="Update audited operational settings within existing merge authority",
+        responses={
+            code: {"model": dependencies.error_response_model} for code in (400, 401, 403, 409, 503)
+        },
     )
 
 
