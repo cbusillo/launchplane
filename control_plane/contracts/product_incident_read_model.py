@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
+import click
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
@@ -35,6 +36,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressTargetKind,
     PublicIngressTlsStatus,
 )
+from control_plane.secrets import keyed_secret_payload_fingerprint
 
 
 ProductIncidentStatusFilter = Literal["all", "open", "resolved"]
@@ -120,6 +122,25 @@ class ProductIncidentReadStore(Protocol):
 
 class ProductIncidentReadModelCapabilityError(RuntimeError):
     pass
+
+
+class ProductIncidentReferenceUnavailableError(RuntimeError):
+    pass
+
+
+def _display_reference(kind: str, stored_id: str) -> str:
+    if not stored_id:
+        return ""
+    try:
+        fingerprint = keyed_secret_payload_fingerprint(
+            stored_id, purpose=f"product-incident-display-{kind}-v1"
+        )
+    except click.ClickException as error:
+        raise ProductIncidentReferenceUnavailableError(
+            "Incident display references require valid managed-secret bootstrap keys."
+        ) from error
+    # Key labels are bootstrap metadata, not part of the public identifier.
+    return f"{kind}-{fingerprint.rsplit(':', 1)[1]}"
 
 
 class ProductIncidentMaterialEvidence(BaseModel):
@@ -444,7 +465,7 @@ def build_product_environment_incident_detail(
                 status=record.status,
                 failure_code=record.failure_code or "",
                 summary=_observation_summary(record),
-                incident_event_id=record.incident_event_id,
+                incident_event_id=_display_reference("event", record.incident_event_id),
                 material_fingerprint_sha256=record.material_fingerprint_sha256,
                 notification_sent=record.notification_sent,
             )
@@ -452,7 +473,7 @@ def build_product_environment_incident_detail(
         ),
         events=tuple(
             ProductIncidentEventSummary(
-                event_id=record.event_id,
+                event_id=_display_reference("event", record.event_id),
                 event=record.event,
                 reason=record.reason,
                 occurred_at=record.occurred_at,
@@ -471,9 +492,9 @@ def build_product_environment_incident_detail(
         ),
         reminders=tuple(
             ProductIncidentReminderSummary(
-                reminder_state_id=record.reminder_state_id,
+                reminder_state_id=_display_reference("reminder", record.reminder_state_id),
                 status=record.status,
-                material_event_id=record.material_event_id,
+                material_event_id=_display_reference("event", record.material_event_id),
                 interval_seconds=record.interval_seconds,
                 last_window_index=record.last_window_index,
                 last_reminded_at=record.last_reminded_at,
@@ -484,13 +505,13 @@ def build_product_environment_incident_detail(
         ),
         notification_attempts=tuple(
             ProductIncidentNotificationAttemptSummary(
-                attempt_id=record.attempt_id,
+                attempt_id=_display_reference("attempt", record.attempt_id),
                 event=record.event,
                 destination_kind=record.destination_kind,
                 delivery_status=record.delivery_status,
                 attempted_at=record.attempted_at,
                 observation_id=record.observation_id,
-                incident_event_id=record.incident_event_id,
+                incident_event_id=_display_reference("event", record.incident_event_id),
                 external_url=record.external_url,
                 action=record.action,
                 error_message=(
@@ -503,7 +524,7 @@ def build_product_environment_incident_detail(
         ),
         outbox_deliveries=tuple(
             ProductIncidentOutboxDeliverySummary(
-                delivery_id=record.delivery_id,
+                delivery_id=_display_reference("delivery", record.delivery_id),
                 state=record.state,
                 created_at=record.created_at,
                 updated_at=record.updated_at,
@@ -634,7 +655,7 @@ def build_product_incident_summary(
         notification_state=incident.notification_state,
         notification_state_changed_at=incident.notification_state_changed_at,
         silenced_until=incident.silenced_until,
-        latest_material_event_id=incident.latest_material_event_id,
+        latest_material_event_id=_display_reference("event", incident.latest_material_event_id),
         latest_material_event=incident.latest_material_event,
         latest_material_event_at=incident.latest_material_event_at,
         material_fingerprint_sha256=incident.material_fingerprint_sha256,
