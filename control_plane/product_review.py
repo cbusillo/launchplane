@@ -85,6 +85,11 @@ def require_product_review_store(record_store: object) -> ProductReviewStore:
 class ProductReviewPreview:
     preview_url: str = ""
     head_sha: str = ""
+    generation_id: str = ""
+
+
+class ProductReviewPreviewChanged(ValueError):
+    """The submitted decision names a preview that is no longer serving."""
 
 
 def source_control_pull_request_url(*, repository: str, pull_request_number: int) -> str:
@@ -146,6 +151,7 @@ def resolve_serving_preview(
             ProductReviewPreview(
                 preview_url=preview.canonical_url.strip(),
                 head_sha=generation.anchor_summary.head_sha.strip().lower(),
+                generation_id=generation.generation_id,
             )
         )
     if len(serving) != 1:
@@ -180,6 +186,13 @@ def record_product_review_decision(
     with store.product_review_lock(
         repository=profile.repository, pull_request_number=pull_request_number
     ):
+        current_preview = resolve_serving_preview(
+            store=store, profile=profile, pull_request_number=pull_request_number
+        )
+        if not preview.preview_url or preview != current_preview:
+            raise ProductReviewPreviewChanged(
+                "The preview changed. Refresh the review and look at the current preview before deciding again."
+            )
         previous = latest_product_review_decision(
             store=store, profile=profile, pull_request_number=pull_request_number
         )
@@ -187,6 +200,7 @@ def record_product_review_decision(
             previous is not None
             and previous.head_sha == preview.head_sha
             and previous.preview_url == preview.preview_url
+            and previous.preview_generation_id == preview.generation_id
             and previous.owner_github_id == str(identity.github_id)
             and previous.decision == decision
             and previous.reason == reason.strip()
@@ -225,6 +239,7 @@ def _append_product_review_decision(
         pull_request_number=pull_request_number,
         head_sha=preview.head_sha,
         preview_url=preview.preview_url,
+        preview_generation_id=preview.generation_id,
         decision=decision,
         reason=reason.strip(),
         owner_github_id=str(identity.github_id),

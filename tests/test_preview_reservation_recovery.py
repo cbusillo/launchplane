@@ -850,6 +850,11 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         self.assertFalse(self.store.list_public_ingress_incident_records(status="open"))
         self.assertTrue(self.store.list_public_ingress_incident_records(status="resolved"))
 
+    @patch.dict(
+        "os.environ",
+        {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "incident-test-key"},
+        clear=True,
+    )
     def test_preview_incident_reads_select_owned_lanes_and_preserve_resolved_history(self) -> None:
         from control_plane.http_routes.products import (
             ProductReadRouteDependencies,
