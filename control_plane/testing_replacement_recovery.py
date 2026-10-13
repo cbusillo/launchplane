@@ -36,7 +36,13 @@ from control_plane.launchplane_reconcile_authorization import (
 
 class TestingRecoveryStore(Protocol):
     def list_deployment_records(
-        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+        self,
+        *,
+        context_name: str = "",
+        instance_name: str = "",
+        artifact_id: str = "",
+        source_git_ref: str = "",
+        limit: int | None = None,
     ) -> tuple[DeploymentRecord, ...]: ...
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
     def read_dokploy_target_record(

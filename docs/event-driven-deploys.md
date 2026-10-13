@@ -663,7 +663,10 @@ provider idleness or a newer runtime identity cannot replace their missing proof
 
 For a legacy attempt, the operation status read also inspects independently
 retained deployment candidates for the original requested artifact and commit
-within the attempt's running interval. A unique candidate supplies the provider
+within the attempt's running interval. Storage filters by that original build
+before applying the bounded inventory limit, so unrelated lane history cannot
+hide the attempt. A truncated inventory for the same build still refuses
+inspection. A unique candidate supplies the provider
 target for read-only deployment and data-workflow schedule history inspection;
 ambiguous, truncated or changed evidence is reported as unavailable. The fixed
 error description reports these observations without exposing provider
