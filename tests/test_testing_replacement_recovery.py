@@ -342,30 +342,37 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                         getattr(store, "list_product_reconcile_requests")(product="site")
                     )
 
-            def changed_evidence_read(**kwargs: object) -> api.JsonValue:
-                result = read(**kwargs)
-                if kwargs["path"] == "/api/schedule.one":
-                    getattr(store, "write_deployment_record")(
-                        deployment.model_copy(
-                            update={
-                                "post_deploy_update": deployment.post_deploy_update.model_copy(
-                                    update={"evidence": {}}
-                                )
-                            }
+            for changed_record in (
+                deployment.model_copy(
+                    update={
+                        "post_deploy_update": deployment.post_deploy_update.model_copy(
+                            update={"evidence": {}}
                         )
-                    )
-                return result
-
-            with (
-                patch(
-                    "control_plane.testing_legacy_replacement_inspection.source.read_dokploy_config",
-                    return_value=("https://provider.test", "fixture-token"),
+                    }
                 ),
-                patch.object(api, "dokploy_request", side_effect=changed_evidence_read),
+                deployment.model_copy(update={"record_id": "late-second-candidate"}),
             ):
-                view = testing_replacement_recovery_read(store, fenced, root)
-            self.assertFalse(view["provider_inspected"])
-            self.assertFalse(view["safe_to_release"])
+                getattr(store, "write_deployment_record")(deployment)
+
+                def changed_evidence_read(**kwargs: object) -> api.JsonValue:
+                    result = read(**kwargs)
+                    if kwargs["path"] == "/api/schedule.one":
+                        getattr(store, "write_deployment_record")(changed_record)
+                    return result
+
+                with (
+                    patch(
+                        "control_plane.testing_legacy_replacement_inspection.source.read_dokploy_config",
+                        return_value=("https://provider.test", "fixture-token"),
+                    ),
+                    patch.object(api, "dokploy_request", side_effect=changed_evidence_read),
+                ):
+                    # Unexpected exceptions fail this direct read, rather than
+                    # looking like a successful fail-closed wrapper refusal.
+                    observation = inspect_legacy_replacement(
+                        store, fenced, root, deadline_at=monotonic() + 15
+                    )
+                self.assertFalse(observation.provider_inspected)
 
     def test_inspection_deadline_refuses_before_another_provider_read(self) -> None:
         for store, root in self.stores():

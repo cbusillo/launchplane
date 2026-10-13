@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.dokploy import api, post_deploy, source
 
 if TYPE_CHECKING:
@@ -56,29 +57,9 @@ def inspect_legacy_replacement(
     """
     if not operation.request.artifact_id or not operation.request.source_git_ref:
         return LegacyReplacementInspection(detail="original build request unavailable")
-    records = store.list_deployment_records(
-        context_name=operation.context,
-        instance_name=operation.instance,
-        artifact_id=operation.request.artifact_id,
-        source_git_ref=operation.request.source_git_ref,
-        limit=51,
-    )
-    if len(records) >= 51:
+    candidates = _retained_deployment_candidates(store, operation)
+    if candidates is None:
         return LegacyReplacementInspection(detail="retained deployment inventory truncated")
-    started = datetime.fromisoformat(operation.started_at)
-    fenced = datetime.fromisoformat(operation.updated_at)
-    candidates = [
-        record
-        for record in records
-        if record.context == operation.context
-        and record.instance == operation.instance
-        and record.source_git_ref == operation.request.source_git_ref
-        and record.artifact_identity is not None
-        and record.artifact_identity.artifact_id == operation.request.artifact_id
-        and record.resolved_target is not None
-        and record.resolved_target.target_type == "compose"
-        and started <= datetime.fromisoformat(record.deploy.started_at) <= fenced
-    ]
     if len(candidates) != 1:
         return LegacyReplacementInspection(
             detail="retained deployment attribution unavailable or ambiguous"
@@ -205,7 +186,7 @@ def inspect_legacy_replacement(
                             if api.deployment_status(matches[0]) in {"done", "error"}
                             else "active"
                         )
-    if store.read_deployment_record(retained.record_id) != retained:
+    if _retained_deployment_candidates(store, operation) != (retained,):
         return LegacyReplacementInspection(detail="retained deployment evidence changed")
     return LegacyReplacementInspection(
         provider_inspected=True,
@@ -215,6 +196,34 @@ def inspect_legacy_replacement(
         retained_schedule_run=retained_run,
         retained_schedule_history=retained_history,
         retained_schedule_timer=retained_timer,
+    )
+
+
+def _retained_deployment_candidates(
+    store: "TestingRecoveryStore", operation: OdooStableTargetReplacementOperationRecord
+) -> tuple[DeploymentRecord, ...] | None:
+    records = store.list_deployment_records(
+        context_name=operation.context,
+        instance_name=operation.instance,
+        artifact_id=operation.request.artifact_id,
+        source_git_ref=operation.request.source_git_ref,
+        limit=51,
+    )
+    if len(records) >= 51:
+        return None
+    started = datetime.fromisoformat(operation.started_at)
+    fenced = datetime.fromisoformat(operation.updated_at)
+    return tuple(
+        record
+        for record in records
+        if record.context == operation.context
+        and record.instance == operation.instance
+        and record.source_git_ref == operation.request.source_git_ref
+        and record.artifact_identity is not None
+        and record.artifact_identity.artifact_id == operation.request.artifact_id
+        and record.resolved_target is not None
+        and record.resolved_target.target_type == "compose"
+        and started <= datetime.fromisoformat(record.deploy.started_at) <= fenced
     )
 
 
