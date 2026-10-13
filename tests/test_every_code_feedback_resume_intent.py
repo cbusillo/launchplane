@@ -73,7 +73,8 @@ def minted_fixture() -> EveryCodeFeedbackResumeIntentRecord:
 
 
 class FeedbackResumeIntentTests(unittest.TestCase):
-    def decision(self, **changes: Any) -> EveryCodeFeedbackIntentMintResult:
+    @staticmethod
+    def decision(**changes: Any) -> EveryCodeFeedbackIntentMintResult:
         acceptance = _acceptance()
         values: dict[str, Any] = dict(
             acceptance=acceptance,
