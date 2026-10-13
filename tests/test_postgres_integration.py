@@ -41,6 +41,7 @@ from tests.test_odoo_import_override_reconciliation import (
     override_record as _import_override_record,
     runtime_record as _import_runtime_record,
 )
+from tests import test_preview_reservation_recovery as preview_reservation_tests
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from tests.test_odoo_addon_settings_override import _existing_record as _addon_override_record
@@ -1428,28 +1429,37 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 snapshot = source.export_stored_record_snapshot()
             self.assertEqual(len(snapshot.tables[LaunchplaneAuthzPolicyRow.__tablename__]), 2)
             self.assertNotIn("plaintext-sentinel", snapshot.model_dump_json())
-            with _isolated_postgres_database() as target_url:
-                engine = create_engine(target_url)
-                self.addCleanup(engine.dispose)
-                revision = restore_snapshot(engine, snapshot)
-                target = PostgresRecordStore(database_url=target_url)
-                self.addCleanup(target.close)
-                self.assertEqual(revision, target.schema_revision())
-                restored_run = target.list_merge_train_run_records()[0]
-                self.assertNotEqual(
-                    restored_run.selected_pr_number,
-                    source.list_merge_train_run_records()[0].selected_pr_number,
-                )
-                with TemporaryDirectory() as directory:
-                    check_restored_records(target, state_dir=Path(directory))
-                    with patch(
-                        "control_plane.service_auth.exclusively_instance_scoped_authz_actions",
-                        return_value=frozenset({"live_target_runtime.plan"}),
-                    ):
-                        with self.assertRaises(ValidationError):
-                            check_restored_records(target, state_dir=Path(directory))
-                with self.assertRaises(ValueError):
-                    restore_snapshot(engine, snapshot)
+            compact = source.export_stored_record_snapshot(format_version=2)
+            for exported in (snapshot, compact):
+                with (
+                    self.subTest(format_version=exported.schema_version),
+                    _isolated_postgres_database() as target_url,
+                ):
+                    engine = create_engine(target_url)
+                    self.addCleanup(engine.dispose)
+                    revision = restore_snapshot(engine, exported)
+                    target = PostgresRecordStore(database_url=target_url)
+                    self.addCleanup(target.close)
+                    self.assertEqual(revision, target.schema_revision())
+                    self.assertEqual(
+                        len(target.list_authz_policy_records()),
+                        len(source.list_authz_policy_records()),
+                    )
+                    restored_run = target.list_merge_train_run_records()[0]
+                    self.assertNotEqual(
+                        restored_run.selected_pr_number,
+                        source.list_merge_train_run_records()[0].selected_pr_number,
+                    )
+                    with TemporaryDirectory() as directory:
+                        check_restored_records(target, state_dir=Path(directory))
+                        with patch(
+                            "control_plane.service_auth.exclusively_instance_scoped_authz_actions",
+                            return_value=frozenset({"live_target_runtime.plan"}),
+                        ):
+                            with self.assertRaises(ValidationError):
+                                check_restored_records(target, state_dir=Path(directory))
+                    with self.assertRaises(ValueError):
+                        restore_snapshot(engine, exported)
 
     def test_feedback_recovery_orders_jsonb_receipts_and_supersedes_same_second_failure(
         self,
@@ -9850,3 +9860,12 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 store.list_product_reconcile_requests(product="site")[0].state, "pending"
             )
+
+
+class RealPostgresPreviewReservationRecoveryTests(
+    preview_reservation_tests.PreviewReservationRecoveryTests
+):
+    """Run original-intent/exclusion/settlement and visibility contracts on PostgreSQL."""
+
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())

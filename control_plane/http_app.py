@@ -5464,6 +5464,7 @@ def create_launchplane_fastapi_app(
     def read_stored_record_snapshot(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
+        format_version: Annotated[int, Query(ge=1, le=2)] = 1,
     ) -> StoredRecordSnapshotResponse:
         trace_id = next_trace_id()
         require_launchplane_service_read_authorization(identity=identity, trace_id=trace_id)
@@ -5563,8 +5564,16 @@ def create_launchplane_fastapi_app(
         from control_plane.stored_record_snapshot import SnapshotAuthorizationDenied
 
         try:
-            snapshot = record_store.export_stored_record_snapshot(
-                authorize_records=None if explicit_service_reader else snapshot_scope_allowed,
+            authorization = None if explicit_service_reader else snapshot_scope_allowed
+            snapshot = (
+                record_store.export_stored_record_snapshot(
+                    authorize_records=authorization,
+                    format_version=2,
+                )
+                if format_version == 2
+                else record_store.export_stored_record_snapshot(
+                    authorize_records=authorization,
+                )
             )
         except SnapshotAuthorizationDenied as error:
             raise _launchplane_http_error(
@@ -26727,6 +26736,11 @@ def create_launchplane_fastapi_app(
         read_identity=read_every_code_worker_read_identity,
     )
     register_preview_record_read_routes(app, dependencies=read_route_dependencies)
+    from control_plane.http_routes.preview_reservations import (
+        register_preview_reservation_read_routes,
+    )
+
+    register_preview_reservation_read_routes(app, dependencies=read_route_dependencies)
 
     register_inventory_operation_read_routes(app, dependencies=read_route_dependencies)
 

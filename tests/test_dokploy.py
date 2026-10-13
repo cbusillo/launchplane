@@ -2694,8 +2694,14 @@ domains = ["cm-testing.shinycomputers.com"]
                 return_value={"appName": "cm-pr-45", "serverId": "server-one"},
             ),
             patch(
-                "control_plane.dokploy.post_deploy.api.find_matching_dokploy_schedule",
-                return_value={"deployments": [{"status": "running"}]},
+                "control_plane.dokploy.post_deploy.api.dokploy_request",
+                return_value=[
+                    {
+                        "name": "platform-data-workflow",
+                        "appName": "platform-odoo-tenant-cm-pr-45-data-workflow",
+                        "deployments": [{"status": "running"}],
+                    }
+                ],
             ) as find_schedule,
         ):
             quiescent = dokploy_post_deploy.compose_data_workflow_is_quiescent(
@@ -2708,10 +2714,8 @@ domains = ["cm-testing.shinycomputers.com"]
         find_schedule.assert_called_once_with(
             host="https://dokploy.example",
             token="token",
-            target_id="server-one",
-            schedule_type="server",
-            schedule_name="platform-data-workflow",
-            app_name="platform-odoo-tenant-cm-pr-45-data-workflow",
+            path="/api/schedule.list",
+            query={"id": "server-one", "scheduleType": "server"},
         )
 
     def test_compose_data_workflow_quiescence_allows_missing_schedule(self) -> None:
@@ -2727,8 +2731,8 @@ domains = ["cm-testing.shinycomputers.com"]
                 return_value={"appName": "cm-pr-45", "serverId": "server-one"},
             ),
             patch(
-                "control_plane.dokploy.post_deploy.api.find_matching_dokploy_schedule",
-                return_value=None,
+                "control_plane.dokploy.post_deploy.api.dokploy_request",
+                return_value=[],
             ),
         ):
             quiescent = dokploy_post_deploy.compose_data_workflow_is_quiescent(
