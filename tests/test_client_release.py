@@ -1,5 +1,6 @@
 import unittest
 from contextlib import ExitStack, nullcontext
+from datetime import datetime, timedelta
 
 import click
 from pathlib import Path
@@ -23,6 +24,8 @@ from control_plane.contracts.promotion_record import (
     DeploymentEvidence,
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
+    PromotionRecord,
+    RollbackExecutionEvidence,
 )
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.durable_operation_authorization import (
@@ -329,6 +332,73 @@ class ClientReleaseTests(unittest.TestCase):
             release_start_for_acceptance(store=self.store, profile=profile_record), "promote"
         )
 
+        # Odoo's generic promotion has no deploy timestamps, and the drill
+        # updates its rollback evidence. Each durable promotion still belongs
+        # in the timeline at its own completion time.
+        for index, operation_id in enumerate((promotion_id, repromotion_id)):
+            operation = self.store.read_odoo_prod_promotion_operation_record(operation_id)
+            assert operation.result is not None
+            finished_at = (
+                datetime.fromisoformat(operation.created_at) + timedelta(seconds=index + 1)
+            ).isoformat()
+            result = operation.result.model_copy(
+                update={
+                    "promotion_record_id": f"promotion-drill-{index}",
+                    "deployment_record_id": f"deployment-drill-{index}",
+                    "backup_record_id": f"logical-backup-{index}",
+                }
+            )
+            self.store.write_odoo_prod_promotion_operation_record(
+                operation.model_copy(
+                    update={"result": result, "finished_at": finished_at, "updated_at": finished_at}
+                )
+            )
+            self.store.write_promotion_record(
+                PromotionRecord(
+                    record_id=result.promotion_record_id,
+                    artifact_identity=ArtifactIdentityReference(artifact_id="artifact-testing"),
+                    context=CONTEXT,
+                    from_instance="testing",
+                    to_instance="prod",
+                    deploy=_deployment(result.deployment_record_id, "artifact-testing").deploy,
+                    rollback=RollbackExecutionEvidence(
+                        attempted=True, status="pass", finished_at=finished_at
+                    )
+                    if index == 0
+                    else RollbackExecutionEvidence(),
+                )
+            )
+        activity = build_product_activity_read_model(record_store=self.store, product=PRODUCT)
+        promotions = [event for event in activity.events if event.event_type == "promotion"]
+        self.assertEqual(
+            {event.records[0].record_id for event in promotions}, {promotion_id, repromotion_id}
+        )
+        for event in promotions:
+            operation = self.store.read_odoo_prod_promotion_operation_record(
+                event.records[0].record_id
+            )
+            assert operation.result is not None
+            self.assertEqual(event.status, operation.status)
+            self.assertEqual(event.occurred_at, operation.finished_at)
+            self.assertEqual(event.context, operation.context)
+            self.assertEqual(event.environment, operation.instance)
+            self.assertTrue(
+                {
+                    ("operation", operation.operation_id),
+                    ("release_decision", accepted.record_id),
+                    ("promotion", operation.result.promotion_record_id),
+                    ("deployment", operation.result.deployment_record_id),
+                    ("backup_gate", operation.result.backup_record_id),
+                    ("backup_gate", operation.request.infrastructure_backup_record_id),
+                }
+                <= {(link.record_type, link.record_id) for link in event.records}
+            )
+        self.assertTrue(any(event.event_type == "rollback" for event in activity.events))
+        limited = build_product_activity_read_model(
+            record_store=self.store, product=PRODUCT, limit=1
+        )
+        self.assertEqual(limited.events, activity.events[:1])
+
     def test_nothing_starts_when_held_prelaunch_overridden_or_unsupported(self) -> None:
         self.assertEqual(self.accept().release_start, "")
         self.assertEqual(self.advance(), ())
@@ -346,6 +416,146 @@ class ClientReleaseTests(unittest.TestCase):
             decision(self.store, outcome="overridden", date="2026-09-23T02:00:00Z")
         )
         self.assertEqual(self.advance(), ())
+
+    def test_progress_explains_a_hold_and_clears_it_without_starting_work(self) -> None:
+        self.switch("promote")
+        accepted = self.accept()
+        self.switch("held")
+        with (
+            patch(
+                "control_plane.client_release.current_release_review",
+                side_effect=AssertionError("Progress reads must not recompile the checklist"),
+            ),
+            patch("control_plane.client_release.enqueue_production_backup_gate") as enqueue,
+        ):
+            run = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(PRODUCT),
+                decision=accepted,
+            )
+            assert run is not None
+            self.assertEqual(run.state, "waiting")
+            self.assertIn("hold", run.blocked_reason)
+            self.assertTrue(all(step.status == "not_started" for step in run.steps))
+            self.switch("promote")
+            resumed = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(PRODUCT),
+                decision=accepted,
+            )
+            assert resumed is not None
+            self.assertEqual(resumed.blocked_reason, "")
+            self.assertEqual(resumed.steps, run.steps)
+            enqueue.assert_not_called()
+
+    def test_progress_distinguishes_unpublished_and_replaced_decisions(self) -> None:
+        self.switch("promote")
+        accepted = self.accept()
+        unpublished = accepted.model_copy(update={"release_issue_url": ""})
+        self.store.write_release_review_decision_record(unpublished)
+        run = read_client_release_run(
+            store=self.store,
+            profile=self.store.read_product_profile_record(PRODUCT),
+            decision=unpublished,
+        )
+        assert run is not None
+        self.assertIn("published", run.blocked_reason)
+        self.assertEqual(self.advance(), ())
+        self.store.write_release_review_decision_record(accepted)
+        self.store.write_release_review_decision_record(
+            decision(self.store, outcome="changes_requested", date="2026-09-23T02:00:00Z")
+        )
+        replaced = read_client_release_run(
+            store=self.store,
+            profile=self.store.read_product_profile_record(PRODUCT),
+            decision=accepted,
+        )
+        assert replaced is not None
+        self.assertTrue(replaced.blocked_reason)
+        self.assertNotEqual(replaced.blocked_reason, run.blocked_reason)
+        self.assertEqual(self.advance(), ())
+
+    def test_progress_explains_changed_lanes_and_preserves_finished_backup(self) -> None:
+        self.switch("promote")
+        accepted = self.accept()
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        testing = self.store.read_release_tuple_record(context_name=CONTEXT, channel_name="testing")
+        # Use the existing production artifact as a different, fully readable candidate.
+        self.store.write_release_tuple_record(
+            testing.model_copy(update={"artifact_id": "artifact-prod"})
+        )
+        with patch(
+            "control_plane.client_release.current_release_review",
+            side_effect=AssertionError("Known stale lanes need no source-control read"),
+        ):
+            changed_testing = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(PRODUCT),
+                decision=accepted,
+            )
+            assert changed_testing is not None
+            self.assertIn("testing", changed_testing.blocked_reason)
+            self.assertEqual(changed_testing.steps[0].status, "pass")
+            self.assertEqual(changed_testing.steps[0].operation_id, backup_id)
+            self.assertEqual(self.advance(), ())
+            self.store.write_release_tuple_record(testing)
+            self.set_prod("artifact-testing")
+            changed_production = read_client_release_run(
+                store=self.store,
+                profile=self.store.read_product_profile_record(PRODUCT),
+                decision=accepted,
+            )
+            assert changed_production is not None
+            self.assertIn("production", changed_production.blocked_reason)
+            self.assertEqual(changed_production.steps, changed_testing.steps)
+            self.assertEqual(self.advance(), ())
+
+    def test_terminal_progress_survives_later_holds_and_lane_changes(self) -> None:
+        for status in ("pass", "fail"):
+            with self.subTest(status=status):
+                self.setUp()
+                self.switch("promote")
+                accepted = self.accept()
+                (backup_id,) = self.advance()
+                self.finish(backup_id)
+                (promotion_id,) = self.advance()
+                self.finish(promotion_id, status)
+                before = read_client_release_run(
+                    store=self.store,
+                    profile=self.store.read_product_profile_record(PRODUCT),
+                    decision=accepted,
+                )
+                assert before is not None
+                self.assertEqual(before.state, "passed" if status == "pass" else "stopped")
+                self.switch("held")
+                self.set_prod("artifact-testing")
+                after = read_client_release_run(
+                    store=self.store,
+                    profile=self.store.read_product_profile_record(PRODUCT),
+                    decision=accepted,
+                )
+                self.assertEqual(after, before)
+
+    def test_drill_progress_allows_its_own_production_transition(self) -> None:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        (promotion_id,) = self.advance()
+        self.set_prod("artifact-testing")
+        for completed in (False, True):
+            with self.subTest(completed=completed):
+                if completed:
+                    self.finish(promotion_id)
+                run = read_client_release_run(
+                    store=self.store,
+                    profile=self.store.read_product_profile_record(PRODUCT),
+                    decision=accepted,
+                )
+                assert run is not None
+                self.assertEqual(run.blocked_reason, "")
+                self.assertEqual(run.state, "waiting" if completed else "running")
 
     def test_a_stale_acceptance_starts_nothing(self) -> None:
         self.switch("promote")
@@ -508,6 +718,36 @@ class ClientReleaseTests(unittest.TestCase):
         )
         assert run is not None and run.steps[1].failure is not None
         self.assertEqual(run.steps[1].failure.record_id, promotion_id)
+        activity = build_product_activity_read_model(record_store=self.store, product=PRODUCT)
+        event = next(event for event in activity.events if event.event_type == "promotion")
+        self.assertEqual(event.status, operation.status)
+        self.assertNotEqual(event.status, "pass")
+        self.assertEqual(event.occurred_at, operation.finished_at)
+
+    def test_promotion_activity_tracks_queued_status_and_isolates_products(self) -> None:
+        self.switch("promote")
+        self.accept()
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        (promotion_id,) = self.advance()
+        operation = self.store.read_odoo_prod_promotion_operation_record(promotion_id)
+        other_profile = self.store.read_product_profile_record(PRODUCT).model_copy(
+            update={"product": "other-site"}
+        )
+        self.store.write_product_profile_record(other_profile)
+        activity = build_product_activity_read_model(record_store=self.store, product=PRODUCT)
+        event = next(event for event in activity.events if event.event_type == "promotion")
+        self.assertEqual(event.status, operation.status)
+        self.assertNotEqual(event.status, "pass")
+        self.assertEqual(event.occurred_at, operation.updated_at)
+        self.assertFalse(
+            any(
+                event.event_type == "promotion"
+                for event in build_product_activity_read_model(
+                    record_store=self.store, product=other_profile.product
+                ).events
+            )
+        )
 
     def test_activity_history_does_not_run_unstarted_release_readiness_checks(self) -> None:
         self.switch("promote_with_rollback_drill")
