@@ -200,13 +200,17 @@ function OwnerPreviewReviewRoute({
       ) : loading && !review ? (
         <OwnerReviewState>Loading the review…</OwnerReviewState>
       ) : error ? (
-        <OwnerReviewState tone="error">{error}</OwnerReviewState>
+        <>
+          <OwnerReviewState tone="error">{error}</OwnerReviewState>
+          <button className="button" type="button" onClick={() => void loadReview()}>Refresh review</button>
+        </>
       ) : review ? (
         <ProductReviewCard
           historical={Boolean(decisionId)}
           fixtureMode={fixtureMode}
           review={review}
           onDecided={setReview}
+          onRefresh={() => loadReview()}
         />
       ) : null}
     </section>
@@ -235,11 +239,13 @@ function ProductReviewCard({
   historical,
   fixtureMode,
   onDecided,
+  onRefresh,
   review,
 }: {
   historical: boolean;
   fixtureMode: DevFixtureMode;
   onDecided: (review: ProductReviewResponse) => void;
+  onRefresh: () => Promise<void>;
   review: ProductReviewResponse;
 }) {
   const previewUrl = safeExternalUrl(review.preview_url);
@@ -292,9 +298,11 @@ function ProductReviewCard({
       ) : null}
       {!historical && review.can_decide && previewUrl ? (
         <ProductReviewDecisionForm
+          key={`${review.repository}:${review.pull_request_number}:${review.head_sha}:${review.preview_url}:${review.preview_generation_id}`}
           fixtureMode={fixtureMode}
           review={review}
           onDecided={onDecided}
+          onRefresh={onRefresh}
         />
       ) : historical ? (
         <OwnerReviewState>Open the latest review to record a new decision.</OwnerReviewState>
@@ -390,16 +398,24 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
 function ProductReviewDecisionForm({
   fixtureMode,
   onDecided,
+  onRefresh,
   review,
 }: {
   fixtureMode: DevFixtureMode;
   onDecided: (review: ProductReviewResponse) => void;
+  onRefresh: () => Promise<void>;
   review: ProductReviewResponse;
 }) {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
   const [recorded, setRecorded] = useState(false);
+  const [stale, setStale] = useState(false);
+
+  useEffect(() => {
+    setStale(false);
+    setFailure("");
+  }, [review]);
 
   const record = async (decision: ProductReviewDecisionRecord["decision"]) => {
     setBusy(true);
@@ -417,6 +433,9 @@ function ProductReviewDecisionForm({
         : await writeProductReviewDecision({
             repository: review.repository,
             pull_request: review.pull_request_number,
+            reviewed_head_sha: review.head_sha,
+            reviewed_preview_url: review.preview_url,
+            reviewed_generation_id: review.preview_generation_id,
             decision,
             reason: decisionReason,
           });
@@ -425,12 +444,15 @@ function ProductReviewDecisionForm({
       onDecided(response);
     } catch (writeError) {
       const apiError = writeError as LaunchplaneApiError;
+      if (apiError.code === "product_review_preview_changed" || apiError.code === "product_review_preview_unavailable") {
+        setStale(true);
+      }
       setFailure(
         apiError.statusCode === 403
           ? "Your decision was not recorded because you are not this product's Client."
           : apiError.statusCode === 409
             ? apiError.message
-            : "Your decision was not recorded. Try again in a moment.",
+            : "Your decision could not be confirmed. Try again in a moment.",
       );
     } finally {
       setBusy(false);
@@ -447,7 +469,7 @@ function ProductReviewDecisionForm({
         <textarea
           maxLength={4000}
           value={reason}
-          disabled={busy}
+          disabled={busy || stale}
           onChange={(event) => {
             setRecorded(false);
             setReason(event.target.value);
@@ -458,7 +480,7 @@ function ProductReviewDecisionForm({
         <button
           className="button button-primary"
           type="button"
-          disabled={busy}
+          disabled={busy || stale}
           onClick={() => void record("accepted")}
         >
           Accept
@@ -466,7 +488,7 @@ function ProductReviewDecisionForm({
         <button
           className="button"
           type="button"
-          disabled={busy || !reason.trim()}
+          disabled={busy || stale || !reason.trim()}
           onClick={() => void record("changes_requested")}
         >
           Request changes
@@ -474,6 +496,10 @@ function ProductReviewDecisionForm({
       </div>
       {busy ? <p className="owner-review-state" role="status">Recording…</p> : null}
       {failure ? <p className="owner-review-alert" role="alert">{failure}</p> : null}
+      {stale ? <button className="button" type="button" disabled={busy} onClick={async () => {
+        setBusy(true);
+        try { await onRefresh(); } finally { setBusy(false); }
+      }}>Refresh review</button> : null}
       {recorded ? <p className="owner-review-success" role="status">Decision recorded.</p> : null}
     </section>
   );

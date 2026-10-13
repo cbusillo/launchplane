@@ -1810,6 +1810,20 @@ new opening. The admin projection deliberately omits raw destination values,
 policy identities, outbox payloads, provider operation details, target URLs,
 and provider error text.
 
+Incident event, reminder, notification-attempt, and outbox delivery identifiers
+on these read surfaces are display references, purpose-separated HMACs backed
+by Launchplane's existing managed-secret bootstrap key. Matching event references
+remain consistent across summaries, observations, reminders and attempts. They
+are stable across reads, restarts and replicas sharing the same active key;
+rotating that key changes display references, so refresh an open incident view
+after rotation. Internal record keys, replay/deduplication and reminder anchors
+do not change. Diagnostic correlation uses the incident/observation, time and
+safe sink link, rather than treating a display reference as a storage key.
+Bearer-only and rehearsal services use the same managed-secret bootstrap setup
+documented in [secrets](secrets.md); missing or invalid keys return
+`503 incident_reference_unavailable` when a read needs a display reference,
+never an unkeyed hash or the stored identifier. Empty histories require no key.
+
 TLS observations reuse the same monitor run, record family, and incident
 lifecycle. For each active environment route binding, and each disabled binding on a Live product, Launchplane probes one
 TLS target per bound domain so primary names and aliases are recorded
@@ -2976,10 +2990,11 @@ context only, and `context_instance` has both context and instance.
   stopped, before web starts again, on every Odoo lane that is not production,
   previews included. A preview has no allowances of its own and never inherits
   its template lane's, so a `pre_live` setting copied into a preview is refused.
-  - Code owns the integration families in `control_plane/integration_readback.py`:
-    `shopify`, `printnode`, `fishbowl`, `repairshopr`, `cm_data`,
-    `outgoing_mail`, `incoming_mail`, `payment`, `mapbox`, `unsplash`, `tenor`
-    and `web_push`. An allowance under any other name has no effect.
+  - `INTEGRATION_FAMILIES` in `control_plane/integration_readback.py` owns the
+    integrations checked. An allowance under any other name has no effect.
+    Display-only map and media settings need no allowance and do not hold web
+    stopped; the runtime key-safety defaults follow the same boundary in
+    [secrets](secrets.md#runtime-key-safety-gates).
   - A setting passes when it is empty, or when the lane has an allowance for its
     integration. An active outgoing mail server whose host is the reserved name
     `invalid` never delivers, and a wire-transfer or demo payment provider

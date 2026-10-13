@@ -217,6 +217,11 @@ def build_launchplane_preview_generation_from_request(
         failed_at=request.failed_at,
         expires_at=request.expires_at,
         artifact_id=request.artifact_id,
+        source_build=existing_generation.source_build
+        if existing_generation is not None
+        and existing_generation.artifact_id == request.artifact_id
+        and existing_generation.anchor_summary.head_sha == request.anchor_head_sha
+        else None,
         baseline_release_tuple_id=request.baseline_release_tuple_id,
         source_map=request.source_map,
         companion_summaries=request.companion_summaries,

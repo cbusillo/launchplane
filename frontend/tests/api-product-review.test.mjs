@@ -43,6 +43,9 @@ test("Owner decision is sent with the session CSRF token to the product-review r
   await writeProductReviewDecision({
     repository: "example/tenant-site",
     pull_request: 42,
+    reviewed_head_sha: "a".repeat(40),
+    reviewed_preview_url: "https://preview.example.invalid/",
+    reviewed_generation_id: "generation-reviewed",
     decision: "changes_requested",
     reason: "The price is wrong.",
   });
@@ -60,6 +63,9 @@ test("Owner decision is sent with the session CSRF token to the product-review r
   assert.deepEqual(JSON.parse(calls[2].init.body), {
     repository: "example/tenant-site",
     pull_request: 42,
+    reviewed_head_sha: "a".repeat(40),
+    reviewed_preview_url: "https://preview.example.invalid/",
+    reviewed_generation_id: "generation-reviewed",
     decision: "changes_requested",
     reason: "The price is wrong.",
   });

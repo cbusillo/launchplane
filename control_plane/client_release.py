@@ -694,6 +694,48 @@ def read_client_release_step_views(
     return tuple(views)
 
 
+def _release_run_blocked_reason(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    views: tuple[ClientReleaseStepView, ...],
+) -> str:
+    """Explain known local blockers without recompiling a checklist or admitting work."""
+
+    if not decision.release_issue_url:
+        return "The release approval has not been published yet. This release cannot advance until its release record is published."
+    if not accepted_release_can_start(store, decision):
+        if decision.decision == "accepted" and profile.release_on_acceptance == "held":
+            return (
+                "Releases are on hold. This release cannot advance until an admin lifts the hold."
+            )
+        return "This decision no longer covers the product's release. The current Client and release decision must be reviewed before it can advance."
+    try:
+        production = release_version(store=store, profile=profile, instance="prod")
+        # A rejected hotfix rolls back even if testing has moved on.
+        if decision.release_start == "rollback":
+            return ""
+        candidate = release_version(store=store, profile=profile, instance="testing")
+    except (FileNotFoundError, ValueError):
+        return "The current release's lane records are unavailable. An admin must reconcile them before this release can advance."
+    if candidate != decision.checklist.candidate:
+        return "The testing version has changed since this release was accepted. The Client must review the current candidate before it can go live."
+    next_step = next(view for view in views if view.status != "pass")
+    expected_production = (
+        decision.checklist.candidate
+        if next_step.kind == "rollback"
+        else decision.checklist.production
+    )
+    # An admitted promotion/rollback may have updated production before settling.
+    if production != expected_production and not (
+        next_step.kind in {"promote", "rollback"}
+        and next_step.status in {"pending", "running"}
+        and production in (decision.checklist.production, decision.checklist.candidate)
+    ):
+        return "The production version has changed since this release was accepted. Its release evidence must be reviewed before it can advance."
+    return ""
+
+
 def read_client_release_run(
     *,
     store: object,
@@ -715,21 +757,30 @@ def read_client_release_run(
         state = "running"
     else:
         state = "waiting"
-    blocked_reason = ""
+    blocked_reason = (
+        _release_run_blocked_reason(store, profile, decision, views)
+        if state in {"waiting", "running"}
+        else ""
+    )
     from control_plane.service_deploy_drain import read_status
 
-    if state in {"waiting", "running"} and read_status(store).get("admission_paused"):
+    if (
+        not blocked_reason
+        and state in {"waiting", "running"}
+        and read_status(store).get("admission_paused")
+    ):
         blocked_reason = "Launchplane is draining admitted release steps before replacement. Pending steps will resume on the replacement worker."
-    if decision.release_start == "rollback" and state == "waiting":
+    if not blocked_reason and decision.release_start == "rollback" and state == "waiting":
         if rejection_rollback_target(store, profile) is None:
             blocked_reason = "No Client-accepted release has a passing production deployment to roll back to. An admin must roll back by hand."
-    elif profile.driver_id == "odoo" and state == "waiting":
+    elif not blocked_reason and profile.driver_id == "odoo" and state == "waiting":
         try:
             pin_odoo_release_recovery_target(store, decision, _prod_context(profile))
         except ValueError:
             blocked_reason = "No passing production deployment is available for recovery. An admin must reconcile the production record before this release can start."
     if (
-        profile.driver_id == "generic-web"
+        not blocked_reason
+        and profile.driver_id == "generic-web"
         and decision.release_start == "promote_with_rollback_drill"
         and state == "waiting"
     ):

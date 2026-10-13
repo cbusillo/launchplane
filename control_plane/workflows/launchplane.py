@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 import click
 
+from control_plane.contracts.artifact_identity import ArtifactSourceBuild
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane.contracts.github_pull_request_event import (
@@ -732,6 +733,7 @@ def build_preview_generation_record(
     failed_at: str = "",
     expires_at: str = "",
     artifact_id: str = "",
+    source_build: ArtifactSourceBuild | None = None,
     baseline_release_tuple_id: str = "",
     source_map: tuple[PreviewSourceRecord, ...] = (),
     companion_summaries: tuple[PreviewPullRequestSummary, ...] = (),
@@ -761,6 +763,7 @@ def build_preview_generation_record(
         expires_at=expires_at,
         resolved_manifest_fingerprint=resolved_manifest_fingerprint,
         artifact_id=artifact_id,
+        source_build=source_build,
         baseline_release_tuple_id=baseline_release_tuple_id,
         source_map=source_map,
         anchor_summary=PreviewPullRequestSummary(
@@ -904,6 +907,11 @@ def build_preview_generation_record_from_request(
         failed_at=request.failed_at,
         expires_at=request.expires_at,
         artifact_id=request.artifact_id,
+        source_build=existing_generation.source_build
+        if existing_generation is not None
+        and existing_generation.artifact_id == request.artifact_id
+        and existing_generation.anchor_summary.head_sha == request.anchor_head_sha
+        else None,
         baseline_release_tuple_id=request.baseline_release_tuple_id,
         source_map=request.source_map,
         companion_summaries=request.companion_summaries,
