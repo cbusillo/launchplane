@@ -5757,9 +5757,7 @@ def _build_engine(
     )
     if connect_args:
         engine_kwargs["connect_args"] = connect_args
-    engine = create_engine(database_url, **engine_kwargs)
-    event.listen(engine, "handle_error", _public_host_authority_error, retval=True)
-    return engine
+    return create_engine(database_url, **engine_kwargs)
 
 
 def _engine_connect_args(
@@ -5852,6 +5850,7 @@ class PostgresRecordStore(HumanSessionStore):
             postgres_connect_timeout_seconds=postgres_connect_timeout_seconds,
             postgres_statement_timeout_milliseconds=postgres_statement_timeout_milliseconds,
         )
+        event.listen(self._engine, "handle_error", _public_host_authority_error, retval=True)
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
         self._preview_lock_engine: Engine | None = None
         if self._engine.dialect.name == "postgresql":
