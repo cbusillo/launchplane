@@ -37,6 +37,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubStaleHeadError,
     UrllibMergeTrainGitHubTransport,
 )
+from control_plane.merge_train_stack_disposition import resolve_stack_child_disposition_label
 from control_plane.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecordStore,
     read_merge_train_stack_collapse_plan_record,
@@ -392,7 +393,7 @@ def _execute_land_mode(
             plan=collapse_existing_record.plan,
             disposition_client=github_client,
             root_merge_commit_sha=root_entry.merge_commit_sha,
-            label=repository_policy.stack_child_disposition_label,
+            label=resolve_stack_child_disposition_label(repository_policy),
             updated_at=recorded_at,
             checkpoint=(
                 lambda progress_plan: (
@@ -474,10 +475,7 @@ def _read_and_validate_stack_record(
         landing_plan=landing_plan,
         policy_sha256=policy_sha256,
     )
-    if not repository_policy.stack_child_disposition_label:
-        raise ValueError(
-            "merge train stack child disposition requires stack_child_disposition_label policy"
-        )
+    resolve_stack_child_disposition_label(repository_policy)
     return collapse_existing_record
 
 

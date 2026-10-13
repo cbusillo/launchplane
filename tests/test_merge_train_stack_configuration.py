@@ -1,6 +1,6 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
@@ -10,8 +10,10 @@ from control_plane.contracts.merge_train_batch import (
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
+from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
+from control_plane.merge_train_stack_disposition import DEFAULT_STACK_CHILD_DISPOSITION_LABEL
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.workflows.ship import utc_now_timestamp
 from tests.http_app_test_support import _post_merge_train_controller_run_once
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.support.auth import _StubVerifier
@@ -24,211 +26,237 @@ from tests.support.merge_train import (
 )
 
 
+class _LabelTransport:
+    def __init__(self) -> None:
+        self.labels: set[str] = set()
+        self.applied: dict[int, set[str]] = {}
+        self.preparation_unavailable = False
+        self.creation_denied = False
+        self.effects: list[str] = []
+
+    def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
+        if method == "GET" and "/labels/" in path:
+            if self.preparation_unavailable:
+                raise MergeTrainGitHubError("Label read unavailable", status_code=503)
+            label = path.rsplit("/", 1)[1]
+            if label not in self.labels:
+                raise MergeTrainGitHubError("Label missing", status_code=404)
+            return {"name": label}
+        if method == "POST" and "/issues/" in path and body is not None:
+            labels = cast(list[str], body["labels"])
+            if not set(labels) <= self.labels:
+                raise MergeTrainGitHubError("Label missing", status_code=422)
+            number = int(path.split("/issues/", 1)[1].split("/", 1)[0])
+            self.applied.setdefault(number, set()).update(labels)
+            self.effects.append("label")
+            return [{"name": label} for label in labels]
+        if method == "POST" and path.endswith("/labels") and body is not None:
+            if self.creation_denied:
+                raise MergeTrainGitHubError("Label creation denied", status_code=403)
+            self.labels.add(str(body["name"]))
+            self.effects.append("create-label")
+            return body
+        raise AssertionError(f"Unexpected provider request: {method} {path}")
+
+
 class StackDispositionConfigurationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_unlanded_stack_reports_policy_recovery_and_retries_without_effects(self) -> None:
-        await self._check_missing_configuration(landed=False)
+    def setUp(self) -> None:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = FilesystemRecordStore(state_dir=Path(temporary.name))
+        configured = build_test_merge_train_policy_record()
+        payload = configured.model_dump(mode="json")
+        payload["policy"]["policies"][0]["stack_child_disposition_label"] = ""
+        payload["policy_sha256"] = ""
+        self.policy = MergeTrainPolicyRecord.model_validate(payload)
+        self.store.write_merge_train_policy_record(self.policy)
+        self.transport = _LabelTransport()
+        transport = self.transport
 
-    async def test_landed_stack_reports_policy_recovery_and_preserves_completion(self) -> None:
-        await self._check_missing_configuration(landed=True)
+        class Client(_FakeMergeTrainGitHubClient):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(**kwargs)
+                self.transport = transport
+                self._effect_executor = None
 
-    async def test_policy_replacement_cannot_retire_stack_without_no_effect_proof(self) -> None:
-        await self._check_missing_configuration(landed=False, retirement_unavailable=True)
+            ensure_repository_label = GitHubMergeTrainClient.ensure_repository_label
+            _create_repository_label = GitHubMergeTrainClient._create_repository_label
+            add_pull_request_label = GitHubMergeTrainClient.add_pull_request_label
 
-    async def _check_missing_configuration(
-        self, *, landed: bool, retirement_unavailable: bool = False
-    ) -> None:
-        effects: list[str] = []
+            def pull_request_has_label(
+                self, *, pull_request_number: int, label: str, **_: Any
+            ) -> bool:
+                return label in transport.applied.get(pull_request_number, set())
 
-        class EffectRecordingClient(_FakeMergeTrainGitHubClient):
-            def land_batch_candidate(self, **kwargs: Any) -> MergeTrainBatchLandingPlan:
-                effects.append("merge")
-                return super().land_batch_candidate(**kwargs)
-
-            def merge_pull_request(self, **kwargs: Any) -> str:
-                effects.append("merge")
-                return super().merge_pull_request(**kwargs)
-
-            def merge_stack_child_into_parent(self, **kwargs: Any) -> str:
-                effects.append("collapse")
-                return super().merge_stack_child_into_parent(**kwargs)
-
-            def cleanup_batch_candidate_ref(self, **kwargs: Any) -> bool:
-                effects.append("cleanup")
-                return super().cleanup_batch_candidate_ref(**kwargs)
-
-            def close_pull_request(self, **kwargs: Any) -> None:
-                effects.append("close")
-                super().close_pull_request(**kwargs)
+            def find_pull_request_comment_url(self, **_: Any) -> str:
+                return ""
 
             def comment_pull_request(self, **kwargs: Any) -> str:
-                effects.append("comment")
+                transport.effects.append("comment")
                 return super().comment_pull_request(**kwargs)
 
-            def add_pull_request_label(self, **kwargs: Any) -> None:
-                effects.append("label")
-                super().add_pull_request_label(**kwargs)
+            def merge_stack_child_into_parent(self, **kwargs: Any) -> str:
+                transport.effects.append("collapse")
+                return super().merge_stack_child_into_parent(**kwargs)
 
-            @staticmethod
-            def verify_unlanded_batch(**kwargs: Any) -> tuple[str, str]:
-                if retirement_unavailable:
-                    raise MergeTrainGitHubStaleHeadError("Cannot prove the root is unlanded")
-                plan = kwargs["landing_plan"]
-                return plan.entries[0].expected_base_sha, "observed-base-tree"
+            def land_batch_candidate(self, **kwargs: Any) -> MergeTrainBatchLandingPlan:
+                transport.effects.append("land")
+                return super().land_batch_candidate(**kwargs)
 
-            def read_pull_request_head(self, **kwargs: Any) -> tuple[str, str]:
-                pr = self.read_pull_request_snapshot(**kwargs)
-                return pr.head_sha, "closed"
+        self.app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: self.store,
+        )
+        self.client_class = Client
+        for name, value in (
+            ("control_plane.http_app.resolve_merge_train_github_token", "token"),
+            ("control_plane.merge_train_controller_run_once.GitHubMergeTrainClient", Client),
+        ):
+            patcher = (
+                patch(name, return_value=value) if isinstance(value, str) else patch(name, value)
+            )
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
-        with TemporaryDirectory() as directory:
-            store = FilesystemRecordStore(state_dir=Path(directory))
-            configured = build_test_merge_train_policy_record()
-            policy = MergeTrainPolicyRecord.model_validate(
-                {
-                    **configured.model_dump(),
-                    "policy_sha256": "",
-                    "policy": {
-                        **configured.policy.model_dump(),
-                        "policies": [
-                            {
-                                **configured.policy.policies[0].model_dump(),
-                                "stack_child_disposition_label": "",
+    async def _run(self, *, collapsed: bool = False, mutate: bool = True) -> dict[str, Any]:
+        reader = (
+            _FakeCollapsedRootStackedMergeTrainSnapshotReader
+            if collapsed
+            else _FakeStackedMergeTrainSnapshotReader
+        )
+        with patch("control_plane.merge_train_github.GitHubMergeTrainSnapshotReader", reader):
+            response = await _post_merge_train_controller_run_once(
+                self.app,
+                {"repository": self.policy.policy.policies[0].repository, "mutate": mutate},
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        return cast(dict[str, Any], response.json()["result"])
+
+    async def _prepare_landing(self) -> None:
+        self.assertEqual((await self._run())["controller_action"], "plan_stack_collapse")
+        self.assertEqual((await self._run())["controller_action"], "execute_stack_collapse")
+        for _ in range(8):
+            result = await self._run(collapsed=True)
+            if result["controller_action"] == "plan_landing":
+                return
+        self.fail(f"Landing was not prepared: {result}")
+
+    async def test_empty_label_repository_lands_stack_with_use_time_default(self) -> None:
+        await self._prepare_landing()
+        result = await self._run(collapsed=True)
+        self.assertEqual(result["controller_action"], "land_batch")
+        self.assertEqual(result["stack_collapse_plan"]["status"], "ready_for_train")
+        self.assertEqual(self.transport.applied[2], {DEFAULT_STACK_CHILD_DISPOSITION_LABEL})
+        self.assertLess(
+            self.transport.effects.index("create-label"), self.transport.effects.index("collapse")
+        )
+        self.assertEqual(self.store.list_merge_train_policy_records()[0], self.policy)
+        self.assertEqual(self.policy.policy.policies[0].stack_child_disposition_label, "")
+
+    async def test_saved_stack_execution_bypasses_unavailable_preparation(self) -> None:
+        await self._run()
+        self.transport.preparation_unavailable = True
+        result = await self._run()
+        self.assertEqual(result["controller_action"], "execute_stack_collapse")
+        self.assertIn("collapse", self.transport.effects)
+
+    async def test_unlanded_stack_recovery_recreates_missing_label_at_disposition(self) -> None:
+        await self._prepare_landing()
+        self.transport.labels.clear()
+        self.transport.effects.clear()
+        with patch.object(
+            self.client_class,
+            "ensure_repository_label",
+            side_effect=AssertionError("Recovery must bypass new-stack preparation"),
+        ):
+            result = await self._run(collapsed=True)
+        self.assertEqual(result["stack_collapse_plan"]["status"], "ready_for_train")
+        self.assertEqual(self.transport.applied[2], {DEFAULT_STACK_CHILD_DISPOSITION_LABEL})
+        self.assertIn("create-label", self.transport.effects)
+        self.assertNotIn("collapse", self.transport.effects)
+
+    async def test_landed_stack_recovery_uses_default_without_new_preparation(self) -> None:
+        await self._prepare_landing()
+        landing = self.store.list_merge_train_batch_landing_plan_records()[0]
+        completed = build_merge_train_batch_landing_plan_record(
+            landing_plan=landing.landing_plan.model_copy(
+                update={
+                    "entries": tuple(
+                        entry.model_copy(
+                            update={
+                                "status": "merged",
+                                "merge_commit_sha": f"merge-{entry.pull_request_number}",
                             }
-                        ],
-                    },
+                        )
+                        for entry in landing.landing_plan.entries
+                    )
+                }
+            ),
+            source="test:interrupted-landed-stack",
+            updated_at=landing.updated_at,
+        )
+        self.store.write_merge_train_batch_landing_plan_record(completed)
+        state = self.store.list_merge_train_controller_state_records()[0]
+        self.store.write_merge_train_controller_state_record(
+            state.model_copy(
+                update={
+                    "status": "reconcile_required",
+                    "active_action": "land_batch",
+                    "active_phase": "landing_entry_merged",
+                    "active_record_id": landing.record_id,
+                    "reconciliation_status": "required",
                 }
             )
-            store.write_merge_train_policy_record(policy)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_merge_train_service_identity()),
-                authz_policy=_merge_train_service_policy(),
-                record_store_factory=lambda: store,
-            )
-            payload = {"repository": configured.policy.policies[0].repository, "mutate": True}
-            with (
-                patch(
-                    "control_plane.http_app.resolve_merge_train_github_token", return_value="token"
-                ),
-                patch(
-                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
-                    EffectRecordingClient,
-                ),
-            ):
-                with patch(
-                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
-                    _FakeStackedMergeTrainSnapshotReader,
-                ):
-                    for _ in range(2):
-                        response = await _post_merge_train_controller_run_once(app, payload)
-                        self.assertEqual(response.status_code, 202, response.text)
-                with patch(
-                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
-                    _FakeCollapsedRootStackedMergeTrainSnapshotReader,
-                ):
-                    for _ in range(4):
-                        response = await _post_merge_train_controller_run_once(app, payload)
-                        self.assertEqual(response.status_code, 202, response.text)
-                    self.assertEqual(response.json()["result"]["controller_action"], "plan_landing")
-                    landing = store.list_merge_train_batch_landing_plan_records()[0]
-                    if landed:
-                        completed = build_merge_train_batch_landing_plan_record(
-                            landing_plan=landing.landing_plan.model_copy(
-                                update={
-                                    "entries": tuple(
-                                        entry.model_copy(
-                                            update={
-                                                "status": "merged",
-                                                "merge_commit_sha": f"merge-{entry.pull_request_number}",
-                                            }
-                                        )
-                                        for entry in landing.landing_plan.entries
-                                    )
-                                }
-                            ),
-                            source="test:interrupted-landed-stack",
-                            updated_at=landing.updated_at,
-                        )
-                        store.write_merge_train_batch_landing_plan_record(completed)
-                        state = store.list_merge_train_controller_state_records()[0]
-                        store.write_merge_train_controller_state_record(
-                            state.model_copy(
-                                update={
-                                    "status": "reconcile_required",
-                                    "active_action": "land_batch",
-                                    "active_phase": "landing_entry_merged",
-                                    "active_record_id": landing.record_id,
-                                    "reconciliation_status": "required",
-                                }
-                            )
-                        )
-                    history = store.list_merge_train_batch_landing_plan_records()
-                    stack_history = store.list_merge_train_stack_collapse_plan_records()
-                    effects.clear()
-                    for mutate in (True, False, True):
-                        response = await _post_merge_train_controller_run_once(
-                            app, {**payload, "mutate": mutate}
-                        )
-                        self.assertEqual(response.status_code, 202, response.text)
-                        result = response.json()["result"]
-                        reason = (
-                            "completed_landing_stack_disposition_not_configured"
-                            if landed
-                            else "landing_stack_disposition_not_configured"
-                        )
-                        self.assertEqual(result["reason_code"], reason)
-                        self.assertEqual(result["controller_action"], "block")
-                        self.assertEqual(result["controller_reconciliation_status"], "required")
-                        self.assertTrue(result["details"]["stack_collapse_plan_record_ids"])
-                        self.assertEqual(
-                            result["details"]["recovery_action"], "privileged-policy-propose"
-                        )
-                        self.assertEqual(effects, [])
-                        self.assertEqual(
-                            store.list_merge_train_batch_landing_plan_records(), history
-                        )
-                        self.assertEqual(
-                            store.list_merge_train_stack_collapse_plan_records(), stack_history
-                        )
-                        self.assertEqual(store.list_merge_admission_records(), ())
-                    # Installing a reviewed replacement changes the digest. The
-                    # controller must honor that change rather than clearing the
-                    # old candidate's fence and merging on obsolete authority.
-                    configured = configured.model_copy(
-                        update={
-                            "record_id": "configured-disposition-policy",
-                            "updated_at": store.list_merge_train_controller_state_records()[
-                                0
-                            ].updated_at,
-                        }
+        )
+        self.transport.preparation_unavailable = True
+        self.transport.effects.clear()
+        self.assertEqual(
+            (await self._run(collapsed=True, mutate=False))["controller_action"],
+            "resume_reconciliation",
+        )
+        result = await self._run(collapsed=True)
+        self.assertEqual(result["stack_collapse_plan"]["status"], "ready_for_train")
+        self.assertNotIn("land", self.transport.effects)
+        self.assertNotIn("collapse", self.transport.effects)
+        self.assertEqual(self.transport.applied[2], {DEFAULT_STACK_CHILD_DISPOSITION_LABEL})
+
+    async def test_missing_prerequisite_refuses_before_any_stack_change(self) -> None:
+        for failure in ("read", "create"):
+            with self.subTest(failure=failure):
+                self.transport.preparation_unavailable = failure == "read"
+                self.transport.creation_denied = failure == "create"
+                for _ in range(2):
+                    result = await self._run()
+                    self.assertEqual(result["reason_code"], "stack_disposition_preparation_failed")
+                    self.assertEqual(result["controller_action"], "block")
+                    self.assertEqual(self.transport.effects, [])
+                    self.assertEqual(self.store.list_merge_train_stack_collapse_plan_records(), ())
+                    self.assertEqual(self.store.list_merge_train_batch_candidate_records(), ())
+                    self.assertEqual(self.store.list_merge_train_batch_landing_plan_records(), ())
+                    self.assertEqual(
+                        self.store.list_merge_train_controller_state_records()[0].status, "idle"
                     )
-                    store.write_merge_train_policy_record(configured)
-                    actions = []
-                    for _ in range(2):
-                        response = await _post_merge_train_controller_run_once(app, payload)
-                        if retirement_unavailable:
-                            self.assertEqual(response.status_code, 409, response.text)
-                            self.assertEqual(
-                                store.list_merge_train_batch_landing_plan_records(), history
-                            )
-                            self.assertEqual(
-                                store.list_merge_train_stack_collapse_plan_records(), stack_history
-                            )
-                            self.assertEqual(effects, [])
-                            return
-                        self.assertEqual(response.status_code, 202, response.text)
-                        result = response.json()["result"]
-                        actions.append(result["controller_action"])
-                        if result.get("stack_collapse_plan", {}).get("status") == "ready_for_train":
-                            break
-                    if landed:
-                        self.assertEqual(
-                            result.get("stack_collapse_plan", {}).get("status"),
-                            "ready_for_train",
-                            actions,
-                        )
-                    else:
-                        self.assertEqual(actions, ["retire_stale_landing", "block"])
-                        self.assertEqual(
-                            result["blocking_reason"]["code"],
-                            "merge_train_stack_collapse_policy_changed",
-                        )
-                    self.assertNotIn("merge", effects)
+        self.transport.creation_denied = False
+        self.assertEqual((await self._run())["controller_action"], "plan_stack_collapse")
+
+    async def test_dry_run_missing_label_names_preparation_without_writes(self) -> None:
+        result = await self._run(mutate=False)
+        self.assertEqual(result["reason_code"], "stack_disposition_label_creation_required")
+        self.assertEqual(self.transport.effects, [])
+        self.assertEqual(self.store.list_merge_train_stack_collapse_plan_records(), ())
+
+    async def test_default_label_collision_refuses_without_stack_effects(self) -> None:
+        payload = self.policy.model_dump(mode="json")
+        payload["record_id"] = "collision-policy"
+        payload["updated_at"] = utc_now_timestamp()
+        payload["policy"]["policies"][0]["blocked_label"] = DEFAULT_STACK_CHILD_DISPOSITION_LABEL
+        payload["policy_sha256"] = ""
+        self.policy = MergeTrainPolicyRecord.model_validate(payload)
+        self.store.write_merge_train_policy_record(self.policy)
+        result = await self._run()
+        self.assertEqual(
+            result["reason_code"], "stack_disposition_label_conflicts_with_train_label"
+        )
+        self.assertEqual(self.transport.effects, [])
+        self.assertEqual(self.store.list_merge_train_stack_collapse_plan_records(), ())
