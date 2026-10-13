@@ -11,6 +11,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 
 import click
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.generic_web_testing_exclusion import (
     GenericWebTestingExclusionResponse,
@@ -292,7 +293,7 @@ def inspect_generic_web_testing_exclusion(
                 response.execution = TestingExclusionFacet(
                     state="excluded", code="proved", complete=True, count=len(reservations)
                 )
-            except (ValueError, RuntimeError):
+            except (ValueError, RuntimeError, SQLAlchemyError, OSError):
                 response.execution = TestingExclusionFacet(code="execution_ownership_unproved")
         try:
             host, token = dokploy_source.read_dokploy_config(control_plane_root=root)
@@ -326,9 +327,14 @@ def inspect_generic_web_testing_exclusion(
         try:
             after = read_target()
             # Compare privately; provider env/source contents never leave here.
+            if before is not None and before != after:
+                response.provider_target = TestingExclusionFacet(code="binding_changed")
+                response.execution = TestingExclusionFacet(code="binding_changed")
+        except (click.ClickException, OSError, ValueError):
+            response.provider_target = TestingExclusionFacet(code="provider_read_unavailable")
+        try:
             if (
-                before != after
-                or _bind(store, product, context, instance) != bindings
+                _bind(store, product, context, instance) != bindings
                 or _target_reservations(
                     store,
                     product=product,
@@ -340,13 +346,14 @@ def inspect_generic_web_testing_exclusion(
             ):
                 response.provider_target = TestingExclusionFacet(code="binding_changed")
                 response.execution = TestingExclusionFacet(code="binding_changed")
-            if check is not None:
-                check()
-        except RuntimeError:
-            response.execution = TestingExclusionFacet(code="execution_lock_lost")
         except (click.ClickException, OSError, ValueError, FileNotFoundError):
             response.provider_target = TestingExclusionFacet(code="binding_changed")
             response.execution = TestingExclusionFacet(code="binding_changed")
+        if check is not None:
+            try:
+                check()
+            except (RuntimeError, SQLAlchemyError, OSError):
+                response.execution = TestingExclusionFacet(code="execution_lock_lost")
         if all(
             facet.code == "proved"
             for facet in (

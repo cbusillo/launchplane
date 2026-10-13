@@ -15,6 +15,11 @@ from control_plane.contracts.generic_web_testing_exclusion import (  # noqa: E40
 )
 
 
+def _unavailable() -> int:
+    print(json.dumps({"status": "unknown", "code": "testing_exclusion_read_unavailable"}))
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--operator-helper", type=Path, required=True)
@@ -58,12 +63,14 @@ def main() -> int:
         print(json.dumps(public, sort_keys=True))
         return 0 if result.status == "excluded" else 1
     except urllib.error.HTTPError as error:
-        helper["emit_http_error_payload"](operation=operation, request=request, exc=error)
+        try:
+            helper["emit_http_error_payload"](operation=operation, request=request, exc=error)
+        except Exception:
+            return _unavailable()
         return 1
     except Exception:
         # Never print transport/provider text, settings or an invalid envelope.
-        print(json.dumps({"status": "unknown", "code": "testing_exclusion_read_unavailable"}))
-        return 1
+        return _unavailable()
 
 
 if __name__ == "__main__":

@@ -3,10 +3,15 @@ import io
 import json
 from pathlib import Path
 import unittest
+from contextlib import contextmanager
+from collections.abc import Iterator, Callable
+import urllib.error
+from email.message import Message
 from unittest.mock import patch
 
 import click
 from pydantic import ValidationError
+from sqlalchemy.exc import OperationalError
 
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 from control_plane.contracts.generic_web_testing_exclusion import (
@@ -130,10 +135,56 @@ class GenericWebTestingExclusionTests(unittest.IsolatedAsyncioTestCase):
             "untitled historical deploy",
         ):
             self.assertNotIn(private, result.text)
-        paths = {call.kwargs["path"] for call in self.fixture.read_mock.call_args_list}
-        self.assertEqual(
-            paths, {"/api/deployment.allByType", "/api/deployment.queueList", "/api/schedule.list"}
-        )
+
+    def test_target_read_failures_preserve_independent_execution_and_inventory_evidence(
+        self,
+    ) -> None:
+        for before, after in (
+            (click.ClickException("private provider failure"), self.fixture.payload),
+            (self.fixture.payload, click.ClickException("private provider failure")),
+            (click.ClickException("first failure"), click.ClickException("second failure")),
+        ):
+            with (
+                self.subTest(before=type(before).__name__, after=type(after).__name__),
+                patch(
+                    "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                    side_effect=[before, after],
+                ),
+            ):
+                result = self.inspect()
+            self.assertEqual(result.provider_target.code, "provider_read_unavailable")
+            self.assertEqual(result.execution.state, "excluded")
+            self.assertTrue(result.deployments.complete)
+            self.assertTrue(result.queue.complete)
+            self.assertTrue(result.schedules.complete)
+            self.assertEqual(result.status, "unknown")
+
+    def test_lost_advisory_connection_keeps_provider_observations_but_never_exclusion(self) -> None:
+        original = self.store.testing_replacement_execution_lock
+
+        @contextmanager
+        def lock(name: str) -> Iterator[Callable[[], None]]:
+            with original(name) as check:
+                assert check is not None
+                called = False
+
+                def failing_check() -> None:
+                    nonlocal called
+                    if called:
+                        raise OperationalError(
+                            "select 1", None, RuntimeError("private database failure")
+                        )
+                    called = True
+                    check()
+
+                yield failing_check
+
+        with patch.object(self.store, "testing_replacement_execution_lock", side_effect=lock):
+            result = self.inspect()
+        self.assertEqual(result.execution.code, "execution_lock_lost")
+        self.assertTrue(result.deployments.complete)
+        self.assertTrue(result.queue.complete)
+        self.assertEqual(result.status, "unknown")
 
     def test_missing_hold_does_not_establish_sustained_exclusion(self) -> None:
         self.hold(False)
@@ -268,7 +319,7 @@ class GenericWebTestingExclusionTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(edit=edit), self.assertRaises(ValidationError):
                 GenericWebTestingExclusionResponse.model_validate(payload | edit)
 
-    def test_consumer_outputs_bound_observation_and_unknown_without_raw_payloads(self) -> None:
+    def test_consumer_outputs_bound_observation_and_rejects_a_valid_wrong_lane(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "exclusion_consumer",
             Path(__file__).parents[1] / "scripts/read-generic-web-testing-exclusion.py",
@@ -309,10 +360,30 @@ class GenericWebTestingExclusionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(code, 0 if expected == "excluded" else 1)
                 self.assertEqual(json.loads(output.getvalue()), payload)
                 self.assertNotIn("private-token", output.getvalue())
+        payload["product"] = "another-product"
+        payload["status"] = "excluded"
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "read",
+                    "--operator-helper",
+                    "helper.py",
+                    "--product",
+                    self.product,
+                    "--context",
+                    self.context,
+                ],
+            ),
+            patch.object(module.runpy, "run_path", return_value=helper),
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            self.assertEqual(module.main(), 1)
+        self.assertEqual(json.loads(output.getvalue())["status"], "unknown")
 
 
 class TestingExclusionConsumerTests(unittest.TestCase):
-    def test_consumer_uses_only_maintained_get_and_rejects_wrong_lane(self) -> None:
+    def test_consumer_uses_only_maintained_get_and_rejects_malformed_response(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "exclusion_consumer",
             Path(__file__).parents[1] / "scripts/read-generic-web-testing-exclusion.py",
@@ -357,3 +428,57 @@ class TestingExclusionConsumerTests(unittest.TestCase):
         self.assertEqual(
             calls[0]["query"], {"product": "site", "context": "lane", "instance": "testing"}
         )
+
+    def test_missing_or_failing_error_projector_remains_unknown_without_traceback(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "exclusion_consumer",
+            Path(__file__).parents[1] / "scripts/read-generic-web-testing-exclusion.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        def read(**_: object) -> object:
+            error = urllib.error.HTTPError(
+                "https://service.test",
+                503,
+                "private provider failure",
+                Message(),
+                io.BytesIO(b"private provider body"),
+            )
+            self.addCleanup(error.close)
+            raise error
+
+        helper = {
+            "public_identifier": lambda value: value,
+            "prepare_operator_settings": lambda **_: {
+                "service_url": "https://service.test",
+                "token": "private-token",
+            },
+            "request_launchplane_read": read,
+        }
+        for projector in (
+            None,
+            lambda **_: (_ for _ in ()).throw(ValueError("private parser failure")),
+        ):
+            if projector is not None:
+                helper["emit_http_error_payload"] = projector
+            with (
+                patch(
+                    "sys.argv",
+                    [
+                        "read",
+                        "--operator-helper",
+                        "helper.py",
+                        "--product",
+                        "site",
+                        "--context",
+                        "lane",
+                    ],
+                ),
+                patch.object(module.runpy, "run_path", return_value=helper),
+                patch("sys.stdout", new_callable=io.StringIO) as output,
+            ):
+                self.assertEqual(module.main(), 1)
+            self.assertEqual(json.loads(output.getvalue())["status"], "unknown")
+            self.assertNotIn("private", output.getvalue())
