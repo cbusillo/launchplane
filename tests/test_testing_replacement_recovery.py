@@ -1,6 +1,7 @@
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from inspect import signature
 from pathlib import Path
 import json
 from tempfile import TemporaryDirectory
@@ -101,6 +102,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             )
             getattr(store, "write_deployment_record")(deployment)
             fenced = self.fence(store)
+            default_method = signature(api.dokploy_request).parameters["method"].default
             for schedule_status, enabled, expected_history, expected_timer in (
                 ("done", False, "terminal", "disabled"),
                 ("running", False, "active", "disabled"),
@@ -115,7 +117,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                     calls: list[str] = []
 
                     def read(**kwargs: object) -> api.JsonValue:
-                        self.assertNotIn("method", kwargs)
+                        self.assertEqual(kwargs.get("method", default_method), "GET")
                         self.assertGreater(float(cast(float, kwargs["timeout_seconds"])), 0)
                         self.assertLessEqual(float(cast(float, kwargs["timeout_seconds"])), 5)
                         path = str(kwargs["path"])
