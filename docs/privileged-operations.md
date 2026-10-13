@@ -502,8 +502,9 @@ existing completion/adoption path, including after lease expiry. This typed
 rejection is the only new expired-reservation adoption path. Generic executor
 failures do not gain that permission, and completion/adoption mismatches retain
 their reconciliation fence and report that reconciliation is still required.
-See [provider delivery inspection](provider-delivery-inspection.md) for the
-expectation's governed write boundary.
+The retired inspection records remain described in
+[Records](records.md#provider-delivery-inspection); no provider inspection
+orchestration remains.
 
 ## Legacy Re-encryption Route
 

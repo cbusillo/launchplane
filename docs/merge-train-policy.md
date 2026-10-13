@@ -363,7 +363,7 @@ Each repository policy contains:
   bytes and digests and supplies no ordinary readiness capability. Only the
   governed `managed-merge-train-policy-import` lifecycle may change its effective
   active projection, including removal. It is separate from authorization
-  policy schema 3; see [provider delivery inspection](provider-delivery-inspection.md).
+  policy schema 3; see [retained inspection records](records.md#provider-delivery-inspection).
 - `failure_policy`: Whether Launchplane pauses the whole train or continues
   after marking the blocked pull request.
 - `enqueue`: Requirements for who may enqueue. Human authority remains role-based

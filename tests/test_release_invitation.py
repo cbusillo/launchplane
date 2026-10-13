@@ -49,6 +49,7 @@ from control_plane.release_invitation import (
     release_request_issue_marker,
 )
 from control_plane.release_review import ReleaseReviewStore, build_release_review
+from control_plane.client_release import advance_client_releases
 from control_plane.release_invitation_changes import (
     ReleaseInvitationNotesUnavailable,
     ReleaseInvitationProvenanceUnavailable,
@@ -533,6 +534,21 @@ class ReleaseInvitationTests(unittest.TestCase):
 
     def test_incomplete_or_inconsistent_historical_provenance_refuses_delivery(self) -> None:
         record = self.seed_historical_batch()
+        assert self.review.checklist is not None
+
+        def review_batch() -> ReleaseReviewStatus:
+            assert self.review.checklist is not None
+            with patch(
+                "control_plane.release_review.read_release_changes",
+                return_value=(self.review.checklist.items, ()),
+            ):
+                return build_release_review(
+                    store=cast(ReleaseReviewStore, self.store),
+                    profile=self.profile,
+                    read=github_read,
+                )
+
+        expected_review = review_batch()
         historical = record.historical_completion
         assert historical is not None
         observed = historical.provider_evidence
@@ -563,6 +579,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         ):
             with self.subTest(change=change):
                 self.persist_historical_batch(record.model_copy(update=change))
+                self.assertEqual(review_batch(), expected_review)
                 with self.assertRaisesRegex(
                     ReleaseInvitationProvenanceUnavailable, "example/site#99"
                 ):
@@ -644,6 +661,61 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertIn("pull/43", self.comments[0]["body"])
         self.assertIn("pull/44", self.comments[0]["body"])
         self.assertNotIn("@site-owner", self.comments[0]["body"])
+
+    def test_missing_batch_notes_are_visible_after_restart_and_recover_without_duplicate_ping(
+        self,
+    ) -> None:
+        batch = self.seed_train_batch()
+        broken = batch.model_copy(update={"owner_test_notes": "### #41 Engineering\nNo check."})
+
+        def read_batch(item: ReleaseReviewItem) -> ReleaseReviewStatus:
+            with patch(
+                "control_plane.release_review.read_release_changes", return_value=((item,), ())
+            ):
+                return build_release_review(
+                    store=cast(ReleaseReviewStore, self.store),
+                    profile=self.profile,
+                    read=github_read,
+                )
+
+        self.review = read_batch(broken)
+        digest = self.review.checklist_digest
+        self.assertTrue(self.review.checklist_complete)
+        self.assertFalse(self.review.approved)
+        self.assertIn(
+            f"{self.profile.repository}#{batch.pull_request_number}",
+            self.review.invitation_notes_error,
+        )
+        self.assertIn("#43", self.review.invitation_notes_error)
+        self.assertNotIn(self.review.invitation_notes_error, self.review.blockers)
+        backoff = ReleaseInvitationBackoff()
+        with self.assertLogs("control_plane.client_release", level="WARNING") as logs:
+            for _ in range(3):
+                advance_client_releases(
+                    store=self.store, control_plane_root=self.root, invitation_backoff=backoff
+                )
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn(self.review.invitation_notes_error, logs.output[0])
+        self.assertEqual(self.posts, [])
+        self.store.close()
+        self.store = PostgresRecordStore(
+            database_url=f"sqlite+pysqlite:///{self.root / 'state.sqlite3'}"
+        )
+        self.addCleanup(self.store.close)
+        restarted = read_batch(broken)
+        self.assertEqual(restarted.invitation_notes_error, self.review.invitation_notes_error)
+        self.assertEqual(restarted.checklist_digest, digest)
+
+        self.review = read_batch(batch)
+        self.assertFalse(self.review.invitation_notes_error)
+        self.assertNotIn("invitation_notes_error", self.review.model_dump(mode="json"))
+        self.publish(ReleaseInvitationBackoff())
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 1)
+        self.assertIn("#43", self.comments[0]["body"])
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product), ()
+        )
 
     def test_batch_note_example_cannot_replace_another_features_name_or_notes(self) -> None:
         batch = self.seed_train_batch(two_features=True)

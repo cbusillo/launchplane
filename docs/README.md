@@ -78,7 +78,6 @@ not describe runtime authority until it is implemented, deployed, and activated.
   baseline, Docker credential isolation, and readiness contract.
 - [runner-host-hygiene.md](runner-host-hygiene.md) — report-only shared runner
   host hygiene evidence, budgets, and future apply boundary.
-- [provider-delivery-inspection.md](provider-delivery-inspection.md) — RETIRED, scheduled for deletion; see DIRECTION.md.
 - [agent-context-boundary.md](agent-context-boundary.md) — public-safe agent
   context, caller profiles, scoped intent, redaction, and provenance boundary.
 - [`agent-operator-contract.md`](agent-operator-contract.md) — generated,
@@ -93,6 +92,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   compatibility boundary for retired acceptance history.
 - [release-review.md](release-review.md) — Client checklist decisions for production
   promotion, revision changes, and recorded admin overrides.
+- [mediaforce-releases.md](mediaforce-releases.md) — source-side macOS release
+  adapter, host fencing/evidence contract, and separate activation prerequisites.
 - [`owner-control-channel.md`](owner-control-channel.md) — public canonical admin
   challenge payloads, cross-host conformance artifact, and deferred runtime boundary.
 - [privileged-operations.md](privileged-operations.md) — typed human-governed
