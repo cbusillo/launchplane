@@ -368,6 +368,7 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
             app = self._app(store, root, "product_config.plan", "product_config.apply")
 
             dry_run = await self._post(app, _payload())
+            self.assertEqual(dry_run.status_code, 202, dry_run.text)
             digest = dry_run.json()["result"]["plan_sha256"]
             missing_key = await self._post(app, _payload(mode="apply", reviewed_plan_sha256=digest))
             apply_payload = _payload(mode="apply", reviewed_plan_sha256=digest)
@@ -429,6 +430,12 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             headers = {"Authorization": "Bearer local-operator-token"}
+            read = await http_request(
+                app,
+                "GET",
+                f"{TESTING_HOLD_ROUTE}?product={_PRODUCT}&context={_CONTEXT}&instance=testing",
+                headers=headers,
+            )
             hold = await http_request(
                 app, "POST", TESTING_HOLD_APPLY_ROUTE, headers=headers, payload=_payload()
             )
@@ -454,6 +461,7 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(_read_hold(store))
             self.assertEqual(store.list_product_reconcile_requests(), ())
 
+        self.assertEqual(read.status_code, 200, read.text)
         self.assertEqual(hold.status_code, 202, hold.text)
         self.assertEqual(lift.status_code, 202, lift.text)
         self.assertEqual(denied_apply.status_code, 403, denied_apply.text)
@@ -502,6 +510,82 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prod_read.json()["error"]["code"], "testing_hold_not_testing_lane")
         self.assertEqual(invalid.status_code, 400)
         self.assertNotIn("hunter2", invalid.text)
+
+    async def test_refuses_foreign_and_ambiguously_owned_lanes(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            app = self._app(store, root, "product_config.plan", "product_config.apply")
+            profile = store.read_product_profile_record(_PRODUCT)
+            dry_run = await self._post(app, _payload())
+            self.assertEqual(dry_run.status_code, 202, dry_run.text)
+            before = store.read_dokploy_target_record(
+                context_name=_CONTEXT, instance_name="testing"
+            )
+            for retains_lane in (False, True):
+                with self.subTest(retains_lane=retains_lane):
+                    store.write_product_profile_record(
+                        profile.model_copy(update={"lanes": profile.lanes if retains_lane else ()})
+                    )
+                    store.write_product_profile_record(
+                        profile.model_copy(update={"product": "other-product"})
+                    )
+                    read = await self._get(app)
+                    plan = await self._post(app, _payload())
+                    apply = await self._post(
+                        app,
+                        _payload(
+                            mode="apply",
+                            reviewed_plan_sha256=dry_run.json()["result"]["plan_sha256"],
+                        ),
+                        idempotency_key=f"foreign-hold-{retains_lane}",
+                    )
+                    for response in (read, plan, apply):
+                        self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(
+                        store.read_dokploy_target_record(
+                            context_name=_CONTEXT, instance_name="testing"
+                        ),
+                        before,
+                    )
+                    self.assertEqual(store.list_product_reconcile_requests(), ())
+
+    async def test_changed_target_refuses_the_reviewed_apply(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            app = self._app(store, root, "product_config.plan", "product_config.apply")
+            dry_run = await self._post(app, _payload())
+            self.assertEqual(dry_run.status_code, 202, dry_run.text)
+            before = store.read_dokploy_target_record(
+                context_name=_CONTEXT, instance_name="testing"
+            )
+            changed = before.model_copy(update={"target_name": "replacement-testing"})
+            store.write_dokploy_target_record(changed)
+            response = await self._post(
+                app,
+                _payload(
+                    mode="apply", reviewed_plan_sha256=dry_run.json()["result"]["plan_sha256"]
+                ),
+                idempotency_key="stale-hold",
+            )
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["error"]["code"], "stale")
+            self.assertEqual(
+                store.read_dokploy_target_record(context_name=_CONTEXT, instance_name="testing"),
+                changed,
+            )
+            self.assertEqual(store.list_product_reconcile_requests(), ())
+
+
+class GenericWebTestingHoldRouteTests(TestingHoldRouteTests):
+    """The same hold lifecycle and safety boundaries apply without an Odoo driver."""
+
+    def _store(self, root: Path) -> PostgresRecordStore:
+        store = super()._store(root)
+        profile = store.read_product_profile_record(_PRODUCT)
+        store.write_product_profile_record(profile.model_copy(update={"driver_id": "generic-web"}))
+        return store
 
 
 if __name__ == "__main__":

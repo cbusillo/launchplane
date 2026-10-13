@@ -1005,7 +1005,6 @@ _TESTING_HOLD_MAX_BODY_BYTES = 8 * 1024
 _TESTING_HOLD_DENIED_MESSAGE = (
     "Workflow cannot read or change the testing hold for the requested product/context."
 )
-_TESTING_HOLD_NOT_FOUND_MESSAGE = "Odoo product lane was not found for the requested testing hold."
 _PRODUCT_OWNER_SETTING_MAX_BODY_BYTES = 16 * 1024
 _SECRET_REENCRYPT_MAX_BODY_BYTES = 64 * 1024
 _TENANT_REPOSITORY_CLASSIFICATION_MAX_BODY_BYTES = 64 * 1024
@@ -8545,6 +8544,26 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    def _require_testing_hold_lane(
+        *, record_store: object, product: str, context: str, instance: str, trace_id: str
+    ) -> None:
+        # The hold is target policy, independent of the product's deploy driver.
+        try:
+            control_plane_product_config_service.resolve_product_config_profile(
+                cast(control_plane_product_config_service.ProductConfigProfileReader, record_store),
+                product=product,
+                context=context,
+                instance=instance,
+            )
+        except control_plane_product_config.ProductConfigError as error:
+            profile_error = control_plane_product_config_service.product_config_service_error(error)
+            raise _launchplane_http_error(
+                status_code=profile_error.status_code,
+                trace_id=trace_id,
+                code=profile_error.code,
+                message=profile_error.message,
+            ) from error
+
     async def read_testing_hold(
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
@@ -8573,13 +8592,12 @@ def create_launchplane_fastapi_app(
             denied_message=_TESTING_HOLD_DENIED_MESSAGE,
             read_action="product_environment.read",
         )
-        _require_lane_product_config_lane(
+        _require_testing_hold_lane(
             record_store=record_store,
             product=product,
             context=context,
             instance=instance,
             trace_id=trace_id,
-            not_found_message=_TESTING_HOLD_NOT_FOUND_MESSAGE,
         )
         try:
             result = control_plane_testing_lane_hold.read_testing_hold(
@@ -8660,13 +8678,12 @@ def create_launchplane_fastapi_app(
                 code="local_operator_lane_scope_required",
                 message="The Director's agent can set a testing hold but not lift one.",
             )
-        _require_lane_product_config_lane(
+        _require_testing_hold_lane(
             record_store=record_store,
             product=hold_request.product,
             context=hold_request.context,
             instance=hold_request.instance,
             trace_id=trace_id,
-            not_found_message=_TESTING_HOLD_NOT_FOUND_MESSAGE,
         )
         typed_store = cast(control_plane_testing_lane_hold.TestingHoldStore, record_store)
         actor = launchplane_identity_actor(identity)
