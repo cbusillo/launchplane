@@ -2,6 +2,46 @@ import { expect, test } from "@playwright/test";
 import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
 import { RELEASE_PROGRESS_REFRESH_MS } from "../../src/OwnerReleaseReviewRoute";
 
+test("Identical testing and production preserve the completed run without decision controls @responsive", async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const fixtures = await import(modulePath);
+    return fixtures.releaseReviewForFixture("products");
+  });
+  response.review.checklist.production = { ...response.review.checklist.candidate };
+  response.review.checklist.items = [];
+  response.review.checklist.shared_sources = [];
+  response.review = { ...response.review, required: false, approved: false, no_new_release: true, blockers: [] };
+  response.release_run = {
+    decision_record_id: "completed-release", rollback_drill: false, state: "passed", blocked_reason: "",
+    steps: [{ step: "promote-1", kind: "promote", status: "pass", operation_id: "completed-promotion", failure: null }],
+  };
+  const writes: string[] = [];
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.route("**/v1/release-review/decisions", route => {
+    writes.push(route.request().method());
+    return route.fulfill({ status: 409, json: {} });
+  });
+  await page.goto("/ui/owner-review?product=example-site");
+  await expect(page.getByRole("heading", { name: "No new release to accept" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Release progress" })).toContainText("Release progress: Live");
+  await expect(page.getByRole("button", { name: "Accept release" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Request changes", exact: true })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("no-new-release-client.png"), fullPage: true });
+  response.viewer_is_owner = false;
+  response.can_override = true;
+  response.can_start_temporary_hotfix = true;
+  await page.reload();
+  for (const name of ["Record admin approval override", "Ship temporary hotfix now", "Ask site-owner to review now"]) {
+    await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
+  }
+  expect(writes).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
 test("Preview-era note markers identify each PR only in the engineering view", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();

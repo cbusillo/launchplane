@@ -157,6 +157,11 @@ class ReleaseReviewStatus(BaseModel):
 
     required: bool = True
     approved: bool = False
+    no_new_release: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     checklist_complete: bool | None = Field(
         default=None,
         exclude_if=lambda value: value is None,

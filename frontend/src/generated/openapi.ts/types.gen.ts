@@ -4410,6 +4410,7 @@ export type ReleaseReviewStatus = {
     checklist_complete?: boolean | null;
     checklist_digest: string;
     latest_decision: ReleaseReviewDecisionRecord | null;
+    no_new_release?: boolean;
     required: boolean;
     unavailable_reason: 'testing_lane_missing' | 'source_control_access_unavailable' | 'production_identity_missing' | 'candidate_identity_missing' | 'release_record_missing' | 'github_read_failed' | null;
 };

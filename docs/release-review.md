@@ -8,6 +8,18 @@ testing site and the **`Client test notes`** from every merged pull request in t
 commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
 
+When production and testing have the same complete recorded release identity
+(artifact, source commit and shared inputs), the review returns
+`no_new_release: true`, `required: false` and `approved: false`, with an empty
+checklist and no approval blocker. This is not a new acceptance. The Client page
+says there is no new release to accept, keeps the previous release-run evidence,
+and offers no decision controls. The decision endpoint refuses an empty release
+with `no_new_release`; the promotion approval gate also refuses it. An unchanged
+production redeploy uses the existing direct-redeploy path. A different artifact
+or shared input still needs its own exact-checklist review, even when the website
+repository commit is unchanged. Live temporary hotfixes keep their saved checklist
+for the Client to accept or reject after deployment.
+
 Checklist compilation replaces links to preview hostnames (including hosts in
 the product's retained preview records) and per-PR `/ui/owner-review` pages with
 the fixed line `Check this on the testing site.`. Other notes and links remain;

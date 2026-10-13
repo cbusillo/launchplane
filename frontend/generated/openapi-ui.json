@@ -34842,6 +34842,12 @@
               }
             ]
           },
+          "no_new_release": {
+            "default": false,
+            "title": "No New Release",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
+          },
           "required": {
             "default": true,
             "title": "Required",

@@ -300,6 +300,15 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         promotions = self.store.list_promotion_records()
         self.assertEqual(promotions[0].backup_record_id, backup.backup_record_id)
         self.assertEqual(promotions[0].destination_health.status, "pass")
+        completed_review = self.review()
+        self.assertTrue(completed_review.no_new_release)
+        self.assertFalse(completed_review.required)
+        self.assertFalse(completed_review.approved)
+        self.assertEqual(completed_review.blockers, ())
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product),
+            (accepted,),
+        )
 
     def test_generic_web_drills_once_with_two_backups_and_the_reviewed_passing_target(self) -> None:
         from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
@@ -377,6 +386,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         assert run is not None
         self.assertEqual(run.state, "passed", run.model_dump())
         self.assertTrue(all(step.status == "pass" for step in run.steps))
+        self.assertTrue(self.review().no_new_release)
         self.assertEqual(self.advance(), ())
         self.assertEqual(
             self.provider.deployed_artifacts,
