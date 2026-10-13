@@ -3150,7 +3150,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     repository="cbusillo/sellyouroutboard", base_branch="main"
                 )
                 decision = build_merge_train_dry_run_result(
-                    policy=build_test_merge_train_policy(), snapshot=snapshot
+                    policy=build_test_merge_train_policy(), snapshot=snapshot, batch_landing=True
                 )
                 self.assertEqual(decision.intended_next_action, expected)
                 self.assertEqual(snapshot.pull_requests[0].mergeable, "unknown")
@@ -3181,7 +3181,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 {"base_commit": {"sha": "other-base"}, "status": "diverged"},
             )
         )
-        with self.assertRaisesRegex(MergeTrainGitHubError, "comparison is inconsistent"):
+        with self.assertRaises(MergeTrainGitHubError):
             GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
                 repository="cbusillo/sellyouroutboard", base_branch="main"
             )

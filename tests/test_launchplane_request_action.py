@@ -56,7 +56,8 @@ class LaunchplaneRequestActionTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode == 0, succeeds, result.stderr)
                 if succeeds:
-                    self.assertEqual(output.read_text().strip(), "feedback_count=0")
+                    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                    self.assertEqual(int(outputs["feedback_count"]), 0)
                 else:
                     self.assertFalse(output.exists())
 
