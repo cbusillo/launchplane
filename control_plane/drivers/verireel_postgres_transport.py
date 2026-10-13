@@ -49,18 +49,21 @@ from control_plane.workflows.verireel_preview_driver import (
 
 
 class _PreviewRefreshSerializationStore(Protocol):
-    def serialize_preview_refresh(self, *, preview_id: str) -> ContextManager[None]: ...
+    def serialize_preview_refresh(
+        self, *, preview_id: str, dedicated: bool = False
+    ) -> ContextManager[None]: ...
 
 
 def _preview_refresh_serialization(
-    *, record_store: object, preview_id: str
+    *, record_store: object, preview_id: str, dedicated: bool = False
 ) -> ContextManager[None]:
     serialize = getattr(record_store, "serialize_preview_refresh", None)
     if not callable(serialize):
         return nullcontext()
-    return cast(_PreviewRefreshSerializationStore, record_store).serialize_preview_refresh(
-        preview_id=preview_id
-    )
+    store = cast(_PreviewRefreshSerializationStore, record_store)
+    if dedicated:
+        return store.serialize_preview_refresh(preview_id=preview_id, dedicated=True)
+    return store.serialize_preview_refresh(preview_id=preview_id)
 
 
 class VeriReelRouteDependencyError(ValueError):

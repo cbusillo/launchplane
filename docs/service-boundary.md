@@ -1892,7 +1892,10 @@ changes observed during discovery also block cleanup. Generate a fresh plan afte
 such a refusal; report-only requests retain their original saved-plan projection.
 The same checks cover the sweep's discovery-to-cleanup interval. The lock remains
 held through provider deletion and terminal preview recording, including the
-canonical preview lock used by driver-owned transport refreshes.
+canonical preview identity lock shared with refresh. Generic-web refresh retains
+that lock through provider work and generation evidence recording; cleanup takes
+it before the provider-operation locks, so it cannot validate an old record in
+the interval after a refresh deploys but before its evidence is committed.
 
 
 `POST /v1/previews/lifecycle-sweep` derives enabled preview profiles from

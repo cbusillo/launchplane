@@ -1,7 +1,6 @@
-from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ContextManager
+from typing import Any
 
 import click
 
@@ -13,7 +12,11 @@ from control_plane.contracts.preview_lifecycle_cleanup_record import (
 from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_mutation_request import PreviewDestroyMutationRequest
-from control_plane.launchplane_mutations import apply_launchplane_destroy_preview
+from control_plane.launchplane_mutations import (
+    apply_launchplane_destroy_preview,
+    resolve_launchplane_preview_id,
+)
+from control_plane.drivers.verireel_postgres_transport import _preview_refresh_serialization
 from control_plane.workflows.launchplane import find_preview_record
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyRequest,
@@ -237,24 +240,19 @@ def _build_generic_web_cleanup_record(
     failed_slugs: list[str] = []
     blocked_slugs: list[str] = []
     for preview_slug, anchor_pr_number in parsed_previews:
-        with serialize_generic_web_preview_operation(
-            record_store=record_store, profile=profile, preview_slug=preview_slug
+        preview_id = resolve_launchplane_preview_id(
+            context=plan.context,
+            anchor_repo=anchor_repo,
+            anchor_pr_number=anchor_pr_number,
+        )
+        # Refresh holds this identity lock until its generation evidence is saved.
+        # Take it before the provider locks to keep the same order as refresh.
+        with _preview_refresh_serialization(
+            record_store=record_store, preview_id=preview_id, dedicated=True
         ):
-            preview = find_preview_record(
-                record_store=record_store,
-                context_name=plan.context,
-                anchor_repo=anchor_repo,
-                anchor_pr_number=anchor_pr_number,
-            )
-            serialize = getattr(record_store, "serialize_preview_refresh", None)
-            driver_scope: ContextManager[None] = nullcontext()
-            if (
-                preview is not None
-                and callable(serialize)
-                and profile.preview.data_transport_mode == "driver"
+            with serialize_generic_web_preview_operation(
+                record_store=record_store, profile=profile, preview_slug=preview_slug
             ):
-                driver_scope = serialize(preview_id=preview.preview_id)
-            with driver_scope:
                 error = _orphan_preflight(
                     plan=plan,
                     profile=profile,

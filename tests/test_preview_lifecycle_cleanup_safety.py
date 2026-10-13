@@ -1,6 +1,8 @@
 """Saved cleanup intent cannot delete a reopened or replaced preview."""
 
 import unittest
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +16,7 @@ from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecycleDesiredPreview,
     PreviewLifecyclePlanRecord,
 )
+from control_plane import generic_web_preview_http as preview_http
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.preview_lifecycle_cleanup_routes import (
@@ -23,6 +26,8 @@ from control_plane.preview_lifecycle_cleanup_routes import (
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyResult,
+    GenericWebPreviewRefreshRequest,
+    GenericWebPreviewRefreshResult,
     GenericWebPreviewInventoryItem,
     GenericWebPreviewInventoryResult,
 )
@@ -236,6 +241,111 @@ class PreviewCleanupSafetyTests(unittest.TestCase):
             self.assertEqual(store.read_preview_record(preview.preview_id).state, "destroyed")
             destroy.assert_called_once()
             self.assertEqual(held, [])
+
+    def test_cleanup_waits_for_refresh_evidence_before_checking_replacement(self) -> None:
+        profile = _profile().model_copy(
+            update={
+                "preview": _profile().preview.model_copy(update={"slug_template": "pr-{number}"}),
+            }
+        )
+        writing = threading.Event()
+        release = threading.Event()
+        cleanup_progress = threading.Event()
+        locks: dict[str, threading.RLock] = {}
+
+        class SerializedStore(FilesystemRecordStore):
+            @contextmanager
+            def serialize_preview_refresh(
+                self, *, preview_id: str, **_kwargs: Any
+            ) -> Iterator[None]:
+                lock = locks.setdefault(preview_id, threading.RLock())
+                if not lock.acquire(blocking=False):
+                    if threading.current_thread().name.startswith("cleanup"):
+                        cleanup_progress.set()
+                    lock.acquire()
+                try:
+                    yield
+                finally:
+                    lock.release()
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, preview, plan = saved_fixture(root, profile)
+            store = SerializedStore(root / "state")
+            replacement = preview.model_copy(
+                update={
+                    "updated_at": (
+                        datetime.fromisoformat(plan.planned_at) + timedelta(seconds=1)
+                    ).isoformat(),
+                    "serving_generation_id": "replacement-generation",
+                }
+            )
+            result = GenericWebPreviewRefreshResult(
+                refresh_status="pass",
+                refresh_started_at=plan.planned_at,
+                refresh_finished_at=replacement.updated_at,
+                product=profile.product,
+                context=profile.preview.context,
+                preview_slug="pr-42",
+                application_name="fixture-pr-42",
+                preview_url=preview.canonical_url,
+            )
+
+            def write_evidence(**_kwargs: Any) -> dict[str, object]:
+                writing.set()
+                if not release.wait(5):
+                    raise TimeoutError("fixture did not release evidence writer")
+                store.write_preview_record(replacement)
+                return {}
+
+            with (
+                patch(
+                    "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh",
+                    return_value=result,
+                ),
+                patch(
+                    "control_plane.generic_web_preview_http._apply_generic_web_preview_refresh_records",
+                    side_effect=write_evidence,
+                ),
+                patch(
+                    WORKFLOW + "discover_generic_web_preview_desired_state",
+                    return_value=desired(profile),
+                ),
+                patch(
+                    WORKFLOW + "_execute_generic_web_preview_destroy_unserialized",
+                    return_value=destroyed(profile),
+                ) as destroy,
+                ThreadPoolExecutor(max_workers=1, thread_name_prefix="refresh") as refresh_worker,
+                ThreadPoolExecutor(max_workers=1, thread_name_prefix="cleanup") as cleanup_worker,
+            ):
+                refreshing = refresh_worker.submit(
+                    preview_http.apply_generic_web_preview_refresh_result,
+                    control_plane_root=root,
+                    record_store=store,
+                    profile=profile,
+                    request=preview_http.GenericWebPreviewRefreshEnvelope(
+                        product=profile.product,
+                        refresh=GenericWebPreviewRefreshRequest(
+                            product=profile.product,
+                            anchor_pr_number=42,
+                            preview_slug="pr-42",
+                            preview_url=preview.canonical_url,
+                            image_reference="ghcr.io/example/fixture:sha-fixture",
+                        ),
+                    ),
+                )
+                try:
+                    self.assertTrue(writing.wait(5))
+                    cleaning = cleanup_worker.submit(cleanup, root, store, plan, profile)
+                    cleaning.add_done_callback(lambda _future: cleanup_progress.set())
+                    self.assertTrue(cleanup_progress.wait(5))
+                    destroy.assert_not_called()
+                finally:
+                    release.set()
+                refreshing.result(timeout=5)
+                self.assertEqual(cleaning.result(timeout=5).status, "blocked")
+                destroy.assert_not_called()
+                self.assertEqual(store.read_preview_record(preview.preview_id), replacement)
 
     def test_sweep_rechecks_reopen_and_generation_movement_after_discovery(self) -> None:
         profile = _profile().model_copy(
