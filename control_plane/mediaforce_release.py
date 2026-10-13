@@ -33,7 +33,8 @@ from control_plane.provider_operations import (
     run_durable_provider_operation,
 )
 from control_plane.release_review import checklist_digest
-from control_plane.client_release import names_director
+from control_plane.durable_operation_authorization import read_active_authz_policy_record
+from control_plane.service_auth import authz_policy_allows_immutable_github_id_administration
 from control_plane.storage.postgres import PostgresRecordStore
 
 MEDIAFORCE_RELEASE_REQUEST_ROUTE = "/v1/mediaforce-release-requests"
@@ -91,6 +92,15 @@ class MediaforceReleaseAuthority:
         if self.resolve_plan(plan.request) != plan:
             raise MediaforceReleaseNotReady("The recorded release inputs changed.")
 
+    def _standing_director(self, decision: ReleaseReviewDecisionRecord) -> bool:
+        try:
+            policy = read_active_authz_policy_record(self.store).policy
+        except (LookupError, TypeError):
+            return False
+        return authz_policy_allows_immutable_github_id_administration(
+            policy=policy, github_id=int(decision.actor_github_id)
+        )
+
     def acceptance(self, plan: MediaforceReleasePlan) -> ReleaseReviewDecisionRecord:
         self.verify_plan(plan)
         profile = self.store.read_product_profile_record(plan.request.product)
@@ -120,7 +130,7 @@ class MediaforceReleaseAuthority:
                 decision.acceptance_source == "director_standing"
                 and (
                     profile.release_on_acceptance != "director_standing"
-                    or not names_director(self.store, decision)
+                    or not self._standing_director(decision)
                 )
             )
         ):
@@ -158,9 +168,19 @@ def request_mediaforce_release(
     trace_id: str,
 ) -> DurableProviderOperationResult:
     """Record intent only; neither acceptance nor a host mutation is supplied."""
-    plan = authority.resolve_plan(request)
-    if plan.request != request:
-        raise ValueError("Resolved release inputs must match the requested product and commit.")
+    existing = authority.store.read_idempotency_record(
+        scope=requester_scope,
+        route_path=MEDIAFORCE_RELEASE_REQUEST_ROUTE,
+        idempotency_key=idempotency_key,
+    )
+    if existing is not None:
+        intent = authority.store.read_original_mutation_intent(existing)
+        plan = MediaforceReleasePlan.model_validate(intent.get("plan"))
+    else:
+        plan = authority.resolve_plan(request)
+        if plan.request != request:
+            raise ValueError("Resolved release inputs must match the requested product and commit.")
+        intent = {"product": request.product, "plan": plan.model_dump(mode="json")}
     return run_durable_provider_operation(
         store=authority.store,
         scope=requester_scope,
@@ -170,7 +190,7 @@ def request_mediaforce_release(
         lease_owner=trace_id,
         response_trace_id=trace_id,
         adapter=_RequestAdapter(plan),
-        original_intent={"product": request.product, "plan": plan.model_dump(mode="json")},
+        original_intent=intent,
     )
 
 
@@ -203,7 +223,9 @@ class MediaforceReleaseAdapter:
             or receipt.observed_at < fence.observed_at
             or (
                 fresh
-                and not timedelta(0) <= self.now() - receipt.observed_at <= timedelta(seconds=30)
+                and not -timedelta(seconds=5)
+                <= self.now() - receipt.observed_at
+                <= timedelta(seconds=30)
             )
         ):
             raise ProviderMutationUnknownError(

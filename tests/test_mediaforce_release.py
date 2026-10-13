@@ -17,6 +17,8 @@ from control_plane.contracts.mediaforce_release import (
     MediaforceRuntime,
     MediaforceRuntimeCheck,
 )
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.mediaforce_release import (
     MEDIAFORCE_RELEASE_EXECUTION_ROUTE,
     MediaforceReleaseAdapter,
@@ -407,6 +409,77 @@ class MediaforceReleaseTests(unittest.TestCase):
     def test_no_recorded_request_cannot_start_worker(self) -> None:
         with self.assertRaises(MediaforceReleaseNotReady):
             self.run_release()
+
+    def test_standing_director_acceptance_uses_immutable_admin_id(self) -> None:
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"release_on_acceptance": "director_standing"})
+        )
+        self.store.write_release_review_decision_record(
+            self.decision.model_copy(update={"acceptance_source": "director_standing"})
+        )
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "github_humans": [
+                    {
+                        "github_ids": [int(self.decision.actor_github_id)],
+                        "roles": ["admin"],
+                        "actions": ["authz_policy_grant.write"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                    }
+                ],
+            }
+        )
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="active-admin-policy",
+                source="test",
+                updated_at=self.decision.decided_at,
+                policy=policy,
+            )
+        )
+        self.assertEqual(self.run_record().status, "passed")
+
+    def test_standing_director_requires_current_admin_policy(self) -> None:
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"release_on_acceptance": "director_standing"})
+        )
+        self.store.write_release_review_decision_record(
+            self.decision.model_copy(update={"acceptance_source": "director_standing"})
+        )
+        self.request_release()
+        with self.assertRaises(MediaforceReleaseNotReady):
+            self.run_release()
+        self.assertEqual(self.host.events, [])
+
+    def test_small_host_clock_skew_does_not_hold_a_valid_release(self) -> None:
+        self.host.evidence_age = -timedelta(milliseconds=1)
+        self.assertEqual(self.run_record().status, "passed")
+
+    def test_unbounded_future_host_evidence_keeps_admissions_held(self) -> None:
+        self.host.evidence_age = -timedelta(minutes=1)
+        self.request_release()
+        result = self.run_release()
+        self.assertEqual(getattr(result, "status"), "reconcile_required")
+        self.assertNotIn("finish", self.host.events)
+
+    def test_request_replay_does_not_depend_on_live_resolver(self) -> None:
+        self.request_release()
+        resolver = unittest.mock.Mock(side_effect=ValueError("source temporarily unavailable"))
+        authority = MediaforceReleaseAuthority(self.store, resolver)
+        result = request_mediaforce_release(
+            authority=authority,
+            request=self.request,
+            idempotency_key="request-1",
+            requester_scope="agent:read-request",
+            trace_id="replay",
+        )
+        self.assertEqual(result.status, "replayed")
+        self.assertEqual(
+            MediaforceReleasePlan.model_validate(result.response_payload["plan"]), self.plan
+        )
+        resolver.assert_not_called()
 
     def test_worker_preserves_original_intent_in_durable_store(self) -> None:
         self.request_release()

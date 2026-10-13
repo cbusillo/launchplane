@@ -39,6 +39,8 @@ The host boundary must:
 2. Report fresh quiescence under that fence: the five Mediaforce database work
    domains, full/prefix scan jobs, pending publishing, publishing locks, remote
    worker custody and quiesced producers. Queued folder children count as work.
+   Receipts may be at most 30 seconds old, allowing up to 5 seconds of forward
+   clock skew between the host and worker; larger future timestamps remain unknown.
    Stale nonterminal scan rows require Mediaforce's supported reconciliation;
    Launchplane never repairs them from a count or guesses that a dead process
    means the row is safe. The read-only `/api/release/work` payload alone is
