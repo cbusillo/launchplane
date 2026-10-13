@@ -204,14 +204,30 @@ def register_release_review_routes(
         )
 
     def release_run(
-        store: object, profile: LaunchplaneProductProfileRecord
+        store: object,
+        profile: LaunchplaneProductProfileRecord,
+        review: ReleaseReviewStatus,
+        *,
+        reviewing_hotfix: bool,
     ) -> ClientReleaseRunView | None:
         latest = cast(ReleaseReviewStore, store).list_release_review_decision_records(
             product=profile.product, limit=1
         )
         if not latest:
             return None
-        return read_client_release_run(store=store, profile=profile, decision=latest[0])
+        decision = latest[0]
+        if not reviewing_hotfix and decision != review.latest_decision:
+            checklist = review.checklist
+            # A completed release changes the production side of the checklist's
+            # digest. Keep its progress only while both lanes carry its candidate;
+            # a new testing invitation must never inherit that historical run.
+            if (
+                checklist is None
+                or checklist.candidate != decision.checklist.candidate
+                or checklist.production != checklist.candidate
+            ):
+                return None
+        return read_client_release_run(store=store, profile=profile, decision=decision)
 
     def response(
         store: object,
@@ -259,7 +275,7 @@ def register_release_review_routes(
             release_on_acceptance=release_start_for_acceptance(store=store, profile=profile)
             or "held",
             live_site_url=prod_lane.base_url if prod_lane is not None else "",
-            release_run=release_run(store, profile),
+            release_run=release_run(store, profile, review, reviewing_hotfix=hotfix is not None),
             can_start_temporary_hotfix=director,
             reviewing_temporary_hotfix=hotfix is not None,
         )
@@ -459,7 +475,9 @@ def register_release_review_routes(
             blockers += (RELEASE_RECORD_PENDING,)
         return current.model_copy(
             update={
-                "release_run": release_run(record_store, profile),
+                "release_run": read_client_release_run(
+                    store=record_store, profile=profile, decision=decision
+                ),
                 "review": review.model_copy(
                     update={
                         "latest_decision": decision,

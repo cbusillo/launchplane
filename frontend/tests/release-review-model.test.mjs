@@ -15,7 +15,7 @@ function item(number, notes) {
   };
 }
 
-test("groups identical test notes, keeps missing notes separate, and collapses nothing-to-test changes", () => {
+test("keeps a separate check per PR and collapses nothing-to-test changes", () => {
   const framework = "Click around the testing site and confirm pages load.";
   const grouped = groupReleaseItems([
     item(1, "Nothing for the Client to test. CI only."),
@@ -28,8 +28,8 @@ test("groups identical test notes, keeps missing notes separate, and collapses n
   ]);
 
   assert.deepEqual(
-    grouped.checks.map(check => [check.notes, check.items.map(entry => entry.pull_request_number)]),
-    [[framework, [2, 4]], ["", [3]], ["", [6]]],
+    grouped.checks.map(entry => entry.pull_request_number),
+    [2, 3, 4, 6],
   );
   assert.deepEqual(grouped.nothingToTest.map(entry => entry.pull_request_number), [1, 5, 7]);
 });
@@ -45,5 +45,5 @@ test("invalid engineering-only notes remain visible as a check", () => {
   const invalid = { ...item(9, "Nothing for the Client to test:"), client_test_notes_error: "A reason is required." };
   const grouped = groupReleaseItems([invalid]);
   assert.deepEqual(grouped.nothingToTest, []);
-  assert.deepEqual(grouped.checks[0].items, [invalid]);
+  assert.deepEqual(grouped.checks, [invalid]);
 });

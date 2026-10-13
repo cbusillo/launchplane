@@ -150,14 +150,16 @@ uv run python -m control_plane.release_invitation --product example-site --candi
 It prints the issue and comment markers and makes no service or GitHub request.
 
 The review leads with the product, the viewer's role, the
-testing-site link, and **What to test**. Pull requests with identical
-`Client test notes` appear as one check listing each change it covers, and a change missing
-notes appears as its own check. Changes with valid `Nothing for the Client to test: <reason>` notes collapse
+testing-site link, and **What to test**. Each pull request appears as its own
+check headed by its title linked to the pull request, with Markdown-formatted
+Client test notes. Raw HTML is omitted; note links use HTTP or HTTPS and images
+show their alternative text without fetching external resources.
+Changes with valid `Nothing for the Client to test: <reason>` notes collapse
 into one expandable count. The reason must be nonempty, and a change carrying
 the product's review label cannot use that declaration. Invalid or missing
 notes stay visible and block Client acceptance, including shared-repository
 changes. Real test notes also request the change's preview review without a
-label; see [Client review](owner-acceptance.md). This grouping
+label; see [Client review](owner-acceptance.md). This presentation
 is display only: the checklist, its digest, and blockers remain per pull request. A collapsed **Technical details**
 section identifies the **Current production version** and **Proposed production
 version** (currently in testing). Accepting records approval for that proposed
@@ -249,6 +251,13 @@ same decision ID, including recovery when GitHub accepted a write whose response
 was lost. Repeating the product's newest published decision records nothing new,
 so a second Accept never replaces the acceptance a running release depends on. GitHub issue contents and membership never decide release contents or
 approval; the saved Launchplane decision remains authoritative.
+The published record describes the saved decision's `release_start`, rather than
+recomputing its effect from current Client settings: promotion, promotion with
+the rollback drill, hotfix rollback, or no production release. Acceptance with
+no saved start records approval only; requests for changes withdraw approval,
+and admin overrides do not start a release. These statements describe the
+recorded action, not proof that its operations completed. Publication retries
+preserve existing historical issue bodies, including older wording.
 Publishers of the same saved decision serialize lookup, issue creation and the
 stored URL acknowledgement with a per-decision storage lock. After waiting, a
 publisher reads the saved decision again and reuses its authoritative URL. The
@@ -785,7 +794,11 @@ this worker, and record fresh acceptance if such a release was stopped.
 
 The review page says before the Accept button whether accepting puts the
 version on the live site, naming it, or whether releases are held. After
-acceptance it shows each step's status. A stopped step also shows its bounded,
+acceptance it shows each step's status. Progress belongs to the reviewed release:
+a new testing candidate does not show an earlier release's completed steps.
+The just-completed release remains visible while testing and production both
+carry its candidate, and an active temporary hotfix retains its own progress.
+A stopped step also shows its bounded,
 redacted recorded reason and code. Expand **Failure details** for the failure
 record, operation and recorded trace IDs. Cancellation can replace an operation's
 saved trace with the cancellation request's trace. A missing saved trace says **Not
