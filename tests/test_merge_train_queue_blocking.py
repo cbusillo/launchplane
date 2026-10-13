@@ -2,7 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
@@ -19,7 +19,6 @@ from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceEnvelope,
     _apply_queue_block,
 )
-from control_plane.ordinary_agent_merge_train_client import _NoAmbientTransport
 from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
@@ -236,17 +235,20 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         lease = MergeTrainControllerLeaseContext(record=record)
+        transport = Mock()
+        transport.request.side_effect = AssertionError("bound history must not call the provider")
         result = _apply_queue_block(
             request=MergeTrainControllerRunOnceEnvelope(
                 repository=snapshot.repository, mutate=True
             ),
             dry_run_result=intent,
-            github_client=GitHubMergeTrainClient(transport=_NoAmbientTransport()),
+            github_client=GitHubMergeTrainClient(transport=transport),
             lease=lease,
         )
         self.assertEqual(result["controller_action"], "block")
         self.assertEqual(result["mode"], "dry-run")
         self.assertNotIn("block_result", result)
+        transport.request.assert_not_called()
 
 
 class BlockLabelTests(unittest.TestCase):

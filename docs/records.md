@@ -71,6 +71,10 @@ Enrollment recovery has been removed. Retained delivery ciphertext still
 participates in managed-secret key retirement, so the privileged-operation
 worker keeps its bounded expiry maintenance until storage deletion under #2437.
 History remains readable; no enrollment or delegated execution is enabled.
+The retired delivery controller, provider transports, token minting, custody
+orchestration, qualification executor, and readiness orchestration are removed.
+Their storage contracts and methods remain for the next retirement layer;
+native merge-train records retain their historical finite-job bindings.
 
 ### Provider Delivery Inspection
 
@@ -95,8 +99,8 @@ pacing without replacing an unexpired conclusive ready observation.
 Recovery uses expected state/revision and current database time, preserves
 unknown custody until its conservative expiry, and cannot let a stale finisher
 overwrite a newer result. The store retains terminal audit history and adds no
-automatic deletion. See [provider delivery inspection](provider-delivery-inspection.md)
-for publication deadlines, charging, guarded consumers and runtime prerequisites.
+automatic deletion. Provider inspection orchestration and token minting are
+removed; these storage records remain only until the next retirement layer.
 
 ## Schema Migrations
 

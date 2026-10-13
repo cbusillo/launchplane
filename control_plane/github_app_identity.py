@@ -85,14 +85,6 @@ _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS: dict[str, dict[str, str]] = {
     "comment_pull_request": {"metadata": "read", "pull_requests": "write"},
     "label_pull_request": {"metadata": "read", "pull_requests": "write"},
 }
-_ORDINARY_AGENT_INSTALLATION_PERMISSION_CEILING = dict(
-    permission.split(":", 1) for permission in ordinary_agent_enrollment_permissions()
-)
-_PROVIDER_DELIVERY_INSPECTION_PERMISSION_CEILING = {
-    "administration": "write",
-    "contents": "read",
-    "metadata": "read",
-}
 
 GitHubApiRequest = Callable[..., object]
 
@@ -104,7 +96,6 @@ __all__ = [
     "GitHubAppPermissionError",
     "GitHubAppIdentity",
     "GitHubAppInstallationToken",
-    "GitHubAppInstallationInspection",
     "mint_build_provenance_installation_token",
     "mint_source_control_read_installation_token",
     "mint_delivery_installation_token",
@@ -112,12 +103,9 @@ __all__ = [
     "mint_repository_installation_token",
     "mint_merge_train_installation_token",
     "mint_pull_request_feedback_installation_token",
-    "mint_ordinary_agent_installation_token",
-    "mint_provider_delivery_inspection_token",
     "ordinary_agent_effect_permissions",
     "ordinary_agent_enrollment_effect_profiles",
     "ordinary_agent_enrollment_permissions",
-    "inspect_ordinary_agent_github_app_installation",
     "revoke_installation_token",
     "revoke_installation_token_value",
 ]
@@ -150,23 +138,6 @@ class GitHubAppInstallationToken:
     repository: str
     expires_at: str
     permissions: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class GitHubAppInstallationInspection:
-    """App installation evidence bound to a DB-inventory repository identity.
-
-    ``repository_id`` and ``repository`` are validated caller inputs, not fields
-    returned by the App-JWT installation endpoint. App, installation, account,
-    and permission values are provider-observed.
-    """
-
-    app_id: int
-    installation_id: int
-    repository_id: int
-    repository_owner_id: int
-    repository: str
-    permissions: tuple[str, ...]
 
 
 def resolve_advisory_github_app_identity(*, control_plane_root: Path) -> GitHubAppIdentity:
@@ -348,73 +319,6 @@ def mint_merge_train_installation_token(
     )
 
 
-def mint_ordinary_agent_installation_token(
-    *,
-    identity: GitHubAppIdentity,
-    repository: str,
-    repository_id: str,
-    effect_profile: str,
-    api_request: GitHubApiRequest = github_api_request,
-    now: datetime | None = None,
-    before_token_mint: Callable[[int, int], None] | None = None,
-) -> GitHubAppInstallationToken:
-    ceiling = _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS.get(effect_profile)
-    if ceiling is None:
-        raise GitHubAppIdentityError("Ordinary-agent GitHub effect profile is unsupported.")
-    requested = {key: value for key, value in ceiling.items() if key != "metadata"}
-    return _mint_repository_installation_token(
-        identity=identity,
-        repository=repository,
-        repository_id=repository_id,
-        requested_permissions=requested,
-        required_installation_permissions=_ORDINARY_AGENT_INSTALLATION_PERMISSION_CEILING,
-        allowed_installation_permissions=_ORDINARY_AGENT_INSTALLATION_PERMISSION_CEILING,
-        allowed_token_permissions=ceiling,
-        identity_label="Ordinary-agent GitHub App",
-        permission_boundary_label="selected profile",
-        api_request=api_request,
-        now=now,
-        before_token_mint=before_token_mint,
-        # The mandatory JWT-authenticated installation lookup verifies this
-        # managed key against identity.app_id and requires the same app_id in
-        # its response. A separate /app request supplies no additional proof.
-        confirm_app_identity_endpoint=False,
-    )
-
-
-def mint_provider_delivery_inspection_token(
-    *,
-    identity: GitHubAppIdentity,
-    repository: str,
-    repository_id: str,
-    repository_owner_id: str,
-    api_request: GitHubApiRequest = github_api_request,
-    now: datetime | None = None,
-    before_token_mint: Callable[[int, int], None] | None = None,
-    validation_error_revoke_api_request: GitHubApiRequest | None = None,
-) -> GitHubAppInstallationToken:
-    """Mint one exact-repository token for the separate inspection App."""
-    return _mint_repository_installation_token(
-        identity=identity,
-        repository=repository,
-        repository_id=repository_id,
-        repository_owner_id=repository_owner_id,
-        requested_permissions={
-            "administration": "write",
-            "contents": "read",
-        },
-        required_installation_permissions=_PROVIDER_DELIVERY_INSPECTION_PERMISSION_CEILING,
-        allowed_installation_permissions=_PROVIDER_DELIVERY_INSPECTION_PERMISSION_CEILING,
-        allowed_token_permissions=_PROVIDER_DELIVERY_INSPECTION_PERMISSION_CEILING,
-        identity_label="Provider-delivery inspection GitHub App",
-        permission_boundary_label="provider-delivery inspection",
-        api_request=api_request,
-        now=now,
-        before_token_mint=before_token_mint,
-        validation_error_revoke_api_request=validation_error_revoke_api_request,
-    )
-
-
 def ordinary_agent_effect_permissions(effect_profile: str) -> tuple[str, ...]:
     ceiling = _ORDINARY_AGENT_EFFECT_PERMISSION_CEILINGS.get(effect_profile)
     if ceiling is None:
@@ -423,128 +327,6 @@ def ordinary_agent_effect_permissions(effect_profile: str) -> tuple[str, ...]:
         f"{permission}:{access}"
         for permission, access in sorted(ceiling.items())
         if permission != "metadata"
-    )
-
-
-def inspect_ordinary_agent_github_app_installation(
-    *,
-    identity: GitHubAppIdentity,
-    repository: str,
-    repository_id: str,
-    repository_owner_id: str,
-    api_request: GitHubApiRequest = github_api_request,
-    now: datetime | None = None,
-) -> GitHubAppInstallationInspection:
-    """Inspect an App installation without minting a repository token."""
-    normalized_repository = repository.strip()
-    if normalized_repository.count("/") != 1:
-        raise GitHubAppIdentityError("GitHub App repository must use owner/name.")
-    owner, repo = normalized_repository.split("/", 1)
-    if (
-        not owner
-        or not repo
-        or not repository_id.isdecimal()
-        or int(repository_id) < 1
-        or not repository_owner_id.isdecimal()
-        or int(repository_owner_id) < 1
-    ):
-        raise GitHubAppIdentityError("GitHub App repository identity is invalid.")
-    issued_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    try:
-        app_jwt = jwt.encode(
-            {
-                "iat": int((issued_at - timedelta(seconds=60)).timestamp()),
-                "exp": int((issued_at + timedelta(minutes=8)).timestamp()),
-                "iss": str(identity.app_id),
-            },
-            identity.private_key,
-            algorithm="RS256",
-        )
-    except jwt.PyJWTError as error:
-        raise GitHubAppIdentityError("Ordinary-agent GitHub App private key is invalid.") from error
-    app_payload = json_object(
-        _github_api_request(api_request, path="/app", token=app_jwt),
-        "GitHub App identity response",
-        error_type=GitHubAppIdentityError,
-    )
-    if (
-        required_positive_int(
-            app_payload.get("id"),
-            "GitHub App identity response requires id.",
-            error_type=GitHubAppIdentityError,
-        )
-        != identity.app_id
-    ):
-        raise GitHubAppIdentityError("GitHub App identity does not match configured app id.")
-    numeric_repository_id = int(repository_id)
-    numeric_repository_owner_id = int(repository_owner_id)
-    installation_payload = json_object(
-        _github_api_request(
-            api_request,
-            path=f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/installation",
-            token=app_jwt,
-        ),
-        "GitHub App installation response",
-        error_type=GitHubAppIdentityError,
-    )
-    account_payload = json_object(
-        installation_payload.get("account"),
-        "GitHub App installation account",
-        error_type=GitHubAppIdentityError,
-    )
-    if (
-        required_positive_int(
-            account_payload.get("id"),
-            "GitHub App installation account requires id.",
-            error_type=GitHubAppIdentityError,
-        )
-        != numeric_repository_owner_id
-        or required_string_text(
-            account_payload.get("login"),
-            "GitHub App installation account requires login.",
-            error_type=GitHubAppIdentityError,
-        ).casefold()
-        != owner.casefold()
-    ):
-        raise GitHubAppIdentityError(
-            "GitHub App installation account does not match repository inventory owner."
-        )
-    installation_id = required_positive_int(
-        installation_payload.get("id"),
-        "GitHub App installation response requires id.",
-        error_type=GitHubAppIdentityError,
-    )
-    if (
-        required_positive_int(
-            installation_payload.get("app_id"),
-            "GitHub App installation response requires app_id.",
-            error_type=GitHubAppIdentityError,
-        )
-        != identity.app_id
-    ):
-        raise GitHubAppIdentityError("GitHub App installation belongs to another app.")
-    expected_permissions = {
-        permission: access
-        for permission, access in (
-            item.split(":", 1) for item in ordinary_agent_enrollment_permissions()
-        )
-    }
-    observed_permissions = _validate_permissions(
-        installation_payload.get("permissions"),
-        label="installation",
-        required_permissions=expected_permissions,
-        allowed_permissions=expected_permissions,
-        permission_boundary_label="ordinary-agent enrollment",
-    )
-    return GitHubAppInstallationInspection(
-        app_id=identity.app_id,
-        installation_id=installation_id,
-        repository_id=numeric_repository_id,
-        repository_owner_id=numeric_repository_owner_id,
-        repository=normalized_repository,
-        permissions=tuple(
-            f"{permission}:{access}" for permission, access in sorted(observed_permissions.items())
-        ),
     )
 
 
