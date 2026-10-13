@@ -32,6 +32,7 @@ from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerStateRecord,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.advisory_check_projection import CONFIG_AUTHORITY_CURRENT_CHECK_NAME
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
@@ -316,7 +317,7 @@ class LiveMergeAdmissionEvaluator:
                 # after the base moves. Unplanned heads retain their queue hold.
                 planned_dependency_heads=frozenset(expected_queue),
             )
-            policy_record.policy.find_repository_policy(
+            repository_policy = policy_record.policy.find_repository_policy(
                 repository=landing_plan.repository,
                 base_branch=landing_plan.base_branch,
             )
@@ -434,13 +435,34 @@ class LiveMergeAdmissionEvaluator:
                     reason_code="head_check_reuse_unavailable",
                 )
             check_head_sha = candidate_record.candidate.head_check_reuse.head_sha
-        technical_checks = self.technical_check_client.read_technical_checks(
+        check_client = self.technical_check_client
+        if repository_policy.config_authority_events_enabled:
+            if not isinstance(
+                check_client, (GitHubMergeTrainClient, TenantAdmissionControllerGitHubClient)
+            ):
+                raise MergeAdmissionDeniedError(
+                    "Current-comparison source evidence reader is unavailable.",
+                    reason_code="config_authority_unavailable",
+                )
+            check_client = GitHubMergeTrainClient(
+                transport=check_client.transport,
+                branch_refresh_store=optional_merge_train_branch_refresh_read_store(self.store),
+            )
+        technical_checks = check_client.read_technical_checks(
             repository=landing_plan.repository,
             base_branch=landing_plan.base_branch,
             base_sha=observed_base_sha,
             head_sha=check_head_sha,
             evaluated_at=evaluated_at,
         )
+        if repository_policy.config_authority_events_enabled and not any(
+            check.name == CONFIG_AUTHORITY_CURRENT_CHECK_NAME
+            for check in technical_checks.required_checks
+        ):
+            raise MergeAdmissionDeniedError(
+                "Current-comparison source requirement is unavailable.",
+                reason_code="config_authority_unavailable",
+            )
         from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
 
         policy_binding_matches = merge_train_policy_bindings_match(

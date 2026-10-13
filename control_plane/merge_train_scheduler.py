@@ -55,6 +55,7 @@ from control_plane.merge_train_github import (
     UrllibMergeTrainGitHubTransport,
 )
 from control_plane.merge_train_github_token import resolve_merge_train_github_token
+from control_plane.merge_train_branch_refresh import optional_merge_train_branch_refresh_read_store
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
@@ -373,7 +374,8 @@ def _run_controller(
             transport=UrllibMergeTrainGitHubTransport(
                 token=token,
                 api_base_url=request.github_api_base_url,
-            )
+            ),
+            branch_refresh_store=optional_merge_train_branch_refresh_read_store(record_store),
         ),
     )
     with github_request_tally(

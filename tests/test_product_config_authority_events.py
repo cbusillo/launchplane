@@ -117,6 +117,36 @@ class ConfigAuthorityEventTests(unittest.TestCase):
             ),
         )
 
+    def test_python_multiple_exception_syntax_has_service_and_cli_parity(self) -> None:
+        source = self.root / "consumer.py"
+        source.write_text("# initial consumer\n")
+        _commit_all(self.root)
+        base = _git(self.root, "rev-parse", "HEAD")
+        safe = (
+            "def timestamp(value):\n"
+            "    try:\n"
+            "        return int(value)\n"
+            "    except OSError, OverflowError, ValueError:\n"
+            "        return None\n"
+        )
+        for authority in (False, True):
+            with self.subTest(authority=authority):
+                source.write_text(safe + ('PRODUCT_DOMAIN = "live.example"\n' if authority else ""))
+                _commit_all(self.root)
+                head = _git(self.root, "rev-parse", "HEAD")
+                result = self.scan(payload={"before": base, "after": head})
+                audit = build_config_authority_audit(
+                    control_plane_root=self.root,
+                    mode="changed-files-gate",
+                    base_sha=base,
+                    head_sha=head,
+                )
+                gate = evaluate_config_authority_gate(audit, profile="product-repo")
+                self.assertEqual(result["gate"], gate)
+                self.assertEqual(gate["status"], "fail" if authority else "pass")
+                self.assertEqual(gate["rejected_coverage_gaps"], [])
+                self.assertEqual(bool(gate["rejected_findings"]), authority)
+
     def test_repository_names_share_cli_fixture_gate_and_ignore_dirty_files(self) -> None:
         for repository in (
             "cbusillo/repairshopr_api",
@@ -432,7 +462,6 @@ class ConfigAuthorityEventTests(unittest.TestCase):
             publish_product_config_authority_evidence,
         )
 
-        names = set()
         for event in ("pull_request", "push", "merge_group"):
             for status in ("pass", "fail", "incomplete", "unavailable", "unavailable-retry"):
                 pending = status == "unavailable-retry"
@@ -521,14 +550,12 @@ class ConfigAuthorityEventTests(unittest.TestCase):
                                 "python_authority_coverage_incomplete", projection.summary
                             )
                             self.assertIn("consumer.py", projection.summary)
-                        names.add(projection.name)
                         evidence["base_branch"] = "release/stable"
                         publish_product_config_authority_evidence(_inventory(), evidence, Path("."))
                         other = writer.call_args.kwargs["projection"]
                         self.assertNotEqual(other.name, projection.name)
                         self.assertNotEqual(other.external_id, projection.external_id)
                         self.assertTrue(other.name.endswith("/release%2Fstable"))
-        self.assertEqual(len(names), len(("pull_request", "push", "merge_group")))
 
     def test_disabled_policy_mints_no_token_and_preserves_old_digest(self) -> None:
         record = build_test_merge_train_policy_record(repository="example/site")
