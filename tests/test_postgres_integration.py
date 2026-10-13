@@ -9940,6 +9940,19 @@ class RealPostgresServiceTokenRetirementTests(unittest.TestCase):
 
 
 class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
+    def test_legacy_inspection_with_unrelated_build_history_on_postgres(self) -> None:
+        from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests
+
+        with _head_postgres_database() as url:
+            fixture = TestingReplacementRecoveryTests(
+                "test_legacy_read_observes_retained_target_and_schedules_without_release"
+            )
+            fixture.database_url = url
+            try:
+                fixture.test_legacy_read_observes_retained_target_and_schedules_without_release()
+            finally:
+                fixture.doCleanups()
+
     def test_event_recovery_retirement_and_binding_drift_on_postgres(self) -> None:
         from tests.test_testing_event_deploy_recovery import TestingEventDeployRecoveryTests
 

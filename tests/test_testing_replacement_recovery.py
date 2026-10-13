@@ -68,6 +68,8 @@ class _FilesystemServiceStore(FilesystemRecordStore):
 
 
 class TestingReplacementRecoveryTests(unittest.TestCase):
+    database_url = ""
+
     def test_legacy_read_observes_retained_target_and_schedules_without_release(self) -> None:
         for store, root in self.stores():
             operation = self.running(store)
@@ -101,6 +103,21 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 }
             )
             getattr(store, "write_deployment_record")(deployment)
+            # A busy lane's unrelated build history must not hide this attempt.
+            assert deployment.artifact_identity is not None
+            for index in range(80):
+                unrelated = deployment.model_copy(
+                    update={
+                        "record_id": f"unrelated-{index}",
+                        "source_git_ref": "b" * 40 if index % 2 else deployment.source_git_ref,
+                        "artifact_identity": deployment.artifact_identity
+                        if index % 2
+                        else deployment.artifact_identity.model_copy(
+                            update={"artifact_id": f"other-artifact-{index}"}
+                        ),
+                    }
+                )
+                getattr(store, "write_deployment_record")(unrelated)
             fenced = self.fence(store)
             default_method = signature(api.dokploy_request).parameters["method"].default
             for schedule_status, enabled, expected_history, expected_timer in (
@@ -409,7 +426,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             postgres = PostgresRecordStore(
-                database_url=f"sqlite+pysqlite:///{root / 'records.sqlite'}"
+                database_url=self.database_url or f"sqlite+pysqlite:///{root / 'records.sqlite'}"
             )
             postgres.ensure_schema()
             self.addCleanup(postgres.close)

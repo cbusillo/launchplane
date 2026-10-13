@@ -13058,6 +13058,8 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         context_name: str = "",
         instance_name: str = "",
+        artifact_id: str = "",
+        source_git_ref: str = "",
         limit: int | None = None,
     ) -> tuple[DeploymentRecord, ...]:
         filters: list[object] = []
@@ -13065,6 +13067,10 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplaneDeploymentRow.context == context_name)
         if instance_name:
             filters.append(LaunchplaneDeploymentRow.instance == instance_name)
+        if artifact_id:
+            filters.append(LaunchplaneDeploymentRow.artifact_id == artifact_id)
+        if source_git_ref:
+            filters.append(LaunchplaneDeploymentRow.source_git_ref == source_git_ref)
         return self._list_models(
             model_type=DeploymentRecord,
             orm_model=LaunchplaneDeploymentRow,

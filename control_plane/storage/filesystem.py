@@ -6846,6 +6846,8 @@ class FilesystemRecordStore:
         *,
         context_name: str = "",
         instance_name: str = "",
+        artifact_id: str = "",
+        source_git_ref: str = "",
         limit: int | None = None,
     ) -> tuple[DeploymentRecord, ...]:
         records = [
@@ -6853,6 +6855,14 @@ class FilesystemRecordStore:
             for record in self._list_models(DeploymentRecord, "deployments")
             if (not context_name or record.context == context_name)
             and (not instance_name or record.instance == instance_name)
+            and (
+                not artifact_id
+                or (
+                    record.artifact_identity is not None
+                    and record.artifact_identity.artifact_id == artifact_id
+                )
+            )
+            and (not source_git_ref or record.source_git_ref == source_git_ref)
         ]
         records.sort(
             key=lambda record: (
