@@ -4233,10 +4233,13 @@ clicks **Apply**. The UI reads back disabled record status. A draft edit require
 another dry-run; an uncertain Apply retains its exact request and operation key
 across reload for **Retry Apply**. Session storage must work before apply dispatch.
 
-The metadata-only `GET /v1/service/github-delivery` and
-`POST /v1/service/github-delivery/token-retirement` require a signed-in human
-administrator and the existing service-context `product_config.plan` / `.apply`
-authority; no new grant is introduced. Retirement requires configured Delivery
+The metadata-only `GET /v1/service/github-delivery` requires a source-bound
+observation declaration and the existing [service metadata read authority](service-boundary.md).
+It returns selectors and binding metadata only, with no secret values, token
+mint or provider operation.
+`POST /v1/service/github-delivery/token-retirement` still requires a signed-in
+human administrator and the service-context `product_config.plan` / `.apply`
+authority. Retirement requires configured Delivery
 and Advisory selectors, the existing Delivery key metadata, receipt links,
 consumer evidence, explicit Director confirmation, a reviewed digest, and an
 actor-bound idempotency key. The database transaction compares the reviewed
