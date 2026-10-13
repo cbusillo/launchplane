@@ -95,6 +95,66 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(response.json()["review"]["approved"])
 
+    async def test_publication_describes_the_saved_release_action(self) -> None:
+        from tests.test_release_review_record import FakeReleaseIssues
+
+        github = FakeReleaseIssues()
+        cases = (
+            ("held", "accepted", "", r"acceptance only.*no production release"),
+            ("promote", "accepted", "promote", r"acceptance starts.*gated production release"),
+            (
+                "promote_with_rollback_drill",
+                "accepted",
+                "promote_with_rollback_drill",
+                r"rollback drill.*previous production version.*backup.*promote.*again",
+            ),
+            ("promote", "overridden", "", r"admin override.*no production release"),
+            ("promote", "changes_requested", "", r"withdraws approval.*no production release"),
+        )
+        with (
+            patch(
+                "control_plane.http_app.publish_release_decision", wraps=publish_release_decision
+            ),
+            patch(
+                "control_plane.release_review_record.resolve_launchplane_github_token",
+                return_value="test-token",
+            ),
+            patch(
+                "control_plane.release_review_record.github_api_request", side_effect=github.request
+            ),
+        ):
+            for mode, outcome, start, effect in cases:
+                with self.subTest(mode=mode, outcome=outcome):
+                    self.store.write_product_profile_record(
+                        profile().model_copy(update={"release_on_acceptance": mode})
+                    )
+                    response = await self.post(
+                        actor="operator" if outcome == "overridden" else "site-owner",
+                        github_id=9003 if outcome == "overridden" else 9001,
+                        outcome=outcome,
+                        reason="Prices need review." if outcome != "accepted" else "",
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    saved = self.store.list_release_review_decision_records(product="example-site")[
+                        0
+                    ]
+                    self.assertEqual(saved.release_start, start)
+                    issue = github.issues[-1]
+                    self.assertEqual(
+                        saved.release_issue_url,
+                        f"https://github.com/example/site/issues/{issue['number']}",
+                    )
+                    # Read the body submitted to publication, not a separate rendering.
+                    body = str(issue["body"])
+                    self.assertRegex(body, effect)
+                    self.assertRegex(body, r"Editing this issue does not change.*approval")
+                    self.assertIn(saved.record_id, body)
+                    self.assertIn(saved.checklist_digest, body)
+                    self.assertEqual(
+                        response.json()["review"]["latest_decision"]["record_id"], saved.record_id
+                    )
+        self.assertEqual(self.store.list_deployment_records(), ())
+
     async def test_client_can_accept_again_after_a_stopped_release(self) -> None:
         from control_plane.client_release import ClientReleaseRunView
 

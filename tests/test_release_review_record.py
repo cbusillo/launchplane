@@ -273,6 +273,51 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         self.assertIn("## Client checklist", body)
         self.assertNotIn("Owner", body)
 
+    def test_publication_uses_saved_action_after_client_settings_change(self) -> None:
+        saved = self.decision.model_copy(
+            update={"record_id": "accepted-before-hold", "release_start": "promote"}
+        )
+        self.store.create_release_review_decision_record_if_absent(saved)
+        # Default profile is held; that must not rewrite a prior acceptance's effect.
+        with patch(
+            "control_plane.release_review_record.github_api_request",
+            side_effect=[[], {"number": 99}],
+        ) as api:
+            publish_release_decision(
+                store=self.store, control_plane_root=self.root, profile=profile(), decision=saved
+            )
+        posted = next(
+            call.kwargs["body"]["body"]
+            for call in api.call_args_list
+            if call.kwargs.get("method") == "POST"
+        )
+        self.assertRegex(posted, r"acceptance starts.*gated production release")
+
+    def test_hotfix_rejection_publishes_rollback_without_losing_authority_notice(self) -> None:
+        saved = self.decision.model_copy(
+            update={
+                "record_id": "hotfix-rejected",
+                "decision": "changes_requested",
+                "reason": "The fix broke search.",
+                "release_start": "rollback",
+            }
+        )
+        self.store.create_release_review_decision_record_if_absent(saved)
+        with patch(
+            "control_plane.release_review_record.github_api_request",
+            side_effect=[[], {"number": 99}],
+        ) as api:
+            publish_release_decision(
+                store=self.store, control_plane_root=self.root, profile=profile(), decision=saved
+            )
+        posted = next(
+            call.kwargs["body"]["body"]
+            for call in api.call_args_list
+            if call.kwargs.get("method") == "POST"
+        )
+        self.assertRegex(posted, r"rolls.*back.*last accepted release")
+        self.assertRegex(posted, r"Editing this issue does not change.*approval")
+
     def test_recovers_successful_issue_write_without_a_duplicate(self) -> None:
         with patch(
             "control_plane.release_review_record.github_api_request",

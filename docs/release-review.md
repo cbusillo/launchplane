@@ -249,6 +249,13 @@ same decision ID, including recovery when GitHub accepted a write whose response
 was lost. Repeating the product's newest published decision records nothing new,
 so a second Accept never replaces the acceptance a running release depends on. GitHub issue contents and membership never decide release contents or
 approval; the saved Launchplane decision remains authoritative.
+The published record describes the saved decision's `release_start`, rather than
+recomputing its effect from current Client settings: promotion, promotion with
+the rollback drill, hotfix rollback, or no production release. Acceptance with
+no saved start records approval only; requests for changes withdraw approval,
+and admin overrides do not start a release. These statements describe the
+recorded action, not proof that its operations completed. Publication retries
+preserve existing historical issue bodies, including older wording.
 Publishers of the same saved decision serialize lookup, issue creation and the
 stored URL acknowledgement with a per-decision storage lock. After waiting, a
 publisher reads the saved decision again and reuses its authoritative URL. The
