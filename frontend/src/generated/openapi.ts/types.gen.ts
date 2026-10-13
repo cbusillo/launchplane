@@ -2376,6 +2376,7 @@ export type PreviewGenerationRecord = {
     runtime_identity: RuntimeIdentity | null;
     schema_version: number;
     sequence: number;
+    source_build: ArtifactSourceBuild | null;
     source_map: Array<PreviewSourceRecord>;
     started_at: string;
     state: 'resolving' | 'building' | 'deploying' | 'verifying' | 'ready' | 'failed' | 'superseded';
@@ -3832,6 +3833,9 @@ export type ProductReviewDecisionEnvelope = {
     pull_request: number;
     reason?: string;
     repository: string;
+    reviewed_generation_id: string;
+    reviewed_head_sha: string;
+    reviewed_preview_url: string;
 };
 
 export type ProductReviewDecisionRecord = {
@@ -3844,6 +3848,7 @@ export type ProductReviewDecisionRecord = {
     head_sha: string;
     owner_github_id: string;
     owner_github_login: string;
+    preview_generation_id: string;
     preview_url: string;
     product: string;
     pull_request_number: number;
@@ -3867,6 +3872,7 @@ export type ProductReviewResponse = {
     latest_decision: ProductReviewDecisionRecord | null;
     owner_github_login: string;
     owner_set: boolean;
+    preview_generation_id: string;
     preview_url: string;
     product: string;
     pull_request_number: number;

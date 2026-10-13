@@ -56,7 +56,7 @@ from sqlalchemy import (
 )
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.engine import Engine, ExceptionContext, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -691,6 +691,7 @@ from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHuman
 from control_plane.storage import landing_authority
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
+    PublicHostAuthorityBusy,
     SecretCopySourceConflictError,
     SecretRecordConflictError,
     ProductProfileConflictError,
@@ -5723,6 +5724,19 @@ def _human_session_from_payload(payload: PayloadDict) -> LaunchplaneHumanSession
     )
 
 
+def _public_host_authority_error(context: ExceptionContext) -> Exception | None:
+    original = context.original_exception
+    if (
+        getattr(original, "sqlstate", "") == "55P03"
+        and getattr(getattr(original, "diag", None), "constraint_name", "")
+        == "launchplane_public_hosts_fence"
+    ):
+        return PublicHostAuthorityBusy(
+            "Public-host authority is being reconciled. Review a fresh dry-run after it finishes."
+        )
+    return None
+
+
 def _build_engine(
     database_url: str,
     *,
@@ -5836,6 +5850,7 @@ class PostgresRecordStore(HumanSessionStore):
             postgres_connect_timeout_seconds=postgres_connect_timeout_seconds,
             postgres_statement_timeout_milliseconds=postgres_statement_timeout_milliseconds,
         )
+        event.listen(self._engine, "handle_error", _public_host_authority_error, retval=True)
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
         self._preview_lock_engine: Engine | None = None
         if self._engine.dialect.name == "postgresql":
@@ -6433,9 +6448,42 @@ class PostgresRecordStore(HumanSessionStore):
                         "Public-host target is shared with another lane."
                     )
 
-        self._write_product_authority_bundle(
-            bundle, guard_provider=guard, apply_provider=apply_provider
-        )
+        if self.database_dialect_name == "sqlite":
+            self._write_product_authority_bundle(
+                bundle, guard_provider=guard, apply_provider=apply_provider
+            )
+            return
+        with self._session_factory() as session:
+            # These outer transaction locks survive the validation savepoint.
+            # Database triggers refuse conflicting writes promptly, even writers
+            # which hold the global bundle lock, so they cannot convoy other products.
+            for table, record in (
+                (LaunchplaneDokployTargetRow, expected_target),
+                (LaunchplaneDokployTargetRow, bundle.dokploy_targets[0]),
+                (LaunchplaneDokployTargetIdRow, expected_target_id),
+                (LaunchplaneProviderTargetRow, expected_provider_target),
+            ):
+                session.execute(
+                    text(
+                        "SELECT launchplane_lock_public_host_authority("
+                        ":kind, CAST(:record AS jsonb))"
+                    ),
+                    {"kind": table.__tablename__, "record": record.model_dump_json()},
+                )
+            # Exercise every DB precondition/write before effects, but roll back
+            # its rows and global advisory lock before the network wait.
+            with session.begin_nested() as validation:
+                self._write_product_authority_bundle(
+                    bundle, guard_provider=guard, write_session=session, commit=False
+                )
+                session.flush()
+                validation.rollback()
+            apply_provider()
+            # Revalidate the entire bundle; configuration and receipt still commit
+            # atomically, and only after verified provider read-back.
+            self._write_product_authority_bundle(
+                bundle, guard_provider=guard, write_session=session
+            )
 
     def _write_product_authority_bundle(
         self,
@@ -6443,10 +6491,16 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         guard_provider: Callable[[Any], None] | None = None,
         apply_provider: Callable[[], None] | None = None,
+        write_session: Session | None = None,
+        commit: bool = True,
     ) -> None:
         if not bundle.requires_write():
             return
-        with self._session_factory() as session:
+        with (
+            nullcontext(write_session)
+            if write_session is not None
+            else self._session_factory() as session
+        ):
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
             self._lock_landing_authority(
@@ -6738,7 +6792,8 @@ class PostgresRecordStore(HumanSessionStore):
             if apply_provider is not None:
                 session.flush()
                 apply_provider()
-            session.commit()
+            if commit:
+                session.commit()
 
     def _write_runtime_environment_with_expectation(
         self,

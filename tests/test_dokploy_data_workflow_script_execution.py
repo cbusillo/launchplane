@@ -890,6 +890,35 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                     self.assert_refused_and_web_stopped(run, entry)
                     self.assertIn(f"integration_readback_refused={entry}", run.stdout)
 
+    def test_display_settings_release_web_without_allowing_push_or_business_credentials(
+        self,
+    ) -> None:
+        display_settings = {
+            "web_map.token_map_box": PRODUCTION_VALUE,
+            "unsplash.access_key": PRODUCTION_VALUE,
+            "discuss.tenor_api_key": PRODUCTION_VALUE,
+        }
+        for name, script in (
+            ("testing_restore", _render_restore_script()),
+            ("preview_deploy", _render_preview_script()),
+        ):
+            with self.subTest(workflow=name):
+                run = self._run(script, FAKE_ODOO_DB=_fake_database(config=display_settings))
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("integration_readback_ok=true", run.stdout.splitlines())
+                self.assertTrue(run.web_restarted, run.docker_log)
+
+        for integration, key in (
+            ("web_push", "mail.web_push_vapid_private_key"),
+            ("cm_data", "cm_data.db.password"),
+        ):
+            with self.subTest(refused=integration):
+                run = self._run(
+                    _render_restore_script(),
+                    FAKE_ODOO_DB=_fake_database(config={**display_settings, key: PRODUCTION_VALUE}),
+                )
+                self.assert_refused_and_web_stopped(run, f"{integration}/{key}")
+
     def test_allowance_passes_the_matching_integration_only(self) -> None:
         database = _fake_database(
             config={"printnode.api_key": PRODUCTION_VALUE, "shopify.api_token": PRODUCTION_VALUE}

@@ -3109,6 +3109,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         supply_proof: bool = True,
         mutate_proof: Callable[[_Store], None] | None = None,
         mutate_before_write: Callable[[_Store], None] | None = None,
+        public_hosts: tuple[str, ...] = (),
         real_post_deploy: bool = False,
         restore_schedule_upsert: Callable[[], dict[str, str]] | None = None,
         external_checkpoint: Callable[[str], None] | None = None,
@@ -3132,7 +3133,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         store = _Store(
             profile=profile,
-            target_record=_opw_target_record().model_copy(update={"instance": test_instance}),
+            target_record=_opw_target_record().model_copy(
+                update={"instance": test_instance, "public_hosts": public_hosts}
+            ),
             target_id_record=_opw_target_id_record().model_copy(update={"instance": test_instance}),
             inventory=EnvironmentInventory(
                 context="opw",
@@ -3570,6 +3573,53 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertFalse(post_deploy.call_args.kwargs["run_destructive_restore"])
         verify.assert_called_once()
 
+    def test_public_upstream_restore_requires_deploy_website_intent_before_effects(self) -> None:
+        website = _opw_website_override_record()
+        for record in (
+            None,
+            website.model_copy(update={"website_bootstrap": None}),
+            website.model_copy(update={"apply_on": ("promotion",)}),
+            website.model_copy(update={"apply_on": ("restore",)}),
+        ):
+            with self.subTest(record=record):
+                effects = Mock()
+                with self.assertRaises(OdooTargetReplacementStageError) as caught:
+                    self._apply_upstream_restore(
+                        override_record=record,
+                        post_deploy_results=(
+                            OdooPostDeployResult(
+                                context="opw",
+                                instance="prod",
+                                phase="restore",
+                                post_deploy_status="pass",
+                            ),
+                        ),
+                        public_hosts=("public.example.test",),
+                        external_checkpoint=effects,
+                    )
+                self.assertEqual(
+                    caught.exception.code, "plan_not_ready.compose_or_override_render_failed"
+                )
+                effects.assert_not_called()
+
+    def test_public_restore_rechecks_website_intent_after_planning(self) -> None:
+        effects = Mock()
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement._read_odoo_instance_override_record",
+                side_effect=(_opw_website_override_record(), None),
+            ),
+            self.assertRaises(OdooTargetReplacementStageError) as caught,
+        ):
+            self._apply_upstream_restore(
+                override_record=_opw_website_override_record(),
+                post_deploy_results=(),
+                public_hosts=("public.example.test",),
+                external_checkpoint=effects,
+            )
+        self.assertEqual(caught.exception.code, "plan_not_ready.compose_or_override_render_failed")
+        effects.assert_not_called()
+
     def test_restore_applies_website_bootstrap_before_verification(self) -> None:
         passed = OdooPostDeployResult(
             context="opw", instance="prod", phase="deploy", post_deploy_status="pass"
@@ -3577,6 +3627,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         result, post_deploy, verify, _store = self._apply_upstream_restore(
             override_record=_opw_website_override_record(),
             post_deploy_results=(passed, passed),
+            public_hosts=("public.example.test",),
         )
 
         self.assertEqual(result.deploy_status, "pass")
@@ -3587,6 +3638,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertFalse(bootstrap_call.kwargs["run_destructive_restore"])
         self.assertEqual(bootstrap_call.kwargs["request"].phase, "deploy")
         verify.assert_called_once()
+        self.assertEqual(verify.call_args.kwargs["base_url"], "https://public.example.test")
 
     def test_failed_website_bootstrap_after_restore_is_recorded_before_verification(
         self,

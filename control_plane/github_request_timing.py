@@ -1,9 +1,7 @@
 """Timing evidence for GitHub API calls made on behalf of one service request.
 
-The service does not log requests, so a controller call that spends minutes in
-GitHub leaves nothing to read. These helpers log a single slow GitHub request,
-and summarize the GitHub time of a long-running operation, without recording
-request bodies, headers, or query strings.
+These helpers summarize GitHub requests for every operation and log slow calls,
+without recording request bodies, headers, or query strings.
 """
 
 from __future__ import annotations
@@ -16,6 +14,13 @@ import logging
 from time import monotonic
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def configure_github_request_logging() -> None:
+    """Route tally INFO records to stderr without enabling other libraries' INFO."""
+    logging.basicConfig()
+    _LOGGER.setLevel(logging.INFO)
+
 
 SLOW_GITHUB_REQUEST_SECONDS = 5.0
 SLOW_GITHUB_OPERATION_SECONDS = 60.0
@@ -75,7 +80,7 @@ def github_request_tally(
     *,
     clock: Callable[[], float] = monotonic,
 ) -> Iterator[None]:
-    """Log how a long operation's time split between GitHub and everything else."""
+    """Log each operation's requests, including conditional responses and failures."""
     tally = _GitHubRequestTally()
     token = _ACTIVE_TALLY.set(tally)
     started = clock()

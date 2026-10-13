@@ -15,7 +15,7 @@ from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployRende
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
 from control_plane.contracts.runtime_environment_record import ScalarValue
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
-from control_plane.contracts.public_hosts import resolve_public_base_url
+from control_plane.contracts.public_hosts import resolve_origin_base_url, resolve_public_base_url
 from control_plane.odoo_import_overrides import import_runtime_value, runtime_values_for_override
 
 ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
@@ -332,11 +332,25 @@ def record_with_public_base_url(
     instance: str,
     public_hosts: tuple[str, ...],
     updated_at: str,
+    origin_domains: tuple[str, ...] = (),
 ) -> OdooInstanceOverrideRecord | None:
-    """Derive an ephemeral payload; public_hosts remains the stored authority."""
+    """Render public authority or restore the prod origin without inventing a website."""
     base_url = resolve_public_base_url(instance=instance, public_hosts=public_hosts)
     if not base_url:
-        return record
+        origin_base_url = resolve_origin_base_url(domains=origin_domains)
+        if (
+            instance != "prod"
+            or not origin_base_url
+            or (
+                record is not None
+                and (
+                    record.website_bootstrap is not None
+                    or any(item.key == "web.base.url" for item in record.config_parameters)
+                )
+            )
+        ):
+            return record
+        base_url = origin_base_url.rstrip("/")
     parameter = OdooConfigParameterOverride(
         key="web.base.url", value=OdooOverrideValue(source="literal", value=base_url)
     )

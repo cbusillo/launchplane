@@ -12,6 +12,7 @@ from fastapi import FastAPI
 import uvicorn
 
 from control_plane.drivers import native_routes
+from control_plane.github_request_timing import configure_github_request_logging
 from control_plane.github_app_webhook import handle_github_app_webhook_request
 from control_plane.trusted_maintenance_github_webhook import (
     handle_trusted_maintenance_github_webhook_request,
@@ -235,6 +236,7 @@ def serve_launchplane_service(
     audience: str,
     database_url: str | None = None,
 ) -> None:
+    configure_github_request_logging()
     with ExitStack() as cleanup:
         bootstrap_authz_policy = load_authz_policy(policy_file)
         verifier = GitHubOidcVerifier(audience=audience)
