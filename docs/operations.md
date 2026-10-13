@@ -1810,6 +1810,20 @@ new opening. The admin projection deliberately omits raw destination values,
 policy identities, outbox payloads, provider operation details, target URLs,
 and provider error text.
 
+Incident event, reminder, notification-attempt, and outbox delivery identifiers
+on these read surfaces are display references, purpose-separated HMACs backed
+by Launchplane's existing managed-secret bootstrap key. Matching event references
+remain consistent across summaries, observations, reminders and attempts. They
+are stable across reads, restarts and replicas sharing the same active key;
+rotating that key changes display references, so refresh an open incident view
+after rotation. Internal record keys, replay/deduplication and reminder anchors
+do not change. Diagnostic correlation uses the incident/observation, time and
+safe sink link, rather than treating a display reference as a storage key.
+Bearer-only and rehearsal services use the same managed-secret bootstrap setup
+documented in [secrets](secrets.md); missing or invalid keys return
+`503 incident_reference_unavailable` when a read needs a display reference,
+never an unkeyed hash or the stored identifier. Empty histories require no key.
+
 TLS observations reuse the same monitor run, record family, and incident
 lifecycle. For each active environment route binding, and each disabled binding on a Live product, Launchplane probes one
 TLS target per bound domain so primary names and aliases are recorded

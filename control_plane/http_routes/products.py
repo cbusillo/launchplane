@@ -35,6 +35,7 @@ from control_plane.contracts.product_incident_read_model import (
     ProductEnvironmentIncidentList,
     ProductIncidentDetail,
     ProductIncidentReadModelCapabilityError,
+    ProductIncidentReferenceUnavailableError,
     ProductIncidentStatusFilter,
     build_product_environment_incident_detail,
     build_product_environment_incident_list,
@@ -399,6 +400,13 @@ def _build_product_environment_read_result(
             params=params,
             action_allowed=action_allowed,
         )
+    except ProductIncidentReferenceUnavailableError as error:
+        raise dependencies.http_error(
+            status_code=503,
+            trace_id=trace_id,
+            code="incident_reference_unavailable",
+            message=str(error),
+        ) from error
     except control_plane_product_read_service.ProductReadModelStoreCapabilityError as error:
         raise dependencies.http_error(
             status_code=503,
@@ -1003,6 +1011,13 @@ def register_product_environment_read_routes(
                     action_allowed=action_allowed,
                 )
             )
+        except ProductIncidentReferenceUnavailableError as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="incident_reference_unavailable",
+                message=str(error),
+            ) from error
         except control_plane_product_read_service.ProductReadModelStoreCapabilityError as error:
             raise common.http_error(
                 status_code=503,
@@ -1161,6 +1176,13 @@ def register_product_environment_read_routes(
                 limit=limit,
                 scope=incident_scope,
             )
+        except ProductIncidentReferenceUnavailableError as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="incident_reference_unavailable",
+                message=str(error),
+            ) from error
         except ProductIncidentReadModelCapabilityError as error:
             raise common.http_error(
                 status_code=503,
@@ -1207,6 +1229,13 @@ def register_product_environment_read_routes(
                 observation_limit=observation_limit,
                 scope=incident_scope,
             )
+        except ProductIncidentReferenceUnavailableError as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="incident_reference_unavailable",
+                message=str(error),
+            ) from error
         except ProductIncidentReadModelCapabilityError as error:
             raise common.http_error(
                 status_code=503,
