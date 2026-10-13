@@ -13,9 +13,32 @@ from control_plane.contracts.release_review import ReleaseReviewItem, ReleaseRev
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidate,
+    MergeTrainBatchCandidateRecord,
+    MergeTrainBatchEntry,
     MergeTrainBatchLandingEntry,
     MergeTrainBatchLandingPlan,
     MergeTrainBatchLandingPlanRecord,
+)
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerStateRecord,
+    build_merge_train_controller_key,
+)
+from control_plane.contracts.merge_train_historical_completion import (
+    MergeTrainHistoricalCompletionSelector,
+    MergeTrainHistoricalCompletionEntrySelector,
+)
+from control_plane.http_routes.mutation_support import idempotency_scope
+from control_plane.merge_train_github import (
+    GitHubMergeTrainClient,
+    RecordingMergeTrainGitHubTransport,
+)
+from control_plane.merge_train_historical_completion import HistoricalCompletionSnapshot
+from control_plane.merge_train_historical_disposition import (
+    HistoricalDispositionAuthority,
+    HistoricalDispositionRequest,
+    build_historical_disposition,
 )
 from control_plane.release_invitation import (
     SETTLED_DECISION_RECHECK_SECONDS,
@@ -28,9 +51,15 @@ from control_plane.release_invitation import (
 from control_plane.release_review import ReleaseReviewStore, build_release_review
 from control_plane.release_invitation_changes import (
     ReleaseInvitationNotesUnavailable,
+    ReleaseInvitationProvenanceUnavailable,
     client_invitation_changes,
 )
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import (
+    PostgresRecordStore,
+    LaunchplaneMergeTrainBatchLandingPlanRow,
+)
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from tests.support.merge_train import _merge_train_service_identity, _merge_train_service_policy
 from tests.test_release_review import decision, github_read, profile, seed
 
 
@@ -298,6 +327,323 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(
             self.store.list_release_review_decision_records(product=self.profile.product), ()
         )
+
+    def seed_historical_batch(self) -> MergeTrainBatchLandingPlanRecord:
+        batch = self.seed_train_batch(two_features=True)
+        policy = build_test_merge_train_policy_record(repository=self.profile.repository)
+        source = self.store.list_merge_train_batch_landing_plan_records()[0]
+        payload = source.landing_plan.model_dump(mode="json")
+        payload.pop("landing_plan_sha256")
+        payload.update(
+            candidate_sha=batch.head_sha,
+            candidate_tree_sha="result-tree-3",
+            candidate_sha256="b" * 64,
+            policy_key=policy.policy.policies[0].policy_key,
+            policy_sha256=policy.policy_sha256,
+        )
+        responses: list[object] = []
+        base = {"commit": {"sha": "pinned-base", "commit": {"tree": {"sha": "base-tree"}}}}
+        responses.append(base)
+        for entry in payload["entries"]:
+            position = entry["position"]
+            parent = entry["expected_base_sha"] if position == 1 else f"observed-{position - 1}"
+            parent_tree = "base-tree" if position == 1 else f"result-tree-{position - 1}"
+            result_tree = f"result-tree-{position}"
+            entry.update(
+                status="planned",
+                merge_commit_sha="",
+                expected_head_tree_sha=f"head-tree-{position}",
+                recorded_candidate_parent_sha=parent,
+                recorded_candidate_parent_tree_sha=parent_tree,
+                recorded_candidate_result_sha=f"constructed-{position}",
+                recorded_candidate_result_tree_sha=result_tree,
+            )
+            responses.extend(
+                (
+                    {
+                        "number": entry["pull_request_number"],
+                        "state": "closed",
+                        "merged": True,
+                        "base": {"ref": "main"},
+                        "head": {"sha": entry["expected_head_sha"]},
+                        "merge_commit_sha": f"observed-{position}",
+                    },
+                    {
+                        "sha": entry["expected_head_sha"],
+                        "tree": {"sha": entry["expected_head_tree_sha"]},
+                    },
+                    {
+                        "sha": f"observed-{position}",
+                        "tree": {"sha": result_tree},
+                        "parents": [{"sha": parent}, {"sha": entry["expected_head_sha"]}],
+                    },
+                    {"sha": parent, "tree": {"sha": parent_tree}},
+                    {"status": "ahead", "merge_base_commit": {"sha": f"observed-{position}"}},
+                )
+            )
+        responses.append(base)
+        plan = MergeTrainBatchLandingPlan.model_validate(payload)
+        source = source.model_copy(update={"landing_plan": plan})
+        candidate = MergeTrainBatchCandidate(
+            batch_id=plan.batch_id,
+            repository=plan.repository,
+            base_branch=plan.base_branch,
+            base_sha=plan.entries[0].expected_base_sha,
+            policy_key=plan.policy_key,
+            policy_sha256=plan.policy_sha256,
+            candidate_ref=plan.candidate_ref,
+            candidate_sha=plan.candidate_sha,
+            candidate_tree_sha=plan.candidate_tree_sha,
+            candidate_sha256=plan.candidate_sha256,
+            status="passed",
+            created_at=plan.created_at,
+            updated_at=plan.created_at,
+            entries=tuple(
+                MergeTrainBatchEntry(
+                    pull_request_number=entry.pull_request_number,
+                    position=entry.position,
+                    head_sha=entry.expected_head_sha,
+                    head_tree_sha=entry.expected_head_tree_sha,
+                )
+                for entry in plan.entries
+            ),
+        )
+        controller = MergeTrainControllerStateRecord(
+            controller_key=build_merge_train_controller_key(
+                repository=plan.repository, base_branch=plan.base_branch
+            ),
+            repository=plan.repository,
+            base_branch=plan.base_branch,
+            policy_key=plan.policy_key,
+            policy_sha256=plan.policy_sha256,
+            status="reconcile_required",
+            updated_at=plan.created_at,
+            active_action="land_batch",
+            active_phase="merge_batch_entries",
+            active_record_id=source.record_id,
+            reconciliation_status="required",
+        )
+        identity = _merge_train_service_identity()
+        request = HistoricalDispositionRequest(
+            repository=plan.repository,
+            base_branch=plan.base_branch,
+            selector=MergeTrainHistoricalCompletionSelector(
+                expected_active_record_id=source.record_id,
+                expected_landing_plan_id=plan.plan_id,
+                expected_effect_sha=plan.candidate_sha,
+                expected_policy_sha256=plan.policy_sha256,
+                expected_entries=tuple(
+                    MergeTrainHistoricalCompletionEntrySelector(
+                        position=entry.position,
+                        pull_request_number=entry.pull_request_number,
+                        expected_head_sha=entry.expected_head_sha,
+                        expected_head_tree_sha=entry.expected_head_tree_sha,
+                    )
+                    for entry in plan.entries
+                ),
+            ),
+            identity=identity,
+            scope=idempotency_scope(identity),
+            route_path="/v1/work-graph/merge-train/controller/run-once",
+            idempotency_key="historical-invitation",
+            request_fingerprint="historical-invitation",
+        )
+        observed = GitHubMergeTrainClient(
+            transport=RecordingMergeTrainGitHubTransport(responses=tuple(responses))
+        ).observe_historical_batch_completion(
+            landing_plan=plan,
+            observed_at=self.now.isoformat(),
+        )
+        record = build_historical_disposition(
+            request=request,
+            authority=HistoricalDispositionAuthority(
+                policy=policy,
+                authz=LaunchplaneAuthzPolicyRecord(
+                    record_id="test-authz",
+                    source="test",
+                    updated_at=self.now.isoformat(),
+                    policy=_merge_train_service_policy(),
+                ),
+            ),
+            snapshot=HistoricalCompletionSnapshot(
+                controller=controller,
+                policy=policy,
+                landing=source,
+                candidate=MergeTrainBatchCandidateRecord(
+                    record_id="candidate-test",
+                    source="test",
+                    updated_at=plan.created_at,
+                    candidate=candidate,
+                ),
+            ),
+            provider_evidence=observed,
+            recorded_at=self.now.isoformat(),
+            trace_id="historical-invitation",
+        ).successor
+        self.store.write_merge_train_batch_landing_plan_record(
+            source.model_copy(update={"status": "superseded"})
+        )
+        self.persist_historical_batch(record)
+        return record
+
+    def persist_historical_batch(self, record: MergeTrainBatchLandingPlanRecord) -> None:
+        # Rehearse the native writer's persisted payload. Generic writers refuse
+        # historical records; this test never invokes the live disposition API.
+        with self.store._session_factory() as session:
+            session.merge(
+                LaunchplaneMergeTrainBatchLandingPlanRow(
+                    record_id=record.record_id,
+                    status=record.status,
+                    source=record.source,
+                    updated_at=record.updated_at,
+                    repository=record.landing_plan.repository,
+                    base_branch=record.landing_plan.base_branch,
+                    batch_id=record.landing_plan.batch_id,
+                    plan_id=record.landing_plan.plan_id,
+                    payload=record.model_dump(mode="json"),
+                )
+            )
+            session.commit()
+
+    def test_historical_batch_notifies_constituents_once_without_release_authority(self) -> None:
+        record = self.seed_historical_batch()
+        self.publish()
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 1)
+        self.assertIn("pull/43", self.comments[0]["body"])
+        self.assertIn("pull/44", self.comments[0]["body"])
+        self.assertNotIn("pull/99", self.comments[0]["body"])
+        self.change_candidate(source_commit="e" * 40)
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 1)
+        self.assertEqual(sum("@site-owner" in post.get("body", "") for post in self.posts), 1)
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product), ()
+        )
+        saved = self.store.list_merge_train_batch_landing_plan_records(record_id=record.record_id)[
+            0
+        ]
+        self.assertEqual(saved, record)
+        self.assertTrue(
+            all(
+                entry.status == "stale" and not entry.merge_commit_sha
+                for entry in saved.landing_plan.entries
+            )
+        )
+
+    def test_incomplete_or_inconsistent_historical_provenance_refuses_delivery(self) -> None:
+        record = self.seed_historical_batch()
+        historical = record.historical_completion
+        assert historical is not None
+        observed = historical.provider_evidence
+        wrong_tree = observed.entries[0].model_copy(
+            update={"observed_merge_commit_tree_sha": "unrelated-tree"}
+        )
+        for change in (
+            {"historical_completion": None},
+            {"status": "superseded"},
+            {
+                "historical_completion": historical.model_copy(
+                    update={
+                        "provider_evidence": observed.model_copy(
+                            update={"final_observed_base_sha": "moved-base"}
+                        )
+                    }
+                )
+            },
+            {
+                "historical_completion": historical.model_copy(
+                    update={
+                        "provider_evidence": observed.model_copy(
+                            update={"entries": (wrong_tree, *observed.entries[1:])}
+                        )
+                    }
+                )
+            },
+        ):
+            with self.subTest(change=change):
+                self.persist_historical_batch(record.model_copy(update=change))
+                with self.assertRaisesRegex(
+                    ReleaseInvitationProvenanceUnavailable, "example/site#99"
+                ):
+                    self.publish(ReleaseInvitationBackoff())
+                self.assertEqual(self.posts, [])
+        self.persist_historical_batch(record)
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 1)
+
+    def test_historical_batch_number_alone_cannot_bind_a_different_candidate(self) -> None:
+        self.seed_historical_batch()
+        assert self.review.checklist is not None
+        batch = self.review.checklist.items[0]
+        self.review = self.review.model_copy(
+            update={
+                "checklist": self.review.checklist.model_copy(
+                    update={"items": (batch.model_copy(update={"head_sha": "9" * 40}),)}
+                )
+            }
+        )
+        with self.assertRaisesRegex(ReleaseInvitationProvenanceUnavailable, "example/site#99"):
+            self.publish()
+        self.assertEqual(self.posts, [])
+
+    def test_conflicting_completed_batch_memberships_refuse_delivery(self) -> None:
+        self.seed_historical_batch()
+        source = self.store.list_merge_train_batch_landing_plan_records(record_id="landing-test")[0]
+        assert self.review.checklist is not None
+        payload = source.landing_plan.model_dump(mode="json")
+        payload.pop("landing_plan_sha256")
+        for entry in payload["entries"]:
+            entry.update(
+                status="merged", merge_commit_sha=self.review.checklist.items[0].merge_commit
+            )
+        payload["entries"][-1]["pull_request_number"] = 45
+        self.store.write_merge_train_batch_landing_plan_record(
+            source.model_copy(
+                update={
+                    "status": "active",
+                    "landing_plan": MergeTrainBatchLandingPlan.model_validate(payload),
+                }
+            )
+        )
+        with self.assertRaises(ReleaseInvitationProvenanceUnavailable):
+            self.publish()
+        self.assertEqual(self.posts, [])
+
+    def test_historical_engineering_only_batch_does_not_open_a_request(self) -> None:
+        self.seed_historical_batch()
+        for number in (43, 44):
+            decision = self.store.list_product_review_decision_records(
+                repository=self.profile.repository, pull_request_number=number
+            )[0]
+            self.store.write_product_review_decision_record(
+                decision.model_copy(update={"product": "another-site"})
+            )
+        self.assertFalse(self.publish())
+        self.assertEqual(self.posts, [])
+
+    def test_historical_batch_legacy_receipt_is_adopted_without_a_ping(self) -> None:
+        self.seed_historical_batch()
+        assert self.review.checklist is not None
+        batch = self.review.checklist.items[0]
+        self.issues = [{"number": 91, "body": release_request_issue_marker(self.profile.product)}]
+        self.comments = [
+            {
+                "id": 1,
+                "created_at": self.now.isoformat(),
+                "body": release_invitation_marker(
+                    self.profile.product, self.review.checklist.candidate
+                )
+                + f"\n\n@site-owner [#99]({batch.url}): Prices",
+            }
+        ]
+        self.publish()
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 1)
+        self.assertEqual(self.posts, [])
+        self.assertIn("pull/43", self.comments[0]["body"])
+        self.assertIn("pull/44", self.comments[0]["body"])
+        self.assertNotIn("@site-owner", self.comments[0]["body"])
 
     def test_batch_note_example_cannot_replace_another_features_name_or_notes(self) -> None:
         batch = self.seed_train_batch(two_features=True)

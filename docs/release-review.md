@@ -93,6 +93,16 @@ preview feedback; titles, labels and the existence of a preview are not classifi
 For a batch landing, the stored landing plan binds the batch PR and merge commit
 to its constituent PRs; each constituent uses its own review evidence and its
 section of the batch's Client test notes.
+An observation-only [historical completion](merge-train-historical-completion.md)
+can also supply those constituents. Its active, typed successor must bind the
+batch PR and checklist head to the persisted candidate, with a stable observed
+base and matching constituent result trees. The entries remain stale: reading
+them for notification creates no merge admission, release decision or approval.
+Missing, inconsistent or conflicting completion evidence for a recorded batch
+raises `ReleaseInvitationProvenanceUnavailable` naming the repository and batch
+PR before publication; it never silently treats that batch as engineering-only.
+Restoring correctly bound persisted evidence permits receipt-aware publication
+and legacy invitation adoption without a new ping for already announced changes.
 The invitation names each Client-facing member from its generated notes heading
 and includes that member's instructions, rather than naming the synthetic batch.
 Fenced examples cannot introduce member sections; duplicate member sections
