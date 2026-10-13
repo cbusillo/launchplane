@@ -1291,6 +1291,16 @@ so a Client's acceptance of the refreshed pull request can carry to the new head
 when the change itself is unchanged (see
 [carried acceptance](owner-acceptance.md#carried-acceptance)).
 
+For a passing same-repository root whose mergeability remains unknown, the
+adapter compares the observed current base commit to the exact head commit.
+A behind or diverged head can request that same guarded refresh even when
+GitHub has not reported `mergeable_state: behind`. An ahead or identical head
+still waits for known mergeability; ancestry is never permission to merge.
+Missing or inconsistent comparison evidence fails the read closed. Forks,
+stacks, drafts, and nonpassing heads retain their existing observation path.
+This adds one comparison read per affected head; provider comparison failures
+can hold the pass until readable evidence returns.
+
 The reread step rebuilds the dry-run decision from a fresh pull request snapshot.
 If checks are still pending or mergeability is unknown, the next action remains
 `wait_for_checks`; Launchplane must not merge from pre-refresh evidence.
@@ -1740,6 +1750,9 @@ reconciliation requirement and next actor/observation. Lease release and restart
 preserve it. `not_observed` means that pass did not read those checks; `unknown`
 means an attempted observation could not establish their status. The observed
 candidate SHA is separate from a newly planned replacement's SHA.
+An original head with passing checks but unresolved mergeability reports
+`head_mergeability_unknown`, identifying the provider state it is waiting on
+instead of implying that candidate or base checks failed to be observed.
 `last_controller_result_policy_status` qualifies its policy binding; even
 current-policy evidence is the last pass, not current readiness or landing
 authority. Old records without a saved result return null rather than a
