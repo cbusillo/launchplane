@@ -156,10 +156,15 @@ def client_invitation_changes(
                     if change.batch_pull_request_number is not None
                     else ""
                 )
+                advice = (
+                    "Restore that constituent's Client test notes in the batch PR."
+                    if change.batch_pull_request_number is not None
+                    else "Restore Client test notes in the pull request."
+                )
                 raise ReleaseInvitationNotesUnavailable(
                     f"Release invitation Client notes are unavailable for "
                     f"{repository}#{item.pull_request_number}{batch}. "
-                    "Restore that constituent's Client test notes in the batch PR."
+                    f"{advice}"
                 )
             key = hashlib.sha256(f"{repository}:{item.pull_request_number}".encode()).hexdigest()
             changes[key] = change

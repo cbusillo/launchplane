@@ -217,7 +217,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       <h2>{response.display_name}</h2>
       <p className="owner-review-state">{viewerRole}</p>
       {!response.viewer_is_owner && response.review.invitation_notes_error ? <p role="alert" className="owner-review-alert">
-        The Client's release invitation cannot be sent. {response.review.invitation_notes_error}
+        Release invitation notes need repair. {response.review.invitation_notes_error}
       </p> : null}
       {!response.owner_github_login ? <p role="alert">No Client set for this product. Ask an admin to name one.</p> : null}
       {reviewingHotfix
