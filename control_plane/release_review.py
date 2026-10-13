@@ -409,6 +409,7 @@ def build_release_review(
     # Import locally: the invitation evidence protocol extends ReleaseReviewStore.
     from control_plane.release_invitation_changes import (
         ReleaseInvitationNotesUnavailable,
+        ReleaseInvitationProvenanceUnavailable,
         client_invitation_changes,
     )
 
@@ -424,6 +425,10 @@ def build_release_review(
             client_invitation_changes(store, profile, checklist)
         except ReleaseInvitationNotesUnavailable as error:
             invitation_notes_error = str(error)
+        except ReleaseInvitationProvenanceUnavailable:
+            # Provenance fences invitation publication; this delivery-only read
+            # must not turn that refusal into a missing release checklist.
+            pass
     return ReleaseReviewStatus(
         required=profile.production_use != "prelaunch",
         approved=approved,

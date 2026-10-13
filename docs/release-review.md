@@ -134,7 +134,9 @@ admin/read-only page. The diagnostic names the recorded batch and constituent
 and tells the admin to fix the batch PR's notes. It is derived from durable
 train membership and current source notes on every read, so correcting the notes
 clears it across worker restarts without a second failure record. It changes no
-checklist digest, completeness, acceptance or release gate. The worker logs the
+checklist digest, completeness, acceptance or release gate. An inconsistent
+batch provenance record still refuses invitation publication without making the
+release checklist unavailable through this diagnostic read. The worker logs the
 same bounded reason at its existing five-minute retry cadence for unchanged
 profile/lane versions; it never logs the PR body or arbitrary exception text.
 Durable `release-client-change` receipts record which PRs have been announced in

@@ -534,6 +534,21 @@ class ReleaseInvitationTests(unittest.TestCase):
 
     def test_incomplete_or_inconsistent_historical_provenance_refuses_delivery(self) -> None:
         record = self.seed_historical_batch()
+        assert self.review.checklist is not None
+
+        def review_batch() -> ReleaseReviewStatus:
+            assert self.review.checklist is not None
+            with patch(
+                "control_plane.release_review.read_release_changes",
+                return_value=(self.review.checklist.items, ()),
+            ):
+                return build_release_review(
+                    store=cast(ReleaseReviewStore, self.store),
+                    profile=self.profile,
+                    read=github_read,
+                )
+
+        expected_review = review_batch()
         historical = record.historical_completion
         assert historical is not None
         observed = historical.provider_evidence
@@ -564,6 +579,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         ):
             with self.subTest(change=change):
                 self.persist_historical_batch(record.model_copy(update=change))
+                self.assertEqual(review_batch(), expected_review)
                 with self.assertRaisesRegex(
                     ReleaseInvitationProvenanceUnavailable, "example/site#99"
                 ):
