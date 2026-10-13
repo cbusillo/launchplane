@@ -39,6 +39,7 @@ from control_plane.contracts.product_incident_read_model import (
     build_product_environment_incident_detail,
     build_product_environment_incident_list,
     require_product_incident_read_store,
+    preview_fence_incident_scope,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_operational_readiness import ProductOperationalReadiness
@@ -448,6 +449,63 @@ def _require_product_environment_result_authorization(
         trace_id=trace_id,
         code="authorization_denied",
         message=result.denial_message,
+    )
+
+
+def _build_product_incident_scope(
+    *,
+    dependencies: ReadRouteDependencies,
+    identity: LaunchplaneIdentity,
+    record_store: object,
+    trace_id: str,
+    product: str,
+    environment: str,
+) -> ProductIncidentEnvironmentScope:
+    try:
+        preview_scope = preview_fence_incident_scope(
+            record_store=record_store, product=product, environment=environment
+        )
+    except FileNotFoundError as error:
+        raise dependencies.http_error(
+            status_code=404, trace_id=trace_id, code="not_found", message=str(error)
+        ) from error
+    if preview_scope is not None:
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="preview.read",
+            product=preview_scope.product,
+            context=preview_scope.context,
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read this product's preview incidents.",
+            )
+        return preview_scope
+    result = _build_product_environment_read_result(
+        dependencies=dependencies,
+        identity=identity,
+        record_store=record_store,
+        trace_id=trace_id,
+        params={"product": product, "environment": environment},
+    )
+    _require_product_environment_result_authorization(
+        dependencies=dependencies,
+        identity=identity,
+        trace_id=trace_id,
+        result=result,
+    )
+    environment_detail = ProductEnvironmentDetail.model_validate(result.payload["environment"])
+    return ProductIncidentEnvironmentScope(
+        product=environment_detail.product,
+        display_name=environment_detail.display_name,
+        environment=environment_detail.environment,
+        context=environment_detail.context,
+        instance=environment_detail.environment,
+        recorded_at=(
+            environment_detail.provenance.refreshed_at or environment_detail.provenance.recorded_at
+        ),
     )
 
 
@@ -1085,30 +1143,13 @@ def register_product_environment_read_routes(
         limit: Annotated[int, Query(ge=1, le=50)] = 20,
     ) -> ProductEnvironmentIncidentsResponse:
         trace_id = common.next_trace_id()
-        result = _build_product_environment_read_result(
+        incident_scope = _build_product_incident_scope(
             dependencies=common,
             identity=identity,
             record_store=record_store,
             trace_id=trace_id,
-            params={"product": product, "environment": environment},
-        )
-        _require_product_environment_result_authorization(
-            dependencies=common,
-            identity=identity,
-            trace_id=trace_id,
-            result=result,
-        )
-        environment_detail = ProductEnvironmentDetail.model_validate(result.payload["environment"])
-        incident_scope = ProductIncidentEnvironmentScope(
-            product=environment_detail.product,
-            display_name=environment_detail.display_name,
-            environment=environment_detail.environment,
-            context=environment_detail.context,
-            instance=environment_detail.environment,
-            recorded_at=(
-                environment_detail.provenance.refreshed_at
-                or environment_detail.provenance.recorded_at
-            ),
+            product=product,
+            environment=environment,
         )
         try:
             incident_store = require_product_incident_read_store(record_store)
@@ -1148,30 +1189,13 @@ def register_product_environment_read_routes(
         observation_limit: Annotated[int, Query(ge=1, le=200)] = 100,
     ) -> ProductEnvironmentIncidentResponse:
         trace_id = common.next_trace_id()
-        result = _build_product_environment_read_result(
+        incident_scope = _build_product_incident_scope(
             dependencies=common,
             identity=identity,
             record_store=record_store,
             trace_id=trace_id,
-            params={"product": product, "environment": environment},
-        )
-        _require_product_environment_result_authorization(
-            dependencies=common,
-            identity=identity,
-            trace_id=trace_id,
-            result=result,
-        )
-        environment_detail = ProductEnvironmentDetail.model_validate(result.payload["environment"])
-        incident_scope = ProductIncidentEnvironmentScope(
-            product=environment_detail.product,
-            display_name=environment_detail.display_name,
-            environment=environment_detail.environment,
-            context=environment_detail.context,
-            instance=environment_detail.environment,
-            recorded_at=(
-                environment_detail.provenance.refreshed_at
-                or environment_detail.provenance.recorded_at
-            ),
+            product=product,
+            environment=environment,
         )
         try:
             incident_store = require_product_incident_read_store(record_store)

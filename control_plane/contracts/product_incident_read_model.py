@@ -523,6 +523,40 @@ def build_product_environment_incident_detail(
     )
 
 
+def preview_fence_incident_scope(
+    *, record_store: object, product: str, environment: str
+) -> ProductIncidentEnvironmentScope | None:
+    """Select only a product-owned held reservation or its recorded incident history."""
+    if not environment.startswith("preview-mutation-reservation-"):
+        return None
+    from control_plane.storage.postgres import PostgresRecordStore
+    from control_plane.workflows.public_ingress_monitor import DEPLOY_FENCE_CHECK_NAME
+
+    if not isinstance(record_store, PostgresRecordStore):
+        return None
+    profile = record_store.read_product_profile_record(product)
+    holds = record_store.list_held_odoo_preview_reservations(product=product, limit=1001)
+    held = any("preview-" + record.record_id == environment for record in holds)
+    history = record_store.list_public_ingress_incident_records(
+        product=product,
+        context_name=profile.preview.context,
+        instance_name=environment,
+        check_kind="provider",
+        check_name=DEPLOY_FENCE_CHECK_NAME,
+        limit=1,
+    )
+    if not held and not history:
+        return None
+    return ProductIncidentEnvironmentScope(
+        product=profile.product,
+        display_name=profile.display_name,
+        environment=environment,
+        context=profile.preview.context,
+        instance=environment,
+        recorded_at=profile.updated_at,
+    )
+
+
 def _resolve_scope(
     *,
     record_store: ProductIncidentReadStore,
@@ -536,6 +570,11 @@ def _resolve_scope(
                 "The authorized incident scope does not match the requested environment."
             )
         return scope
+    preview_scope = preview_fence_incident_scope(
+        record_store=record_store, product=product, environment=environment
+    )
+    if preview_scope is not None:
+        return preview_scope
     try:
         profile = record_store.read_product_profile_record(product)
         lane = next(candidate for candidate in profile.lanes if candidate.instance == environment)

@@ -301,7 +301,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 observer.assert_called_once()
                 write.assert_not_called()
 
-    def test_legacy_missing_intent_refuses_without_provider_reads_or_writes(self) -> None:
+    def remove_original_intent(self) -> None:
         with self.store._session_factory() as session:
             receipt = session.scalar(
                 select(LaunchplaneIdempotencyRow).where(
@@ -313,6 +313,144 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             assert receipt is not None
             session.delete(receipt)
             session.commit()
+
+    def assert_legacy_preview_drain_passes_with_fence(self) -> None:
+        from control_plane.preview_reservation_recovery import classify_preview_reservation
+        from control_plane.service_deploy_drain import confirm_startup, read_status
+        from tests.test_client_release_redeploy import _prepare, _replacement_env
+
+        self.remove_original_intent()
+        before = classify_preview_reservation(
+            self.reservation, profile=self.profile, store=self.store
+        )
+        self.assertEqual(before["next_action"], "retain_fence_missing_original_proof")
+        _, blockers, dispatch = _prepare(self.store)
+        self.assertTrue(dispatch)
+        self.assertFalse(blockers)
+        details = cast(tuple[dict[str, object], ...], read_status(self.store)["operation_details"])
+        self.assertTrue(details[0]["execution_excluded"])
+        self.assertFalse(details[0]["blocks_drain"])
+        self.assertEqual(
+            held_preview_reservations(self.store, product=self.profile.product), (self.reservation,)
+        )
+        self.assertEqual(
+            before,
+            classify_preview_reservation(self.reservation, profile=self.profile, store=self.store),
+        )
+        observer, quiescence = Mock(), Mock()
+        self.assertEqual(
+            self.recover(observe=observer, quiescence=quiescence)["settlement"], "refused"
+        )
+        observer.assert_not_called()
+        quiescence.assert_not_called()
+        with patch.dict("os.environ", _replacement_env()):
+            confirm_startup(self.store)
+            fresh = self.store.reserve_mutation(
+                scope=self.reservation.scope,
+                route_path=self.reservation.route_path,
+                idempotency_key="fresh-preview",
+                request_fingerprint="fresh-preview",
+                lease_owner="new-worker",
+                reconciliation_key=self.reservation.reconciliation_key,
+                provider_target_key=self.reservation.provider_target_key,
+            )
+            self.assertEqual(fresh.status, "target_busy")
+        retained = self.store.read_idempotency_record(
+            scope=self.reservation.scope,
+            route_path=self.reservation.route_path,
+            idempotency_key=self.reservation.idempotency_key,
+        )
+        assert retained is not None
+        self.assertEqual(retained.state, "reconcile_required")
+
+    def test_expired_legacy_running_preview_passes_drain_and_retains_fence(self) -> None:
+        self.assert_legacy_preview_drain_passes_with_fence()
+
+    def test_expired_legacy_reconcile_required_preview_passes_drain_and_retains_fence(self) -> None:
+        self.reservation = self.replace_record(state="reconcile_required")
+        self.assert_legacy_preview_drain_passes_with_fence()
+
+    def test_preview_executor_lock_held_by_another_store_blocks_drain(self) -> None:
+        from tests.test_client_release_redeploy import _prepare
+
+        executor = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(executor.close)
+        with executor.testing_replacement_execution_lock(
+            preview_execution_lock_name(self.reservation.provider_target_key)
+        ) as check:
+            self.assertIsNotNone(check)
+            for state in ("running", "reconcile_required"):
+                with self.subTest(state=state):
+                    self.reservation = self.replace_record(state=state)
+                    _, blockers, dispatch = _prepare(self.store)
+                    self.assertFalse(dispatch)
+                    self.assertIn(self.reservation.record_id, blockers)
+        _, blockers, dispatch = _prepare(self.store)
+        self.assertTrue(dispatch)
+        self.assertFalse(blockers)
+
+    def test_active_preview_leases_block_drain_without_lock_probe(self) -> None:
+        from tests.test_client_release_redeploy import _prepare
+
+        with patch.object(self.store, "testing_replacement_execution_lock") as lock:
+            for state in ("running", "reconcile_required"):
+                with self.subTest(state=state):
+                    self.reservation = self.replace_record(
+                        state=state,
+                        lease_expires_at=(
+                            datetime.now(timezone.utc) + timedelta(hours=1)
+                        ).isoformat(),
+                    )
+                    _, blockers, dispatch = _prepare(self.store)
+                    self.assertFalse(dispatch)
+                    self.assertIn(self.reservation.record_id, blockers)
+            lock.assert_not_called()
+
+    def test_unavailable_preview_execution_lock_blocks_drain(self) -> None:
+        from contextlib import nullcontext
+        from tests.test_client_release_redeploy import _prepare
+
+        with patch.object(
+            self.store, "testing_replacement_execution_lock", return_value=nullcontext(None)
+        ):
+            for state in ("running", "reconcile_required"):
+                with self.subTest(state=state):
+                    self.reservation = self.replace_record(state=state)
+                    _, blockers, dispatch = _prepare(self.store)
+                    self.assertFalse(dispatch)
+                    self.assertIn(self.reservation.record_id, blockers)
+
+    def test_unbound_or_missing_expiry_preview_still_blocks_drain(self) -> None:
+        from tests.test_client_release_redeploy import _prepare
+
+        original = self.reservation.model_dump()
+        for changes in (
+            {"provider_target_key": ""},
+            {"lease_expires_at": "", "state": "reconcile_required"},
+        ):
+            with self.subTest(changes=changes):
+                self.reservation = self.replace_record(**{**original, **changes})
+                _, blockers, dispatch = _prepare(self.store)
+                self.assertFalse(dispatch)
+                self.assertIn(self.reservation.record_id, blockers)
+
+    def test_lost_preview_execution_lock_refuses_dispatch(self) -> None:
+        from contextlib import nullcontext
+        from tests.test_client_release_redeploy import _prepare
+
+        with patch.object(
+            self.store,
+            "testing_replacement_execution_lock",
+            return_value=nullcontext(Mock(side_effect=RuntimeError("lock lost"))),
+        ):
+            with self.assertRaises(RuntimeError):
+                _prepare(self.store)
+        self.assertEqual(
+            held_preview_reservations(self.store, product=self.profile.product), (self.reservation,)
+        )
+
+    def test_legacy_missing_intent_refuses_without_provider_reads_or_writes(self) -> None:
+        self.remove_original_intent()
         observer, quiescence = Mock(), Mock()
         result = self.recover(observe=observer, quiescence=quiescence)
         self.assertEqual(result["settlement"], "refused")
@@ -624,15 +762,19 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             operation.idempotency_key,
         )
 
-    def test_monitor_alerts_for_a_preview_without_desired_state_and_resolves_after_settlement(
-        self,
-    ) -> None:
+    def test_scheduled_monitor_alerts_for_legacy_preview_without_original_intent(self) -> None:
+        self.remove_original_intent()
+        self.assert_scheduled_preview_alert(recover=False)
+
+    def test_scheduled_monitor_resolves_preview_incident_after_supported_settlement(self) -> None:
+        self.assert_scheduled_preview_alert(recover=True)
+
+    def assert_scheduled_preview_alert(self, *, recover: bool) -> None:
         from control_plane.contracts.public_ingress_monitoring import (
             PublicIngressNotificationDestination,
             PublicIngressNotificationPolicyRecord,
         )
         from control_plane.workflows.public_ingress_monitor import (
-            run_public_ingress_monitor_once,
             PublicIngressNotificationDriverSet,
             deliver_public_ingress_notification_outbox_delivery,
         )
@@ -657,10 +799,22 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             secret_resolver=lambda _name: "https://discord.com/api/webhooks/test/webhook",
         )
         now = datetime.now(timezone.utc).isoformat()
-        observed = run_public_ingress_monitor_once(
-            record_store=self.store, checked_at=now, notification_drivers=drivers
+        from control_plane.health_monitor_scheduler import HealthMonitorScheduler
+        from control_plane.contracts.public_ingress_monitoring import (
+            health_monitor_interval_seconds,
         )
-        self.assertEqual(observed.open_incident_count, 1)
+
+        clock = datetime.fromisoformat(now).timestamp()
+        scheduler = HealthMonitorScheduler(self.store, clock=lambda: clock)
+        with patch(
+            "control_plane.health_monitor_scheduler.public_ingress_notification_drivers",
+            return_value=drivers,
+        ):
+            self.assertTrue(scheduler.run_once())
+            self.assertFalse(scheduler.run_once())
+        incidents = self.store.list_public_ingress_incident_records(status="open")
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0].failure_code, "deploy_fence_held")
         queued = self.store.list_outbox_delivery_records(
             states=("pending",), kind="public_ingress_notification"
         )
@@ -679,14 +833,96 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             self.reservation.reconciliation_key,
         ):
             self.assertNotIn(private, json.dumps(posts))
+        if not recover:
+            self.assertEqual(
+                held_preview_reservations(self.store, product=self.profile.product),
+                (self.reservation,),
+            )
+            return
         result = self.recover(observe=Mock(return_value=("present", {"status": "fail"}, False)))
         self.assertEqual(result["settlement"], "adopted")
-        recovered = run_public_ingress_monitor_once(
-            record_store=self.store,
-            checked_at=(datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
-            notification_drivers=drivers,
+        clock += health_monitor_interval_seconds("prod")
+        with patch(
+            "control_plane.health_monitor_scheduler.public_ingress_notification_drivers",
+            return_value=drivers,
+        ):
+            self.assertTrue(scheduler.run_once())
+        self.assertFalse(self.store.list_public_ingress_incident_records(status="open"))
+        self.assertTrue(self.store.list_public_ingress_incident_records(status="resolved"))
+
+    def test_preview_incident_reads_select_owned_lanes_and_preserve_resolved_history(self) -> None:
+        from control_plane.http_routes.products import (
+            ProductReadRouteDependencies,
+            register_product_environment_read_routes,
         )
-        self.assertEqual(recovered.resolved_incident_count, 1)
+        from control_plane.workflows.public_ingress_monitor import run_public_ingress_monitor_once
+
+        run_public_ingress_monitor_once(record_store=self.store, notify=False)
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        allowed = Mock(return_value=True)
+        app = FastAPI()
+        register_product_environment_read_routes(
+            cast(ApiRouteRegistrar, app),
+            dependencies=ProductReadRouteDependencies(
+                common=ReadRouteDependencies(
+                    read_identity=lambda: LocalAdminIdentity(subject="admin", token_label="test"),
+                    get_record_store=lambda: self.store,
+                    next_trace_id=lambda: "trace",
+                    authorization_allows=allowed,
+                    http_error=lambda **kw: HTTPException(kw["status_code"], kw["code"]),
+                    error_response_model=BaseModel,
+                ),
+                read_product_profile_list_identity=lambda: None,
+                work_graph_planning_facts_provider=None,
+                workflow_credentials_ready=lambda *_: False,
+                control_plane_root=self.root,
+                github_token=lambda **_: "",
+            ),
+        )
+        path = f"/v1/products/{self.profile.product}/environments/{incident.instance}/public-ingress/incidents"
+        for status in ("open", "resolved"):
+            with (
+                self.subTest(status=status),
+                patch.object(
+                    self.store,
+                    "reserve_mutation",
+                    side_effect=AssertionError("incident read mutated"),
+                ),
+            ):
+                listed = asyncio.run(get(app, path))
+                detail = asyncio.run(get(app, path + "/" + incident.incident_id))
+            self.assertEqual(listed.status_code, 200, listed.text)
+            self.assertEqual(detail.status_code, 200, detail.text)
+            self.assertEqual(
+                listed.json()["incident_list"]["incidents"][0]["incident_id"], incident.incident_id
+            )
+            self.assertEqual(allowed.call_args.kwargs["action"], "preview.read")
+            self.assertEqual(allowed.call_args.kwargs["context"], self.profile.preview.context)
+            self.assertNotIn(self.reservation.reconciliation_key, json.dumps(detail.json()))
+            if status == "open":
+                self.assertEqual(
+                    self.recover(observe=Mock(return_value=("present", {"status": "fail"}, False)))[
+                        "settlement"
+                    ],
+                    "adopted",
+                )
+                run_public_ingress_monitor_once(record_store=self.store, notify=False)
+        self.assertEqual(detail.json()["incident"]["incident"]["status"], "resolved")
+        other = self.profile.model_copy(update={"product": "other-product"})
+        self.store.write_product_profile_record(other)
+        self.assertEqual(
+            asyncio.run(get(app, path.replace(self.profile.product, other.product))).status_code,
+            404,
+        )
+        self.assertEqual(
+            asyncio.run(
+                get(app, path.replace(incident.instance, "preview-mutation-reservation-unknown"))
+            ).status_code,
+            404,
+        )
+        allowed.return_value = False
+        for url in (path, path + "/" + incident.incident_id):
+            self.assertEqual(asyncio.run(get(app, url)).status_code, 403)
 
     def test_report_only_sweep_exposes_reservation_residue_without_provider_inventory(self) -> None:
         from control_plane.preview_lifecycle_cleanup_routes import (
