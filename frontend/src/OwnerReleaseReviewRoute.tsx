@@ -43,6 +43,7 @@ function ReleaseRunProgress({ run, refreshFailed }: { run: ClientReleaseRunView;
   return <section className="owner-review-latest" aria-label="Release progress">
     <h3>Release progress: {run.state === "waiting" && run.blocked_reason ? "Blocked" : RELEASE_RUN_STATE[run.state]}</h3>
     {run.blocked_reason ? <p role="status">{run.blocked_reason}</p> : null}
+    {run.next_release_at ? <p>Scheduled after closing: <time dateTime={run.next_release_at}>{new Date(run.next_release_at).toLocaleString("en-US", { timeZone: run.business_hours_timezone || "UTC" })}</time> ({run.business_hours_timezone || "UTC"}). Launchplane checks Odoo's hours again before starting.</p> : null}
     {refreshFailed ? <p role="alert" className="owner-review-alert">Release progress could not be updated. This page keeps trying; the progress shown may be out of date.</p> : null}
     <ol>{run.steps.map(step => <li key={step.step}>
       {step.kind === "rollback" && !run.rollback_drill ? "Roll back to the last accepted release" : RELEASE_STEP_LABELS[step.kind]}: {RELEASE_STEP_STATUS[step.status]}
@@ -148,7 +149,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     };
   }, [product, releaseRunActive, response, refreshAttempt]);
 
-  async function decide(decision: ReleaseReviewDecisionEnvelope["decision"], decisionReason: string) {
+  async function decide(decision: ReleaseReviewDecisionEnvelope["decision"], decisionReason: string, releaseNow = false) {
     if (!response?.review.checklist || busy) return;
     setBusy(true);
     setError("");
@@ -159,7 +160,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         const fixtures = await loadDevFixtures();
         setResponse(fixtures.releaseDecisionForFixture(response, decision, decisionReason));
       } else {
-        setResponse(await writeReleaseReviewDecision({ product, checklist_digest: response.review.checklist_digest, decision, reason: decisionReason }));
+        setResponse(await writeReleaseReviewDecision({ product, checklist_digest: response.review.checklist_digest, decision, reason: decisionReason, release_during_business_hours: releaseNow }));
       }
       setRecorded(true);
     } catch {
@@ -243,7 +244,8 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
           ? <p>{reviewingHotfix ? "This version is already live." : "The Director is putting this version live"} before {response.viewer_is_owner ? "your" : "the Client's"} review, because of breakage on the live site. {response.viewer_is_owner ? "Please review it like any release." : ""}</p>
           : <p>Recorded by {latestDecision.actor_github_login} for this proposed version.</p>}
         {latestDecision.reason ? <blockquote>{latestDecision.reason}</blockquote> : null}
-        {latestDecision.decision === "accepted" && latestDecision.release_start ? <p>This acceptance started the release.</p> : null}
+        {latestDecision.decision === "accepted" && latestDecision.release_start ? <p>This acceptance authorizes this version's gated release.</p> : null}
+        {latestDecision.release_during_business_hours ? <p role="status">Urgent release during business hours requested by {latestDecision.actor_github_login}; the reason is recorded above.</p> : null}
         {!latestDecision.release_issue_url ? <p role="alert" className="owner-review-alert">Decision saved, but its release record has not been published. Approval cannot be used for deployment yet. Retry the same decision to publish its record.</p> : null}
       </section> : null}
       {response.release_run ? <ReleaseRunProgress run={response.release_run} refreshFailed={refreshFailed} /> : null}
@@ -263,14 +265,20 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         {reviewingHotfix
           ? <p className="owner-review-golive"><strong>Accepting keeps this urgent fix live as your accepted release.</strong> Nothing else is deployed.</p>
           : releaseStarts
-          ? <p className="owner-review-golive"><strong>Accepting puts this version on the live site, {liveSiteName}.</strong> Launchplane takes a verified backup, puts it live, checks it, and rolls back by itself if the checks fail.{response.release_on_acceptance === "promote_with_rollback_drill" ? " This first time, it also rolls back once and puts the same version live again, to prove rollback works." : ""}</p>
+          ? <p className="owner-review-golive"><strong>{response.business_hours?.applies ? `Accepting releases this version on ${liveSiteName} when Odoo's company calendar is outside business hours.` : `Accepting puts this version on the live site, ${liveSiteName}.`}</strong> Launchplane takes a verified backup, puts it live, checks it, and rolls back by itself if the checks fail.{response.release_on_acceptance === "promote_with_rollback_drill" ? " This first time, it also rolls back once and puts the same version live again, to prove rollback works." : ""}</p>
           : <p><strong>Releases are on hold for {response.display_name}.</strong> Accepting records your approval; nothing goes live until an admin releases the hold.</p>}
         <p><strong>Request changes</strong> {reviewingHotfix ? `rolls ${liveSiteName} back to your last accepted release and records your feedback.` : "records your feedback and replaces any earlier approval or admin override for this release."}</p>
-        <label><span>What should change? (needed only when you request changes)</span><textarea value={reason} maxLength={4000} disabled={busy} onChange={event => setReason(event.target.value)} /></label>
+        <label><span>{response.business_hours?.applies ? "Feedback or urgent-release reason (required for changes or releasing during business hours)" : "What should change? (needed only when you request changes)"}</span><textarea value={reason} maxLength={4000} disabled={busy} onChange={event => setReason(event.target.value)} /></label>
         <div className="owner-review-action-buttons">
           <button className="button button-primary" type="button" disabled={busy || incomplete} onClick={() => void decide("accepted", reason)}>Accept release</button>
           <button className="button" type="button" disabled={busy || !reason.trim()} onClick={() => void decide("changes_requested", reason)}>Request changes</button>
         </div>
+        {response.business_hours?.applies && !reviewingHotfix && releaseStarts ? <div>
+          <p>Normal releases wait for closing according to Odoo's company calendar. {response.business_hours.blocked_reason}</p>
+          {response.business_hours.next_release_at ? <p>Next release window: <time dateTime={response.business_hours.next_release_at}>{new Date(response.business_hours.next_release_at).toLocaleString("en-US", { timeZone: response.business_hours.timezone || "UTC" })}</time> ({response.business_hours.timezone || "UTC"}).</p> : null}
+          <p>For an urgent bug fix, explain why it cannot wait in the text box above. This still records your acceptance of exactly this version.</p>
+          <button className="button" type="button" disabled={busy || incomplete || !reason.trim()} onClick={() => void decide("accepted", reason, true)}>Accept and release now during business hours</button>
+        </div> : null}
       </section> : null}
       {checklist && hasChanges && !activeHotfix && response.can_override && client && !latestDecision ? <section className="owner-review-action" aria-label="Ask the Client now">
         <h3>Ask {client} to review this release now</h3>
@@ -298,7 +306,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         </div>
       </section> : null}
       {checklist && !noNewRelease && (response.viewer_is_owner || response.can_override) ? <p className="owner-review-state">Each new decision is saved and published as a separate release record. {releaseStarts ? "Only the Client's acceptance starts the release; an admin override does not, and an admin can hold releases." : "Recording a decision does not deploy anything."} Production deployment still requires the release and backup checks.</p> : null}
-      {recorded ? <p role="status" className="owner-review-success">{latestDecision?.decision === "temporary_hotfix" ? "Temporary hotfix recorded. Launchplane is putting it live; this page shows its progress." : latestDecision?.release_start === "rollback" ? "Changes requested. Launchplane is rolling the site back to your last accepted release." : latestDecision?.release_start ? "Release accepted. Launchplane is starting it; this page shows its progress." : "Decision recorded. Nothing has been deployed."}</p> : null}
+      {recorded ? <p role="status" className="owner-review-success">{latestDecision?.decision === "temporary_hotfix" ? "Temporary hotfix recorded. Launchplane is putting it live; this page shows its progress." : latestDecision?.release_start === "rollback" ? "Changes requested. Launchplane is rolling the site back to your last accepted release." : latestDecision?.release_start ? "Release accepted. This page shows when Launchplane can start and its progress." : "Decision recorded. Nothing has been deployed."}</p> : null}
       {checklist ? <details className="release-review-technical">
         <summary>Technical details</summary>
         <dl>

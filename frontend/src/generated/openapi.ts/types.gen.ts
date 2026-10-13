@@ -310,6 +310,13 @@ export type BootstrapEvidence = {
     run_status: 'pending' | 'pass' | 'fail' | 'skipped';
 };
 
+export type BusinessHoursWindow = {
+    applies: boolean;
+    blocked_reason: string;
+    next_release_at: string;
+    timezone: string;
+};
+
 export type ChangeImpactCoverage = {
     state: 'complete' | 'incomplete';
     truncated: boolean;
@@ -327,7 +334,9 @@ export type ClientReleaseFailureView = {
 
 export type ClientReleaseRunView = {
     blocked_reason: string;
+    business_hours_timezone?: string;
     decision_record_id: string;
+    next_release_at?: string;
     rollback_drill: boolean;
     state: 'waiting' | 'running' | 'passed' | 'stopped';
     steps: Array<ClientReleaseStepView>;
@@ -984,6 +993,7 @@ export type LaunchplaneProductProfileRecord = {
     image: ProductImageProfile;
     lanes: Array<ProductLaneProfile>;
     lifecycle_state: 'active' | 'retiring' | 'retired';
+    odoo_business_hours?: OdooBusinessHoursPolicy | null;
     owner: ProductOwnerProfile;
     preview: ProductPreviewProfile;
     product: string;
@@ -1681,6 +1691,11 @@ export type OdooAddonSettingOverride = {
     addon: string;
     setting: string;
     value: OdooOverrideValue;
+};
+
+export type OdooBusinessHoursPolicy = {
+    company_id: number;
+    private_endpoint_key: string;
 };
 
 export type OdooConfigParameterOverride = {
@@ -4374,6 +4389,7 @@ export type ReleaseReviewDecisionEnvelope = {
     decision: 'accepted' | 'changes_requested' | 'overridden' | 'temporary_hotfix';
     product: string;
     reason?: string;
+    release_during_business_hours?: boolean;
 };
 
 export type ReleaseReviewDecisionRecord = {
@@ -4387,6 +4403,7 @@ export type ReleaseReviewDecisionRecord = {
     product: string;
     reason: string;
     record_id: string;
+    release_during_business_hours?: boolean;
     release_issue_url: string;
     release_start: '' | 'promote' | 'promote_with_rollback_drill' | 'rollback';
 };
@@ -4404,6 +4421,7 @@ export type ReleaseReviewItem = {
 };
 
 export type ReleaseReviewResponse = {
+    business_hours?: BusinessHoursWindow | null;
     can_override: boolean;
     can_start_temporary_hotfix: boolean;
     display_name: string;
@@ -4948,6 +4966,7 @@ export type LaunchplaneProductProfileRecordWritable = {
     image: ProductImageProfile;
     lanes: Array<ProductLaneProfile>;
     lifecycle_state: 'active' | 'retiring' | 'retired';
+    odoo_business_hours?: OdooBusinessHoursPolicy | null;
     owner: ProductOwnerProfile;
     preview: ProductPreviewProfileWritable;
     product: string;

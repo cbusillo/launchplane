@@ -100,6 +100,11 @@ class ReleaseReviewDecisionRecord(BaseModel):
     checklist: ReleaseChecklist
     decision: ReleaseDecision
     reason: str = Field(default="", max_length=4000)
+    release_during_business_hours: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     actor_github_id: str = Field(pattern=r"^[0-9]+$")
     actor_github_login: str = Field(min_length=1)
     decided_at: str = Field(min_length=1)
@@ -114,6 +119,12 @@ class ReleaseReviewDecisionRecord(BaseModel):
 
     @model_validator(mode="after")
     def validate_decision(self) -> "ReleaseReviewDecisionRecord":
+        if self.release_during_business_hours and (
+            self.decision not in {"accepted", "temporary_hotfix"} or not self.reason.strip()
+        ):
+            raise ValueError(
+                "A business-hours escape requires acceptance or a hotfix and a reason."
+            )
         if self.product != self.checklist.product:
             raise ValueError("Release decision and checklist products must match.")
         if self.decision != "accepted" and not self.reason.strip():

@@ -69,6 +69,7 @@ from control_plane.client_release import (
     advance_client_releases,
     client_release_grant_allows,
 )
+from control_plane.odoo_business_hours import BusinessHoursHeld, require_release_window
 from control_plane.odoo_release_recovery import (
     PRODUCTION_WRITE_KEY,
     odoo_release_wrote_production,
@@ -1622,6 +1623,14 @@ def _run_release_operation(
             terminal_operation = denied_hold(error)
         else:
             terminal_operation = failed(str(error), error.code)
+    except BusinessHoursHeld as error:
+        terminal_operation = _retry_source_order_read(read_current()).model_copy(
+            update={
+                "error_code": "business_hours_held",
+                "error_message": str(error),
+                "attempt": max(operation.attempt - 1, 0),
+            }
+        )
     except Exception as error:
         logging.exception(
             "%s operation %s failed before producing a result.", label, operation.operation_id
@@ -1706,7 +1715,24 @@ def _execute_prod_promotion_operation(
         checkpoint_phase: Callable[[str], None],
         checkpoint_provider_effect: Callable[[str], None],
     ) -> OdooProdPromotionRunResult:
+        started = False
+
         def before_effect(effect_name: str) -> None:
+            nonlocal started
+            if not started and operation.authorization.grant in RELEASE_DECISION_GRANTS:
+                if not isinstance(record_store, PostgresRecordStore):
+                    raise ValueError("Scheduled releases require durable storage.")
+                profile = record_store.read_product_profile_record(operation.product)
+                decision = record_store.read_release_review_decision_record(
+                    product=operation.product,
+                    record_id=operation.authorization.release_decision_record_id,
+                )
+                require_release_window(
+                    store=record_store,
+                    profile=profile,
+                    decision=decision,
+                    control_plane_root=control_plane_root_path,
+                )
             if (
                 effect_name == TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE
                 and operation.authorization.grant in RELEASE_DECISION_GRANTS
@@ -1715,6 +1741,7 @@ def _execute_prod_promotion_operation(
                     raise ValueError("Odoo Client release recovery requires durable storage.")
                 require_odoo_release_recovery_pin(record_store, operation)
             checkpoint_provider_effect(effect_name)
+            started = True
 
         return execute_odoo_prod_promotion_run(
             control_plane_root=control_plane_root_path,

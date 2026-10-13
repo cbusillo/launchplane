@@ -35,11 +35,16 @@ from time import monotonic
 from typing import Literal, cast
 
 import click
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.child_process_errors import redact_untrusted_text
 from control_plane.operation_status_read import safe_operation_error_code
 from control_plane.service_deploy_drain import ServiceDeployDraining
+from control_plane.odoo_business_hours import (
+    BusinessHoursHeld,
+    release_window,
+    require_release_window,
+)
 
 from control_plane.contracts.deployment_record import DeploymentRecord, deployment_record_passed
 from control_plane.contracts.generic_web_rollback import (
@@ -195,6 +200,16 @@ class ClientReleaseRunView(BaseModel):
     rollback_drill: bool
     state: ClientReleaseRunState
     blocked_reason: str = ""
+    next_release_at: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    business_hours_timezone: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     steps: tuple[ClientReleaseStepView, ...]
 
 
@@ -742,6 +757,7 @@ def read_client_release_run(
     store: object,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
+    control_plane_root: Path | None = None,
 ) -> ClientReleaseRunView | None:
     if not client_release_steps(decision.release_start) or not isinstance(
         store, PostgresRecordStore
@@ -763,6 +779,12 @@ def read_client_release_run(
         if state in {"waiting", "running"}
         else ""
     )
+    window = None
+    if not blocked_reason and state in {"waiting", "running"}:
+        window = release_window(
+            store=store, profile=profile, decision=decision, control_plane_root=control_plane_root
+        )
+        blocked_reason = window.blocked_reason
     from control_plane.service_deploy_drain import read_status
 
     if (
@@ -791,6 +813,8 @@ def read_client_release_run(
             blocked_reason = "The reviewed production version has no deployable passing rollback target. An admin must reconcile its deployment evidence before this drill can continue."
     return ClientReleaseRunView(
         blocked_reason=blocked_reason,
+        next_release_at=window.next_release_at if window else "",
+        business_hours_timezone=window.timezone if window else "",
         decision_record_id=decision.record_id,
         rollback_drill=decision.release_start == "promote_with_rollback_drill",
         state=state,
@@ -1027,7 +1051,7 @@ def advance_client_releases(
             continue
         try:
             operation_id = _advance(store, control_plane_root, *covered)
-        except ClientReleaseNotReady as reason:
+        except (ClientReleaseNotReady, BusinessHoursHeld) as reason:
             _LOGGER.info(
                 "client release not advanced product=%s reason=%s", profile.product, reason
             )
@@ -1104,6 +1128,9 @@ def _advance(
             return _queue_rollback(
                 store, control_plane_root, profile, decision, step, context, authorized_at
             )
+        require_release_window(
+            store=store, profile=profile, decision=decision, control_plane_root=control_plane_root
+        )
         _require_current_release(store, control_plane_root, profile, decision)
         if step.kind == "backup":
             if profile.driver_id == "odoo":
