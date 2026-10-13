@@ -29,6 +29,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubError,
     MergeTrainGitHubStaleHeadError,
 )
+from control_plane.merge_train_stack_disposition import DEFAULT_STACK_CHILD_DISPOSITION_LABEL
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.http_app_test_support import _post_merge_train_controller_run_once
@@ -657,7 +658,7 @@ class MergeTrainPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.store.list_merge_train_controller_state_records()[0].status, "reconcile_required"
         )
 
-    def test_old_policy_stack_requires_current_disposition_policy(self) -> None:
+    def test_old_policy_stack_recovers_with_default_disposition_label(self) -> None:
         transport = self._record_unfinished_stack()
         current = self.policy.policy
         self.policy = self.policy.model_copy(
@@ -674,10 +675,12 @@ class MergeTrainPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         result = self._run().accepted_result
-        self.assertEqual(
-            result["reason_code"], "completed_landing_stack_disposition_not_configured"
-        )
-        self.assertEqual(transport.effects, [])
+        stack = result["stack_collapse_plan"]
+        assert isinstance(stack, dict)
+        self.assertEqual(stack["status"], "ready_for_train")
+        for child in transport.children.values():
+            self.assertEqual(child["labels"], [{"name": DEFAULT_STACK_CHILD_DISPOSITION_LABEL}])
+        self.assertEqual(self.store.list_merge_train_controller_state_records()[0].status, "idle")
 
     def _assert_rewritten_root_recovery(self, method: MergeTrainMergeMethod) -> None:
         transport = self._record_unfinished_stack()
