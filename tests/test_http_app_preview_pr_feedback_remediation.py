@@ -1,10 +1,11 @@
 import asyncio
 import threading
 import unittest
+from datetime import UTC, datetime, timedelta
 import click
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from typing import cast
 from unittest.mock import patch
 
@@ -36,7 +37,7 @@ def _installation_token() -> GitHubAppInstallationToken:
         installation_id=12,
         repository_id=7001,
         repository="cbusillo/verireel",
-        expires_at="2026-10-14T00:00:00Z",
+        expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
         app_slug="example-delivery",
     )
 
@@ -98,7 +99,7 @@ class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
                     )
                 if unquote(path) == "/users/example-delivery[bot]":
                     return {"id": 101, "login": "example-delivery[bot]", "type": "Bot"}
-                if path.endswith("/comments?per_page=100&page=1"):
+                if urlsplit(path).path.endswith("/issues/311/comments"):
                     return []
                 if path == "/installation/token" and method == "DELETE":
                     return None
@@ -164,7 +165,7 @@ class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
                     calls.append((method, path))
                     if unquote(path) == f"/users/{bot['login']}":
                         return bot
-                    if path.endswith("/comments?per_page=100&page=1"):
+                    if urlsplit(path).path.endswith("/issues/311/comments"):
                         return [
                             {
                                 "id": 55,

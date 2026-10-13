@@ -1,4 +1,5 @@
 import unittest
+from datetime import UTC, datetime, timedelta
 from collections.abc import Callable
 from urllib.parse import unquote
 from pathlib import Path
@@ -288,7 +289,7 @@ class PreviewPrFeedbackRemediationTests(unittest.TestCase):
             installation_id=12,
             repository_id=7001,
             repository="cbusillo/verireel",
-            expires_at="2026-10-14T00:00:00Z",
+            expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
             app_slug="example-delivery",
         )
         for slug, actor in (

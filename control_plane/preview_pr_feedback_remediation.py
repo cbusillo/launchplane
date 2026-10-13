@@ -436,13 +436,15 @@ def resolve_remediation_token(
 ) -> Iterator[PreviewPrFeedbackCredentials]:
     installation_token: GitHubAppInstallationToken | None = None
 
-    def resolve_token(**kwargs: object) -> str:
+    def resolve_token(
+        *, control_plane_root: Path, context_name: str, repository: str, purpose: str
+    ) -> str:
         nonlocal installation_token
         installation_token = resolve_delivery_github_installation_token(
             control_plane_root=control_plane_root,
-            context_name=context,
+            context_name=context_name,
             repository=repository,
-            purpose="pull_request_feedback",
+            purpose=purpose,
             report_failure=True,
         )
         return installation_token.token if installation_token is not None else ""

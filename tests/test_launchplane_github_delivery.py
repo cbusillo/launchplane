@@ -164,12 +164,18 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
             )
 
     def test_delivery_identity_carries_slug_from_the_verified_app(self) -> None:
-        def mint(**kwargs: object) -> GitHubAppInstallationToken:
+        def mint(
+            *,
+            identity: GitHubAppIdentity,
+            repository: str,
+            repository_id: str,
+            permissions: Mapping[str, str],
+        ) -> GitHubAppInstallationToken:
             return mint_delivery_installation_token(
-                identity=self.identity,
-                repository="example/site",
-                repository_id="7001",
-                permissions={"contents": "read", "pull_requests": "write"},
+                identity=identity,
+                repository=repository,
+                repository_id=repository_id,
+                permissions=permissions,
                 api_request=self.provider,
                 now=self.now,
             )
