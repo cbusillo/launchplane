@@ -320,7 +320,9 @@ class TemporaryHotfixRehearsal(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.advance(), ())
         view = await self.read(client)
         self.assertFalse(view["reviewing_temporary_hotfix"])
-        self.assertEqual(view["release_run"]["state"], "passed")
+        # Testing already carries a newer invitation. Once production has left
+        # the hotfix, its completed rollback is historical, not this release.
+        self.assertIsNone(view["release_run"])
 
     async def test_a_stopped_rollback_keeps_the_rejection_until_production_leaves_the_fix(
         self,

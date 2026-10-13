@@ -357,6 +357,14 @@ status, timestamp, and record links so the UI can render deployments,
 promotions, rollbacks, backup gates, previews, cleanup, feedback, and relevant
 authz changes without loading raw record payloads.
 
+Odoo promotion events use the durable promotion operation's status and completion
+time, with links to its Client release decision, promotion, deployment and backup
+records when present. This preserves both promotions around a rollback drill even
+when a generic promotion record has no deploy timestamp or later records a
+rollback. The linked generic promotion is not repeated as a second promotion;
+its rollback remains a separate event. Pending and failed operations retain their
+recorded status rather than appearing as successful promotions.
+
 Authz events are attributed from the managed reconcile mutation delta, not from
 membership in the resulting cumulative policy snapshot. Grant, removal, and
 update copy names the affected product and operation without exposing raw rule

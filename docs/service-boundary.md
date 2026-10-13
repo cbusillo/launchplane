@@ -4030,7 +4030,7 @@ independent of the retired exact-binding machinery and reads none of its records
 `GET /v1/product-review?repository=<owner/repo>&pull_request=<n>` returns the
 product display name, the pull request URL, the preview URL of the one active
 preview serving a ready generation for that pull request (empty when there is
-none), the head revision that preview serves, the latest decision, and
+none), the head revision and `preview_generation_id` that preview serves, the latest decision, and
 `owner_set`, `viewer_is_owner`, `can_decide`, and a plain `cannot_decide_reason`.
 Optional `decision_id` selects a saved decision from this same visible PR in
 `latest_decision`, returning 404 when absent. This supports historical decision
@@ -4045,9 +4045,15 @@ it receives `viewer_is_owner=false` and `can_decide=false`. Reading never grants
 the ability to record a Client decision.
 
 `POST /v1/product-review/decisions` takes `{repository, pull_request, decision,
-reason}` with `decision` of `accepted` or `changes_requested` (reason required)
-and appends one `launchplane_product_review_decisions` record bound to the served
-preview URL and head revision. It uses the GitHub-human browser mutation identity
+reason, reviewed_head_sha, reviewed_preview_url, reviewed_generation_id}` with
+`decision` of `accepted` or `changes_requested` (reason required). The three
+`reviewed_*` fields are required evidence copied from the GET response. The
+service compares them with the currently serving preview before saving, under
+the decision lock. A mismatch returns `409 product_review_preview_changed`
+without recording or publishing a decision. The browser disables decisions
+until the Client refreshes the review and inspects the current preview. A saved
+`launchplane_product_review_decisions` record retains the reviewed URL, head, and
+`preview_generation_id`; older records default the generation to empty. It uses the GitHub-human browser mutation identity
 path (session cookie, same-origin fetch metadata, single-use CSRF token); bearer
 and agent identities are rejected. Authorization is one comparison: the
 session's immutable GitHub id equals `owner.github_id` on the product profile

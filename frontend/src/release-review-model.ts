@@ -9,17 +9,14 @@ function nothingToTestMarker(notes: string): string | undefined {
   return [NOTHING_TO_TEST, LEGACY_NOTHING_TO_TEST].find(marker => lowered.startsWith(marker.toLowerCase()));
 }
 
-export type ReleaseCheck = { notes: string; items: ReleaseReviewItem[] };
-
 export type GroupedReleaseItems = {
-  checks: ReleaseCheck[];
+  checks: ReleaseReviewItem[];
   nothingToTest: ReleaseReviewItem[];
 };
 
-// Display grouping only: the checklist, its digest, and the blockers stay per pull request.
+// Engineering-only changes stay collapsed; every Client check stays per pull request.
 export function groupReleaseItems(items: readonly ReleaseReviewItem[]): GroupedReleaseItems {
-  const checks: ReleaseCheck[] = [];
-  const byNotes = new Map<string, ReleaseCheck>();
+  const checks: ReleaseReviewItem[] = [];
   const nothingToTest: ReleaseReviewItem[] = [];
   for (const item of items) {
     const notes = item.owner_test_notes.trim();
@@ -27,14 +24,7 @@ export function groupReleaseItems(items: readonly ReleaseReviewItem[]): GroupedR
       nothingToTest.push(item);
       continue;
     }
-    const existing = notes ? byNotes.get(notes) : undefined;
-    if (existing) {
-      existing.items.push(item);
-      continue;
-    }
-    const check = { notes, items: [item] };
-    checks.push(check);
-    if (notes) byNotes.set(notes, check);
+    checks.push(item);
   }
   return { checks, nothingToTest };
 }
