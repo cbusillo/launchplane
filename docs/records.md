@@ -540,7 +540,7 @@ an ORM column/table or remains only in the evidence payload.
   notes, and provider route evidence stay payload-only.
 - Preview generation: modeled fields are `generation_id`, `preview_id`,
   `sequence`, `state`, `requested_at`, `finished_at`, and `artifact_id`. Source
-  map, PR summaries, deploy/verify evidence, and failure details stay
+  map, PR summaries, optional verified `source_build`, deploy/verify evidence, and failure details stay
   payload-only.
 - Release tuple: modeled fields are `context`, `channel`, `tuple_id`,
   `artifact_id`, `minted_at`, and `provenance`. Repo SHA maps and source
@@ -2410,9 +2410,13 @@ run` is the foreground loop intended for an external process supervisor, and
   origin's rendered page with the public URL. Backup restore and verification
   replay use the same public canonical expectation after post-deploy, without
   changing their internal-origin or backup authority. Lanes without public
-  hosts retain their previous behavior; previews and the destructive restore
-  payload itself do not inherit this URL. Public URLs are ephemeral in website
-  rendering too, so clearing public hosts leaves no persisted public canonical.
+  hosts retain explicit base-URL overrides and website intent. When neither
+  supplies a URL, prod deploy/promotion renders the recorded origin into
+  `web.base.url`, including after public hosts are withdrawn. This fallback is
+  ephemeral and never selects a website or enables a disabled override phase.
+  Previews and the destructive restore payload itself do not inherit this URL.
+  Public URLs are ephemeral in website rendering too, so clearing public hosts
+  leaves no persisted public canonical.
 - Isolated Odoo previews inherit only `website_bootstrap` from the preview
   template instance when that record applies on deploy. Launchplane renders an
   ephemeral payload with the preview URL as `canonical_url`; it does not persist

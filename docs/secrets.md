@@ -404,14 +404,15 @@ decryption key state denies the reveal or resolution.
   `testing` or `dev` lane, because the lane cannot tell a production key from a
   test key. A binding whose key names an integration needs a policy rule or a
   declared `secret_class` there, even when it is stored for exactly that lane.
-  Code recognizes store, payment, outgoing-mail, printing, map, media, web-push and
-  business-system connector names (`DEFAULT_INTEGRATION_KEY_MARKERS` in
-  `control_plane/runtime_key_safety.py`), matched on whole underscore-separated
-  key parts. The active policy record's `integration_key_markers` add
+  Code recognizes integrations whose keys can change a live business system;
+  `DEFAULT_INTEGRATION_KEY_MARKERS` in `control_plane/runtime_key_safety.py`
+  owns the defaults, matched on whole underscore-separated key parts.
+  Display-only map and media keys use ordinary lane classification and are not
+  omitted from Odoo previews by the default integration guard. Explicit policy
+  rules and product-specific markers still apply.
+  The active policy record's `integration_key_markers` add
   product-specific ones. Policy apply adds markers and never removes one. `prod`
-  lanes keep the lane-exact shortcut. Odoo's `web_map.token_map_box` override
-  retains its integration identity in the generated runtime binding key and
-  follows the same classification and preview-omission rules.
+  lanes keep the lane-exact shortcut.
 - A production integration key may sit on a `testing` or `dev` lane only for a
   reason on an allowlist, recorded with evidence. Declaring such a key
   `shared_safe` on a non-production lane also needs a `sharing_reason` on the

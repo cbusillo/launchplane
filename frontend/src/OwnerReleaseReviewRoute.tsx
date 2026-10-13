@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import Markdown from "react-markdown";
 import { openUrgentReleaseReview, readReleaseReview, writeReleaseReviewDecision } from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import type { ClientReleaseRunView, ReleaseReviewDecisionEnvelope, ReleaseReviewResponse, ReleaseReviewItem } from "./generated/openapi.ts";
@@ -40,7 +41,7 @@ const DECISION_HEADINGS: Record<ReleaseReviewDecisionEnvelope["decision"], strin
 
 function ReleaseRunProgress({ run, refreshFailed }: { run: ClientReleaseRunView; refreshFailed: boolean }) {
   return <section className="owner-review-latest" aria-label="Release progress">
-    <h3>Release progress: {RELEASE_RUN_STATE[run.state]}</h3>
+    <h3>Release progress: {run.state === "waiting" && run.blocked_reason ? "Blocked" : RELEASE_RUN_STATE[run.state]}</h3>
     {run.blocked_reason ? <p role="status">{run.blocked_reason}</p> : null}
     {refreshFailed ? <p role="alert" className="owner-review-alert">Release progress could not be updated. This page keeps trying; the progress shown may be out of date.</p> : null}
     <ol>{run.steps.map(step => <li key={step.step}>
@@ -59,19 +60,30 @@ function ReleaseRunProgress({ run, refreshFailed }: { run: ClientReleaseRunView;
 
 function ReleaseItems({ items, viewerIsOwner, emptyMessage = "No merged pull request changes between these versions." }: { items: readonly ReleaseReviewItem[]; viewerIsOwner: boolean; emptyMessage?: string }) {
   const grouped = groupReleaseItems(items);
+  function changeTitle(item: ReleaseReviewItem) {
+    const url = safeExternalUrl(item.url);
+    return url ? <a href={url.toString()} target="_blank" rel="noreferrer">{item.title}</a> : item.title;
+  }
   return <>
-        {grouped.checks.length ? <ol className="release-review-checklist">{grouped.checks.map(check => <li key={check.items[0].url}>
-          <p className="release-review-notes">{check.notes || "Test notes are missing for this change."}</p>
-          <ul className="release-review-changes">{check.items.map(item => <li key={item.url}>
-            {item.title}
+        {grouped.checks.length ? <ol className="release-review-checklist">{grouped.checks.map(item => <li key={item.url}>
+          <h4>{changeTitle(item)}</h4>
+          <div className="release-review-notes"><Markdown skipHtml urlTransform={url => safeExternalUrl(url)?.toString() ?? ""} components={{
+            h1: ({ children }) => <h5>{children}</h5>,
+            h2: ({ children }) => <h5>{children}</h5>,
+            h3: ({ children }) => <h5>{children}</h5>,
+            h4: ({ children }) => <h5>{children}</h5>,
+            h5: ({ children }) => <h5>{children}</h5>,
+            h6: ({ children }) => <h5>{children}</h5>,
+            a: ({ href, children }) => href ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <>{children}</>,
+            img: ({ alt }) => <>{alt}</>,
+          }}>{item.owner_test_notes.trim() || "Test notes are missing for this change."}</Markdown></div>
             {!viewerIsOwner && item.preview_era_notes ? <span>PR #{item.pull_request_number}: preview-era test links replaced with testing-site instructions.</span> : null}
             {item.already_reviewed ? <span>{`${viewerIsOwner ? "You" : "The Client"} accepted this change in its preview. Check it again as part of this release.`}</span> : null}
-          </li>)}</ul>
         </li>)}</ol> : <p>{items.length ? "No changes from this repository need you to test them." : emptyMessage}</p>}
         {grouped.nothingToTest.length ? <details className="release-review-untested">
           <summary>{grouped.nothingToTest.length === 1 ? "1 change needs nothing from you" : `${grouped.nothingToTest.length} changes need nothing from you`}</summary>
           <ul>{grouped.nothingToTest.map(item => <li key={item.url}>
-            {item.title}
+            {changeTitle(item)}
             {!viewerIsOwner && item.preview_era_notes ? <span>PR #{item.pull_request_number}: preview-era test links replaced with testing-site instructions.</span> : null}
             {untestedReason(item.owner_test_notes) ? <span>{untestedReason(item.owner_test_notes)}</span> : null}
           </li>)}</ul>

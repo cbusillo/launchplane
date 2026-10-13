@@ -552,10 +552,6 @@ class RuntimeKeySafetyTests(unittest.TestCase):
             "REPAIRSHOPR_API_KEY",
             "FISHBOWL_PASSWORD",
             "RESEND_API_KEY",
-            "MAPBOX_API_KEY",
-            "ODOO_OVERRIDE_SECRET__CONFIG_PARAM__WEB_MAP__TOKEN_MAP_BOX",
-            "UNSPLASH_ACCESS_TOKEN",
-            "TENOR_API_KEY",
             "WEB_PUSH_VAPID_PRIVATE_KEY",
             "ENV_OVERRIDE_CM_DATA__DB_PASSWORD",
         ):
@@ -574,6 +570,43 @@ class RuntimeKeySafetyTests(unittest.TestCase):
 
                     self.assertEqual(evaluation.status, "fail")
                     self.assertEqual(evaluation.findings[0].code, "unclassified_binding")
+
+    def test_display_only_keys_use_lane_classification_and_keep_explicit_rules(self) -> None:
+        lanes: tuple[tuple[str, RuntimeEnvironmentClass], ...] = (
+            ("testing", "testing"),
+            ("dev", "dev"),
+        )
+        for binding_key in (
+            "MAPBOX_API_KEY",
+            "ODOO_OVERRIDE_SECRET__CONFIG_PARAM__WEB_MAP__TOKEN_MAP_BOX",
+            "UNSPLASH_ACCESS_TOKEN",
+            "TENOR_API_KEY",
+        ):
+            for instance, environment_class in lanes:
+                with self.subTest(binding_key=binding_key, instance=instance):
+                    target = RuntimeKeySafetyTarget(
+                        context="opw", instance=instance, environment_class=environment_class
+                    )
+                    binding = _binding(binding_key=binding_key, instance=instance)
+                    evaluation = evaluate_runtime_key_safety(
+                        target=target,
+                        required_binding_keys=(binding_key,),
+                        secret_bindings=(binding,),
+                        secret_rules=(),
+                    )
+                    self.assertEqual(evaluation.status, "pass")
+                    refused = evaluate_runtime_key_safety(
+                        target=target,
+                        required_binding_keys=(binding_key,),
+                        secret_bindings=(binding,),
+                        secret_rules=(
+                            RuntimeSecretSafetyRule(
+                                binding_key=binding_key, secret_class="prod_only"
+                            ),
+                        ),
+                    )
+                    self.assertEqual(refused.status, "fail")
+                    self.assertEqual(refused.findings[0].code, "secret_class_not_allowed")
 
     def test_declared_class_classifies_an_integration_secret_on_a_testing_lane(self) -> None:
         cases: tuple[tuple[RuntimeSecretClass, str], ...] = (
