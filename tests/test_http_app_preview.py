@@ -66,7 +66,8 @@ from tests.support.stores import (
 
 
 class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
-    def _cleanup_policy(self, actions: list[str]) -> LaunchplaneAuthzPolicy:
+    @staticmethod
+    def _cleanup_policy(actions: list[str]) -> LaunchplaneAuthzPolicy:
         return LaunchplaneAuthzPolicy.model_validate(
             {
                 "github_actions": [
@@ -84,9 +85,8 @@ class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-    def _cleanup_app(
-        self, *, root: Path, state_dir: Path, policy: LaunchplaneAuthzPolicy
-    ) -> FastAPI:
+    @staticmethod
+    def _cleanup_app(*, root: Path, state_dir: Path, policy: LaunchplaneAuthzPolicy) -> FastAPI:
         return create_launchplane_fastapi_app(
             verifier=_StubVerifier(
                 _identity(
@@ -101,7 +101,8 @@ class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: FilesystemRecordStore(state_dir=state_dir),
         )
 
-    def _write_cleanup_plan(self, state_dir: Path) -> None:
+    @staticmethod
+    def _write_cleanup_plan(state_dir: Path) -> None:
         FilesystemRecordStore(state_dir=state_dir).write_preview_lifecycle_plan_record(
             PreviewLifecyclePlanRecord(
                 plan_id="preview-lifecycle-plan-verireel-testing-20260429T195838Z",
@@ -390,7 +391,6 @@ class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
                         discovered_at="2026-05-10T12:00:00Z",
                         repository="every/syo",
                         anchor_repo="syo",
-                        preview_slug_prefix="pr-",
                         status="pass",
                         desired_count=0,
                         desired_previews=(),
@@ -419,7 +419,8 @@ class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
         inventory_mock.assert_called_once()
         desired_mock.assert_called_once()
 
-    async def _sweep_syo_and_verireel(self, *, authorized_product: str) -> _AsgiResponse:
+    @staticmethod
+    async def _sweep_syo_and_verireel(*, authorized_product: str) -> _AsgiResponse:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
@@ -480,7 +481,6 @@ class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
                         discovered_at="2026-05-10T12:00:00Z",
                         repository="every/syo",
                         anchor_repo="syo",
-                        preview_slug_prefix="pr-",
                         status="pass",
                         desired_count=0,
                         desired_previews=(),
@@ -1135,9 +1135,7 @@ class FastApiPreviewReadTests(unittest.IsolatedAsyncioTestCase):
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
             preview = _preview_read_record()
             store.write_preview_record(preview)
-            store.write_preview_generation_record(
-                _preview_generation_read_record(sequence=1, state="ready")
-            )
+            store.write_preview_generation_record(_preview_generation_read_record())
             store.write_preview_generation_record(
                 _preview_generation_read_record(sequence=2, state="verifying")
             )

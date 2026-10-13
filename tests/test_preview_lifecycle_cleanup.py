@@ -20,7 +20,7 @@ from tests.test_generic_web_preview import _profile
 class PreviewLifecycleCleanupTests(unittest.TestCase):
     def setUp(self) -> None:
         def closed_prs(
-            *, profile: LaunchplaneProductProfileRecord, **kwargs: Any
+            *, profile: LaunchplaneProductProfileRecord, **_kwargs: Any
         ) -> PreviewDesiredStateRecord:
             return build_preview_desired_state_record(
                 product=profile.product,

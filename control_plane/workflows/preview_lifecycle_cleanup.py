@@ -1,7 +1,7 @@
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ContextManager
 
 import click
 
@@ -247,13 +247,13 @@ def _build_generic_web_cleanup_record(
                 anchor_pr_number=anchor_pr_number,
             )
             serialize = getattr(record_store, "serialize_preview_refresh", None)
-            driver_scope = (
-                serialize(preview_id=preview.preview_id)
-                if preview is not None
+            driver_scope: ContextManager[None] = nullcontext()
+            if (
+                preview is not None
                 and callable(serialize)
                 and profile.preview.data_transport_mode == "driver"
-                else nullcontext()
-            )
+            ):
+                driver_scope = serialize(preview_id=preview.preview_id)
             with driver_scope:
                 error = _orphan_preflight(
                     plan=plan,
@@ -408,7 +408,6 @@ def build_preview_lifecycle_cleanup_record(
             inventory_scan_id=plan.inventory_scan_id,
             requested_at=requested_at,
             source=source,
-            apply=False,
             status="report_only",
             planned_slugs=plan.orphaned_slugs,
             results=_planned_results(plan),

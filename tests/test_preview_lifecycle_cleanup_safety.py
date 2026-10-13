@@ -160,7 +160,7 @@ class PreviewCleanupSafetyTests(unittest.TestCase):
                     )
                     store.write_preview_record(preview)
 
-                def reread(**kwargs: Any) -> PreviewDesiredStateRecord:
+                def reread(**_kwargs: Any) -> PreviewDesiredStateRecord:
                     if scenario == "during_read":
                         store.write_preview_record(
                             preview.model_copy(
@@ -203,7 +203,7 @@ class PreviewCleanupSafetyTests(unittest.TestCase):
         class SerializedStore(FilesystemRecordStore):
             @contextmanager
             def serialize_preview_refresh(
-                self, *, preview_id: str, **kwargs: object
+                self, *, preview_id: str, **_kwargs: object
             ) -> Iterator[None]:
                 held.append(preview_id)
                 try:
@@ -216,7 +216,7 @@ class PreviewCleanupSafetyTests(unittest.TestCase):
             _, preview, plan = saved_fixture(root, profile)
             store = SerializedStore(root / "state")
 
-            def effect(**kwargs: Any) -> GenericWebPreviewDestroyResult:
+            def effect(**_kwargs: Any) -> GenericWebPreviewDestroyResult:
                 self.assertIn(f"{profile.product}:{profile.preview.context}:pr-42", held)
                 return destroyed(profile)
 
@@ -248,7 +248,7 @@ class PreviewCleanupSafetyTests(unittest.TestCase):
                 root = Path(directory)
                 store, preview, _ = saved_fixture(root, profile)
 
-                def apply_discovery(**kwargs: Any) -> PreviewDesiredStateRecord:
+                def apply_discovery(**_kwargs: Any) -> PreviewDesiredStateRecord:
                     if scenario == "replacement":
                         replacement_at = (datetime.now(UTC) + timedelta(seconds=1)).isoformat()
                         store.write_preview_record(
