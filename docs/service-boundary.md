@@ -121,6 +121,16 @@ remaining domain and storage removal is tracked in #2437.
     `launchplane_service.read` for the Launchplane service context and returning
     VeriReel backup-gate operation worker queue counters without request
     payloads
+  - `GET /v1/service/github-delivery`, requiring a source-bound observation
+    declaration and the existing `launchplane_service.metadata.read` check.
+    Explicit legacy `launchplane_service.read` grants and signed-in admin
+    `product_config.plan` grants remain supported without read-role inheritance
+    on those fallback checks. The [standing read/plan contract](authorization-authority.md)
+    owns Director-agent and product-scoped reader eligibility. The response
+    contains Delivery/Advisory selectors and managed record/binding identifiers,
+    never secret values. See [operation effects](driver-descriptors.md#operation-effects-and-standing-observation)
+    for declaration checks and [service controls](operations.md) for human-admin
+    mutation guards.
 - native FastAPI Odoo operation status reads:
   - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}`,
     `.../target-replacement/operations/{operation_id}`,

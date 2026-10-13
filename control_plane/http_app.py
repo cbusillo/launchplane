@@ -24,6 +24,10 @@ from pathlib import Path as FilePath
 from typing import Annotated, Any, Literal, NoReturn, NotRequired, Protocol, Self, TypedDict, cast
 from uuid import uuid4
 import click
+from control_plane.operation_authorization import (
+    operation_observation_is_declared,
+    register_operation_route,
+)
 import fastapi.exceptions as fastapi_exceptions
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.datastructures import DefaultPlaceholder
@@ -468,7 +472,7 @@ from control_plane.github_delivery_configuration import (
     apply_delivery_github_configuration,
 )
 from control_plane.service_github_delivery_controls import (
-    SERVICE_GITHUB_DELIVERY_ROUTE,
+    SERVICE_GITHUB_DELIVERY_OPERATION,
     SERVICE_TOKEN_RETIREMENT_ROUTE,
     ServiceGitHubDeliveryStatus,
     ServiceTokenRetirementRequest,
@@ -24994,7 +24998,9 @@ def create_launchplane_fastapi_app(
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> ServiceGitHubDeliveryStatus:
         trace_id = next_trace_id()
-        if (
+        if not operation_observation_is_declared(
+            endpoint=read_github_delivery_controls, mode="read"
+        ) or (
             not resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="launchplane_service.metadata.read",
@@ -25103,10 +25109,10 @@ def create_launchplane_fastapi_app(
                 message="Service-token retirement is unavailable, stale, or conflicts with its reviewed request.",
             ) from error
 
-    app.add_api_route(
-        SERVICE_GITHUB_DELIVERY_ROUTE,
-        read_github_delivery_controls,
-        methods=["GET"],
+    register_operation_route(
+        app,
+        descriptor=SERVICE_GITHUB_DELIVERY_OPERATION,
+        endpoint=read_github_delivery_controls,
         response_model=ServiceGitHubDeliveryStatus,
         operation_id="read_service_github_delivery_controls",
         summary="Read service GitHub delivery selectors and managed binding metadata",

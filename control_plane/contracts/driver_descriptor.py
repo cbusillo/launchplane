@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.data_provenance import DataProvenance
+from control_plane.contracts.operation_descriptor import OperationDescriptor, OperationScope
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.production_backup_authority import (
@@ -11,7 +12,7 @@ from control_plane.contracts.production_backup_authority import (
 
 
 DriverActionSafety = Literal["read", "safe_write", "mutation", "destructive"]
-DriverActionScope = Literal["global", "context", "instance", "preview"]
+DriverActionScope = OperationScope
 DriverActionReadinessRequirement = Literal[
     "provider_target",
     "route_binding",
@@ -35,17 +36,13 @@ DriverPanelKind = Literal[
 ]
 
 
-class DriverActionDescriptor(BaseModel):
+class DriverActionDescriptor(OperationDescriptor):
     model_config = ConfigDict(extra="forbid")
 
     action_id: str
     label: str
     description: str
     safety: DriverActionSafety
-    scope: DriverActionScope
-    method: Literal["GET", "POST"]
-    route_path: str
-    authz_action: str = ""
     alternate_authz_actions: tuple[str, ...] = ()
     operator_visible: bool = True
     input_schema: dict[str, object] = Field(default_factory=dict)
