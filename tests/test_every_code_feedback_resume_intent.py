@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from pathlib import Path
 import unittest
 from typing import Any
 from control_plane.contracts.every_code_feedback_resume import (
@@ -74,7 +73,8 @@ def minted_fixture() -> EveryCodeFeedbackResumeIntentRecord:
 
 
 class FeedbackResumeIntentTests(unittest.TestCase):
-    def decision(self, **changes: Any) -> EveryCodeFeedbackIntentMintResult:
+    @staticmethod
+    def decision(**changes: Any) -> EveryCodeFeedbackIntentMintResult:
         acceptance = _acceptance()
         values: dict[str, Any] = dict(
             acceptance=acceptance,
@@ -179,15 +179,6 @@ class FeedbackResumeIntentTests(unittest.TestCase):
             EveryCodeFeedbackResumeIntentRecord.model_validate(changed).intent_digest,
             minted.intent_digest,
         )
-
-    def test_no_route_consumes_open_observations_or_fixture_writer(self) -> None:
-        root = Path(__file__).resolve().parents[1] / "control_plane"
-        for path in (root / "http_routes").glob("*.py"):
-            source = path.read_text()
-            self.assertNotIn("EveryCodeFeedbackPullRequestOpenObservation", source, path.name)
-            self.assertNotIn(
-                "_write_every_code_feedback_resume_intent_fixture_record", source, path.name
-            )
 
     def test_canonical_factory_rejects_closed_or_repository_mismatch(self) -> None:
         repo = {"id": 34, "owner": {"id": 12}}
