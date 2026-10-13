@@ -40,6 +40,7 @@ class InvitationChange:
     item: ReleaseReviewItem
     legacy_url: str
     feature_name: str = ""
+    batch_pull_request_number: int | None = None
 
 
 def _release_items(
@@ -80,7 +81,9 @@ def _release_items(
                         member = int(match[1])
                         if member in sections:
                             raise ReleaseInvitationNotesUnavailable(
-                                f"Release invitation batch notes repeat {repository}#{member}."
+                                f"Release invitation batch {repository}#{item.pull_request_number} "
+                                f"repeats the notes section for constituent #{member}. "
+                                "Keep one notes section for that constituent in the batch PR."
                             )
                         sections[member] = ((match[2] or "").strip(), [])
                         continue
@@ -107,6 +110,7 @@ def _release_items(
                             ),
                             item.url,
                             title,
+                            item.pull_request_number,
                         ),
                     )
                 )
@@ -147,8 +151,15 @@ def client_invitation_changes(
             for decision in decisions
         ):
             if not item.owner_test_notes.strip():
+                batch = (
+                    f" in batch {repository}#{change.batch_pull_request_number}"
+                    if change.batch_pull_request_number is not None
+                    else ""
+                )
                 raise ReleaseInvitationNotesUnavailable(
-                    f"Release invitation batch Client notes are unavailable for {repository}#{item.pull_request_number}."
+                    f"Release invitation Client notes are unavailable for "
+                    f"{repository}#{item.pull_request_number}{batch}. "
+                    "Restore that constituent's Client test notes in the batch PR."
                 )
             key = hashlib.sha256(f"{repository}:{item.pull_request_number}".encode()).hexdigest()
             changes[key] = change
