@@ -3,7 +3,7 @@ from __future__ import annotations
 import atexit
 import asyncio
 import base64
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
@@ -234,6 +234,7 @@ from control_plane.storage.postgres import (
     OrdinaryAgentPersistenceError,
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
+    LaunchplaneIdempotencyRow,
 )
 from tests.test_ordinary_agent_activation_storage import (
     _event as _activation_event,
@@ -1411,12 +1412,16 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     mode="apply",
                 )
 
-            def slow_provider() -> None:
+            def slow_provider(checkpoint: Callable[[str, str, int], None]) -> None:
                 entered_provider.set()
                 if not release_provider.wait(10):
                     raise TimeoutError("Stub provider was not released")
                 with patch("control_plane.dokploy.api.dokploy_request", side_effect=stub.call):
-                    plan.apply_provider()
+                    plan.apply_provider(checkpoint)
+
+            def verify_provider() -> None:
+                with patch("control_plane.dokploy.api.dokploy_request", side_effect=stub.call):
+                    plan.verify_provider()
 
             other = PostgresRecordStore(database_url=store.database_url)
             try:
@@ -1428,6 +1433,8 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                         expected_target_id=target_id,
                         expected_provider_target=provider,
                         apply_provider=slow_provider,
+                        pending_effects=plan.effects,
+                        verify_provider=verify_provider,
                     )
                     try:
                         self.assertTrue(entered_provider.wait(10))
@@ -1435,7 +1442,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                             other.read_dokploy_target_record(
                                 context_name=target.context, instance_name=target.instance
                             ),
-                            target,
+                            target.model_copy(update={"pending_public_host_effects": plan.effects}),
                         )
                         self.assertIsNone(
                             other.read_idempotency_record(
@@ -1506,7 +1513,9 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                             workers.submit(
                                 other.write_product_public_hosts_bundle,
                                 bundle,
-                                expected_target=target,
+                                expected_target=target.model_copy(
+                                    update={"pending_public_host_effects": plan.effects}
+                                ),
                                 expected_target_id=target_id,
                                 expected_provider_target=provider,
                                 apply_provider=never_apply,
@@ -1557,7 +1566,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 provider_verified = threading.Event()
                 original_write = store._write_product_authority_bundle
 
-                def apply_provider() -> None:
+                def apply_provider(checkpoint: Callable[[str, str, int], None]) -> None:
                     provider_verified.set()
                     if failure == "provider":
                         raise RuntimeError("Stub provider disconnected before verified read-back")
@@ -1604,7 +1613,95 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                         expected_target=target,
                         expected_target_id=target_id,
                         expected_provider_target=provider,
-                        apply_provider=lambda: None,
+                        apply_provider=lambda checkpoint: None,
+                    )
+                finally:
+                    other.close()
+
+    def test_public_hosts_checkpoint_survives_failed_commit_and_revised_intent(self) -> None:
+        from control_plane.product_public_hosts import plan_public_hosts
+        from tests.test_product_public_hosts import StubProvider
+
+        with _store_for_fresh_head_database() as store:
+            _profile, target, target_id, provider, original_bundle = self._public_host_bundle(store)
+            stub = StubProvider()
+            stub.routes[0].update(composeId=target_id.target_id, host=target.domains[0])
+            hosts = ("public.example", "retained.example")
+            with (
+                patch(
+                    "control_plane.dokploy.source.read_dokploy_config",
+                    return_value=("stub", "test"),
+                ),
+                patch("control_plane.dokploy.api.dokploy_request", side_effect=stub.call),
+            ):
+                plan = plan_public_hosts(
+                    record_store=store,
+                    control_plane_root=Path("."),
+                    context=target.context,
+                    instance=target.instance,
+                    hosts=hosts,
+                    mode="apply",
+                )
+                bundle = original_bundle.model_copy(update={"dokploy_targets": (plan.replacement,)})
+
+                def fail_receipt_commit(session: Any) -> None:
+                    receipt = bundle.idempotency_record
+                    assert receipt is not None
+                    if session.get(LaunchplaneIdempotencyRow, receipt.record_id) is not None:
+                        raise RuntimeError("Final receipt commit failed")
+
+                event.listen(store._session_factory, "before_commit", fail_receipt_commit)
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "Final receipt commit failed"):
+                        store.write_product_public_hosts_bundle(
+                            bundle,
+                            expected_target=target,
+                            expected_target_id=target_id,
+                            expected_provider_target=provider,
+                            apply_provider=plan.apply_provider,
+                            pending_effects=plan.effects,
+                            verify_provider=plan.verify_provider,
+                        )
+                finally:
+                    event.remove(store._session_factory, "before_commit", fail_receipt_commit)
+                # Independent connection observes identities despite the failed receipt.
+                other = PostgresRecordStore(database_url=store.database_url)
+                try:
+                    saved = other.read_dokploy_target_record(
+                        context_name=target.context, instance_name=target.instance
+                    )
+                    self.assertEqual(saved.public_hosts, ())
+                    self.assertEqual(
+                        {effect.host for effect in saved.pending_public_host_effects}, set(hosts)
+                    )
+                    self.assertTrue(
+                        all(effect.domain_id for effect in saved.pending_public_host_effects)
+                    )
+                    revised = plan_public_hosts(
+                        record_store=other,
+                        control_plane_root=Path("."),
+                        context=target.context,
+                        instance=target.instance,
+                        hosts=(hosts[1],),
+                        mode="apply",
+                    )
+                    self.assertEqual(revised.result.removed, [hosts[0]])
+                    other.write_product_public_hosts_bundle(
+                        bundle.model_copy(update={"dokploy_targets": (revised.replacement,)}),
+                        expected_target=saved,
+                        expected_target_id=target_id,
+                        expected_provider_target=provider,
+                        apply_provider=revised.apply_provider,
+                        pending_effects=revised.effects,
+                        verify_provider=revised.verify_provider,
+                    )
+                    recovered = other.read_dokploy_target_record(
+                        context_name=target.context, instance_name=target.instance
+                    )
+                    self.assertEqual(recovered.public_hosts, (hosts[1],))
+                    self.assertEqual(recovered.pending_public_host_effects, ())
+                    self.assertEqual(
+                        {route["host"] for route in stub.routes}, {target.domains[0], hosts[1]}
                     )
                 finally:
                     other.close()

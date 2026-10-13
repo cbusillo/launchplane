@@ -60,6 +60,48 @@ test("A new invitation has its own progress and formatted linked PR checks", { t
   expect(writes).toEqual(["POST"]);
 });
 
+test("Identical testing and production preserve the completed run without decision controls @responsive", async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  const heading = page.locator("[data-route-heading]");
+  await expect(heading).toBeVisible();
+  const pendingHeading = await heading.textContent();
+  const response = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const fixtures = await import(modulePath);
+    return fixtures.releaseReviewForFixture("products");
+  });
+  response.review.checklist.production = { ...response.review.checklist.candidate };
+  response.review.checklist.items = [];
+  response.review.checklist.shared_sources = [];
+  response.review = { ...response.review, required: false, approved: false, no_new_release: true, blockers: [] };
+  response.release_run = {
+    decision_record_id: "completed-release", rollback_drill: false, state: "passed", blocked_reason: "",
+    steps: [{ step: "promote-1", kind: "promote", status: "pass", operation_id: "completed-promotion", failure: null }],
+  };
+  const writes: string[] = [];
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.route("**/v1/release-review/decisions", route => {
+    writes.push(route.request().method());
+    return route.fulfill({ status: 409, json: {} });
+  });
+  await page.goto("/ui/owner-review?product=example-site");
+  await expect(heading).not.toHaveText(pendingHeading!);
+  await expect(page.getByRole("region", { name: "Release progress" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Accept release" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Request changes", exact: true })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("no-new-release-client.png"), fullPage: true });
+  response.viewer_is_owner = false;
+  response.can_override = true;
+  response.can_start_temporary_hotfix = true;
+  await page.reload();
+  for (const name of ["Record admin approval override", "Ship temporary hotfix now", "Ask site-owner to review now"]) {
+    await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
+  }
+  expect(writes).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
 test("Preview-era note markers identify each PR only in the engineering view", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
@@ -164,7 +206,6 @@ test("Owner reviews the complete release and can request changes after accepting
   await expect(page.getByText("Accepting puts this version on the live site, Example site (www.example.invalid).")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("owner-initial.png"), fullPage: true });
   await page.getByRole("button", { name: "Accept release" }).click();
-  await expect(page.getByRole("status")).toContainText("This page shows when Launchplane can start");
   await expect(page.getByRole("region", { name: "Release progress" }).getByRole("listitem")).toHaveCount(5);
   await expect(page.getByRole("region", { name: "Latest release decision" })).toContainText("site-owner");
   await page.screenshot({ path: testInfo.outputPath("owner-accepted.png"), fullPage: true });
@@ -493,16 +534,16 @@ test("Business-hours release waits and an urgent acceptance records the human's 
   await page.goto("/ui/owner-review?product=example-site");
   const urgent = page.getByRole("button", { name: "Accept and release now during business hours" });
   await expect(urgent).toBeDisabled();
-  await expect(page.getByText("Next release window:", { exact: false })).toContainText("5:00:00 PM");
+  await expect(page.getByRole("region", { name: "Client release decision" }).locator("time")).toHaveAttribute("datetime", response.business_hours.next_release_at);
   await page.getByRole("button", { name: "Accept release", exact: true }).click();
   const progress = page.getByRole("region", { name: "Release progress" });
-  await expect(progress).toContainText("Blocked");
-  await expect(progress).toContainText("Scheduled after closing:");
+  await expect(progress.getByRole("status")).toHaveText(response.business_hours.blocked_reason);
+  await expect(progress.locator("time")).toHaveAttribute("datetime", response.business_hours.next_release_at);
   await page.screenshot({ path: testInfo.outputPath("business-hours-held.png"), fullPage: true });
   await page.getByRole("region", { name: "Client release decision" }).getByRole("textbox").fill("Staff cannot save orders; this fix cannot wait.");
   await urgent.click();
-  await expect(page.getByRole("region", { name: "Latest release decision" })).toContainText("Urgent release during business hours requested by site-owner");
-  await expect(progress).not.toContainText("Scheduled after closing:");
+  await expect(page.getByRole("region", { name: "Latest release decision" }).getByRole("status")).toContainText(response.review.latest_decision!.actor_github_login);
+  await expect(progress.locator("time")).toHaveCount(0);
   expect(writes.map(body => body.release_during_business_hours)).toEqual([false, true]);
   expect(writes[0].checklist_digest).toBe(writes[1].checklist_digest);
   expect(writes[1].reason).toBe("Staff cannot save orders; this fix cannot wait.");

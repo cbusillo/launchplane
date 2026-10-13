@@ -396,6 +396,13 @@ def register_release_review_routes(
                 message="The live temporary hotfix waits for the Client's review.",
             )
         review = current.review
+        if review.no_new_release:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="no_new_release",
+                message="Production already runs the testing version. There is no new release to decide.",
+            )
         if hotfix:
             refusal = ""
             if not hotfix_supported(profile):

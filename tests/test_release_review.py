@@ -143,6 +143,60 @@ class ReleaseReviewTests(unittest.TestCase):
     def review(self) -> ReleaseReviewStatus:
         return build_release_review(store=self.store, profile=profile(), read=github_read)
 
+    def test_identical_versions_need_no_new_acceptance_and_preserve_decisions(self) -> None:
+        accepted = decision(self.store)
+        self.store.write_release_review_decision_record(accepted)
+        production = self.store.read_release_tuple_record(
+            context_name="example-site", channel_name="prod"
+        )
+        self.store.write_release_tuple_record(
+            production.model_copy(update={"artifact_id": accepted.checklist.candidate.artifact_id})
+        )
+        read = unittest.mock.Mock(side_effect=AssertionError("No source comparison is needed"))
+        review = build_release_review(store=self.store, profile=profile(), read=read)
+        self.assertTrue(review.no_new_release)
+        self.assertFalse(review.required)
+        self.assertFalse(review.approved)
+        self.assertTrue(review.checklist_complete)
+        self.assertEqual(review.blockers, ())
+        self.assertIsNone(review.latest_decision)
+        assert review.checklist is not None
+        self.assertEqual(review.checklist.production, review.checklist.candidate)
+        self.assertEqual(review.checklist.items, ())
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=profile().product), (accepted,)
+        )
+        read.assert_not_called()
+        with (
+            patch("control_plane.release_review.current_release_review", return_value=review),
+            self.assertRaises(click.ClickException),
+        ):
+            require_release_approval(
+                control_plane_root=Path(self.directory.name),
+                record_store=self.store,
+                product=profile().product,
+                artifact_id="unreviewed-artifact",
+            )
+
+    def test_same_commit_with_a_different_artifact_still_needs_review(self) -> None:
+        testing = self.store.read_artifact_manifest("artifact-testing")
+        self.store.write_artifact_manifest(testing.model_copy(update={"source_commit": BASE}))
+        review = build_release_review(
+            store=self.store,
+            profile=profile(),
+            read=lambda path: {"status": "identical", "total_commits": 0, "commits": []},
+        )
+        self.assertFalse(review.no_new_release)
+        self.assertTrue(review.required)
+        self.assertFalse(review.approved)
+        assert review.checklist is not None
+        self.assertEqual(
+            review.checklist.production.source_commit, review.checklist.candidate.source_commit
+        )
+        self.assertNotEqual(
+            review.checklist.production.artifact_id, review.checklist.candidate.artifact_id
+        )
+
     def test_records_release_from_actual_production_and_testing_commits(self) -> None:
         review = self.review()
         assert review.checklist is not None

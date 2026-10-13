@@ -5176,6 +5176,14 @@
             "title": "Instance",
             "type": "string"
           },
+          "pending_public_host_effects": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PublicHostEffect"
+            },
+            "title": "Pending Public Host Effects",
+            "type": "array"
+          },
           "policies": {
             "$ref": "#/components/schemas/DokployTargetPolicies"
           },
@@ -38629,6 +38637,43 @@
         "title": "ProxmoxStorageBackupDestinationReference",
         "type": "object"
       },
+      "PublicHostEffect": {
+        "additionalProperties": false,
+        "description": "Write-ahead addition and its provider identity, independent of config success.",
+        "properties": {
+          "domain_id": {
+            "default": "",
+            "title": "Domain Id",
+            "type": "string"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "provider_host": {
+            "title": "Provider Host",
+            "type": "string"
+          },
+          "runtime_port": {
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Runtime Port",
+            "type": "integer"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "provider_host",
+          "target_id",
+          "runtime_port"
+        ],
+        "title": "PublicHostEffect",
+        "type": "object"
+      },
       "PublicIngressMonitorRunOnceRequest": {
         "additionalProperties": false,
         "properties": {
@@ -39861,6 +39906,12 @@
                 "type": "null"
               }
             ]
+          },
+          "no_new_release": {
+            "default": false,
+            "title": "No New Release",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           },
           "required": {
             "default": true,
