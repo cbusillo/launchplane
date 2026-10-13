@@ -167,7 +167,6 @@ def _app(
     store: object,
     runtime_record: LaunchplaneAuthzPolicyRecord,
     human_session_manager: HumanSessionManager | None = None,
-    director_agent: bool = False,
 ) -> FastAPI:
     return create_launchplane_fastapi_app(
         verifier=_RejectingVerifier(),
@@ -213,7 +212,6 @@ def _database_app(
             store=store,
             runtime_record=runtime_record,
             human_session_manager=human_session_manager,
-            director_agent=director_agent,
         )
         try:
             if director_agent:

@@ -22247,9 +22247,7 @@ def create_launchplane_fastapi_app(
                     + ("product/context/instance." if instance_name else "product/context.")
                 ),
             )
-        role_only = not director_agent_identity(
-            identity
-        ) and not resolved_authz_policy_runtime.allows(
+        role_only = not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=authz_action,
             product=route_request.product,

@@ -92,7 +92,6 @@ class ActionEffectTests(unittest.TestCase):
                     action="secret.read",
                     product="new-product-with-no-grants",
                     context="new-context",
-                    inherit_agent_read_role=False,
                 )
             )
             self.assertFalse(
@@ -1451,7 +1450,16 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("record-reader-label", result.text)
 
     async def test_ingress_and_backup_planners_accept_role_but_refuse_apply(self) -> None:
-        with _database_app(reader_policy()) as (store, _, app):
+        await self._exercise_ingress_and_backup_plans(director_agent=False)
+
+    async def test_director_ingress_plan_redacts_provider_config_and_validates_domains(
+        self,
+    ) -> None:
+        await self._exercise_ingress_and_backup_plans(director_agent=True)
+
+    async def _exercise_ingress_and_backup_plans(self, *, director_agent: bool) -> None:
+        policy = LaunchplaneAuthzPolicy(schema_version=2) if director_agent else reader_policy()
+        with _database_app(policy, director_agent=director_agent) as (store, _, app):
             headers = {"Authorization": "Bearer reader-token"}
             from control_plane.http_app import create_launchplane_fastapi_app
             from control_plane.service_auth import BearerIdentityConfig
@@ -1483,7 +1491,7 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             app = create_launchplane_fastapi_app(
                 verifier=_RejectingVerifier(),
-                authz_policy=reader_policy(),
+                authz_policy=policy,
                 record_store_factory=lambda: store,
                 bearer_identity_config=BearerIdentityConfig(
                     local_operator_token="reader-token",
