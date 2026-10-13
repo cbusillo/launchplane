@@ -6384,7 +6384,7 @@ class PostgresRecordStore(HumanSessionStore):
         expected_target: DokployTargetRecord,
         expected_target_id: DokployTargetIdRecord,
         expected_provider_target: ProviderTargetRecord,
-        apply_provider: Callable[[Callable[[str, str], None]], None],
+        apply_provider: Callable[[Callable[[str, str, int], None]], None],
         pending_effects: tuple[PublicHostEffect, ...] = (),
         verify_provider: Callable[[], None] | None = None,
     ) -> None:
@@ -6488,14 +6488,16 @@ class PostgresRecordStore(HumanSessionStore):
                         )
                 guard(session)
 
-            def checkpoint(host: str, domain_id: str) -> None:
+            def checkpoint(host: str, domain_id: str, runtime_port: int) -> None:
                 nonlocal expected_target
                 if not any(effect.host == host for effect in pending_effects):
                     return
                 updated = expected_target.model_copy(
                     update={
                         "pending_public_host_effects": tuple(
-                            effect.model_copy(update={"domain_id": domain_id})
+                            effect.model_copy(
+                                update={"domain_id": domain_id, "runtime_port": runtime_port}
+                            )
                             if effect.host == host
                             else effect
                             for effect in expected_target.pending_public_host_effects

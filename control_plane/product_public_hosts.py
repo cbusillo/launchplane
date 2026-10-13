@@ -67,16 +67,19 @@ class PublicHostsPlan:
         ):
             raise PublicHostsProviderError("Provider routes changed before configuration commit.")
 
-    def apply_provider(self, checkpoint: Callable[[str, str], None]) -> None:
+    def apply_provider(self, checkpoint: Callable[[str, str, int], None]) -> None:
         def read() -> tuple[api.JsonObject, ...]:
             return fetch_dokploy_compose_domains_for_target_setup(
                 host=self.host, token=self.token, compose_id=self.target_id.target_id
             )
 
         try:
-            if read() != self.routes:
+            expected_routes = self.routes
+            if read() != expected_routes:
                 raise PublicHostsProviderError("Provider routes changed; review a fresh dry-run.")
             for host in (*self.result.added, *self.result.updated):
+                if read() != expected_routes:
+                    raise PublicHostsProviderError("Provider routes changed between checkpoints.")
                 domain_id = compose.ensure_compose_web_domain_route(
                     host=self.host,
                     token=self.token,
@@ -84,13 +87,37 @@ class PublicHostsPlan:
                     domain_host=host,
                     runtime_port=self.result.runtime_port,
                 )
-                checkpoint(host, domain_id)
+                observed_routes = read()
+                selected = [route for route in observed_routes if route.get("host") == host]
+                if (
+                    len(selected) != 1
+                    or selected[0].get("domainId") != domain_id
+                    or not _route_matches(
+                        selected[0], self.target_id.target_id, self.result.runtime_port
+                    )
+                    or tuple(route for route in observed_routes if route.get("host") != host)
+                    != tuple(route for route in expected_routes if route.get("host") != host)
+                ):
+                    raise PublicHostsProviderError(
+                        "Provider route identity/read-back did not match."
+                    )
+                expected_routes = observed_routes
+                checkpoint(host, domain_id, self.result.runtime_port)
             for route in self.routes:
                 if route.get("host") in self.result.removed:
+                    if read() != expected_routes:
+                        raise PublicHostsProviderError("Provider routes changed before removal.")
                     delete_dokploy_domain_for_target_setup(
                         host=self.host, token=self.token, domain_id=str(route["domainId"])
                     )
+                    expected_routes = tuple(
+                        current
+                        for current in expected_routes
+                        if current["domainId"] != route["domainId"]
+                    )
             observed = read()
+            if observed != expected_routes:
+                raise PublicHostsProviderError("Provider routes changed during reconciliation.")
             for host in self.result.after:
                 selected = [route for route in observed if route.get("host") == host]
                 if len(selected) != 1 or not _route_matches(
@@ -176,6 +203,11 @@ def plan_public_hosts(
         ):
             raise ValueError("Public hosts require an existing HTTPS web origin route.")
         effects = {effect.host: effect for effect in target.pending_public_host_effects}
+        if protected.intersection((*target.public_hosts, *effects)):
+            raise ProductConfigError(
+                "A managed public host now belongs to the target's protected origin; inspect the target before retrying.",
+                code="public_hosts_effect_ownership_unknown",
+            )
         for effect in effects.values():
             if effect.target_id != target_id.target_id or effect.provider_host != host:
                 raise ProductConfigError(

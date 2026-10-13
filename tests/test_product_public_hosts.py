@@ -1,5 +1,6 @@
 import copy
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,7 +9,8 @@ from typing import ClassVar, cast
 from fastapi import FastAPI
 from httpx2 import Response
 from unittest.mock import patch
-from sqlalchemy import event
+from sqlalchemy import event, select
+from sqlalchemy.orm import Session
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -18,7 +20,7 @@ from control_plane.dokploy import api
 from control_plane.dokploy import source
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import PostgresRecordStore, LaunchplaneIdempotencyRow
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from tests.support.auth import identity, StubVerifier
 from tests.support.http import request
@@ -178,6 +180,25 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
     def recorded(self) -> DokployTargetRecord:
         return self.store.read_dokploy_target_record(context_name=CONTEXT, instance_name="prod")
 
+    @contextmanager
+    def failing_config_commit(self, key: str) -> Iterator[None]:
+        def fail_commit(session: Session) -> None:
+            if (
+                session.scalar(
+                    select(LaunchplaneIdempotencyRow).where(
+                        LaunchplaneIdempotencyRow.idempotency_key == key
+                    )
+                )
+                is not None
+            ):
+                raise RuntimeError("injected final storage commit failure")
+
+        event.listen(self.store._session_factory, "before_commit", fail_commit)
+        try:
+            yield
+        finally:
+            event.remove(self.store._session_factory, "before_commit", fail_commit)
+
     async def test_cm_dry_run_apply_readback_replay_and_noop(self) -> None:
         dry = await self.config()
         self.assertEqual(dry.status_code, 202, dry.text)
@@ -283,23 +304,9 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
         }
         self.provider.routes.append(unmanaged)
         await self.config()
-        completing = False
-
-        def step(name: str) -> None:
-            nonlocal completing
-            completing = name == "write_idempotency"
-
-        def fail_commit(session: object) -> None:
-            if completing:
-                raise RuntimeError("injected final storage commit failure")
-
-        event.listen(self.store._session_factory, "before_commit", fail_commit)
-        try:
-            with patch.object(self.store, "_after_product_authority_bundle_step", side_effect=step):
-                with self.assertRaisesRegex(RuntimeError, "injected final storage"):
-                    await self.config(mode="apply", key="storage-failure")
-        finally:
-            event.remove(self.store._session_factory, "before_commit", fail_commit)
+        with self.failing_config_commit("storage-failure"):
+            with self.assertRaisesRegex(RuntimeError, "injected final storage"):
+                await self.config(mode="apply", key="storage-failure")
         self.assertEqual(self.recorded().public_hosts, ())
         self.assertTrue(set(HOSTS).issubset({route["host"] for route in self.provider.routes}))
         # Resume through a fresh store, as after a service restart.
@@ -414,6 +421,63 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.recorded().public_hosts, ())
         self.assertEqual(self.recorded().source_label, "concurrent-writer")
 
+    async def test_provider_change_between_checkpoints_is_not_overwritten(self) -> None:
+        await self.config()
+        changed = False
+        foreign = {
+            **self.provider.routes[0],
+            "host": HOSTS[1],
+            "domainId": "foreign",
+            "serviceName": "admin",
+        }
+
+        def change_after_checkpoint(session: object) -> None:
+            nonlocal changed
+            if not changed and self.provider.writes:
+                changed = True
+                self.provider.routes.append(foreign)
+
+        event.listen(self.store._session_factory, "after_commit", change_after_checkpoint)
+        try:
+            response = await self.config(mode="apply", key="checkpoint-provider-race")
+        finally:
+            event.remove(self.store._session_factory, "after_commit", change_after_checkpoint)
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertIn(foreign, self.provider.routes)
+        self.assertEqual(self.recorded().public_hosts, ())
+
+    async def test_pending_route_that_became_an_origin_is_protected(self) -> None:
+        await self.config()
+        self.provider.fail_host = HOSTS[1]
+        response = await self.config(mode="apply", key="pending-origin")
+        self.assertEqual(response.status_code, 502, response.text)
+        self.store.write_dokploy_target_record(
+            self.recorded().model_copy(update={"domains": (*self.target.domains, HOSTS[0])})
+        )
+        writes = list(self.provider.writes)
+        response = await self.config([])
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.provider.writes, writes)
+
+    async def test_pending_route_port_update_is_checkpointed_before_config_commit(self) -> None:
+        await self.config()
+        self.provider.fail_host = HOSTS[1]
+        response = await self.config(mode="apply", key="partial-port")
+        self.assertEqual(response.status_code, 502, response.text)
+        self.provider.fail_host = ""
+        self.provider.routes[0]["port"] = 8080
+        await self.config([HOSTS[0]])
+        with self.failing_config_commit("port-change"):
+            with self.assertRaisesRegex(RuntimeError, "injected final storage"):
+                await self.config([HOSTS[0]], mode="apply", key="port-change")
+        effect = self.recorded().pending_public_host_effects[0]
+        self.assertEqual(effect.runtime_port, self.provider.routes[0]["port"])
+        response = await self.config([])
+        self.assertEqual(response.status_code, 202, response.text)
+        response = await self.config([], mode="apply", key="recover-port")
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(self.provider.routes, [self.provider.routes[0]])
+
     async def test_binding_changed_at_commit_refuses_before_provider_write(self) -> None:
         await self.config()
         original = self.store.write_product_public_hosts_bundle
@@ -424,7 +488,7 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
             expected_target: DokployTargetRecord,
             expected_target_id: DokployTargetIdRecord,
             expected_provider_target: ProviderTargetRecord,
-            apply_provider: Callable[[Callable[[str, str], None]], None],
+            apply_provider: Callable[[Callable[[str, str, int], None]], None],
             pending_effects: tuple[PublicHostEffect, ...],
             verify_provider: Callable[[], None],
         ) -> None:
