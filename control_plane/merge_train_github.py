@@ -3214,8 +3214,8 @@ class GitHubMergeTrainSnapshotReader:
                 config_comparison=_config_comparison(
                     self._branch_refresh_store,
                     repository=base_repository,
-                    base_branch=str(base.get("ref") or ""),
-                    base_sha=str(base.get("sha") or ""),
+                    base_branch=_required_text(base.get("ref"), "Source base branch is required."),
+                    base_sha=_required_text(base.get("sha"), "Source base SHA is required."),
                     head_sha=head_sha,
                     policy=self._repository_policy,
                 ),

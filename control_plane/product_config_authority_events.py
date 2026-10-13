@@ -273,11 +273,8 @@ def request_product_config_authority_event(
     payload: dict[str, object],
 ) -> dict[str, JsonValue]:
     """Select dormant branch policy without making any provider read."""
-    if (
-        event == "push"
-        and isinstance(payload.get("ref"), str)
-        and str(payload["ref"]).startswith("refs/heads/launchplane/train/")
-    ):
+    ref = payload.get("ref")
+    if event == "push" and isinstance(ref, str) and ref.startswith("refs/heads/launchplane/train/"):
         reader = getattr(record_store, "list_merge_train_batch_candidate_records", None)
         if not callable(reader):
             raise ValueError("Recorded candidate evidence is unavailable.")

@@ -5,7 +5,6 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from urllib.parse import quote
 from click.testing import CliRunner
-from control_plane.cli import main
 
 from control_plane.config_authority_comparison import (
     config_authority_comparison_id,
@@ -26,6 +25,7 @@ from control_plane.merge_train_github import (
 )
 from control_plane.product_config_authority_events import request_product_config_authority_event
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from tests.test_config_authority_audit import CLI_MAIN
 from tests.test_github_app_webhook import _inventory
 from tests.test_merge_train_github import (
     _batch_candidate,
@@ -43,17 +43,23 @@ class ComparisonStore:
     def list_merge_train_policy_records(
         self, *, status: str = "", limit: int | None = None
     ) -> tuple[MergeTrainPolicyRecord, ...]:
-        return (self.record,)
+        records = (self.record,) if not status or self.record.status == status else ()
+        return records[:limit] if limit is not None else records
 
+    @staticmethod
     def list_merge_train_branch_refresh_records(
-        self, *, repository: str, pull_request_number: int
+        **_filters: object,
     ) -> tuple[MergeTrainBranchRefreshRecord, ...]:
         return ()
 
     def list_merge_train_batch_candidate_records(
         self, *, repository: str = ""
     ) -> tuple[MergeTrainBatchCandidateRecord, ...]:
-        return self.candidates
+        return tuple(
+            record
+            for record in self.candidates
+            if not repository or record.candidate.repository.casefold() == repository.casefold()
+        )
 
 
 class CurrentComparisonTests(unittest.TestCase):
@@ -280,8 +286,8 @@ class CurrentComparisonTests(unittest.TestCase):
                 str(path),
             ]
             with patch("urllib.request.urlopen", side_effect=AssertionError("No provider calls")):
-                blocked = CliRunner().invoke(main, args)
-                planned = CliRunner().invoke(main, [*args, "--checks-app-id", str(self.app_id)])
+                blocked = CliRunner().invoke(CLI_MAIN, args)
+                planned = CliRunner().invoke(CLI_MAIN, [*args, "--checks-app-id", str(self.app_id)])
             self.assertEqual(blocked.exit_code, 0, blocked.output)
             self.assertEqual(planned.exit_code, 0, planned.output)
             waiting = json.loads(blocked.output)
@@ -297,7 +303,7 @@ class CurrentComparisonTests(unittest.TestCase):
             self.assertFalse(result["live_policy_applied"])
             self.assertEqual(json.loads(path.read_text()), baseline)
             path.write_text("{}")
-            self.assertNotEqual(CliRunner().invoke(main, args).exit_code, 0)
+            self.assertNotEqual(CliRunner().invoke(CLI_MAIN, args).exit_code, 0)
 
     def test_final_readiness_uses_pair_bound_signal_instead_of_old_branch_checks(self) -> None:
         from control_plane.contracts.merge_readiness import MergeReadinessTarget
@@ -308,6 +314,8 @@ class CurrentComparisonTests(unittest.TestCase):
             TenantAdmissionTechnicalCheckSignal,
         )
 
+        old_name = self.check(branch="old")["name"]
+        assert isinstance(old_name, str)
         initial = TenantAdmissionTechnicalChecks(
             evaluated_at="2026-10-13T14:00:00Z",
             head_sha=self.head,
@@ -321,7 +329,7 @@ class CurrentComparisonTests(unittest.TestCase):
                     source="check_run", name="Build", app_id=42, state="pass"
                 ),
                 TenantAdmissionTechnicalCheckSignal(
-                    source="check_run", name=str(self.check(branch="old")["name"]), state="fail"
+                    source="check_run", name=old_name, state="fail"
                 ),
             ),
         )
