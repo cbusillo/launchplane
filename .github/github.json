@@ -113,7 +113,7 @@
       "ide": "PyCharm",
       "prepare": {
         "python": {
-          "version": "3.13",
+          "version": "3.14",
           "moduleName": "launchplane-inspection",
           "testRoots": ["tests"],
           "sync": true,

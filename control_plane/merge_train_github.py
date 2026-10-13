@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from dataclasses import dataclass
 import json
 from hashlib import sha256
 import logging
@@ -12,7 +13,14 @@ from urllib.request import Request, urlopen
 from pydantic import BaseModel, ConfigDict, model_validator
 from sqlalchemy.exc import SQLAlchemyError
 
-from control_plane.contracts.advisory_check_projection import is_launchplane_projected_check
+from control_plane.contracts.advisory_check_projection import (
+    is_launchplane_projected_check,
+    CONFIG_AUTHORITY_CURRENT_CHECK_NAME,
+)
+from control_plane.config_authority_comparison import (
+    current_config_authority_status,
+    is_config_authority_check,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.merge_train_batch import (
@@ -947,6 +955,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             repository_path=repository_path,
             base_branch=candidate.base_branch,
             encoded_head_sha=quote(candidate_sha, safe=""),
+            config_comparison=_config_comparison(
+                self._branch_refresh_store,
+                repository=candidate.repository,
+                base_branch=candidate.base_branch,
+                base_sha=candidate.base_sha,
+                head_sha=candidate_sha,
+            ),
         )
         candidate_status = "ready_for_checks"
         if check_status == "pass":
@@ -1049,6 +1064,18 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     def read_head_check_reuse(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainHeadCheckReuse | None:
+        # An equal tree does not establish the candidate's current commit pair.
+        if (
+            _config_comparison(
+                self._branch_refresh_store,
+                repository=candidate.repository,
+                base_branch=candidate.base_branch,
+                base_sha=candidate.base_sha,
+                head_sha=candidate.candidate_sha,
+            )
+            is not None
+        ):
+            return None
         if len(candidate.entries) != 1:
             return None
         canonical_ref = build_merge_train_batch_candidate_ref(
@@ -1266,7 +1293,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     ) -> "TenantAdmissionTechnicalChecks":
         from control_plane.tenant_admission_controller import (
             _required_technical_checks,
+            _required_technical_check_state,
             read_technical_checks_for_requirements,
+            TenantAdmissionRequiredTechnicalCheck,
+            TenantAdmissionTechnicalCheckSignal,
         )
 
         required_checks = _required_branch_checks(
@@ -1284,7 +1314,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         # Strict freshness is a native train requirement, independent of
         # GitHub's optional strict flag. Admission separately proves exact or
         # recorded-rolling structural provenance against the current base.
-        return read_technical_checks_for_requirements(
+        evidence = read_technical_checks_for_requirements(
             transport=self.transport,
             merge_client=self,
             repository=repository,
@@ -1293,6 +1323,56 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             evaluated_at=evaluated_at,
             strict=True,
             required_checks=normalized_checks,
+        )
+        comparison = _config_comparison(
+            self._branch_refresh_store,
+            repository=repository,
+            base_branch=base_branch,
+            base_sha=base_sha,
+            head_sha=head_sha,
+        )
+        if comparison is None:
+            return evidence
+        payload = _list_check_runs(
+            transport=self.transport,
+            repository_path=_repository_path(repository),
+            encoded_head_sha=quote(head_sha, safe=""),
+        )
+        state = comparison.status(payload)
+        name = CONFIG_AUTHORITY_CURRENT_CHECK_NAME
+        # Replace head-only source signals with one pair-bound requirement.
+        result = evidence.model_copy(
+            update={
+                "required_checks": tuple(
+                    check
+                    for check in evidence.required_checks
+                    if not is_config_authority_check(check.name)
+                )
+                + (TenantAdmissionRequiredTechnicalCheck(name=name, app_id=comparison.app_id),),
+                "signals": tuple(
+                    signal
+                    for signal in evidence.signals
+                    if not is_config_authority_check(signal.name)
+                )
+                + (
+                    TenantAdmissionTechnicalCheckSignal(
+                        source="check_run",
+                        name=name,
+                        app_id=comparison.app_id,
+                        state=state,
+                    ),
+                ),
+            }
+        )
+        return result.model_copy(
+            update={
+                "status": _required_technical_check_state(
+                    required_checks=result.required_checks,
+                    signals=result.signals,
+                    strict=result.strict,
+                    base_up_to_date=result.base_up_to_date,
+                )
+            }
         )
 
     def verify_unlanded_batch(
@@ -3131,6 +3211,14 @@ class GitHubMergeTrainSnapshotReader:
                 repository_path=repository_path,
                 head_sha=head_sha,
                 owner_review_required=owner_review_required,
+                config_comparison=_config_comparison(
+                    self._branch_refresh_store,
+                    repository=base_repository,
+                    base_branch=str(base.get("ref") or ""),
+                    base_sha=str(base.get("sha") or ""),
+                    head_sha=head_sha,
+                    policy=self._repository_policy,
+                ),
             )
             if enrich
             else "unknown",
@@ -3472,7 +3560,12 @@ class GitHubMergeTrainSnapshotReader:
         ).review_required
 
     def _required_checks_status(
-        self, *, repository_path: str, head_sha: str, owner_review_required: bool = False
+        self,
+        *,
+        repository_path: str,
+        head_sha: str,
+        owner_review_required: bool = False,
+        config_comparison: "_ConfigComparison | None" = None,
     ) -> MergeTrainCheckStatus:
         encoded_head_sha = quote(head_sha, safe="")
         return _required_checks_status(
@@ -3480,6 +3573,7 @@ class GitHubMergeTrainSnapshotReader:
             repository_path=repository_path,
             encoded_head_sha=encoded_head_sha,
             owner_review_required=owner_review_required,
+            config_comparison=config_comparison,
             owner_review_app_id=_owner_review_advisory_app_id(self._branch_refresh_store)
             if owner_review_required
             else None,
@@ -4066,6 +4160,7 @@ def _required_checks_status(
     encoded_head_sha: str,
     owner_review_required: bool = False,
     owner_review_app_id: int | None = None,
+    config_comparison: "_ConfigComparison | None" = None,
 ) -> MergeTrainCheckStatus:
     status_payload = _list_commit_statuses(
         transport=transport,
@@ -4077,7 +4172,14 @@ def _required_checks_status(
         repository_path=repository_path,
         encoded_head_sha=encoded_head_sha,
     )
-    statuses = [_combined_status_state(status_payload), _check_runs_status(check_runs_payload)]
+    statuses = [
+        _combined_status_state(status_payload),
+        _check_runs_status(
+            _without_source_checks(check_runs_payload) if config_comparison else check_runs_payload
+        ),
+    ]
+    if config_comparison is not None:
+        statuses.append(config_comparison.status(check_runs_payload))
     if owner_review_required:
         statuses.append(
             _owner_review_status(
@@ -4167,6 +4269,7 @@ def _candidate_required_checks_status(
     repository_path: str,
     base_branch: str,
     encoded_head_sha: str,
+    config_comparison: "_ConfigComparison | None" = None,
 ) -> MergeTrainCheckStatus:
     required_checks = _required_branch_checks(
         transport=transport,
@@ -4185,10 +4288,16 @@ def _candidate_required_checks_status(
     )
     observed_status = _combine_check_statuses(
         _combined_status_state(status_payload),
-        _check_runs_status(check_runs_payload),
+        _check_runs_status(
+            _without_source_checks(check_runs_payload) if config_comparison else check_runs_payload
+        ),
     )
     required_status, missing_required_checks = _required_check_evidence_status(
-        required_checks=required_checks,
+        required_checks=tuple(
+            check
+            for check in required_checks
+            if config_comparison is None or not is_config_authority_check(check[0])
+        ),
         status_payload=status_payload,
         check_runs_payload=check_runs_payload,
     )
@@ -4197,7 +4306,88 @@ def _candidate_required_checks_status(
             "Merge train candidate is missing required check evidence: "
             + ", ".join(missing_required_checks)
         )
-    return _combine_check_statuses(observed_status, required_status)
+    return _combine_check_statuses(
+        observed_status,
+        required_status,
+        config_comparison.status(check_runs_payload) if config_comparison else "pass",
+    )
+
+
+@dataclass(frozen=True)
+class _ConfigComparison:
+    repository_id: str
+    base_branch: str
+    base_sha: str
+    head_sha: str
+    app_id: int | None
+
+    def status(self, payload: dict[str, object]) -> Literal["pass", "pending", "fail"]:
+        checks = payload.get("check_runs")
+        if not isinstance(checks, list):
+            return "pending"
+        return current_config_authority_status(
+            check_runs=checks,
+            repository_id=self.repository_id,
+            base_branch=self.base_branch,
+            base_sha=self.base_sha,
+            head_sha=self.head_sha,
+            app_id=self.app_id,
+        )
+
+
+def _config_comparison(
+    store: object,
+    *,
+    repository: str,
+    base_branch: str,
+    base_sha: str,
+    head_sha: str,
+    policy: MergeTrainRepositoryPolicy | None = None,
+) -> _ConfigComparison | None:
+    from control_plane.merge_train_policy_source import (
+        MergeTrainPolicyStoreMissingError,
+        resolve_merge_train_policy_record,
+    )
+
+    if callable(getattr(store, "list_merge_train_policy_records", None)):
+        try:
+            policies = resolve_merge_train_policy_record(store).policy.policies
+        except MergeTrainPolicyStoreMissingError:
+            policies = ()
+        policy = next(
+            (
+                item
+                for item in policies
+                if item.repository.casefold() == repository.casefold()
+                and item.base_branch == base_branch
+            ),
+            None,
+        )
+    if policy is None or not policy.config_authority_events_enabled:
+        return None
+    app = policy.github_token.github_app
+    return _ConfigComparison(
+        repository_id=str(app.repository_id) if app is not None else "",
+        base_branch=base_branch,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        app_id=_owner_review_advisory_app_id(store),
+    )
+
+
+def _without_source_checks(payload: dict[str, object]) -> dict[str, object]:
+    checks = payload.get("check_runs")
+    if not isinstance(checks, list):
+        return payload
+    return {
+        **payload,
+        "check_runs": [
+            check
+            for check in checks
+            if not isinstance(check, dict)
+            or not is_config_authority_check(str(check.get("name") or ""))
+        ],
+    }
 
 
 _CONVERSATION_RESOLUTION_RULE_QUERY = """

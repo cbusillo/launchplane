@@ -18,10 +18,13 @@ from urllib.parse import quote
 from pydantic import JsonValue
 
 from control_plane import secrets
+from control_plane.config_authority_comparison import config_authority_comparison_id
+from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.advisory_check_projection import write_github_check_projection
 from control_plane.contracts.advisory_check_projection import (
     ConfigAuthorityCheckProjection,
     CONFIG_AUTHORITY_CHECK_NAME,
+    CONFIG_AUTHORITY_CURRENT_CHECK_NAME,
 )
 from control_plane.build_provenance import BuildProvenanceTransport, GitHubBuildProvenanceTransport
 from control_plane.config_authority_audit import (
@@ -45,6 +48,12 @@ from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
 )
+
+
+class _CandidateReadStore(Protocol):
+    def list_merge_train_batch_candidate_records(
+        self, *, repository: str = ""
+    ) -> tuple[MergeTrainBatchCandidateRecord, ...]: ...
 
 
 class GitHubConfigAuthoritySource:
@@ -264,6 +273,39 @@ def request_product_config_authority_event(
     payload: dict[str, object],
 ) -> dict[str, JsonValue]:
     """Select dormant branch policy without making any provider read."""
+    if (
+        event == "push"
+        and isinstance(payload.get("ref"), str)
+        and str(payload["ref"]).startswith("refs/heads/launchplane/train/")
+    ):
+        reader = getattr(record_store, "list_merge_train_batch_candidate_records", None)
+        if not callable(reader):
+            raise ValueError("Recorded candidate evidence is unavailable.")
+        matches = [
+            record.candidate
+            for record in cast(
+                _CandidateReadStore, record_store
+            ).list_merge_train_batch_candidate_records(repository=inventory.repository)
+            if isinstance(record, MergeTrainBatchCandidateRecord)
+            and record.candidate.candidate_ref == payload.get("ref")
+            and record.candidate.candidate_sha == payload.get("after")
+            and record.candidate.status in {"building", "ready_for_checks", "passed"}
+        ]
+        pairs = {(item.base_branch, item.base_sha, item.candidate_sha) for item in matches}
+        if len(pairs) != 1 or payload.get("deleted") is True:
+            return {}
+        branch, base, head = pairs.pop()
+        if _enabled_policy(record_store, inventory, branch) is None:
+            return {}
+        return {
+            "status": "pending",
+            "request": {
+                "before": base,
+                "after": head,
+                "base_branch": branch,
+                "candidate": True,
+            },
+        }
     if event == "push" and (
         payload.get("deleted") is True
         or payload.get("created") is True
@@ -385,18 +427,13 @@ def publish_product_config_authority_evidence(
         repository=inventory.repository,
         repository_id=inventory.repository_id,
     )
-    identity = hashlib.sha256(
-        json.dumps(
-            {
-                "repository_id": inventory.repository_id,
-                "base_sha": evidence.get("base_sha"),
-                "event": evidence.get("event"),
-                "base_branch": evidence.get("base_branch"),
-                "head_sha": head,
-            },
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
+    identity = config_authority_comparison_id(
+        repository_id=inventory.repository_id,
+        base_sha=evidence.get("base_sha"),
+        head_sha=head,
+        event=str(evidence.get("event")),
+        base_branch=evidence.get("base_branch"),
+    )
     gate = evidence.get("gate")
     coverage = evidence.get("coverage")
     gate = gate if isinstance(gate, dict) else {}
@@ -437,7 +474,11 @@ def publish_product_config_authority_evidence(
     )
     projection = ConfigAuthorityCheckProjection(
         name=(
-            f"{CONFIG_AUTHORITY_CHECK_NAME}/{str(evidence.get('event')).replace('_', '-')}/"
+            (
+                CONFIG_AUTHORITY_CURRENT_CHECK_NAME + "/"
+                if evidence.get("event") != "push" or evidence.get("candidate") is True
+                else f"{CONFIG_AUTHORITY_CHECK_NAME}/push/"
+            )
             + quote(str(evidence["base_branch"]), safe="")
         ),
         repository=inventory.repository,
@@ -521,6 +562,8 @@ def run_product_config_authority_once(
     evidence["event"] = claimed.event
     evidence["base_branch"] = claimed.config_authority_request.get("base_branch")
     evidence["delivery_id"] = claimed.delivery_id
+    if claimed.config_authority_request.get("candidate") is True:
+        evidence["candidate"] = True
 
     def project() -> None:
         if evidence.get("status") in {"disabled", "superseded"} or inventory is None:
