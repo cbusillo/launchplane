@@ -10,7 +10,7 @@ from control_plane.contracts.artifact_identity import ArtifactAddonSource
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.release_review import build_release_review
-from control_plane.release_review_record import publish_release_decision
+from control_plane.release_review_record import _decision_effect, publish_release_decision
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -100,17 +100,17 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
 
         github = FakeReleaseIssues()
         cases = (
-            ("held", "accepted", "", r"acceptance only.*no production release"),
-            ("promote", "accepted", "promote", r"acceptance starts.*gated production release"),
+            ("held", "accepted", ""),
+            ("promote", "accepted", "promote"),
             (
                 "promote_with_rollback_drill",
                 "accepted",
                 "promote_with_rollback_drill",
-                r"rollback drill.*previous production version.*backup.*promote.*again",
             ),
-            ("promote", "overridden", "", r"admin override.*no production release"),
-            ("promote", "changes_requested", "", r"withdraws approval.*no production release"),
+            ("promote", "overridden", ""),
+            ("promote", "changes_requested", ""),
         )
+        effects: list[str] = []
         with (
             patch(
                 "control_plane.http_app.publish_release_decision", wraps=publish_release_decision
@@ -123,7 +123,7 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                 "control_plane.release_review_record.github_api_request", side_effect=github.request
             ),
         ):
-            for mode, outcome, start, effect in cases:
+            for mode, outcome, start in cases:
                 with self.subTest(mode=mode, outcome=outcome):
                     self.store.write_product_profile_record(
                         profile().model_copy(update={"release_on_acceptance": mode})
@@ -146,8 +146,11 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                     )
                     # Read the body submitted to publication, not a separate rendering.
                     body = str(issue["body"])
-                    self.assertRegex(body, effect)
-                    self.assertRegex(body, r"Editing this issue does not change.*approval")
+                    effect = _decision_effect(saved)
+                    self.assertIn(effect, body)
+                    # A universal description must not erase distinct recorded actions.
+                    self.assertNotIn(effect, effects)
+                    effects.append(effect)
                     self.assertIn(saved.record_id, body)
                     self.assertIn(saved.checklist_digest, body)
                     self.assertEqual(

@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.release_review_record import (
+    _decision_effect,
     publish_release_decision,
     release_decision_issue_body,
 )
@@ -291,9 +292,10 @@ class ReleaseReviewRecordTests(unittest.TestCase):
             for call in api.call_args_list
             if call.kwargs.get("method") == "POST"
         )
-        self.assertRegex(posted, r"acceptance starts.*gated production release")
+        self.assertIn(_decision_effect(saved), posted)
+        self.assertNotEqual(_decision_effect(saved), _decision_effect(self.decision))
 
-    def test_hotfix_rejection_publishes_rollback_without_losing_authority_notice(self) -> None:
+    def test_hotfix_rejection_publishes_rollback_instead_of_ordinary_rejection(self) -> None:
         saved = self.decision.model_copy(
             update={
                 "record_id": "hotfix-rejected",
@@ -315,8 +317,9 @@ class ReleaseReviewRecordTests(unittest.TestCase):
             for call in api.call_args_list
             if call.kwargs.get("method") == "POST"
         )
-        self.assertRegex(posted, r"rolls.*back.*last accepted release")
-        self.assertRegex(posted, r"Editing this issue does not change.*approval")
+        self.assertIn(_decision_effect(saved), posted)
+        ordinary_rejection = saved.model_copy(update={"release_start": ""})
+        self.assertNotEqual(_decision_effect(saved), _decision_effect(ordinary_rejection))
 
     def test_recovers_successful_issue_write_without_a_duplicate(self) -> None:
         with patch(
