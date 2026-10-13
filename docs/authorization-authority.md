@@ -30,8 +30,9 @@ access to an invalid policy or silently starting with bootstrap authority.
 - People sign in with GitHub and hold the `admin` or `read_only` role. Clients
   hold the narrow `owner` role for their own site's decisions.
 - The [admin](#the-admin) may do anything.
-- Machine identities hold DB policy grants. Token-bound agents can hold the
-  product-scoped standing read-and-plan permission described below.
+- Machine writes hold DB policy grants. The Director's authenticated agents
+  use the declared read-and-plan permission described below; other agents
+  retain product-scoped policy rules.
 - Granting access is a stop boundary: an agent asks the Director before creating
   credentials, granting access, or changing who can merge (see
   [DIRECTION.md](../DIRECTION.md#stop-boundaries)). Do not create, edit,
@@ -82,34 +83,33 @@ authorization membership rather than complete coverage.
 
 ## Standing Agent Read And Plan Permission
 
-`agent.read` is a DB rule action, not an identity shortcut or an installed
-default. A schema-2 or schema-3 `local_operator` or `terminal_agent` rule names exact
-subjects, token labels and products; wildcard agent or product selectors are
-rejected. Context and instance selectors retain their existing matching rules.
-Product-level reads use the `launchplane` metadata context, so the context
-rule must include it alongside the selected product lane contexts (or use the
-existing all-context selector). Use separate context and instance rules when
-both scopes are needed. A new
-product is included through an explicitly reviewed policy change.
+The [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md#stop-boundaries)
+owns who may read and plan. The service authenticates the existing Director
+`local_operator` and `terminal_agent` bootstrap tokens and marks their resolved
+identities internally. A policy principal or diagnostic request cannot supply
+that marker. Diagnostics bind an exact subject, token label and transport to
+the configured identity; another principal never inherits its authority.
 
 [`action_effects.py`](../control_plane/action_effects.py) owns source declarations
-of `read`, `plan` and `write`. Only declared reads and qualified plans inherit
-`agent.read`, within the matching rule's product, context and instance scope.
-Unknown actions fail closed. Raw policy matching defaults to explicit actions;
-role inheritance passes through the service runtime, which resolves returned
-product ownership. Existing enumerated permissions remain authoritative; a
-`launchplane_service.read` grant also reads Delivery metadata but does not
-inherit authority for other read actions. Policy refresh and
-revocation apply to the role on every request, as to other DB grants.
+of `read`, `plan` and `write`. The Director's authenticated agents inherit every
+declared read and inert plan directly, without a DB `agent.read` rule, a product
+catalog or a policy approval. New products need no read-grant update. Unknown
+actions fail closed; policy-schema/target validation and response redaction stay
+in force. Pure dry runs can change only their own evidence. Queuing execution,
+taking leases, creating operative lifecycle plans, revealing credentials and
+copying secret values retain write or explicit source permissions. The two
+secret-copy source checks explicitly disable read-role inheritance. Existing
+terminal transport restrictions remain; `local_operator` supplies the full
+planning surface, including mixed plan/apply routes.
 
-Pure dry runs and inert evidence can use this role. Queuing execution, taking
-leases, creating operative plans (including stored product-retirement lifecycle
-plans), revealing credentials and copying secret values retain separate write or
-explicit source permissions. Service-side authenticated provider reads do not
-return the credential used to perform them. Existing terminal
-credential transport restrictions remain; the `local_operator` transport covers
-the Director's full planning surface. A Client's own agent can use the same
-product-scoped model later; no Client-agent access is installed by source code.
+Other agents retain exact subject/token/product-scoped DB `agent.read` rules
+and their existing context and instance matching. Client agents must be scoped
+to their Client's products; source delivery installs no Client credential or
+grant. Generic identities never become Director agents from a type name or
+caller-supplied claim. Product-level metadata uses the `launchplane` context;
+separate context and instance rules support both scopes. Requests authorize
+the returned product and collections filter each returned record. Revocation
+continues to apply to these scoped rules and to all explicit write permissions.
 
 Expected-configuration dry runs also preserve existing explicit grants: a
 `local_operator` granted `product_profile.expected_config.apply` may inspect the inert
@@ -117,7 +117,7 @@ plan for a live product without changing its profile. The corresponding apply
 still refuses with `live_product_requires_operator`; browser CSRF and read-only
 identity restrictions remain in force.
 
-Product reads authorize the returned product. Profile and product overview lists filter role access
+For scoped agents, product reads authorize the returned product. Profile and product overview lists filter role access
 per returned product; contextual secret and runtime-setting collections omit
 global or other-product records unless their scopes are also granted; saved Client reviews resolve the repository's product.
 Dokploy dry runs use the recorded product owning the context, and ingress plans validate the
@@ -129,11 +129,11 @@ product records; aggregate reads require each recorded product scope, including
 historical product projections without a current profile. Caller-supplied intent
 evaluations, including denied requests, do not establish product scopes. Snapshot authorization
 checks the actual exported profiles and inventory inside the same read-only
-transaction. The Delivery selector GET uses ordinary DB read
-authorization; its configuration and credential retirement keep their admin gates.
+transaction. The Delivery selector GET uses the declared metadata read;
+its configuration and credential retirement keep their admin gates.
 
-Non-agent policy-diagnostic identity gates remain; the exact agent read role
-adds the supported agent path. Repository-scope lookups require both the Launchplane metadata scope and
+Non-agent policy-diagnostic identity gates remain. For scoped agents,
+repository-scope lookups require both the Launchplane metadata scope and
 coverage of recorded products; they include Root-owned repository inventory,
 classification, work-request and policy membership metadata. Global effective-access,
 candidate-policy diagnostics and policy-retirement evidence require the recorded
@@ -145,12 +145,11 @@ including products not yet recorded; unbounded selectors require explicit author
 Snapshot inventory for Launchplane itself uses its own scope; ambiguous
 product context ownership fails closed.
 
-Source delivery installs no grant. After the deployed source is qualified,
-prepare one managed-policy proposal bound to the current exact agent and explicit
-product set. Chris reviews and approves its exact diff in the signed-in Access
-policy UI; agents never apply it. Preserve existing enumerated rules for rollback,
-and remove the new role through the same reviewed path before reverting to an
-older service image that cannot validate its scoped marker.
+Installation activates the Director's declaration-based reads; no managed-policy
+proposal or grant step follows it. Verify the installed revision with the same
+agent's real dry run, a refused write and a foreign-product scoped-agent probe.
+Existing DB grants are preserved for image rollback; an older image may still
+refuse a Director read without a matching rule. Report that as a tool defect.
 
 ## Current Transitional Model
 
@@ -223,9 +222,10 @@ rule names that product.
 Treat `authorization_denied` as an authority result, not a credential-selection
 hint. Record the denied action, scope, and trace ID, then:
 
-- **A refused read** means the Director's agent is missing its standing read
-  grant. Reading is never a stop boundary, so report the missing grant to the
-  Director as a bug and continue with work that does not depend on it.
+- **A refused Director-agent read, plan or inert dry run** is a tool defect.
+  Diagnose authentication, the source effect and the installed revision, then
+  fix the tool under the overall direction. Do not prepare a grant or ask for
+  read-role approval. Continue independent work while installation is pending.
 - **A refused write, grant, or change** is a stop boundary. Ask the Director
   once for that specific grant or change and continue with work that does not
   depend on it.

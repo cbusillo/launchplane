@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 import base64
 import json
 import unittest
@@ -1526,6 +1527,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
 
         self.assertEqual(status_code, 200)
 
+    @scoped_agent_test
     def test_provider_evidence_denies_before_reservation_lookup(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

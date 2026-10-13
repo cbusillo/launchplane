@@ -39,6 +39,7 @@ from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneIdentity,
     LocalOperatorIdentity,
+    director_agent_identity,
 )
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
@@ -294,7 +295,9 @@ def _execute_write(
         return replay
     try:
         authority_store = require_production_backup_authority_store(record_store)
-        if isinstance(identity, (LocalOperatorIdentity, GitHubHumanIdentity)):
+        if isinstance(identity, (LocalOperatorIdentity, GitHubHumanIdentity)) and not (
+            envelope.mode == "dry_run" and director_agent_identity(identity)
+        ):
             target_refusal = _target_revision_refusal(
                 dependencies=dependencies,
                 identity=identity,

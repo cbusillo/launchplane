@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 from typing import cast
 from pathlib import Path
 from dataclasses import replace
@@ -30,6 +31,7 @@ from tests.support.stores import _sqlite_database_url
 
 
 class SignedInProductSetupTests(unittest.IsolatedAsyncioTestCase):
+    @scoped_agent_test
     async def test_admin_setup_plans_and_applies_without_releasing_or_changing_production(
         self,
     ) -> None:

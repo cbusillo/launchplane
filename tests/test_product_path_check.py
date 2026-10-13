@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 import unittest
 from collections.abc import Mapping
 from typing import cast
@@ -779,6 +780,7 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(grant["code"], expected_code)
 
+    @scoped_agent_test
     async def test_route_needs_product_read_and_answers_for_the_caller(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(

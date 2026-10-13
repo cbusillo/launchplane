@@ -1,4 +1,6 @@
 from __future__ import annotations
+from tests.support.auth import scoped_agent_test
+
 
 import base64
 from collections.abc import Iterator
@@ -366,6 +368,7 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("set-cookie", response.headers)
         self.assertEqual(session_after, session_before)
 
+    @scoped_agent_test
     async def test_repository_scope_authorization_precedes_route_database_reads(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
@@ -406,6 +409,7 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
+    @scoped_agent_test
     async def test_repository_scope_rechecks_fresh_policy_and_only_records_denial(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -881,6 +885,7 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
+    @scoped_agent_test
     async def test_operator_preview_grant_cannot_substitute_for_the_scoped_read_role(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
@@ -1130,6 +1135,7 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
             0,
         )
 
+    @scoped_agent_test
     async def test_unauthorized_policy_health_skips_route_database_reads(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1450,6 +1456,7 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("evaluated-principal-secret", rendered)
         self.assertNotIn("evaluated-token-label-secret", rendered)
 
+    @scoped_agent_test
     async def test_support_reader_explains_persisted_denial_without_policy_write_authority(
         self,
     ) -> None:

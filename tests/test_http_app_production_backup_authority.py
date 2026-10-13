@@ -523,7 +523,7 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.list_production_backup_policy_records(), ())
             self.assertEqual(store.list_production_backup_target_records(), ())
 
-    async def test_local_operator_revises_only_its_own_policy_targets(self) -> None:
+    async def test_director_plans_target_changes_but_applies_only_its_granted_lane(self) -> None:
         policy = _authz_policy().model_dump(mode="json")
         policy["github_actions"][0]["products"] = ["example-product", "other-product"]
         policy["github_actions"][0]["contexts"] = ["example-product", "other-product"]
@@ -586,8 +586,22 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
                 headers=operator,
                 payload=extra,
             )
-            self.assertEqual(refused.status_code, 403, refused.text)
-            self.assertEqual(refused.json()["error"]["code"], "local_operator_lane_scope_required")
+            self.assertEqual(refused.status_code, 200, refused.text)
+            denied_apply = await http_request(
+                app,
+                "POST",
+                "/v1/production-backup-authority/apply",
+                headers=operator | {"Idempotency-Key": "foreign-target-apply-denied"},
+                payload=extra
+                | {
+                    "mode": "apply",
+                    "reviewed_authority_digest": refused.json()["result"]["authority_digest"],
+                },
+            )
+            self.assertEqual(denied_apply.status_code, 403, denied_apply.text)
+            self.assertEqual(
+                denied_apply.json()["error"]["code"], "local_operator_lane_scope_required"
+            )
 
             other = _dry_run_envelope().model_dump(mode="json")
             other["policy"].update(
@@ -620,11 +634,29 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(applied.status_code, 200, applied.text)
 
+            own["expected_current_target_record_ids"] = {
+                target.target_id: target.record_id
+                for target in store.list_production_backup_target_records(status="active")
+            }
             shared = await http_request(
                 app, "POST", "/v1/production-backup-authority/apply", headers=operator, payload=own
             )
-            self.assertEqual(shared.status_code, 403, shared.text)
-            self.assertEqual(shared.json()["error"]["code"], "local_operator_lane_scope_required")
+            self.assertEqual(shared.status_code, 200, shared.text)
+            denied_shared_apply = await http_request(
+                app,
+                "POST",
+                "/v1/production-backup-authority/apply",
+                headers=operator | {"Idempotency-Key": "shared-target-apply-denied"},
+                payload=own
+                | {
+                    "mode": "apply",
+                    "reviewed_authority_digest": shared.json()["result"]["authority_digest"],
+                },
+            )
+            self.assertEqual(denied_shared_apply.status_code, 403, denied_shared_apply.text)
+            self.assertEqual(
+                denied_shared_apply.json()["error"]["code"], "local_operator_lane_scope_required"
+            )
             store.close()
 
     async def test_openapi_exposes_bounded_authority_routes(self) -> None:

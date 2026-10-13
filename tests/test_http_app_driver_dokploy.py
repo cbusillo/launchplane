@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 import json
 import os
 import unittest
@@ -136,6 +137,7 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "authentication_required")
         self.assertEqual(response.headers["WWW-Authenticate"], 'Bearer realm="Launchplane API"')
 
+    @scoped_agent_test
     async def test_driver_descriptors_reject_wrong_context_grant(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -151,6 +153,7 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    @scoped_agent_test
     async def test_driver_descriptor_rejects_wrong_context_grant(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -398,6 +401,7 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
             "deployment-example-site-testing",
         )
 
+    @scoped_agent_test
     async def test_driver_instance_view_denies_ungranted_instance_in_shared_context(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = _driver_context_store(Path(temporary_directory_name) / "state")
@@ -456,6 +460,7 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "authentication_required")
         self.assertEqual(response.headers["WWW-Authenticate"], 'Bearer realm="Launchplane API"')
 
+    @scoped_agent_test
     async def test_driver_context_view_rejects_wrong_context_grant(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -538,6 +543,7 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
+    @scoped_agent_test
     async def test_operator_target_read_preserves_scope_and_redaction(self) -> None:
         cases = (
             ("driver.read", "launchplane", "cm_website", ("prod",), "local-owner-agent", 200),
@@ -650,6 +656,7 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
         read_config.assert_not_called()
 
+    @scoped_agent_test
     async def test_operator_denial_records_inspect_action(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
