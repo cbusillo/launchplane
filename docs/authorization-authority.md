@@ -607,9 +607,10 @@ The ordinary-agent delegated-delivery design is retired (see
 The ordinary-agent activation text below describes that code until then; do not
 activate or extend it.
 
-The retired activation executor and enrollment/expiry maintenance have been
-removed. Historical activation contracts and schema-3 parsing remain until
-the domain/storage layers are deleted under #2437.
+The retired activation executor and enrollment recovery have been removed.
+Historical activation contracts and schema-3 parsing remain until the
+domain/storage layers are deleted under #2437. Bounded legacy ciphertext expiry
+maintenance remains necessary for current managed-secret key retirement.
 
 The source-owned activation administration descriptor is
 `ordinary-agent-delivery-activation`. Its human lifecycle uses the distinct

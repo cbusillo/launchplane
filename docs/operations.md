@@ -4116,6 +4116,11 @@ remain diagnostic and do not block a valid DB heartbeat. Target lookup, service
 selection, container configuration/identity, and image identity failures remain
 hard failures.
 
+The privileged-operation worker retains bounded expiry maintenance for legacy
+delivery ciphertext because managed-secret key retirement still accounts for
+that ciphertext. The ordinary enrollment recovery and execution workers are
+removed; remaining storage cleanup is tracked in #2437.
+
 Because runtime compatibility accepts only the checked-in Alembic head, a code
 rollback across this migration also requires the matching schema downgrade;
 deploying the previous image alone fails closed instead of running against an

@@ -72,10 +72,12 @@ from control_plane.privileged_operation_service import (
 )
 from control_plane.privileged_operation_worker import (
     _construct_approver_authorization,
+    OrdinaryAgentDeliveryCleanupState,
     execute_approved_privileged_operations_once,
     privileged_operation_execution_token,
     record_privileged_operation_worker_poll_heartbeat,
     require_privileged_operation_execution_store,
+    run_ordinary_agent_delivery_cleanup_once,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -572,6 +574,88 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                     )
             finally:
                 store.close()
+
+    def test_delivery_cleanup_retries_without_exposing_failure_detail(self) -> None:
+        store = _WorkerStore(
+            cleanup_results=[
+                RuntimeError("private delivery ciphertext"),
+                RuntimeError("private delivery ciphertext"),
+                2,
+            ]
+        )
+        state = OrdinaryAgentDeliveryCleanupState()
+
+        failed = run_ordinary_agent_delivery_cleanup_once(
+            record_store=store,
+            limit=4,
+            state=state,
+            now_monotonic=10.0,
+            error_backoff_seconds=3,
+        )
+        failed_again = run_ordinary_agent_delivery_cleanup_once(
+            record_store=store,
+            limit=4,
+            state=state,
+            now_monotonic=13.0,
+            error_backoff_seconds=3,
+        )
+        backing_off = run_ordinary_agent_delivery_cleanup_once(
+            record_store=store,
+            limit=4,
+            state=state,
+            now_monotonic=14.0,
+            error_backoff_seconds=3,
+        )
+        succeeded = run_ordinary_agent_delivery_cleanup_once(
+            record_store=store,
+            limit=4,
+            state=state,
+            now_monotonic=19.0,
+            error_backoff_seconds=3,
+        )
+
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.error_type, "RuntimeError")
+        self.assertEqual(failed.retry_seconds, 3)
+        self.assertEqual(failed_again.retry_seconds, 6)
+        self.assertEqual(backing_off.status, "backing_off")
+        self.assertEqual(backing_off.retry_seconds, 5)
+        self.assertEqual(store.cleanup_calls, 3)
+        self.assertEqual(succeeded.status, "succeeded")
+        self.assertEqual(succeeded.expired_deliveries, 2)
+        self.assertEqual(state.consecutive_failures, 0)
+
+        capped_store = _WorkerStore(
+            cleanup_results=[RuntimeError("private"), RuntimeError("private")]
+        )
+        capped_state = OrdinaryAgentDeliveryCleanupState()
+        first_capped = run_ordinary_agent_delivery_cleanup_once(
+            record_store=capped_store,
+            limit=4,
+            state=capped_state,
+            now_monotonic=20.0,
+            error_backoff_seconds=200,
+        )
+        second_capped = run_ordinary_agent_delivery_cleanup_once(
+            record_store=capped_store,
+            limit=4,
+            state=capped_state,
+            now_monotonic=220.0,
+            error_backoff_seconds=200,
+        )
+        self.assertEqual((first_capped.retry_seconds, second_capped.retry_seconds), (200, 300))
+
+    def test_delivery_cleanup_configuration_failure_is_isolated(self) -> None:
+        result = run_ordinary_agent_delivery_cleanup_once(
+            record_store=_WorkerStore(),
+            limit=101,
+            state=OrdinaryAgentDeliveryCleanupState(),
+            now_monotonic=10.0,
+            error_backoff_seconds=3,
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.error_type, "ValueError")
 
     def _store(self, directory: str) -> PostgresRecordStore:
         store = PostgresRecordStore(
@@ -1458,35 +1542,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertNotIn("worker-container-hostname", str(records[0].model_dump()))
 
-    def test_worker_run_once_does_not_touch_retired_maintenance(self) -> None:
-        store = _WorkerStore()
-        with (
-            patch("control_plane.cli_service._store", return_value=store),
-            patch(
-                "control_plane.cli_service.execute_approved_privileged_operations_once",
-                return_value=(),
-            ) as execute,
-            patch.object(
-                store,
-                "expire_ordinary_agent_deliveries",
-                side_effect=AssertionError("retired maintenance"),
-            ) as cleanup,
-        ):
-            result = CliRunner().invoke(
-                main,
-                [
-                    "service",
-                    "privileged-operation-workers",
-                    "run-once",
-                    "--database-url",
-                    "sqlite+pysqlite:///:memory:",
-                ],
-            )
-        self.assertEqual(result.exit_code, 0, result.output)
-        execute.assert_called_once()
-        cleanup.assert_not_called()
-        self.assertEqual(json.loads(result.output), {"processed": 0, "statuses": []})
-
     def test_worker_commands_are_service_internal(self) -> None:
         runner = CliRunner()
 
@@ -1597,23 +1652,26 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 "privileged_operation_worker_schema_probe_succeeded",
                 "privileged_operation_worker_store_initialized",
                 "privileged_operation_worker_first_poll_attempted",
+                "ordinary_agent_delivery_cleanup_succeeded",
                 "privileged_operation_worker_poll_succeeded",
+                "ordinary_agent_delivery_cleanup_succeeded",
                 "privileged_operation_worker_retry",
+                "ordinary_agent_delivery_cleanup_succeeded",
                 "privileged_operation_worker_threshold_exit",
             ],
         )
         self.assertEqual(telemetry[2]["consecutive_errors"], 1)
         self.assertEqual(telemetry[2]["error_type"], "RuntimeError")
         self.assertEqual(
-            telemetry[6],
+            telemetry[7],
             {
                 "event": "privileged_operation_worker_poll_succeeded",
                 "processed": 1,
                 "statuses": ["executed"],
             },
         )
-        self.assertEqual(telemetry[7]["consecutive_errors"], 1)
-        self.assertEqual(telemetry[8]["consecutive_errors"], 2)
+        self.assertEqual(telemetry[9]["consecutive_errors"], 1)
+        self.assertEqual(telemetry[11]["consecutive_errors"], 2)
 
     def test_heartbeat_write_failure_counts_as_poll_failure(self) -> None:
         class TestStopEvent:
@@ -1742,6 +1800,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 "privileged_operation_worker_schema_probe_succeeded",
                 "privileged_operation_worker_store_initialized",
                 "privileged_operation_worker_first_poll_attempted",
+                "ordinary_agent_delivery_cleanup_succeeded",
                 "privileged_operation_worker_poll_succeeded",
                 "privileged_operation_worker_stopped",
             ],
@@ -1812,6 +1871,10 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 {"event": "privileged_operation_worker_schema_probe_succeeded"},
                 {"event": "privileged_operation_worker_store_initialized"},
                 {"event": "privileged_operation_worker_first_poll_attempted"},
+                {
+                    "event": "ordinary_agent_delivery_cleanup_succeeded",
+                    "expired_deliveries": 0,
+                },
             ],
         )
         self.assertEqual(signal_calls[-2:], list(previous_handlers.items()))
@@ -1871,7 +1934,9 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 "privileged_operation_worker_schema_probe_succeeded",
                 "privileged_operation_worker_store_initialized",
                 "privileged_operation_worker_first_poll_attempted",
+                "ordinary_agent_delivery_cleanup_succeeded",
                 "privileged_operation_worker_poll_succeeded",
+                "ordinary_agent_delivery_cleanup_succeeded",
                 "privileged_operation_worker_poll_succeeded",
                 "privileged_operation_worker_stopped",
             ],

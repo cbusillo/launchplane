@@ -67,9 +67,10 @@ revoked without reading custody or calling a provider. The store derives the
 receipt after DB time and server-allocated revisions are known; callers cannot
 supply response content or run callbacks while locks are held.
 
-The enrollment recovery worker and private-delivery expiry polling have been
-removed. These retained records are historical; current privileged-operation
-workers do not use them. Remaining storage deletion is tracked in #2437.
+Enrollment recovery has been removed. Retained delivery ciphertext still
+participates in managed-secret key retirement, so the privileged-operation
+worker keeps its bounded expiry maintenance until storage deletion under #2437.
+History remains readable; no enrollment or delegated execution is enabled.
 
 ### Provider Delivery Inspection
 

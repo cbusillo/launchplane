@@ -34,6 +34,8 @@ from control_plane.outbox_worker import (
 )
 from control_plane.openapi_export import write_canonical_openapi
 from control_plane.privileged_operation_worker import (
+    OrdinaryAgentDeliveryCleanupState,
+    run_ordinary_agent_delivery_cleanup_once,
     PrivilegedOperationExecutionStore,
     execute_approved_privileged_operations_once,
     record_privileged_operation_worker_poll_heartbeat,
@@ -622,6 +624,13 @@ def service_privileged_operation_workers_run_once(
         PrivilegedOperationExecutionStore,
         _store(state_dir=state_dir, database_url=database_url),
     )
+    cleanup = run_ordinary_agent_delivery_cleanup_once(
+        record_store=store,
+        limit=limit,
+        state=OrdinaryAgentDeliveryCleanupState(),
+        now_monotonic=time.monotonic(),
+        error_backoff_seconds=15,
+    )
     records = execute_approved_privileged_operations_once(
         record_store=store,
         lease_owner=generated_lease_owner,
@@ -632,6 +641,11 @@ def service_privileged_operation_workers_run_once(
             {
                 "processed": len(records),
                 "statuses": [record.status for record in records],
+                "delivery_cleanup": {
+                    "status": cleanup.status,
+                    "expired_deliveries": cleanup.expired_deliveries,
+                    "error_type": cleanup.error_type,
+                },
             },
             indent=2,
             sort_keys=True,
@@ -717,6 +731,7 @@ def service_privileged_operation_workers_run(
         schema_probe_succeeded = False
         store_initialized = False
         first_poll_attempted = False
+        cleanup_state = OrdinaryAgentDeliveryCleanupState()
         consecutive_errors = 0
 
         def report_schema_probe_succeeded() -> None:
@@ -759,6 +774,35 @@ def service_privileged_operation_workers_run(
                         )
                     )
                     first_poll_attempted = True
+                cleanup = run_ordinary_agent_delivery_cleanup_once(
+                    record_store=store,
+                    limit=limit,
+                    state=cleanup_state,
+                    now_monotonic=cycle_started,
+                    error_backoff_seconds=error_backoff_seconds,
+                )
+                if cleanup.status == "succeeded":
+                    click.echo(
+                        json.dumps(
+                            {
+                                "event": "ordinary_agent_delivery_cleanup_succeeded",
+                                "expired_deliveries": cleanup.expired_deliveries,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                elif cleanup.status == "failed":
+                    click.echo(
+                        json.dumps(
+                            {
+                                "event": "ordinary_agent_delivery_cleanup_failed",
+                                "error_type": cleanup.error_type,
+                                "consecutive_failures": cleanup.consecutive_failures,
+                                "retry_seconds": cleanup.retry_seconds,
+                            },
+                            sort_keys=True,
+                        )
+                    )
                 records = execute_approved_privileged_operations_once(
                     record_store=store,
                     lease_owner=generated_lease_owner,

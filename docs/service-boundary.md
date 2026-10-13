@@ -96,7 +96,9 @@ cleanup scope so the store is always closed.
 - server runtime: FastAPI served directly by Uvicorn
 
 The retired ordinary finite-job worker, its CLI and Compose service, and its
-privileged-worker enrollment/expiry maintenance have been removed. Retained
+privileged-worker enrollment recovery have been removed. Bounded expiry
+maintenance remains for retained ciphertext used by managed-secret key retirement.
+Retained
 delegated-delivery records and schema-3 policy history remain readable;
 remaining domain and storage removal is tracked in #2437.
 
