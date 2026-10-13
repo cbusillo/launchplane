@@ -142,7 +142,15 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                         if path == "/api/compose.one":
                             return {"composeId": "compose-123", "serverId": "private-server"}
                         if path == "/api/schedule.list":
-                            return [
+                            unrelated_schedules: list[api.JsonValue] = [
+                                {
+                                    "scheduleId": f"unrelated-schedule-{index}",
+                                    "appName": f"other-lane-{index}",
+                                    "enabled": True,
+                                }
+                                for index in range(80)
+                            ]
+                            return unrelated_schedules + [
                                 {
                                     "scheduleId": "private-schedule",
                                     "appName": _build_dokploy_data_workflow_schedule_app_name(
@@ -191,6 +199,44 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                     )
                     self.assertFalse(
                         getattr(store, "list_product_reconcile_requests")(product="site")
+                    )
+            app_name = _build_dokploy_data_workflow_schedule_app_name(
+                context_name=operation.context, instance_name=operation.instance
+            )
+            schedule_inventories: tuple[api.JsonValue, ...] = (
+                [
+                    {"scheduleId": f"matching-{index}", "appName": app_name, "enabled": False}
+                    for index in range(80)
+                ],
+                [{"scheduleId": "matching", "appName": app_name}, None],
+                {"items": [], "data": []},
+            )
+            for schedule_inventory in schedule_inventories:
+                with self.subTest(backend=type(store).__name__, inventory=schedule_inventory):
+
+                    def incomplete_read(**kwargs: object) -> api.JsonValue:
+                        if kwargs["path"] == "/api/schedule.list":
+                            return cast(api.JsonValue, schedule_inventory)
+                        query = cast(dict[str, str], kwargs["query"])
+                        self.assertNotEqual(query.get("type"), "schedule")
+                        return read(**kwargs)
+
+                    with (
+                        patch(
+                            "control_plane.testing_legacy_replacement_inspection.source.read_dokploy_config",
+                            return_value=("https://provider.test", "fixture-token"),
+                        ),
+                        patch.object(api, "dokploy_request", side_effect=incomplete_read),
+                    ):
+                        view = testing_replacement_recovery_read(store, fenced, root)
+                    self.assertFalse(view["provider_inspected"])
+                    self.assertEqual(view["provider_effects"], "unknown")
+                    self.assertFalse(view["safe_to_release"])
+                    self.assertEqual(
+                        store.read_odoo_stable_target_replacement_operation_record(
+                            operation.operation_id
+                        ),
+                        fenced,
                     )
             getattr(store, "write_deployment_record")(
                 deployment.model_copy(update={"record_id": "another-candidate"})
