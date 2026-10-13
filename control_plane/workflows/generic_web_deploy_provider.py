@@ -90,13 +90,25 @@ def build_generic_web_provider_target_key(
     resolved_deploy_target: GenericWebResolvedDeployTarget,
 ) -> str:
     ship_request = resolved_deploy_target.ship_request
+    return generic_web_provider_target_key(
+        provider_id=ship_request.provider_id,
+        context=ship_request.context,
+        instance=ship_request.instance,
+        target_type=resolved_deploy_target.resolved_target.target_type,
+        target_id=resolved_deploy_target.resolved_target.target_id,
+    )
+
+
+def generic_web_provider_target_key(
+    *, provider_id: str, context: str, instance: str, target_type: str, target_id: str
+) -> str:
     identity = "\x1f".join(
         (
-            ship_request.provider_id,
-            ship_request.context,
-            ship_request.instance,
-            resolved_deploy_target.resolved_target.target_type,
-            resolved_deploy_target.resolved_target.target_id,
+            provider_id,
+            context,
+            instance,
+            target_type,
+            target_id,
         )
     )
     return f"generic-web-provider-target:{hashlib.sha256(identity.encode()).hexdigest()}"

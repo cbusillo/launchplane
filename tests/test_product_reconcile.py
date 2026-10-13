@@ -1436,6 +1436,22 @@ def _generic_web_profile() -> LaunchplaneProductProfileRecord:
 
 
 class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
+    def test_hold_set_during_adapter_preparation_blocks_dispatch_under_execution_lock(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        resolve = self.deploys.resolve_deploy_target
+
+        def prepare_then_hold(**kwargs: Any) -> Any:
+            target = resolve(**kwargs)
+            self.hold_testing()
+            return target
+
+        with patch.object(self.deploys, "resolve_deploy_target", side_effect=prepare_then_hold):
+            plan = self.reconcile()
+        self.assertEqual(self.deploys.runtime_identities, [])
+        self.assertEqual(plan["reason"], "staff_testing")
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+
     def test_declared_maintenance_changes_testing_retry_authority(self) -> None:
         from control_plane.contracts.generic_web_extensions import (
             GenericWebLaneExtensions,

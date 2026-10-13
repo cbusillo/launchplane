@@ -11037,6 +11037,108 @@
         "title": "GenericWebStableVerificationRequest",
         "type": "object"
       },
+      "GenericWebTestingExclusionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Binding Sha256",
+            "type": "string"
+          },
+          "context": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$",
+            "title": "Context",
+            "type": "string"
+          },
+          "deployments": {
+            "$ref": "#/components/schemas/TestingExclusionFacet"
+          },
+          "execution": {
+            "$ref": "#/components/schemas/TestingExclusionFacet"
+          },
+          "historical_settlement": {
+            "const": "not_evaluated",
+            "default": "not_evaluated",
+            "title": "Historical Settlement",
+            "type": "string"
+          },
+          "hold": {
+            "$ref": "#/components/schemas/TestingExclusionFacet"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "observed_at": {
+            "pattern": "^[0-9T:.+Z-]{20,40}$",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "product": {
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$",
+            "title": "Product",
+            "type": "string"
+          },
+          "provider_target": {
+            "$ref": "#/components/schemas/TestingExclusionFacet"
+          },
+          "queue": {
+            "$ref": "#/components/schemas/TestingExclusionFacet"
+          },
+          "reservation_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Reservation Sha256",
+            "type": "string"
+          },
+          "schedules": {
+            "$ref": "#/components/schemas/TestingExclusionFacet"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "status": {
+            "default": "unknown",
+            "enum": [
+              "excluded",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "pattern": "^launchplane_req_[a-zA-Z0-9_-]+$",
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "validity": {
+            "const": "while_hold_binding_and_reservation_fence_unchanged",
+            "default": "while_hold_binding_and_reservation_fence_unchanged",
+            "title": "Validity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "product",
+          "context",
+          "observed_at",
+          "binding_sha256",
+          "reservation_sha256",
+          "hold",
+          "execution",
+          "deployments",
+          "queue",
+          "schedules",
+          "provider_target"
+        ],
+        "title": "GenericWebTestingExclusionResponse",
+        "type": "object"
+      },
       "GitHubActionsAccessPrincipal": {
         "additionalProperties": false,
         "properties": {
@@ -46384,6 +46486,60 @@
         "title": "TerminalAgentPolicyRule",
         "type": "object"
       },
+      "TestingExclusionFacet": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "default": "not_inspected",
+            "enum": [
+              "proved",
+              "not_inspected",
+              "hold_absent",
+              "execution_lock_busy",
+              "reservation_fence_absent",
+              "execution_ownership_unproved",
+              "binding_changed",
+              "provider_read_unavailable",
+              "provider_inventory_unproved",
+              "provider_effect_active",
+              "provider_target_unproved",
+              "execution_lock_lost"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "complete": {
+            "default": false,
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "count": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Count"
+          },
+          "state": {
+            "default": "unknown",
+            "enum": [
+              "excluded",
+              "quiescent",
+              "held",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "title": "TestingExclusionFacet",
+        "type": "object"
+      },
       "TestingReplacementRecoveryRead": {
         "additionalProperties": false,
         "properties": {
@@ -70125,6 +70281,116 @@
           }
         },
         "summary": "Write runner lane registration audit evidence"
+      }
+    },
+    "/v1/generic-web/testing/exclusion": {
+      "get": {
+        "operationId": "read_generic_web_testing_exclusion",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$",
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": false,
+            "schema": {
+              "default": "testing",
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericWebTestingExclusionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Testing Exclusion"
       }
     },
     "/v1/github/app-webhook": {
