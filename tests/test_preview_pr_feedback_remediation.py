@@ -1,5 +1,9 @@
 import unittest
+from datetime import UTC, datetime, timedelta
 from collections.abc import Callable
+from urllib.parse import unquote
+from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import patch
@@ -17,7 +21,9 @@ from control_plane.preview_pr_feedback_remediation import (
     apply_remediation,
     bind_preview_pr_feedback_target,
     observe_managed_preview_pr_feedback,
+    resolve_remediation_token,
 )
+from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.workflows.preview_pr_feedback import (
     DEFAULT_PREVIEW_FEEDBACK_MARKER,
     render_preview_pr_feedback_markdown,
@@ -75,6 +81,7 @@ class PreviewPrFeedbackRemediationTests(unittest.TestCase):
         return observe_managed_preview_pr_feedback(
             target=_target(),
             token="token",
+            token_actor=(101, "launchplane-bot"),
             api_request=_api_with_comments(
                 [
                     {
@@ -94,6 +101,7 @@ class PreviewPrFeedbackRemediationTests(unittest.TestCase):
         observation = observe_managed_preview_pr_feedback(
             target=target,
             token="token",
+            token_actor=(101, "launchplane-bot"),
             api_request=_api_with_comments([]),
         )
 
@@ -127,6 +135,7 @@ class PreviewPrFeedbackRemediationTests(unittest.TestCase):
         observation = observe_managed_preview_pr_feedback(
             target=_target(),
             token="token",
+            token_actor=(101, "launchplane-bot"),
             api_request=_api_with_comments(
                 [
                     {
@@ -225,6 +234,7 @@ class PreviewPrFeedbackRemediationTests(unittest.TestCase):
             observe_managed_preview_pr_feedback(
                 target=_target(),
                 token="token",
+                token_actor=(101, "launchplane-bot"),
                 api_request=_api_with_comments(
                     [
                         {
@@ -249,6 +259,7 @@ class PreviewPrFeedbackRemediationTests(unittest.TestCase):
             observe_managed_preview_pr_feedback(
                 target=_target(),
                 token="token",
+                token_actor=(101, "launchplane-bot"),
                 api_request=_api_with_comments(comments),
             )
 
@@ -266,9 +277,55 @@ class PreviewPrFeedbackRemediationTests(unittest.TestCase):
             observe_managed_preview_pr_feedback(
                 target=_target(),
                 token="token",
+                token_actor=(101, "launchplane-bot"),
                 api_request=api_request,
             )
         self.assertEqual(calls, 10)
+
+    def test_bot_lookup_refusals_revoke_the_scoped_token(self) -> None:
+        issued = GitHubAppInstallationToken(
+            token="scoped-token",
+            app_id=76,
+            installation_id=12,
+            repository_id=7001,
+            repository="cbusillo/verireel",
+            expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            app_slug="example-delivery",
+        )
+        for slug, actor in (
+            ("", {"id": 101, "login": "example-delivery[bot]", "type": "Bot"}),
+            ("example-delivery", {"id": 101, "login": "another[bot]", "type": "Bot"}),
+            ("example-delivery", {"id": 101, "login": "example-delivery[bot]", "type": "User"}),
+            ("example-delivery", {"id": 0, "login": "example-delivery[bot]", "type": "Bot"}),
+        ):
+            calls: list[tuple[str, str]] = []
+
+            def provider(*, path: str, token: str, method: str = "GET") -> object:
+                calls.append((method, path))
+                if path == "/installation/token" and method == "DELETE":
+                    return None
+                if unquote(path) == "/users/example-delivery[bot]":
+                    return actor
+                raise AssertionError((method, path))
+
+            with (
+                self.subTest(slug=slug, actor=actor),
+                patch(
+                    "control_plane.preview_pr_feedback_remediation.resolve_delivery_github_installation_token",
+                    return_value=replace(issued, app_slug=slug),
+                ),
+                patch(
+                    "control_plane.preview_pr_feedback_remediation.github_api_request",
+                    side_effect=provider,
+                ),
+                self.assertRaises(click.ClickException),
+            ):
+                with resolve_remediation_token(
+                    control_plane_root=Path("."), context="preview", repository=issued.repository
+                ):
+                    self.fail("Invalid bot identity must not reach observation")
+            self.assertIn(("DELETE", "/installation/token"), calls)
+            self.assertNotIn(("GET", "/user"), calls)
 
     def test_request_rejects_non_terminal_status(self) -> None:
         with self.assertRaises(ValueError):

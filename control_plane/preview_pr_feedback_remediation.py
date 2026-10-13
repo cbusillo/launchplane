@@ -1,6 +1,7 @@
 import hashlib
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -26,10 +27,11 @@ from control_plane.workflows.launchplane import (
     delete_github_issue_comment,
     github_api_request,
     github_pull_request_reference,
-    resolve_launchplane_github_token,
     launchplane_github_token,
     update_github_issue_comment,
 )
+from control_plane.launchplane_github_delivery import resolve_delivery_github_installation_token
+from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.workflows.preview_pr_feedback import (
     DEFAULT_PREVIEW_FEEDBACK_MARKER,
     LEGACY_PREVIEW_FEEDBACK_MARKERS,
@@ -107,13 +109,13 @@ def bind_preview_pr_feedback_target(
 
 def _actor(payload: object) -> tuple[int, str]:
     if not isinstance(payload, dict):
-        raise click.ClickException("GitHub authenticated user response must be an object.")
+        raise click.ClickException("GitHub actor response must be an object.")
     actor_id = payload.get("id")
     login = payload.get("login")
     if not isinstance(actor_id, int) or isinstance(actor_id, bool) or actor_id < 1:
-        raise click.ClickException("GitHub token identity is missing a stable actor id.")
+        raise click.ClickException("GitHub actor identity is missing a stable actor id.")
     if not isinstance(login, str) or not login.strip():
-        raise click.ClickException("GitHub token identity is missing a login.")
+        raise click.ClickException("GitHub actor identity is missing a login.")
     return actor_id, login.strip()
 
 
@@ -138,9 +140,10 @@ def observe_managed_preview_pr_feedback(
     *,
     target: BoundPreviewPrFeedbackTarget,
     token: str,
+    token_actor: tuple[int, str],
     api_request: GitHubApiRequest = github_api_request,
 ) -> PreviewPrFeedbackObservation:
-    token_actor_id, token_actor_login = _actor(api_request(path="/user", token=token))
+    token_actor_id, token_actor_login = _actor({"id": token_actor[0], "login": token_actor[1]})
     marker_comments: list[tuple[dict[str, object], str]] = []
     page = 1
     while True:
@@ -336,7 +339,10 @@ def apply_remediation(
             )
             evidence.mutated = True
             after = observe_managed_preview_pr_feedback(
-                target=target, token=token, api_request=api_request
+                target=target,
+                token=token,
+                token_actor=(observation.token_actor_id, observation.token_actor_login),
+                api_request=api_request,
             )
             evidence.after_digest_sha256 = after.digest_sha256
             evidence.verified_absent = after.state == "absent"
@@ -371,7 +377,10 @@ def apply_remediation(
             )
             evidence.mutated = True
             after = observe_managed_preview_pr_feedback(
-                target=target, token=token, api_request=api_request
+                target=target,
+                token=token,
+                token_actor=(observation.token_actor_id, observation.token_actor_login),
+                api_request=api_request,
             )
             evidence.after_digest_sha256 = after.digest_sha256
         except click.ClickException as error:
@@ -414,20 +423,58 @@ def apply_remediation(
     return outcome, evidence, feedback
 
 
+@dataclass(frozen=True)
+class PreviewPrFeedbackCredentials:
+    token: str = field(repr=False)
+    actor_id: int
+    actor_login: str
+
+
 @contextmanager
 def resolve_remediation_token(
     *, control_plane_root: Path, context: str, repository: str
-) -> Iterator[str]:
+) -> Iterator[PreviewPrFeedbackCredentials]:
+    installation_token: GitHubAppInstallationToken | None = None
+
+    def resolve_token(
+        *, control_plane_root: Path, context_name: str, repository: str, purpose: str
+    ) -> str:
+        nonlocal installation_token
+        installation_token = resolve_delivery_github_installation_token(
+            control_plane_root=control_plane_root,
+            context_name=context_name,
+            repository=repository,
+            purpose=purpose,
+            report_failure=True,
+        )
+        return installation_token.token if installation_token is not None else ""
+
     with launchplane_github_token(
-        token_resolver=resolve_launchplane_github_token,
+        token_resolver=resolve_token,
         api_request=github_api_request,
         control_plane_root=control_plane_root,
         context_name=context,
         repository=repository,
         purpose="pull_request_feedback",
     ) as token:
-        if not token:
+        if not token or installation_token is None:
             raise click.ClickException(
                 "Launchplane Delivery App credentials are unavailable for this repository."
             )
-        yield token
+        slug = installation_token.app_slug
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", slug) is None:
+            raise click.ClickException("Delivery App identity is missing a valid slug.")
+        expected_login = f"{slug}[bot]"
+        actor_payload = github_api_request(
+            path=f"/users/{quote(expected_login, safe='')}", token=token
+        )
+        actor_id, actor_login = _actor(actor_payload)
+        if (
+            not isinstance(actor_payload, dict)
+            or actor_payload.get("type") != "Bot"
+            or actor_login.casefold() != expected_login.casefold()
+        ):
+            raise click.ClickException(
+                "Delivery App bot identity does not match its verified slug."
+            )
+        yield PreviewPrFeedbackCredentials(token=token, actor_id=actor_id, actor_login=actor_login)

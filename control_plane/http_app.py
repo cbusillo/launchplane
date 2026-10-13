@@ -23562,16 +23562,21 @@ def create_launchplane_fastapi_app(
                         record_store=remediation_store,
                         request=remediation_request,
                     )
-                    token = credentials.enter_context(
+                    feedback_credentials = credentials.enter_context(
                         resolve_remediation_token(
                             control_plane_root=resolved_control_plane_root,
                             context=remediation_request.context,
                             repository=target.profile.repository,
                         )
                     )
+                    token = feedback_credentials.token
                     observation = observe_managed_preview_pr_feedback(
                         target=target,
                         token=token,
+                        token_actor=(
+                            feedback_credentials.actor_id,
+                            feedback_credentials.actor_login,
+                        ),
                     )
                 except FileNotFoundError as error:
                     raise _launchplane_http_error(

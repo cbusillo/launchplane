@@ -1,15 +1,21 @@
 import asyncio
 import threading
 import unittest
+from datetime import UTC, datetime, timedelta
+import click
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import unquote, urlsplit
 from typing import cast
 from unittest.mock import patch
 
+from control_plane.github_app_identity import GitHubAppInstallationToken
 from control_plane.contracts.preview_pr_feedback_remediation import (
     PreviewPrFeedbackObservation,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.workflows.preview_pr_feedback import DEFAULT_PREVIEW_FEEDBACK_MARKER
+from control_plane.preview_pr_feedback_remediation import observe_managed_preview_pr_feedback
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.filesystem import FilesystemRecordStore
 from fastapi import FastAPI
@@ -22,6 +28,18 @@ from tests.http_app_test_support import (
 )
 from tests.support.auth import _identity, _local_operator_policy, _StubVerifier
 from tests.support.profiles import _generic_site_profile_payload
+
+
+def _installation_token() -> GitHubAppInstallationToken:
+    return GitHubAppInstallationToken(
+        token="token",
+        app_id=76,
+        installation_id=12,
+        repository_id=7001,
+        repository="cbusillo/verireel",
+        expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        app_slug="example-delivery",
+    )
 
 
 def _payload(*, mode: str) -> dict[str, object]:
@@ -66,6 +84,146 @@ def _operator_app(root: Path, store: FilesystemRecordStore) -> FastAPI:
 
 
 class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_destroyed_feedback_dry_run_observes_with_installation_token(self) -> None:
+        with TemporaryDirectory() as name:
+            root = Path(name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = _operator_app(root, store)
+            calls: list[tuple[str, str]] = []
+
+            def provider(*, path: str, token: str, method: str = "GET") -> object:
+                calls.append((method, path))
+                if path == "/user":
+                    raise click.ClickException(
+                        "GitHub API request failed for /user: HTTP Error 403: Forbidden"
+                    )
+                if unquote(path) == "/users/example-delivery[bot]":
+                    return {"id": 101, "login": "example-delivery[bot]", "type": "Bot"}
+                if urlsplit(path).path.endswith("/issues/311/comments"):
+                    return []
+                if path == "/installation/token" and method == "DELETE":
+                    return None
+                raise AssertionError((method, path))
+
+            payload = _payload(mode="dry-run")
+            payload["terminal_status"] = "destroyed"
+            with (
+                patch(
+                    "control_plane.preview_pr_feedback_remediation.resolve_delivery_github_installation_token",
+                    return_value=_installation_token(),
+                ),
+                patch(
+                    "control_plane.preview_pr_feedback_remediation.github_api_request",
+                    side_effect=provider,
+                ),
+                patch(
+                    "control_plane.http_app.observe_managed_preview_pr_feedback",
+                    side_effect=lambda **kwargs: observe_managed_preview_pr_feedback(
+                        api_request=provider, **kwargs
+                    ),
+                ),
+                patch(
+                    "control_plane.preview_pr_feedback_remediation.delete_github_issue_comment"
+                ) as delete,
+                patch(
+                    "control_plane.preview_pr_feedback_remediation.update_github_issue_comment"
+                ) as update,
+            ):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/remediation",
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "destroyed-preview-observation",
+                    },
+                    payload=payload,
+                )
+            self.assertEqual(response.status_code, 202, response.text)
+            result = response.json()["result"]
+            self.assertEqual(result["observation"]["state"], "absent")
+            self.assertEqual(result["observation"]["token_actor_id"], 101)
+            self.assertEqual(result["planned_action"], "none")
+            self.assertFalse(result["mutation_evidence"]["attempted"])
+            self.assertEqual(len(store.list_preview_pr_feedback_remediation_records()), 1)
+            self.assertNotIn(("GET", "/user"), calls)
+            self.assertIn(("DELETE", "/installation/token"), calls)
+            delete.assert_not_called()
+            update.assert_not_called()
+
+    async def test_bot_user_id_controls_managed_marker_ownership(self) -> None:
+        bot = {"id": 101, "login": "example-delivery[bot]", "type": "Bot"}
+        issued = _installation_token()
+        for author_id in (bot["id"], issued.app_id, issued.installation_id):
+            with self.subTest(author_id=author_id), TemporaryDirectory() as name:
+                root = Path(name)
+                store = FilesystemRecordStore(state_dir=root / "state")
+                app = _operator_app(root, store)
+                calls: list[tuple[str, str]] = []
+
+                def provider(*, path: str, token: str, method: str = "GET") -> object:
+                    calls.append((method, path))
+                    if unquote(path) == f"/users/{bot['login']}":
+                        return bot
+                    if urlsplit(path).path.endswith("/issues/311/comments"):
+                        return [
+                            {
+                                "id": 55,
+                                "body": DEFAULT_PREVIEW_FEEDBACK_MARKER,
+                                "user": {"id": author_id, "login": bot["login"]},
+                            }
+                        ]
+                    if path == "/installation/token" and method == "DELETE":
+                        return None
+                    raise AssertionError((method, path))
+
+                payload = _payload(mode="dry-run")
+                payload["terminal_status"] = "destroyed"
+                with (
+                    patch(
+                        "control_plane.preview_pr_feedback_remediation.resolve_delivery_github_installation_token",
+                        return_value=issued,
+                    ),
+                    patch(
+                        "control_plane.preview_pr_feedback_remediation.github_api_request",
+                        side_effect=provider,
+                    ),
+                    patch(
+                        "control_plane.http_app.observe_managed_preview_pr_feedback",
+                        side_effect=lambda **kwargs: observe_managed_preview_pr_feedback(
+                            api_request=provider, **kwargs
+                        ),
+                    ),
+                    patch(
+                        "control_plane.preview_pr_feedback_remediation.update_github_issue_comment"
+                    ) as update,
+                    patch(
+                        "control_plane.preview_pr_feedback_remediation.delete_github_issue_comment"
+                    ) as delete,
+                ):
+                    response = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/previews/pr-feedback/remediation",
+                        headers={
+                            "Authorization": "Bearer local-operator-token",
+                            "Idempotency-Key": "marker-owner",
+                        },
+                        payload=payload,
+                    )
+                if author_id == bot["id"]:
+                    self.assertEqual(response.status_code, 202, response.text)
+                    result = response.json()["result"]
+                    self.assertEqual(result["planned_action"], "replace_comment")
+                    self.assertEqual(result["observation"]["comment_author_id"], bot["id"])
+                    self.assertFalse(result["mutation_evidence"]["attempted"])
+                else:
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertEqual(store.list_preview_pr_feedback_remediation_records(), ())
+                self.assertIn(("DELETE", "/installation/token"), calls)
+                update.assert_not_called()
+                delete.assert_not_called()
+
     async def test_operator_dry_run_and_apply_record_already_absent(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -84,6 +242,8 @@ class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
             revoked: list[str] = []
 
             def revoke(**kwargs: object) -> object:
+                if str(kwargs["path"]).startswith("/users/"):
+                    return {"id": 101, "login": "example-delivery[bot]", "type": "Bot"}
                 self.assertEqual(kwargs["path"], "/installation/token")
                 self.assertEqual(kwargs["method"], "DELETE")
                 token = kwargs["token"]
@@ -93,8 +253,8 @@ class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch(
-                    "control_plane.preview_pr_feedback_remediation.resolve_launchplane_github_token",
-                    return_value="token",
+                    "control_plane.preview_pr_feedback_remediation.resolve_delivery_github_installation_token",
+                    return_value=_installation_token(),
                 ),
                 patch(
                     "control_plane.preview_pr_feedback_remediation.github_api_request",
@@ -172,6 +332,8 @@ class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
             )
 
         def revoke(**kwargs: object) -> object:
+            if str(kwargs["path"]).startswith("/users/"):
+                return {"id": 101, "login": "example-delivery[bot]", "type": "Bot"}
             revocations.append((str(kwargs["token"]), threading.get_ident()))
             revoked.set()
             return None
@@ -181,8 +343,8 @@ class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
             app = _operator_app(root, FilesystemRecordStore(state_dir=root / "state"))
             with (
                 patch(
-                    "control_plane.preview_pr_feedback_remediation.resolve_launchplane_github_token",
-                    return_value="token",
+                    "control_plane.preview_pr_feedback_remediation.resolve_delivery_github_installation_token",
+                    return_value=_installation_token(),
                 ),
                 patch(
                     "control_plane.preview_pr_feedback_remediation.github_api_request",
@@ -258,12 +420,16 @@ class PreviewPrFeedbackRemediationHttpTests(unittest.IsolatedAsyncioTestCase):
 
             with (
                 patch(
-                    "control_plane.preview_pr_feedback_remediation.resolve_launchplane_github_token",
-                    return_value="token",
+                    "control_plane.preview_pr_feedback_remediation.resolve_delivery_github_installation_token",
+                    return_value=_installation_token(),
                 ),
                 patch(
                     "control_plane.preview_pr_feedback_remediation.github_api_request",
-                    return_value=None,
+                    side_effect=lambda **kwargs: (
+                        {"id": 101, "login": "example-delivery[bot]", "type": "Bot"}
+                        if str(kwargs["path"]).startswith("/users/")
+                        else None
+                    ),
                 ),
                 patch(
                     "control_plane.http_app.observe_managed_preview_pr_feedback",

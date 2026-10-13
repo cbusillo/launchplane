@@ -11,7 +11,11 @@ import click
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane import runtime_environments, secrets
-from control_plane.github_app_identity import GitHubAppIdentity, mint_delivery_installation_token
+from control_plane.github_app_identity import (
+    GitHubAppIdentity,
+    GitHubAppInstallationToken,
+    mint_delivery_installation_token,
+)
 from control_plane.github_app_configuration import service_github_app_values
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.product_repository_identity import current_tracked_inventory_record
@@ -151,7 +155,7 @@ def delivery_github_credentials_ready(*, control_plane_root: Path, repository: s
         return False
 
 
-def resolve_delivery_github_token(
+def resolve_delivery_github_installation_token(
     *,
     control_plane_root: Path,
     context_name: str,
@@ -159,11 +163,11 @@ def resolve_delivery_github_token(
     purpose: str,
     retry_provider_errors: bool = False,
     report_failure: bool = False,
-) -> str:
+) -> GitHubAppInstallationToken | None:
     if not repository.strip():
         if report_failure:
             raise DeliveryGitHubCredentialsUnavailable("request")
-        return ""
+        return None
     stage: DeliveryCredentialStage = "request"
     try:
         permissions = _PERMISSIONS[purpose]
@@ -178,7 +182,7 @@ def resolve_delivery_github_token(
             repository=repository,
             repository_id=inventory.repository_id,
             permissions=permissions,
-        ).token
+        )
     except (
         click.ClickException,
         SQLAlchemyError,
@@ -197,4 +201,24 @@ def resolve_delivery_github_token(
         )
         if report_failure:
             raise DeliveryGitHubCredentialsUnavailable(stage) from error
-        return ""
+        return None
+
+
+def resolve_delivery_github_token(
+    *,
+    control_plane_root: Path,
+    context_name: str,
+    repository: str,
+    purpose: str,
+    retry_provider_errors: bool = False,
+    report_failure: bool = False,
+) -> str:
+    installation_token = resolve_delivery_github_installation_token(
+        control_plane_root=control_plane_root,
+        context_name=context_name,
+        repository=repository,
+        purpose=purpose,
+        retry_provider_errors=retry_provider_errors,
+        report_failure=report_failure,
+    )
+    return installation_token.token if installation_token is not None else ""
