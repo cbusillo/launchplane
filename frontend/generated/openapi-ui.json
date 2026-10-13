@@ -34868,6 +34868,12 @@
             "title": "Checklist Digest",
             "type": "string"
           },
+          "invitation_notes_error": {
+            "default": "",
+            "title": "Invitation Notes Error",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "latest_decision": {
             "anyOf": [
               {

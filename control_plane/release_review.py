@@ -385,6 +385,26 @@ def build_release_review(
         blockers = (
             "The Client requested changes." if latest_decision else CLIENT_APPROVAL_REQUIRED,
         )
+    # Read the same durable train/preview evidence used by publication. Keeping
+    # this derived avoids a stale failure record after an agent fixes the notes.
+    # Import locally: the invitation evidence protocol extends ReleaseReviewStore.
+    from control_plane.release_invitation_changes import (
+        ReleaseInvitationNotesUnavailable,
+        client_invitation_changes,
+    )
+
+    invitation_notes_error = ""
+    if (
+        profile.is_active
+        and profile.production_use != "prelaunch"
+        and profile.release_on_acceptance != "director_standing"
+        and profile.owner.is_set
+        and production != candidate
+    ):
+        try:
+            client_invitation_changes(store, profile, checklist)
+        except ReleaseInvitationNotesUnavailable as error:
+            invitation_notes_error = str(error)
     return ReleaseReviewStatus(
         required=profile.production_use != "prelaunch",
         approved=approved,
@@ -393,6 +413,7 @@ def build_release_review(
         checklist_digest=digest,
         blockers=() if approved else blockers,
         latest_decision=latest_decision,
+        invitation_notes_error=invitation_notes_error,
     )
 
 
