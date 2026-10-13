@@ -88,6 +88,15 @@ MutateDokployPayload = Callable[[str, str, str, JsonObject], JsonObject]
 _DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
+class DokployTargetComparisonEvidenceUnavailableError(ValueError):
+    def __init__(self) -> None:
+        super().__init__(
+            "Complete expected-current provider evidence is unavailable from supported "
+            "inspection. Planning requires an inspection-safe comparison capability for "
+            "this stored evidence shape; no record repair or grant is implied."
+        )
+
+
 def normalize_dokploy_domain_host(raw_host: str) -> str:
     host = raw_host.strip().lower()
     if not host or any(character.isspace() for character in host):
@@ -172,7 +181,20 @@ def repair_dokploy_target_domain_authority(
         raise ValueError(
             "Dokploy domain authority repair target id does not match the tracked target."
         )
-    if provider_target_record.to_deployed_target_reference() != expected_current_provider_target:
+    current_reference = provider_target_record.to_deployed_target_reference()
+    if current_reference != expected_current_provider_target:
+        canonical_evidence = ProviderTargetRecord.from_dokploy_records(
+            target_record=target_record, target_id_record=target_id_record
+        ).provider_evidence
+        if (
+            not expected_current_provider_target.provider_evidence
+            and provider_target_record.provider_evidence != canonical_evidence
+            and expected_current_provider_target.model_copy(
+                update={"provider_evidence": current_reference.provider_evidence}
+            )
+            == current_reference
+        ):
+            raise DokployTargetComparisonEvidenceUnavailableError()
         raise ValueError(
             "Dokploy domain authority repair provider-target expectation did not match current authority."
         )
