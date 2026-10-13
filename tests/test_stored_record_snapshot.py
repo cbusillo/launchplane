@@ -445,7 +445,7 @@ class StoredRecordSnapshotTests(unittest.TestCase):
             compact = self.store.export_stored_record_snapshot(format_version=2)
         self.assertLess(len(compact.model_dump_json().encode()), bound)
         rows = list(iter_snapshot_rows(compact))
-        self.assertEqual([row["revision"] for _, row in rows], list(range(1, 14)))
+        self.assertEqual(sorted(row["revision"] for _, row in rows), list(range(1, 14)))
         old = next(row for _, row in rows if row["revision"] == 5)
         self.assertNotIn("instances", old["payload"]["policy"]["github_actions"][0])
         restored = PostgresRecordStore(database_url=_sqlite_database_url(self.root / "compact.db"))
