@@ -22638,6 +22638,16 @@
             "title": "Sequence",
             "type": "integer"
           },
+          "source_build": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArtifactSourceBuild"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "source_map": {
             "default": [],
             "items": {
@@ -22702,6 +22712,7 @@
           "runtime_identity",
           "schema_version",
           "sequence",
+          "source_build",
           "source_map",
           "started_at",
           "state",

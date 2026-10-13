@@ -2376,6 +2376,7 @@ export type PreviewGenerationRecord = {
     runtime_identity: RuntimeIdentity | null;
     schema_version: number;
     sequence: number;
+    source_build: ArtifactSourceBuild | null;
     source_map: Array<PreviewSourceRecord>;
     started_at: string;
     state: 'resolving' | 'building' | 'deploying' | 'verifying' | 'ready' | 'failed' | 'superseded';

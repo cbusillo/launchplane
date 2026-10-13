@@ -187,8 +187,12 @@ reservation. The webhook request never waits on a deploy.
     the desired state is a preview running that build. A closed or merged PR
     has no preview. Labels and draft state play no part (#2735).
   - Compare the desired state with the preview record's verified build (run
-    id and attempt), not just whether a preview exists, then apply or
-    destroy.
+    id and attempt), source head, and immutable image digest, then apply or
+    destroy. A new head, run, or attempt refreshes the preview even if the digest
+    is unchanged. An unchanged exact build requires no provider work. Generic-web
+    generations retain the verified `source_build`; legacy generations without
+    that proof receive a normal verified refresh rather than claiming an exact
+    build match. Forward-only build checks still refuse older runs and ancestors.
   - The manifest is not recorded in the artifact store. The preview's slug
     and URL come from the product profile as today. The result is posted on
     the PR; see [Pull request feedback](#pull-request-feedback).
