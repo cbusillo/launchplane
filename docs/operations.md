@@ -3057,7 +3057,7 @@ context only, and `context_instance` has both context and instance.
   reviewed acknowledgement and idempotency key. Use the same exact
   `--product`, `--context`, `--instance testing` for review and apply. A lift
   requests testing reconciliation and can deploy: the Director's agent may
-  plan it, but existing write authority still governs apply (local-operator
+  plan it, but existing write authority still governs apply (`local_operator`
   lift applies remain refused). See the hold's
   [dispatch limits](event-driven-deploys.md#staff-testing-hold) before isolation
   staging; a hold is not proof of executor/provider quiescence.
