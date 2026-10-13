@@ -153,7 +153,9 @@ def apply_verireel_preview_refresh_result(
         anchor_repo=request.refresh.anchor_repo,
         anchor_pr_number=request.refresh.anchor_pr_number,
     )
-    with _preview_refresh_serialization(record_store=record_store, preview_id=preview_id):
+    with _preview_refresh_serialization(
+        record_store=record_store, preview_id=preview_id, dedicated=True
+    ):
         existing = find_preview_record(
             record_store=cast(PreviewMutationRecordStore, record_store),
             context_name=request.refresh.context,
