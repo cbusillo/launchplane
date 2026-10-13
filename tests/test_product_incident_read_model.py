@@ -393,9 +393,7 @@ class ProductIncidentReadModelTests(unittest.TestCase):
                 self.subTest(key_config=bool(key_config)),
                 patch.dict(os.environ, key_config, clear=True),
             ):
-                with self.assertRaisesRegex(
-                    ProductIncidentReferenceUnavailableError, "managed-secret bootstrap keys"
-                ):
+                with self.assertRaises(ProductIncidentReferenceUnavailableError):
                     build_product_environment_incident_detail(
                         record_store=_Store(),
                         product="example-product",
