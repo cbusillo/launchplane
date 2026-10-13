@@ -4,6 +4,14 @@ title: Client Review and Retired Acceptance History
 
 ## Current Client review
 
+Setting a product's Client resolves the login through the repository-scoped
+Delivery App credential. A `github_credentials_unavailable` response identifies
+the failed stage: `request`, `identity`, `repository_inventory`, or `token_mint`.
+The mint stage includes installation lookup, permission checks and validation of
+the returned token's scope and expiry. Provider messages and credential values
+are never included. A failed lookup leaves the profile unchanged; it does not
+fall back to another credential. Service logs include the same failure stage.
+
 Products recorded with `release_on_acceptance: director_standing` do not wait
 for a Client-preview check at merge admission or receive preview-review invitations,
 even when the PR has test notes or an old review label. The Director's standing

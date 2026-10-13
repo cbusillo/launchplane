@@ -239,6 +239,25 @@ def build_release_review(
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+    if production == candidate:
+        # The complete recorded identity already runs in production. There is
+        # nothing to compare or accept; prior decisions/runs remain unchanged.
+        checklist = ReleaseChecklist(
+            product=profile.product,
+            repository=profile.repository,
+            owner_github_id=profile.owner.github_id,
+            testing_url=lane.base_url,
+            production=production,
+            candidate=candidate,
+            items=(),
+        )
+        return ReleaseReviewStatus(
+            required=False,
+            no_new_release=True,
+            checklist_complete=True,
+            checklist=checklist,
+            checklist_digest=checklist_digest(checklist),
+        )
     shared_sources: tuple[SharedSourceReview, ...] = ()
     additional_changes: tuple[str, ...] = ()
     try:
@@ -523,6 +542,10 @@ def require_release_approval(
     review = current_release_review(
         control_plane_root=control_plane_root, record_store=record_store, profile=profile
     )
+    if review.no_new_release:
+        raise click.ClickException(
+            "Production already runs the testing version; no new release to promote."
+        )
     if not review.required:
         return
     if not review.approved or review.checklist is None:

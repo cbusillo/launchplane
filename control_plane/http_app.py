@@ -476,7 +476,10 @@ from control_plane.service_github_delivery_controls import (
     apply_service_token_retirement,
     read_service_github_delivery,
 )
-from control_plane.launchplane_github_delivery import delivery_github_credentials_ready
+from control_plane.launchplane_github_delivery import (
+    DeliveryGitHubCredentialsUnavailable,
+    delivery_github_credentials_ready,
+)
 from control_plane.client_test_notes import ClientTestNotesRequired
 from control_plane.product_review_status import (
     OwnerReviewStatusPublisher,
@@ -13666,6 +13669,7 @@ def create_launchplane_fastapi_app(
                     control_plane_root=resolved_control_plane_root,
                     context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
                     repository=profile.repository,
+                    report_failure=True,
                 ) as github_token:
                     if not github_token:
                         raise _launchplane_http_error(
@@ -13682,6 +13686,16 @@ def create_launchplane_fastapi_app(
 
             try:
                 resolved_owner = await run_in_threadpool(lookup_owner)
+            except DeliveryGitHubCredentialsUnavailable as error:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="github_credentials_unavailable",
+                    message=(
+                        f"Launchplane could not resolve the GitHub read credential at "
+                        f"{error.stage} to look up the Client login."
+                    ),
+                ) from error
             except control_plane_product_owner_setting.ProductOwnerLoginNotFoundError as error:
                 raise _launchplane_http_error(
                     status_code=400,
@@ -16585,6 +16599,8 @@ def create_launchplane_fastapi_app(
                         expected_target_id=public_hosts_plan.target_id,
                         expected_provider_target=public_hosts_plan.provider_target,
                         apply_provider=public_hosts_plan.apply_provider,
+                        pending_effects=public_hosts_plan.effects,
+                        verify_provider=public_hosts_plan.verify_provider,
                     )
             except product_public_hosts.PublicHostsProviderError as error:
                 raise _launchplane_http_error(
