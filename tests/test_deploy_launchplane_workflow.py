@@ -260,8 +260,6 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
                 "Render Launchplane rollback request",
                 {
                     "BOOTSTRAP_SECRET_OPERATION": "preserve",
-                    "ORDINARY_AGENT_WORKERS": "preserve",
-                    "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "absent",
                     "DEPLOYED_IMAGE_REFERENCE": "registry.example/service@sha256:" + "b" * 64,
                     "PREVIOUS_IMAGE_REFERENCE": previous_image,
                     "FORWARD_DEPLOYMENT_MARKER": "forward",
@@ -297,7 +295,7 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
                 if marker_outcome != "success":
                     self.assertNotIn("Rolled Launchplane back", result.stdout)
 
-    def test_rendered_worker_changes_and_same_image_rollback_are_exact(self) -> None:
+    def test_rendered_replacement_and_same_image_rollback_are_exact(self) -> None:
         base = {
             "BOOTSTRAP_SECRET_OPERATION": "preserve",
             "DEPLOYMENT_MARKER": "deploy-marker",
@@ -305,37 +303,19 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
             "IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
             "SUPERSEDES_DEPLOYMENT_MARKER": "stuck-deploy-marker",
         }
-        cases = (
-            ("preserve", "absent", None),
-            ("enable", "absent", {"expected": "absent", "desired": "1"}),
-            ("enable", "0", {"expected": "0", "desired": "1"}),
-            ("disable", "1", {"expected": "1", "desired": "0"}),
+        payload = self._render("Render Launchplane self deploy request", base)
+        deploy = cast(dict[str, object], payload["deploy"])
+        self.assertEqual(
+            deploy["supersedes_deployment_marker"], base["SUPERSEDES_DEPLOYMENT_MARKER"]
         )
-        for operation, expected, wanted in cases:
-            with self.subTest(operation=operation, expected=expected):
-                payload = self._render(
-                    "Render Launchplane self deploy request",
-                    {
-                        **base,
-                        "ORDINARY_AGENT_WORKERS": operation,
-                        "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": expected,
-                    },
-                )
-                deploy = cast(dict[str, object], payload["deploy"])
-                self.assertEqual(deploy.get("ordinary_agent_worker_replicas"), wanted)
-                self.assertEqual(
-                    deploy["supersedes_deployment_marker"], base["SUPERSEDES_DEPLOYMENT_MARKER"]
-                )
-                self.assertEqual(
-                    cast(dict[str, str], deploy["oauth_env"])["LAUNCHPLANE_DEPLOYMENT_MARKER"],
-                    base["DEPLOYMENT_MARKER"],
-                )
+        self.assertEqual(
+            cast(dict[str, str], deploy["oauth_env"])["LAUNCHPLANE_DEPLOYMENT_MARKER"],
+            base["DEPLOYMENT_MARKER"],
+        )
         rollback = self._render(
             "Render Launchplane rollback request",
             {
                 "BOOTSTRAP_SECRET_OPERATION": "preserve",
-                "ORDINARY_AGENT_WORKERS": "enable",
-                "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "absent",
                 "DEPLOYED_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:same",
                 "PREVIOUS_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:same",
                 "FORWARD_DEPLOYMENT_MARKER": "forward",
@@ -347,10 +327,6 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
         self.assertEqual(deploy["supersedes_deployment_marker"], "forward")
         self.assertEqual(
             cast(dict[str, str], deploy["oauth_env"])["LAUNCHPLANE_DEPLOYMENT_MARKER"], "rollback"
-        )
-        self.assertEqual(
-            deploy["ordinary_agent_worker_replicas"],
-            {"expected": "1", "desired": "absent"},
         )
 
     def test_self_deploy_ignores_retired_every_code_credentials(self) -> None:
@@ -364,8 +340,6 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
             "Render Launchplane self deploy request",
             {
                 "BOOTSTRAP_SECRET_OPERATION": "preserve",
-                "ORDINARY_AGENT_WORKERS": "preserve",
-                "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "absent",
                 "DEPLOYMENT_MARKER": "deploy-marker",
                 "DEPLOY_IMAGE_REFERENCE": "ghcr.io/example/service@sha256:" + ("b" * 64),
                 "IMAGE_REPOSITORY": "ghcr.io/example/service",
@@ -386,8 +360,6 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
     ) -> None:
         base = {
             "BOOTSTRAP_SECRET_OPERATION": "preserve",
-            "ORDINARY_AGENT_WORKERS": "preserve",
-            "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "absent",
             "DEPLOYMENT_MARKER": "deploy-marker",
             "DEPLOY_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:" + ("b" * 64),
             "IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
@@ -441,8 +413,6 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
                 "Render Launchplane self deploy request",
                 {
                     "BOOTSTRAP_SECRET_OPERATION": "preserve",
-                    "ORDINARY_AGENT_WORKERS": "preserve",
-                    "ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "absent",
                     "DEPLOYMENT_MARKER": "deploy-marker",
                     "DEPLOY_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:" + ("b" * 64),
                     "IMAGE_REPOSITORY": "ghcr.io/cbusillo/launchplane",
@@ -476,7 +446,7 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(command_marker.exists())
 
-    def test_automatic_input_resolution_preserves_worker_replicas(self) -> None:
+    def test_automatic_input_resolution_preserves_repair_boundary(self) -> None:
         step = self.workflow.step_named("deploy", "Resolve deploy inputs")
         assert step is not None
         for event, repair, accepted in (
@@ -501,8 +471,6 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
                         "GITHUB_RUN_ID": "123",
                         "GITHUB_RUN_ATTEMPT": "1",
                         "DISPATCH_BOOTSTRAP_SECRET_OPERATION": "",
-                        "DISPATCH_ORDINARY_AGENT_WORKERS": "",
-                        "DISPATCH_ORDINARY_AGENT_WORKERS_EXPECTED_STATE": "",
                         "DISPATCH_IMAGE_REFERENCE": "",
                         "DISPATCH_SELF_DEPLOY_IDEMPOTENCY_KEY": "",
                         "DISPATCH_SUPERSEDES_DEPLOYMENT_MARKER": repair,
@@ -517,7 +485,6 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
                 if accepted:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-                    self.assertEqual(values["ordinary_agent_workers"], "preserve")
                     self.assertEqual(values["supersedes_deployment_marker"], repair)
                 else:
                     self.assertNotEqual(result.returncode, 0)

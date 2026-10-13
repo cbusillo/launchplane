@@ -607,12 +607,9 @@ The ordinary-agent delegated-delivery design is retired (see
 The ordinary-agent activation text below describes that code until then; do not
 activate or extend it.
 
-Ordinary-agent activation additionally requires the delivery migration before
-the worker image and a separate successful
-`ordinary_agent_delivery_cleanup_succeeded` event from that image. Deploying the
-image starts this empty-table maintenance scan automatically, but does not by
-itself enroll an agent or add an authorization rule, route, or grant. The
-privileged-operation heartbeat is not cleanup evidence.
+The retired activation executor and enrollment/expiry maintenance have been
+removed. Historical activation contracts and schema-3 parsing remain until
+the domain/storage layers are deleted under #2437.
 
 The source-owned activation administration descriptor is
 `ordinary-agent-delivery-activation`. Its human lifecycle uses the distinct

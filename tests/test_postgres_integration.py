@@ -200,9 +200,7 @@ from control_plane.provider_operations import (
     run_durable_provider_operation,
 )
 from control_plane.privileged_operation_worker import (
-    OrdinaryAgentDeliveryCleanupState,
     execute_approved_privileged_operations_once,
-    run_ordinary_agent_delivery_cleanup_once,
 )
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
@@ -237,7 +235,6 @@ from tests.test_ordinary_agent_activation_storage import (
 )
 from tests.test_privileged_operation import _record as _privileged_operation_record
 from control_plane.storage.factory import (
-    PrivilegedOperationWorkerSchemaError,
     build_privileged_operation_worker_store,
 )
 from tests.support.durable_operations import durable_operation_cancellation_payload
@@ -1946,29 +1943,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 ),
                 (),
             )
-
-    def test_privileged_worker_requires_delivery_cleanup_index(self) -> None:
-        with _head_postgres_database() as database_url:
-            store = build_privileged_operation_worker_store(database_url=database_url)
-            cleanup = run_ordinary_agent_delivery_cleanup_once(
-                record_store=store,
-                limit=5,
-                state=OrdinaryAgentDeliveryCleanupState(),
-                now_monotonic=10.0,
-                error_backoff_seconds=3,
-            )
-            store.close()
-            self.assertEqual(cleanup.status, "succeeded")
-
-            engine = create_engine(database_url)
-            with engine.begin() as connection:
-                connection.execute(text("DROP INDEX ordinary_agent_delivery_expiry_idx"))
-            engine.dispose()
-
-            with self.assertRaisesRegex(
-                PrivilegedOperationWorkerSchemaError, "not runtime-compatible"
-            ):
-                build_privileged_operation_worker_store(database_url=database_url)
 
     def test_production_backup_authority_schema_and_revision_fences(self) -> None:
         with _store_for_fresh_head_database() as store:

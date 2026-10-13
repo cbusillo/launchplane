@@ -26,24 +26,6 @@ on:
           - preserve
           - install
           - remove
-      ordinary_agent_workers:
-        description: Preserve, enable, or disable the ordinary-agent worker replica count.
-        required: false
-        default: preserve
-        type: choice
-        options:
-          - preserve
-          - enable
-          - disable
-      ordinary_agent_workers_expected_state:
-        description: Exact current ordinary-agent worker replica state for a manual enable or disable.
-        required: false
-        default: absent
-        type: choice
-        options:
-          - absent
-          - "0"
-          - "1"
       self_deploy_idempotency_key:
         description: Exact bounded idempotency key for a reviewed manual self-deploy.
         required: false
@@ -151,8 +133,6 @@ jobs:
         shell: bash
         env:
           DISPATCH_BOOTSTRAP_SECRET_OPERATION: ${{ inputs.bootstrap_secret_operation }}
-          DISPATCH_ORDINARY_AGENT_WORKERS: ${{ inputs.ordinary_agent_workers }}
-          DISPATCH_ORDINARY_AGENT_WORKERS_EXPECTED_STATE: ${{ inputs.ordinary_agent_workers_expected_state }}
           DISPATCH_IMAGE_REFERENCE: ${{ inputs.image_reference }}
           DISPATCH_SELF_DEPLOY_IDEMPOTENCY_KEY: ${{ inputs.self_deploy_idempotency_key }}
           DISPATCH_SUPERSEDES_DEPLOYMENT_MARKER: ${{ inputs.supersedes_deployment_marker }}
@@ -210,37 +190,6 @@ jobs:
             exit 1
           fi
 
-          ordinary_agent_workers="${DISPATCH_ORDINARY_AGENT_WORKERS:-preserve}"
-          ordinary_agent_workers_expected_state="${DISPATCH_ORDINARY_AGENT_WORKERS_EXPECTED_STATE:-absent}"
-          case "$ordinary_agent_workers" in
-            preserve | enable | disable) ;;
-            *)
-              echo "ordinary_agent_workers must be preserve, enable, or disable." >&2
-              exit 1
-              ;;
-          esac
-          case "$ordinary_agent_workers_expected_state" in
-            absent | 0 | 1) ;;
-            *)
-              echo "ordinary_agent_workers_expected_state must be absent, 0, or 1." >&2
-              exit 1
-              ;;
-          esac
-          if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$ordinary_agent_workers" != "preserve" ]; then
-            echo "Automatic deploys must preserve ordinary-agent worker replicas." >&2
-            exit 1
-          fi
-          if [ "$ordinary_agent_workers" = "enable" ] \
-            && [ "$ordinary_agent_workers_expected_state" = "1" ]; then
-            echo "ordinary_agent_workers=enable requires expected state absent or 0." >&2
-            exit 1
-          fi
-          if [ "$ordinary_agent_workers" = "disable" ] \
-            && [ "$ordinary_agent_workers_expected_state" = "0" ]; then
-            echo "ordinary_agent_workers=disable requires expected state absent or 1." >&2
-            exit 1
-          fi
-
           self_deploy_idempotency_key="$DISPATCH_SELF_DEPLOY_IDEMPOTENCY_KEY"
           if [ -n "$self_deploy_idempotency_key" ]; then
             if [[ ! "$self_deploy_idempotency_key" =~ ^[A-Za-z0-9._:/-]{8,200}$ ]]; then
@@ -281,8 +230,6 @@ jobs:
             printf 'should_build=%s\n' "$should_build"
             printf 'deploy_image_reference=%s\n' "$deploy_image_reference"
             printf 'bootstrap_secret_operation=%s\n' "$bootstrap_secret_operation"
-            printf 'ordinary_agent_workers=%s\n' "$ordinary_agent_workers"
-            printf 'ordinary_agent_workers_expected_state=%s\n' "$ordinary_agent_workers_expected_state"
             printf 'self_deploy_idempotency_key=%s\n' "$self_deploy_idempotency_key"
             printf 'supersedes_deployment_marker=%s\n' "$supersedes_deployment_marker"
             printf 'forward_deployment_marker=%s\n' "$forward_deployment_marker"
@@ -427,8 +374,6 @@ jobs:
         shell: bash
         env:
           BOOTSTRAP_SECRET_OPERATION: ${{ steps.prep.outputs.bootstrap_secret_operation }}
-          ORDINARY_AGENT_WORKERS: ${{ steps.prep.outputs.ordinary_agent_workers }}
-          ORDINARY_AGENT_WORKERS_EXPECTED_STATE: ${{ steps.prep.outputs.ordinary_agent_workers_expected_state }}
           DEPLOYMENT_MARKER: ${{ steps.prep.outputs.forward_deployment_marker }}
           SUPERSEDES_DEPLOYMENT_MARKER: ${{ steps.prep.outputs.supersedes_deployment_marker }}
           DEPLOY_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
@@ -668,18 +613,6 @@ jobs:
                 end
               )'
           })"
-          ordinary_agent_worker_replicas_json="$({
-            jq -n \
-              --arg operation "$ORDINARY_AGENT_WORKERS" \
-              --arg expected "$ORDINARY_AGENT_WORKERS_EXPECTED_STATE" \
-              'if $operation == "preserve" then
-                {}
-              elif $operation == "enable" then
-                {ordinary_agent_worker_replicas: {expected: $expected, desired: "1"}}
-              else
-                {ordinary_agent_worker_replicas: {expected: $expected, desired: "0"}}
-              end'
-          })"
           request_payload="$({
             jq -n \
               --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
@@ -690,7 +623,6 @@ jobs:
               --argjson service_env_expected_absent "$service_env_expected_absent_json" \
               --argjson service_env_expected_values "$service_env_expected_values_json" \
               --argjson service_env_removals "$service_env_removals_json" \
-              --argjson ordinary_agent_worker_replicas "$ordinary_agent_worker_replicas_json" \
               '{schema_version: 1, product: "launchplane", deploy: (
                 {target_type: $target_type, target_id: $target_id, image_reference: $image_reference}
                 + (if $supersedes_deployment_marker != "" then {supersedes_deployment_marker: $supersedes_deployment_marker} else {} end)
@@ -698,7 +630,6 @@ jobs:
                 + (if ($service_env_removals | length) > 0 then {oauth_env_removals: $service_env_removals} else {} end)
                 + (if ($service_env_expected_absent | length) > 0 then {oauth_env_expected_absent: $service_env_expected_absent} else {} end)
                 + (if ($service_env_expected_values | length) > 0 then {oauth_env_expected_values: $service_env_expected_values} else {} end)
-                + $ordinary_agent_worker_replicas
               )}'
           })"
 
@@ -996,8 +927,6 @@ jobs:
         shell: bash
         env:
           BOOTSTRAP_SECRET_OPERATION: ${{ steps.prep.outputs.bootstrap_secret_operation }}
-          ORDINARY_AGENT_WORKERS: ${{ steps.prep.outputs.ordinary_agent_workers }}
-          ORDINARY_AGENT_WORKERS_EXPECTED_STATE: ${{ steps.prep.outputs.ordinary_agent_workers_expected_state }}
           DEPLOYED_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
           FORWARD_DEPLOYMENT_MARKER: ${{ steps.prep.outputs.forward_deployment_marker }}
           LAUNCHPLANE_SECRET_KEYS_JSON: ${{ secrets.LAUNCHPLANE_SECRET_KEYS_JSON }}
@@ -1080,18 +1009,6 @@ jobs:
                 {}
               end'
           })"
-          rollback_ordinary_agent_worker_replicas_json="$({
-            jq -n \
-              --arg operation "$ORDINARY_AGENT_WORKERS" \
-              --arg previous "$ORDINARY_AGENT_WORKERS_EXPECTED_STATE" \
-              'if $operation == "preserve" then
-                {}
-              elif $operation == "enable" then
-                {ordinary_agent_worker_replicas: {expected: "1", desired: $previous}}
-              else
-                {ordinary_agent_worker_replicas: {expected: "0", desired: $previous}}
-              end'
-          })"
           rollback_payload="$({
             jq -n \
               --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
@@ -1102,7 +1019,6 @@ jobs:
               --argjson service_env_expected_absent "$rollback_service_env_expected_absent_json" \
               --argjson service_env_expected_values "$rollback_service_env_expected_values_json" \
               --argjson service_env_removals "$rollback_service_env_removals_json" \
-              --argjson ordinary_agent_worker_replicas "$rollback_ordinary_agent_worker_replicas_json" \
               '{schema_version: 1, product: "launchplane", deploy: (
                 {target_type: $target_type, target_id: $target_id, image_reference: $image_reference, no_cache: true,
                  supersedes_deployment_marker: $supersedes_deployment_marker}
@@ -1110,7 +1026,6 @@ jobs:
                 + (if ($service_env_removals | length) > 0 then {oauth_env_removals: $service_env_removals} else {} end)
                 + (if ($service_env_expected_absent | length) > 0 then {oauth_env_expected_absent: $service_env_expected_absent} else {} end)
                 + (if ($service_env_expected_values | length) > 0 then {oauth_env_expected_values: $service_env_expected_values} else {} end)
-                + $ordinary_agent_worker_replicas
               )}'
           })"
 

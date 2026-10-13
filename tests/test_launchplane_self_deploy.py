@@ -19,7 +19,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
         "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
         "LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET=old-manager-secret\n"
     )
-    _ORDINARY_WORKER_COMPOSE_TARGET = {
+    _COMPOSE_TARGET = {
         "sourceType": "git",
         "composeType": "docker-compose",
         "composePath": "./docker-compose.yml",
@@ -28,7 +28,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
 
     @classmethod
     def _compose_target(cls, env: str) -> dict[str, str]:
-        return {**cls._ORDINARY_WORKER_COMPOSE_TARGET, "env": env}
+        return {**cls._COMPOSE_TARGET, "env": env}
 
     @staticmethod
     def _canonical_key_ring() -> str:
@@ -40,159 +40,18 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
             separators=(",", ":"),
         )
 
-    def test_replicas_change_requires_a_compose_target_and_real_transition(self) -> None:
-        base = {
-            "target_type": "compose",
-            "target_id": "compose-123",
-            "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
-        }
-        with self.assertRaisesRegex(ValueError, "must not be a no-op"):
+    def test_retired_worker_replica_input_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
             LaunchplaneSelfDeployRequest.model_validate(
                 {
-                    **base,
-                    "ordinary_agent_worker_replicas": {"expected": "0", "desired": "0"},
-                }
-            )
-        with self.assertRaisesRegex(ValueError, "only to compose"):
-            LaunchplaneSelfDeployRequest.model_validate(
-                {
-                    **base,
-                    "target_type": "application",
-                    "ordinary_agent_worker_replicas": {"expected": "absent", "desired": "1"},
+                    "target_type": "compose",
+                    "target_id": "compose-test",
+                    "image_reference": "registry.invalid/image@sha256:abc",
+                    "ordinary_agent_worker_replicas": {"expected": "0", "desired": "1"},
                 }
             )
 
-    def test_execute_changes_replicas_with_exact_precondition_and_restores_absence(self) -> None:
-        forward = LaunchplaneSelfDeployRequest.model_validate(
-            {
-                "target_type": "compose",
-                "target_id": "compose-123",
-                "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
-                "ordinary_agent_worker_replicas": {"expected": "absent", "desired": "1"},
-            }
-        )
-        rollback = LaunchplaneSelfDeployRequest.model_validate(
-            {
-                "target_type": "compose",
-                "target_id": "compose-123",
-                "image_reference": "ghcr.io/cbusillo/launchplane@sha256:old",
-                "ordinary_agent_worker_replicas": {"expected": "1", "desired": "absent"},
-            }
-        )
-        with (
-            patch(
-                "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
-                return_value=("https://dokploy.example.com", "token-123"),
-            ),
-            patch(
-                "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
-                side_effect=[
-                    {**self._ORDINARY_WORKER_COMPOSE_TARGET, "env": self._BOOTSTRAP_ENV},
-                    {
-                        **self._ORDINARY_WORKER_COMPOSE_TARGET,
-                        "env": self._BOOTSTRAP_ENV
-                        + "LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS=1\n",
-                    },
-                ],
-            ),
-            patch(
-                "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
-            ) as update_env_mock,
-            patch(
-                "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment",
-            ),
-        ):
-            forward_result = execute_launchplane_self_deploy(
-                control_plane_root_path=Path("."), request=forward
-            )
-            rollback_result = execute_launchplane_self_deploy(
-                control_plane_root_path=Path("."), request=rollback
-            )
-
-        self.assertEqual(forward_result.ordinary_agent_worker_replicas_previous, "absent")
-        self.assertEqual(forward_result.ordinary_agent_worker_replicas_desired, "1")
-        self.assertEqual(rollback_result.ordinary_agent_worker_replicas_previous, "1")
-        self.assertEqual(rollback_result.ordinary_agent_worker_replicas_desired, "absent")
-        self.assertIn(
-            "LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS=1",
-            update_env_mock.call_args_list[0].kwargs["env_text"],
-        )
-        self.assertNotIn(
-            "LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS=",
-            update_env_mock.call_args_list[1].kwargs["env_text"],
-        )
-
-    def test_execute_rejects_invalid_or_unexpected_replicas_before_mutation(self) -> None:
-        request = LaunchplaneSelfDeployRequest.model_validate(
-            {
-                "target_type": "compose",
-                "target_id": "compose-123",
-                "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
-                "ordinary_agent_worker_replicas": {"expected": "0", "desired": "1"},
-            }
-        )
-        with (
-            patch(
-                "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
-                return_value=("https://dokploy.example.com", "token-123"),
-            ),
-            patch(
-                "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
-                return_value={
-                    **self._ORDINARY_WORKER_COMPOSE_TARGET,
-                    "env": self._BOOTSTRAP_ENV + "LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS=2\n",
-                },
-            ),
-            patch(
-                "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
-            ) as update_env_mock,
-            patch(
-                "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
-            ) as trigger_mock,
-        ):
-            with self.assertRaisesRegex(ValueError, "unsupported state"):
-                execute_launchplane_self_deploy(control_plane_root_path=Path("."), request=request)
-        update_env_mock.assert_not_called()
-        trigger_mock.assert_not_called()
-
-    def test_execute_disables_worker_from_one_to_zero(self) -> None:
-        request = LaunchplaneSelfDeployRequest.model_validate(
-            {
-                "target_type": "compose",
-                "target_id": "compose-123",
-                "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
-                "ordinary_agent_worker_replicas": {"expected": "1", "desired": "0"},
-            }
-        )
-        with (
-            patch(
-                "control_plane.workflows.launchplane_self_deploy.dokploy_source.read_dokploy_config",
-                return_value=("https://dokploy.example.com", "token-123"),
-            ),
-            patch(
-                "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
-                return_value={
-                    **self._ORDINARY_WORKER_COMPOSE_TARGET,
-                    "env": self._BOOTSTRAP_ENV + "LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS=1\n",
-                },
-            ),
-            patch(
-                "control_plane.workflows.launchplane_self_deploy.dokploy_api.update_dokploy_target_env"
-            ) as update_env_mock,
-            patch("control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"),
-        ):
-            result = execute_launchplane_self_deploy(
-                control_plane_root_path=Path("."), request=request
-            )
-
-        self.assertEqual(result.ordinary_agent_worker_replicas_previous, "1")
-        self.assertEqual(result.ordinary_agent_worker_replicas_desired, "0")
-        self.assertIn(
-            "LAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS=0",
-            update_env_mock.call_args.kwargs["env_text"],
-        )
-
-    def test_execute_preserves_existing_one_replica_without_updating_target_env(self) -> None:
+    def test_execute_preserves_unrelated_env_without_updating_target_env(self) -> None:
         request = LaunchplaneSelfDeployRequest.model_validate(
             {
                 "target_type": "compose",
@@ -202,7 +61,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
         )
         target_env = self._BOOTSTRAP_ENV.replace(
             "DOCKER_IMAGE_REFERENCE=old\n",
-            "DOCKER_IMAGE_REFERENCE=old\nLAUNCHPLANE_ORDINARY_AGENT_WORKER_REPLICAS=1\n",
+            "DOCKER_IMAGE_REFERENCE=old\nUNRELATED_SETTING=1\n",
         )
         with (
             patch(
@@ -220,22 +79,17 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
                 "control_plane.workflows.launchplane_self_deploy.dokploy_api.trigger_deployment"
             ) as trigger_mock,
         ):
-            result = execute_launchplane_self_deploy(
-                control_plane_root_path=Path("."), request=request
-            )
+            execute_launchplane_self_deploy(control_plane_root_path=Path("."), request=request)
 
-        self.assertEqual(result.ordinary_agent_worker_replicas_previous, "1")
-        self.assertEqual(result.ordinary_agent_worker_replicas_desired, "1")
         update_env_mock.assert_not_called()
         trigger_mock.assert_called_once()
 
-    def test_execute_rejects_incompatible_worker_compose_target_before_mutation(self) -> None:
+    def test_execute_rejects_incompatible_compose_target_before_mutation(self) -> None:
         request = LaunchplaneSelfDeployRequest.model_validate(
             {
                 "target_type": "compose",
                 "target_id": "compose-123",
                 "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
-                "ordinary_agent_worker_replicas": {"expected": "absent", "desired": "1"},
             }
         )
         with (
@@ -258,7 +112,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
                 {"composeType": "stack"},
                 {"composeType": ""},
                 {"composePath": "./other-compose.yml"},
-                {"command": "docker compose up --scale launchplane-ordinary-agent-workers=2"},
+                {"command": "docker compose up --scale launchplane=2"},
                 {"env": self._BOOTSTRAP_ENV + "COMPOSE_FILE=other-compose.yml\n"},
             ):
                 with self.subTest(override=override):
@@ -297,7 +151,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
-                    **self._ORDINARY_WORKER_COMPOSE_TARGET,
+                    **self._COMPOSE_TARGET,
                     "env": self._BOOTSTRAP_ENV + "LAUNCHPLANE_NPMPLUS_SECRET=npmplus-secret\n",
                 },
             ),
@@ -447,7 +301,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
-                    **self._ORDINARY_WORKER_COMPOSE_TARGET,
+                    **self._COMPOSE_TARGET,
                     "env": self._BOOTSTRAP_ENV
                     + f"LAUNCHPLANE_SECRET_KEYS_JSON={canonical_key_ring}\n",
                 },
@@ -487,7 +341,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.launchplane_self_deploy.dokploy_api.fetch_dokploy_target_payload",
                 return_value={
-                    **self._ORDINARY_WORKER_COMPOSE_TARGET,
+                    **self._COMPOSE_TARGET,
                     "env": self._BOOTSTRAP_ENV + "LAUNCHPLANE_DEPLOYMENT_MARKER=forward-marker\n",
                 },
             ),

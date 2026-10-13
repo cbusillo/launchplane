@@ -403,7 +403,6 @@ jobs:
 
       - name: Qualify ordinary worker Compose lifecycle
         run: |
-          bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
           bash scripts/qualify-testing-browser.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
 
       - name: Restore Trivy cache
@@ -488,7 +487,6 @@ jobs:
 
       - name: Qualify ordinary worker Compose lifecycle
         run: |
-          bash scripts/qualify-ordinary-agent-compose.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
           bash scripts/qualify-testing-browser.sh "$LAUNCHPLANE_CI_IMAGE_TAG"
 
       - name: Restore Trivy cache
