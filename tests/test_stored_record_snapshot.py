@@ -132,7 +132,7 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         observed: list[LaunchplaneProductProfileRecord] = []
 
         def authorize(
-            profiles: tuple[LaunchplaneProductProfileRecord, ...], inventory: tuple[object, ...]
+            profiles: tuple[LaunchplaneProductProfileRecord, ...], _inventory: tuple[object, ...]
         ) -> bool:
             observed.extend(profiles)
             return profiles == (expected,)
