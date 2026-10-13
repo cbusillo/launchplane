@@ -400,6 +400,13 @@ def inspect_dokploy_target(
         if provider_target_record is None:
             result["provider_target_record"] = {"status": "missing"}
         else:
+            # Only the canonical Dokploy metadata already exposed by this read is safe
+            # to carry into a full expected-current reference. Never return a partial
+            # evidence map or publish arbitrary stored provider payloads.
+            inspected_evidence = ProviderTargetRecord.from_dokploy_records(
+                target_record=target_record,
+                target_id_record=target_id_record,
+            ).provider_evidence
             result["provider_target_record"] = {
                 "status": "present",
                 "provider_id": provider_target_record.provider_id,
@@ -410,6 +417,20 @@ def inspect_dokploy_target(
                 "source_label": provider_target_record.source_label,
                 "updated_at": provider_target_record.updated_at,
             }
+            provider_target_summary = result["provider_target_record"]
+            assert isinstance(provider_target_summary, dict)
+            if (
+                not provider_target_record.provider_evidence
+                or provider_target_record.provider_evidence == inspected_evidence
+            ):
+                provider_target_summary["provider_evidence"] = dict(
+                    provider_target_record.provider_evidence
+                )
+            else:
+                # Keep identity/runtime inspection available when a complete safe
+                # planner input cannot be projected. The planner reports the missing
+                # comparison capability rather than weakening its authority check.
+                provider_target_summary["comparison_evidence_status"] = "unavailable"
     return result
 
 

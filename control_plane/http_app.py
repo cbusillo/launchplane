@@ -79,6 +79,9 @@ from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
 )
+from control_plane.workflows.dokploy_target_adoption import (
+    DokployTargetComparisonEvidenceUnavailableError,
+)
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_public_hosts
 from control_plane.contracts.dokploy_target_record import DokployTargetRecordChanged
@@ -24694,6 +24697,13 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="local_operator_lane_scope_required",
+                message=str(error),
+            ) from error
+        except DokployTargetComparisonEvidenceUnavailableError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="dokploy_target_comparison_evidence_unavailable",
                 message=str(error),
             ) from error
         except (ValueError, click.ClickException) as error:

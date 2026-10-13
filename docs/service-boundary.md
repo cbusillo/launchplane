@@ -2672,7 +2672,25 @@ requires `dokploy_target.inspect` authz for product/context `launchplane`, reads
 Dokploy through Launchplane-managed secrets, and returns a redacted identity
 summary only: target ids, names, project/environment/server identity, domain
 summaries, source metadata, and environment key names/counts. It must not return
-raw provider payloads or environment values. The manual `Dokploy Target Inspect`
+raw provider payloads or environment values. For a tracked target, its
+`provider_target_record` includes the complete stored `provider_evidence` for
+the domain-authority planner's expected-current reference when it is empty or
+exactly matches canonical Dokploy metadata derived from the tracked target and
+target-id records (currently the project name already exposed by inspection).
+Empty stored evidence is returned explicitly, without reconstructing missing
+metadata. Other stored evidence remains hidden and the section reports
+`comparison_evidence_status: unavailable`; identity and runtime-proof inspection
+remain available. If an otherwise matching planner expectation omits that hidden
+evidence, the planner returns HTTP 400
+`dokploy_target_comparison_evidence_unavailable` with a trace: this evidence shape
+requires an inspection-safe comparison capability before the supported helper
+can plan it. This is a missing comparison-input prerequisite, not a request to
+repair records or grant access. Callers that already possess a complete private
+expectation retain the existing comparison path. The private helper forwards
+available evidence and drops it from public receipts. The planner still compares
+the full current reference and rechecks live target identity and the exact domain
+set. Neither inspection nor a repair dry run writes records or grants apply
+authority. The manual `Dokploy Target Inspect`
 workflow is the supported shared and production caller when admins need
 provider evidence without mutating Dokploy or Launchplane records. A
 `local_operator` caller may also use its existing `driver.read` grant for product `launchplane`
