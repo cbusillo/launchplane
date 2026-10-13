@@ -3,7 +3,7 @@
 from collections import OrderedDict
 from collections.abc import Callable
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import RLock
 from types import FunctionType
 from typing import Any, get_args, get_origin
@@ -128,6 +128,10 @@ class PreparedAPIRoute(APIRoute):
                 }
                 memo.update(_schema_memo(state))
                 prepared = deepcopy(state, memo)
+                # deepcopy's atomic-function fast path can precede its memo
+                # lookup. Replace calls explicitly so templates never retain
+                # an application's authentication or storage closures.
+                prepared = _replace_calls(prepared, memo)
                 self._prepared[key] = prepared
                 if len(self._prepared) > 512:
                     self._prepared.popitem(last=False)
@@ -162,6 +166,25 @@ def _bindings_in(value: Any) -> list[_Binding]:
         result.extend(_bindings_in(value.call))
         result.extend(_bindings_in(value.dependencies))
     return result
+
+
+def _replace_calls(value: Any, memo: dict[int, Any]) -> Any:
+    from fastapi.dependencies.models import Dependant
+
+    if isinstance(value, FunctionType):
+        return memo.get(id(value), value)
+    if isinstance(value, dict):
+        return {key: _replace_calls(item, memo) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_calls(item, memo) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_replace_calls(item, memo) for item in value)
+    if isinstance(value, Depends):
+        return replace(value, dependency=_replace_calls(value.dependency, memo))
+    elif isinstance(value, Dependant):
+        value.call = _replace_calls(value.call, memo)
+        value.dependencies = _replace_calls(value.dependencies, memo)
+    return value
 
 
 def _schema_memo(state: dict[str, Any]) -> dict[int, Any]:

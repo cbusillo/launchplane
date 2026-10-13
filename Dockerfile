@@ -41,7 +41,7 @@ RUN github_cli_x_mod_version=v0.41.0 \
     && go version -m /go/bin/gh | grep -F "golang.org/x/text" | grep -F "${GITHUB_CLI_X_TEXT_VERSION}" \
     && go version -m /go/bin/gh | grep -F "golang.org/x/net" | grep -F "${GITHUB_CLI_X_NET_VERSION}"
 
-FROM mirror.gcr.io/library/python:3.13-slim AS runtime
+FROM mirror.gcr.io/library/python:3.14-slim AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/cbusillo/launchplane"
 

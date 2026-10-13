@@ -517,8 +517,11 @@ of the expected build is what marks the preview ready, as for Odoo.
 
 ## Product configuration authority from source events
 
-Source implementation: #3021. Runtime activation and required-check policy are
-separate Director decisions; consumer workflows remain until coverage is verified.
+Source implementation: #3021. Its recorded Q252 decision requires a passing
+current base/head comparison before merge and parser parity before activation
+or consumer removal. Live policy application and consumer removal remain
+outside that source decision; consumer workflows remain until deployed coverage
+is verified.
 An enrolled base branch's DB-backed merge-train policy can opt in with
 `config_authority_events_enabled`. Its default is false, and omitting it
 preserves historical policy digests. No checked-in product catalog or service
@@ -530,9 +533,12 @@ merge-group checks-requested events for that enrolled base branch, even without
 a deploy profile or build.
 It acknowledges after the transaction, without waiting for GitHub file reads.
 Redelivery preserves the original request and deploy-target deduplication.
-Pushes are scanned only for enrolled base branches with an explicit nonzero
-before/head pair. Creation, deletion, tag and unrelated feature/train-candidate
-pushes request no scan; PR and merge-group events provide their comparisons.
+Base-branch pushes use an explicit nonzero before/head pair. A push creating or
+updating a recorded canonical train candidate instead uses that record's
+original base and completed candidate SHA. The repository, full ref and head
+must match the stored candidate, including its enrolled destination branch;
+the candidate need not emit a merge-group event. Unrecorded train refs,
+construction refs, deletions, tags and unrelated feature pushes request no scan.
 
 The existing operation worker leases each delivery and rereads repository
 identity. PRs use the API's current explicit base/head pair; push and merge-group
@@ -552,11 +558,13 @@ reconcile polling; a slow source read does not hold up newly queued operations.
 With no branch opted in, idle polling skips the scan table. The source migration
 adds a PostgreSQL index on scan state and receipt time for enabled queue reads.
 
-Completed results are projected through the existing checks-only App as
-`launchplane/config-authority/<event>/<encoded-base-branch>`, with event
-`pull-request`, `push`, or `merge-group` and a URL-encoded branch name.
-Separate event and branch names prevent a narrower comparison from overwriting a PR's
-result on the same head. A failed gate produces failure. An unavailable scan
+PR, recorded-candidate and merge-group results use the existing checks-only
+App's `launchplane/config-authority/current-comparison/<encoded-base-branch>`
+context. This one context can be required for both source PRs and native train
+candidates. Ordinary base-branch push results keep their separate
+`launchplane/config-authority/push/<encoded-base-branch>` context. Every result's
+external identity binds repository ID, event, branch and exact base/head pair.
+A failed gate produces failure. An unavailable scan
 projects in-progress while a retry is pending, then failure on exhaustion;
 these checks are not excluded from normal check readiness as advisory governance
 projections are. A missing projection credential/permission or failed projection
@@ -565,7 +573,8 @@ fallback or access grant is created. Source reads use the repository's existing
 train App with a contents/pull-requests read token (a subset of the train's
 existing permissions); projection uses the existing
 checks-only identity. Both installations and managed-key bindings need to be
-verified before activation. Requiring these check names is an Director decision.
+verified before activation. Q252 authorizes preparing the transition, not
+applying its live policy or creating a grant.
 
 An authorized inventory reader can retrieve a delivery's request, queue/lease
 state, commit pair, redacted gate findings, coverage gaps, hashes and projection
@@ -583,12 +592,43 @@ that product, and account for any required-check change. Source fixture parity
 and read-only scans of their commits demonstrate scanner coverage; they do not
 prove deployed activation or authorize any live change.
 
-The queue itself does not create a GitHub check: a delivery awaiting a worker
-has no source result yet. Existing checks alone therefore cannot prove that this
-scan finished before merge. Before consumer removal, the Director's required-check
-handling must account for a missing/queued source check and for irrelevant old
-branch contexts after a PR retarget. Source implementation does not change that
-live policy. Runtime proof must include a delayed scan, not only a completed pass.
+The queue itself does not create a GitHub check. For opted-in branches, PR
+selection, candidate observation and final admission independently require a
+completed success from the configured checks App for the current comparison.
+Missing, queued, unavailable, neutral, mismatched or untrusted evidence cannot
+pass. Retargeted and stale source contexts do not poison another comparison or
+stand in for its proof; other technical checks remain enforced. Historical
+event-specific receipts may satisfy the service only when their exact identity
+matches. Native candidate head-check reuse is disabled for opted-in branches:
+an equal tree does not prove the candidate's commit pair.
+
+The runtime and CI interpreter support Python 3.14 consumer syntax. Immutable
+fixtures prove safe multiple-exception syntax passes without a coverage gap
+while new configuration authority still fails. The route preparation cache
+explicitly substitutes callable bindings: Python's deepcopy atomic-function
+path cannot carry another application's authentication or storage closures.
+These source tests do not prove the deployed interpreter or activation.
+
+Prepare an additive offline transition from current required-check metadata:
+
+```sh
+uv run launchplane service plan-config-authority-transition \
+  --base-branch <enrolled-branch> --required-checks-file <private-checks.json> \
+  --checks-app-id <verified-configured-checks-app-id>
+```
+
+The supplied JSON is a list of `context`/`app_id` identities read from current
+branch protection. The planner makes no provider calls, preserves every
+existing required check and proposes only the branch's current-comparison
+context bound to the supplied App. Without a verified App ID, omit that option:
+the plan reports blocked and proposes no applicable policy. Do not substitute
+the Actions App or the train App for the configured checks publisher. Effective
+rulesets must also be read before any authorized apply; a classic-protection
+snapshot alone cannot prove the entire policy. Refresh snapshots and supported
+service policy-import dry runs against the active digest before activation.
+No plan removes a consumer or changes live policy. Deployed proof must include
+a delayed scan, current base movement, candidate push and retarget, not only a
+completed pass.
 
 Source reads share the train App installation's rate budget. The four-minute
 budget limits source reads, and the blob cache avoids repeats within an attempt.
