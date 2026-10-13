@@ -109,6 +109,18 @@ class DokployTargetPolicies(BaseModel):
         return self
 
 
+class PublicHostEffect(BaseModel):
+    """Write-ahead addition and its provider identity, independent of config success."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    host: str
+    provider_host: str
+    target_id: str
+    runtime_port: int = Field(ge=1, le=65535)
+    domain_id: str = ""
+
+
 class DokployTargetRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -135,6 +147,9 @@ class DokployTargetRecord(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     domains: tuple[str, ...] = ()
     public_hosts: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    pending_public_host_effects: tuple[PublicHostEffect, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     policies: DokployTargetPolicies = Field(default_factory=DokployTargetPolicies)
     updated_at: str
     source_label: str = ""
