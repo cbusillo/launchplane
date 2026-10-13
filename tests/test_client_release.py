@@ -1,5 +1,6 @@
 import unittest
 from contextlib import ExitStack, nullcontext
+from datetime import datetime, timedelta
 
 import click
 from pathlib import Path
@@ -23,6 +24,8 @@ from control_plane.contracts.promotion_record import (
     DeploymentEvidence,
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
+    PromotionRecord,
+    RollbackExecutionEvidence,
 )
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.durable_operation_authorization import (
@@ -328,6 +331,73 @@ class ClientReleaseTests(unittest.TestCase):
         self.assertEqual(
             release_start_for_acceptance(store=self.store, profile=profile_record), "promote"
         )
+
+        # Odoo's generic promotion has no deploy timestamps, and the drill
+        # updates its rollback evidence. Each durable promotion still belongs
+        # in the timeline at its own completion time.
+        for index, operation_id in enumerate((promotion_id, repromotion_id)):
+            operation = self.store.read_odoo_prod_promotion_operation_record(operation_id)
+            assert operation.result is not None
+            finished_at = (
+                datetime.fromisoformat(operation.created_at) + timedelta(seconds=index + 1)
+            ).isoformat()
+            result = operation.result.model_copy(
+                update={
+                    "promotion_record_id": f"promotion-drill-{index}",
+                    "deployment_record_id": f"deployment-drill-{index}",
+                    "backup_record_id": f"logical-backup-{index}",
+                }
+            )
+            self.store.write_odoo_prod_promotion_operation_record(
+                operation.model_copy(
+                    update={"result": result, "finished_at": finished_at, "updated_at": finished_at}
+                )
+            )
+            self.store.write_promotion_record(
+                PromotionRecord(
+                    record_id=result.promotion_record_id,
+                    artifact_identity=ArtifactIdentityReference(artifact_id="artifact-testing"),
+                    context=CONTEXT,
+                    from_instance="testing",
+                    to_instance="prod",
+                    deploy=_deployment(result.deployment_record_id, "artifact-testing").deploy,
+                    rollback=RollbackExecutionEvidence(
+                        attempted=True, status="pass", finished_at=finished_at
+                    )
+                    if index == 0
+                    else RollbackExecutionEvidence(),
+                )
+            )
+        activity = build_product_activity_read_model(record_store=self.store, product=PRODUCT)
+        promotions = [event for event in activity.events if event.event_type == "promotion"]
+        self.assertEqual(
+            {event.records[0].record_id for event in promotions}, {promotion_id, repromotion_id}
+        )
+        for event in promotions:
+            operation = self.store.read_odoo_prod_promotion_operation_record(
+                event.records[0].record_id
+            )
+            assert operation.result is not None
+            self.assertEqual(event.status, operation.status)
+            self.assertEqual(event.occurred_at, operation.finished_at)
+            self.assertEqual(event.context, operation.context)
+            self.assertEqual(event.environment, operation.instance)
+            self.assertTrue(
+                {
+                    ("operation", operation.operation_id),
+                    ("release_decision", accepted.record_id),
+                    ("promotion", operation.result.promotion_record_id),
+                    ("deployment", operation.result.deployment_record_id),
+                    ("backup_gate", operation.result.backup_record_id),
+                    ("backup_gate", operation.request.infrastructure_backup_record_id),
+                }
+                <= {(link.record_type, link.record_id) for link in event.records}
+            )
+        self.assertTrue(any(event.event_type == "rollback" for event in activity.events))
+        limited = build_product_activity_read_model(
+            record_store=self.store, product=PRODUCT, limit=1
+        )
+        self.assertEqual(limited.events, activity.events[:1])
 
     def test_nothing_starts_when_held_prelaunch_overridden_or_unsupported(self) -> None:
         self.assertEqual(self.accept().release_start, "")
@@ -648,6 +718,36 @@ class ClientReleaseTests(unittest.TestCase):
         )
         assert run is not None and run.steps[1].failure is not None
         self.assertEqual(run.steps[1].failure.record_id, promotion_id)
+        activity = build_product_activity_read_model(record_store=self.store, product=PRODUCT)
+        event = next(event for event in activity.events if event.event_type == "promotion")
+        self.assertEqual(event.status, operation.status)
+        self.assertNotEqual(event.status, "pass")
+        self.assertEqual(event.occurred_at, operation.finished_at)
+
+    def test_promotion_activity_tracks_queued_status_and_isolates_products(self) -> None:
+        self.switch("promote")
+        self.accept()
+        (backup_id,) = self.advance()
+        self.finish(backup_id)
+        (promotion_id,) = self.advance()
+        operation = self.store.read_odoo_prod_promotion_operation_record(promotion_id)
+        other_profile = self.store.read_product_profile_record(PRODUCT).model_copy(
+            update={"product": "other-site"}
+        )
+        self.store.write_product_profile_record(other_profile)
+        activity = build_product_activity_read_model(record_store=self.store, product=PRODUCT)
+        event = next(event for event in activity.events if event.event_type == "promotion")
+        self.assertEqual(event.status, operation.status)
+        self.assertNotEqual(event.status, "pass")
+        self.assertEqual(event.occurred_at, operation.updated_at)
+        self.assertFalse(
+            any(
+                event.event_type == "promotion"
+                for event in build_product_activity_read_model(
+                    record_store=self.store, product=other_profile.product
+                ).events
+            )
+        )
 
     def test_activity_history_does_not_run_unstarted_release_readiness_checks(self) -> None:
         self.switch("promote_with_rollback_drill")
