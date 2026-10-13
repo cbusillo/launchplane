@@ -32313,10 +32313,6 @@
               {
                 "const": "disabled",
                 "type": "string"
-              },
-              {
-                "const": "unsupported",
-                "type": "string"
               }
             ],
             "default": "missing",

@@ -3286,7 +3286,7 @@ export type ProductManagedSecretConfigStatusItem = {
     instance: string;
     integration: string;
     status: 'configured' | 'missing' | 'disabled' | 'unvalidated' | 'stale' | 'unsupported';
-    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported' | 'disabled' | 'unsupported';
+    trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported' | 'disabled';
     updated_at: string;
 };
 

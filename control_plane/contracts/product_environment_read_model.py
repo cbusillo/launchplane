@@ -540,7 +540,7 @@ class ProductManagedSecretConfigStatusItem(BaseModel):
     context: str = ""
     instance: str = ""
     updated_at: str = ""
-    trust_state: ProductSecretBindingTrustState | Literal["unsupported"] = "missing"
+    trust_state: ProductSecretBindingTrustState = "missing"
 
 
 class ProductConfigOperationAvailability(BaseModel):
