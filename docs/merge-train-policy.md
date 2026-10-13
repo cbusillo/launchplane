@@ -1291,6 +1291,16 @@ so a Client's acceptance of the refreshed pull request can carry to the new head
 when the change itself is unchanged (see
 [carried acceptance](owner-acceptance.md#carried-acceptance)).
 
+For a passing same-repository root whose mergeability remains unknown, the
+adapter compares the observed current base commit to the exact head commit.
+A behind or diverged head can request that same guarded refresh even when
+GitHub has not reported `mergeable_state: behind`. An ahead or identical head
+still waits for known mergeability; ancestry is never permission to merge.
+Missing or inconsistent comparison evidence fails the read closed. Forks,
+stacks, drafts, and nonpassing heads retain their existing observation path.
+This adds one comparison read per affected head; provider comparison failures
+can hold the pass until readable evidence returns.
+
 The reread step rebuilds the dry-run decision from a fresh pull request snapshot.
 If checks are still pending or mergeability is unknown, the next action remains
 `wait_for_checks`; Launchplane must not merge from pre-refresh evidence.
@@ -1666,6 +1676,37 @@ conclusive no effect. A provider rejection requires a fresh L2 evaluation and a
 new admission. Candidate-ref cleanup remains downstream of landing evidence and
 cannot downgrade it.
 
+### Externally merged collapsed roots
+
+If a single collapsed root was merged outside the train before admission, the
+ordinary landing observer refuses to create a successful train outcome without
+an immutable admission. On the next reconciliation pass, the controller can
+observe that external merge and retire its stale plan under its existing lease.
+Run the normal controller dry run first: eligible recovery reports
+`retire_stale_landing` with reason `external_stack_landing_observed`. A mutating
+pass then completes recovery; a fresh controller/status read must show
+`idle`/`clean` before claiming that the train is recovered.
+
+Recovery requires the exact expected root head and tree, merge parent and result
+tree, containment in a pinned protected base, current policy and completed
+collapse history. It verifies child heads and containment before the existing
+checkpointed child disposition, preserving a changed child instead of closing
+new work. Provider uncertainty or missing containment retains the fence. An
+interruption re-observes the root and resumes child checkpoints without another
+root or child merge.
+
+The persisted landing entries are `stale`, never successful train landings.
+The retirement source records the observed external merge commit and trace;
+the original plan retains its immutable expected head/tree and candidate
+identity. No admission or landing outcome is created. Candidate records are
+superseded; their branch ref is retained. A crash after retirement resumes that
+terminal record before clearing the fence. This recovery is limited to a
+single legacy collapsed root with no admission for that PR in any lineage.
+Partial batches, ordinary-bound work and admitted effects retain their existing
+reconciliation contracts. It does not change the separate
+[historical-completion](merge-train-historical-completion.md) API's stack
+exclusion or authorize a new merge.
+
 Scheduler admission is a deterministic decision over the latest stored
 `launchplane_merge_train_runs` record for the repository/base branch. Dry-run
 records do not throttle the scheduler. Mutation records with `reread_required`
@@ -1709,6 +1750,9 @@ reconciliation requirement and next actor/observation. Lease release and restart
 preserve it. `not_observed` means that pass did not read those checks; `unknown`
 means an attempted observation could not establish their status. The observed
 candidate SHA is separate from a newly planned replacement's SHA.
+An original head with passing checks but unresolved mergeability reports
+`head_mergeability_unknown`, identifying the provider state it is waiting on
+instead of implying that candidate or base checks failed to be observed.
 `last_controller_result_policy_status` qualifies its policy binding; even
 current-policy evidence is the last pass, not current readiness or landing
 authority. Old records without a saved result return null rather than a

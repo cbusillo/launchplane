@@ -28,6 +28,8 @@ from control_plane.drivers.generic_web_preview_extensions import (
     apply_generic_web_preview_driver_destroy,
     apply_generic_web_preview_driver_refresh,
 )
+from control_plane.drivers.verireel_postgres_transport import _preview_refresh_serialization
+from control_plane.launchplane_mutations import resolve_launchplane_preview_id
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyResult,
@@ -197,22 +199,34 @@ def apply_generic_web_preview_refresh_result(
     if driver_extension_result is not None:
         return driver_extension_result
 
-    _generic_web_preview_anchor_pr_number(request=request.refresh, profile=profile)
-    driver_result = execute_generic_web_preview_refresh(
-        control_plane_root=control_plane_root,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.refresh,
-        profile=profile,
+    anchor_pr_number = _generic_web_preview_anchor_pr_number(
+        request=request.refresh, profile=profile
     )
-    driver_result = GenericWebPreviewRefreshResult.model_validate(driver_result)
-    records = _apply_generic_web_preview_refresh_records(
-        control_plane_root_path=control_plane_root,
-        record_store=record_store,
-        request=request.refresh,
-        driver_result=driver_result,
-        profile=profile,
+    preview_id = resolve_launchplane_preview_id(
+        context=profile.preview.context,
+        anchor_repo=_generic_web_preview_anchor_repo(profile),
+        anchor_pr_number=anchor_pr_number,
     )
-    return records, driver_result.model_dump(mode="json")
+    # The provider's slug lock ends before evidence is recorded. Keep the canonical
+    # identity lock through both so cleanup cannot observe the old generation then.
+    with _preview_refresh_serialization(
+        record_store=record_store, preview_id=preview_id, dedicated=True
+    ):
+        driver_result = execute_generic_web_preview_refresh(
+            control_plane_root=control_plane_root,
+            record_store=cast(GenericWebPreviewProfileStore, record_store),
+            request=request.refresh,
+            profile=profile,
+        )
+        driver_result = GenericWebPreviewRefreshResult.model_validate(driver_result)
+        records = _apply_generic_web_preview_refresh_records(
+            control_plane_root_path=control_plane_root,
+            record_store=record_store,
+            request=request.refresh,
+            driver_result=driver_result,
+            profile=profile,
+        )
+        return records, driver_result.model_dump(mode="json")
 
 
 def _destroy_result_with_record_outcome(
