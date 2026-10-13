@@ -216,7 +216,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
 
                     def incomplete_read(**kwargs: object) -> api.JsonValue:
                         if kwargs["path"] == "/api/schedule.list":
-                            return cast(api.JsonValue, schedule_inventory)
+                            return schedule_inventory
                         query = cast(dict[str, str], kwargs["query"])
                         self.assertNotEqual(query.get("type"), "schedule")
                         return read(**kwargs)
