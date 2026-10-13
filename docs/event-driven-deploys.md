@@ -746,8 +746,9 @@ attribution remain unknown.
 When the candidate's post-deploy evidence retains a schedule ID and deployment
 ID, inspection reads that exact schedule and run independently of mutable names.
 It reports the run, complete returned schedule history and timer state, without
-exposing references. Missing or unmatched references stay unknown or unavailable;
-a failed provider read makes the whole inspection unavailable. A recorded terminal run
+exposing references. Missing references in the retained evidence stay unknown or
+unavailable; unmatched runs stay unknown. A failed provider read, including a
+deleted schedule, makes the whole inspection unavailable. A recorded terminal run
 does not enumerate every original
 data effect; the operation still lacks complete dispatch proof. The retained
 deployment candidate set is rechecked after provider reads to detect changed

@@ -159,10 +159,12 @@ def inspect_legacy_replacement(
     # mutable name changed. They do not enumerate every historical dispatch.
     retained_run = retained_history = retained_timer = "unavailable"
     evidence = retained.post_deploy_update.evidence
-    retained_schedule_id = evidence.get("schedule_id", "").strip()
-    retained_run_id = evidence.get("schedule_deployment_id", "").strip()
-    if retained_schedule_id or retained_run_id:
+    schedule_reference = evidence.get("post_deploy_readback_schedule_id", "")
+    run_reference = evidence.get("post_deploy_readback_schedule_deployment_id", "")
+    if schedule_reference or run_reference:
         retained_run = retained_history = retained_timer = "unknown"
+        retained_schedule_id = post_deploy._bounded_dokploy_evidence_id(schedule_reference)
+        retained_run_id = post_deploy._bounded_dokploy_evidence_id(run_reference)
         if retained_schedule_id and retained_run_id:
             schedule = read("/api/schedule.one", {"scheduleId": retained_schedule_id})
             if isinstance(schedule, dict) and api.schedule_key(schedule) == retained_schedule_id:

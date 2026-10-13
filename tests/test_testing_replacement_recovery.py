@@ -39,6 +39,13 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     _execute_target_replacement_operation,
 )
 from control_plane.workflows.public_ingress_monitor import run_public_ingress_monitor_once
+from control_plane.workflows.odoo_generic_web_post_deploy import (
+    post_deploy_evidence_from_odoo_result,
+)
+from control_plane.workflows.odoo_post_deploy import (
+    OdooPostDeployResult,
+    _prefix_post_deploy_readback_evidence,
+)
 from tests.test_product_reconcile import _profile, _inventory
 from typing import cast
 
@@ -276,14 +283,20 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                         "target_type": "compose",
                         "started_at": operation.started_at,
                     },
-                    "post_deploy_update": {
-                        "attempted": True,
-                        "status": "pass",
-                        "evidence": {
-                            "schedule_id": "private-original-schedule",
-                            "schedule_deployment_id": "private-original-run",
-                        },
-                    },
+                    "post_deploy_update": post_deploy_evidence_from_odoo_result(
+                        OdooPostDeployResult(
+                            context=operation.context,
+                            instance=operation.instance,
+                            phase="deploy",
+                            post_deploy_status="pass",
+                            override_evidence=_prefix_post_deploy_readback_evidence(
+                                {
+                                    "schedule_id": "private-original-schedule",
+                                    "schedule_deployment_id": "private-original-run",
+                                }
+                            ),
+                        )
+                    ).model_dump(mode="json"),
                 }
             )
             getattr(store, "write_deployment_record")(deployment)
