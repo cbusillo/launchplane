@@ -225,6 +225,9 @@ def execute_odoo_post_deploy(
         context=request.context,
         instance=request.instance,
         public_hosts=public_hosts,
+        origin_domains=target_definition.domains
+        if not run_destructive_restore and request.phase in {"deploy", "promotion"}
+        else (),
         updated_at=utc_now_timestamp(),
     )
 

@@ -296,6 +296,12 @@ def require_forward_build(
         (current.artifact_id and current.artifact_id == desired.artifact_id)
         or (current.image and current.image == desired.image)
     ):
+        if (
+            current.source_build is not None
+            and desired.source_build is not None
+            and current.source_build != desired.source_build
+        ):
+            _require_newer_artifact(record_store, profile, current, desired, transport)
         return desired
     if re.fullmatch(r"[0-9a-fA-F]{4,39}", current.commit):
         try:
@@ -752,6 +758,9 @@ def current_preview_builds(
             else "",
             observed_at=str(current.get("current_observed_at", "")),
             pull_request_number=number,
+            source_build=ArtifactSourceBuild.model_validate(current["current_source_build"])
+            if current.get("current_source_build")
+            else None,
         )
         if build not in builds:
             builds.append(build)

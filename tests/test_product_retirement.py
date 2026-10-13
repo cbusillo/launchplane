@@ -26,6 +26,7 @@ from control_plane.contracts.product_retirement import (
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.dokploy import api as dokploy_api
 from control_plane.product_retirement import (
+    BoundProductRetirement,
     DokployProductRetirementAdapter,
     ProductRetirementBlockedError,
     ProductRetirementStore,
@@ -34,7 +35,10 @@ from control_plane.product_retirement import (
     build_provider_observation,
     observe_tracked_dokploy_application,
 )
-from control_plane.provider_operations import ProviderMutationUnknownError
+from control_plane.provider_operations import (
+    ProviderMutationRejectedError,
+    ProviderMutationUnknownError,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.profiles import _generic_site_profile_payload
@@ -64,6 +68,9 @@ class _Store:
             "context": "example-site-preview",
         }
         self.profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
+        self.profile = self.profile.model_copy(
+            update={"lanes": tuple(lane for lane in self.profile.lanes if lane.instance == "prod")}
+        )
         self.provider_target: ProviderTargetRecord | None = ProviderTargetRecord(
             context="example-site",
             instance="prod",
@@ -222,6 +229,89 @@ def _plan(
 
 
 class ProductRetirementTests(unittest.TestCase):
+    def test_binding_refuses_either_lane_of_a_multi_lane_product(self) -> None:
+        for instance in ("testing", "prod"):
+            with self.subTest(instance=instance):
+                store = _Store()
+                store.profile = LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload()
+                )
+                profile = store.profile
+                with self.assertRaises(ProductRetirementBlockedError):
+                    bind_product_retirement_authority(
+                        record_store=cast(ProductRetirementStore, store),
+                        request=_request(instance=instance),
+                    )
+                self.assertEqual(store.profile, profile)
+
+    def test_apply_refuses_a_previously_reviewed_multi_lane_plan_before_effects(self) -> None:
+        store = _Store()
+        store.profile = LaunchplaneProductProfileRecord.model_validate(
+            _generic_site_profile_payload()
+        )
+        profile = store.profile
+        assert store.provider_target is not None
+        assert store.dokploy_target is not None
+        assert store.target_id is not None
+        # A plan persisted by the older binder reviewed only prod, despite owning two lanes.
+        plan = build_product_retirement_plan_record(
+            request=_request(),
+            identity=ProductRetirementIdentity(actor="test", identity_kind="test"),
+            trace_id="legacy-plan",
+            idempotency_key="retire-example-site",
+            requested_at=NOW,
+            bound=BoundProductRetirement(
+                profile=profile,
+                context="example-site",
+                provider_target=store.provider_target,
+                dokploy_target=store.dokploy_target,
+                dokploy_target_id=store.target_id,
+                runtime_records=store.runtime_records,
+                secret_records=(),
+            ),
+            observation=_observation(),
+        )
+        adapter = DokployProductRetirementAdapter(
+            control_plane_root=Path("."),
+            record_store=cast(ProductRetirementStore, store),
+            request=_request(
+                mode="apply",
+                reviewed_plan_record_id=plan.record_id,
+                reviewed_plan_sha256=plan.plan_sha256,
+                confirmation=f"retire product example-site instance prod target {TARGET_SHA256}",
+            ),
+            plan=plan,
+            identity=plan.identity,
+            trace_id="legacy-apply",
+            idempotency_key=plan.idempotency_key,
+            requested_at=NOW,
+        )
+        lease = _Lease()
+        runtime = store.runtime_records
+        target = store.provider_target
+        with (
+            patch(
+                "control_plane.product_retirement.observe_tracked_dokploy_application",
+                return_value=_observation(),
+            ),
+            patch(
+                "control_plane.product_retirement.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.invalid", "fixture-token"),
+            ),
+            patch(
+                "control_plane.product_retirement.dokploy_api.delete_dokploy_application"
+            ) as delete,
+            patch("control_plane.product_retirement.dokploy_api.delete_dokploy_domain") as domains,
+        ):
+            with self.assertRaises(ProviderMutationRejectedError):
+                adapter.apply("provider-operation:test", lease)
+        delete.assert_not_called()
+        domains.assert_not_called()
+        self.assertEqual(lease.phases, [])
+        self.assertEqual(store.profile, profile)
+        self.assertEqual(store.runtime_records, runtime)
+        self.assertEqual(store.provider_target, target)
+
     def test_binding_scopes_preview_blockers_to_owned_context_and_repository(self) -> None:
         for backend in ("filesystem", "sqlite"):
             for anchor, context, state, blocked in (

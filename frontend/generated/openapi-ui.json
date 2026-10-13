@@ -22638,6 +22638,16 @@
             "title": "Sequence",
             "type": "integer"
           },
+          "source_build": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArtifactSourceBuild"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "source_map": {
             "default": [],
             "items": {
@@ -22702,6 +22712,7 @@
           "runtime_identity",
           "schema_version",
           "sequence",
+          "source_build",
           "source_map",
           "started_at",
           "state",
@@ -31552,11 +31563,29 @@
             "pattern": "^[^/\\s]+/[^/\\s]+$",
             "title": "Repository",
             "type": "string"
+          },
+          "reviewed_generation_id": {
+            "minLength": 1,
+            "title": "Reviewed Generation Id",
+            "type": "string"
+          },
+          "reviewed_head_sha": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Reviewed Head Sha",
+            "type": "string"
+          },
+          "reviewed_preview_url": {
+            "minLength": 1,
+            "title": "Reviewed Preview Url",
+            "type": "string"
           }
         },
         "required": [
           "repository",
           "pull_request",
+          "reviewed_head_sha",
+          "reviewed_preview_url",
+          "reviewed_generation_id",
           "decision"
         ],
         "title": "ProductReviewDecisionEnvelope",
@@ -31616,6 +31645,11 @@
             "title": "Owner Github Login",
             "type": "string"
           },
+          "preview_generation_id": {
+            "default": "",
+            "title": "Preview Generation Id",
+            "type": "string"
+          },
           "preview_url": {
             "default": "",
             "title": "Preview Url",
@@ -31661,6 +31695,7 @@
           "head_sha",
           "owner_github_id",
           "owner_github_login",
+          "preview_generation_id",
           "preview_url",
           "product",
           "pull_request_number",
@@ -31739,6 +31774,10 @@
             "title": "Owner Set",
             "type": "boolean"
           },
+          "preview_generation_id": {
+            "title": "Preview Generation Id",
+            "type": "string"
+          },
           "preview_url": {
             "title": "Preview Url",
             "type": "string"
@@ -31781,6 +31820,7 @@
           "latest_decision",
           "owner_github_login",
           "owner_set",
+          "preview_generation_id",
           "preview_url",
           "product",
           "pull_request_number",

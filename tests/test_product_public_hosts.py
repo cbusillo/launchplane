@@ -18,7 +18,10 @@ from control_plane.dokploy import source
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    PublicHostAuthorityBusy,
+)
 from tests.support.auth import identity, StubVerifier
 from tests.support.http import request
 from tests.support.profiles import _odoo_preview_profile_payload
@@ -206,6 +209,23 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(noop.status_code, 202, noop.text)
         self.assertEqual(noop.json()["result"]["public_hosts"]["unchanged"], HOSTS)
         self.assertEqual(self.provider.writes, writes)
+
+    async def test_busy_authority_is_retryable_after_a_fresh_dry_run(self) -> None:
+        await self.config()
+        with patch.object(
+            self.store,
+            "write_product_public_hosts_bundle",
+            side_effect=PublicHostAuthorityBusy("Review a fresh dry-run."),
+        ):
+            response = await self.config(mode="apply", key="busy")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "public_hosts_authority_busy")
+        self.assertEqual(self.provider.writes, [])
+        self.assertEqual(self.recorded(), self.target)
+        await self.config()
+        response = await self.config(mode="apply", key="retry")
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(self.recorded().public_hosts, tuple(HOSTS))
 
     async def test_reordering_hosts_changes_base_url_without_route_writes(self) -> None:
         await self.config()

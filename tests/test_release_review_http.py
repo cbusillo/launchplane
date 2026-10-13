@@ -4,13 +4,14 @@ import click
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from typing import cast
 
 from httpx2 import Response
 from control_plane.contracts.artifact_identity import ArtifactAddonSource
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.release_review import build_release_review
-from control_plane.release_review_record import publish_release_decision
+from control_plane.release_review_record import _decision_effect, publish_release_decision
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -26,6 +27,77 @@ from tests.test_release_review import github_read, profile, seed
 
 
 class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_progress_belongs_to_the_current_release_not_a_previous_invitation(self) -> None:
+        from control_plane.client_release import ClientReleaseRunView
+        from tests.test_release_review import HEAD
+
+        self.store.write_product_profile_record(
+            profile().model_copy(update={"release_on_acceptance": "promote"})
+        )
+        accepted = await self.post()
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        decision = self.store.list_release_review_decision_records(product="example-site")[0]
+        session = self.sessions.issue(_human(login="site-owner", github_id=9001))
+
+        async def read() -> dict[str, object]:
+            result = await _asgi_get(
+                self.app,
+                "/v1/release-review?product=example-site",
+                headers={"Cookie": self.sessions.session_cookie_header(session)},
+            )
+            self.assertEqual(result.status_code, 200, result.text)
+            return cast(dict[str, object], result.json())
+
+        with patch(
+            "control_plane.http_routes.release_review.read_client_release_run",
+            return_value=ClientReleaseRunView(
+                decision_record_id=decision.record_id,
+                rollback_drill=False,
+                state="passed",
+                steps=(),
+            ),
+        ) as progress:
+            self.assertIsNotNone((await read())["release_run"])
+            # Finishing promotion changes the digest, but this is still the same
+            # candidate on testing and production, not a new invitation.
+            production = self.store.read_release_tuple_record(
+                context_name="example-site", channel_name="prod"
+            )
+            self.store.write_release_tuple_record(
+                production.model_copy(
+                    update={"artifact_id": "artifact-testing", "repo_shas": {"example/site": HEAD}}
+                )
+            )
+            self.assertIsNotNone((await read())["release_run"])
+            # A fresh testing version must not inherit the completed run.
+            testing = self.store.read_release_tuple_record(
+                context_name="example-site", channel_name="testing"
+            )
+            artifact = self.store.read_artifact_manifest("artifact-testing")
+            self.store.write_artifact_manifest(
+                artifact.model_copy(
+                    update={"artifact_id": "artifact-next", "source_commit": "d" * 40}
+                )
+            )
+            self.store.write_release_tuple_record(
+                testing.model_copy(
+                    update={"artifact_id": "artifact-next", "repo_shas": {"example/site": "d" * 40}}
+                )
+            )
+            progress.reset_mock()
+            self.assertIsNone((await read())["release_run"])
+            progress.assert_not_called()
+            next_acceptance = await self.post()
+            self.assertEqual(next_acceptance.status_code, 200, next_acceptance.text)
+            self.assertIsNotNone(next_acceptance.json()["release_run"])
+            current_decision = self.store.list_release_review_decision_records(
+                product="example-site"
+            )[0]
+            self.assertNotEqual(current_decision.record_id, decision.record_id)
+            self.assertEqual(
+                progress.call_args.kwargs["decision"].record_id, current_decision.record_id
+            )
+
     async def test_client_accepts_covered_shared_release_and_incomplete_or_stale_refuses(
         self,
     ) -> None:
@@ -94,6 +166,69 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             saved.release_issue_url,
         )
         self.assertTrue(response.json()["review"]["approved"])
+
+    async def test_publication_describes_the_saved_release_action(self) -> None:
+        from tests.test_release_review_record import FakeReleaseIssues
+
+        github = FakeReleaseIssues()
+        cases = (
+            ("held", "accepted", ""),
+            ("promote", "accepted", "promote"),
+            (
+                "promote_with_rollback_drill",
+                "accepted",
+                "promote_with_rollback_drill",
+            ),
+            ("promote", "overridden", ""),
+            ("promote", "changes_requested", ""),
+        )
+        effects: list[str] = []
+        with (
+            patch(
+                "control_plane.http_app.publish_release_decision", wraps=publish_release_decision
+            ),
+            patch(
+                "control_plane.release_review_record.resolve_launchplane_github_token",
+                return_value="test-token",
+            ),
+            patch(
+                "control_plane.release_review_record.github_api_request", side_effect=github.request
+            ),
+        ):
+            for mode, outcome, start in cases:
+                with self.subTest(mode=mode, outcome=outcome):
+                    self.store.write_product_profile_record(
+                        profile().model_copy(update={"release_on_acceptance": mode})
+                    )
+                    response = await self.post(
+                        actor="operator" if outcome == "overridden" else "site-owner",
+                        github_id=9003 if outcome == "overridden" else 9001,
+                        outcome=outcome,
+                        reason="Prices need review." if outcome != "accepted" else "",
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    saved = self.store.list_release_review_decision_records(product="example-site")[
+                        0
+                    ]
+                    self.assertEqual(saved.release_start, start)
+                    issue = github.issues[-1]
+                    self.assertEqual(
+                        saved.release_issue_url,
+                        f"https://github.com/example/site/issues/{issue['number']}",
+                    )
+                    # Read the body submitted to publication, not a separate rendering.
+                    body = str(issue["body"])
+                    effect = _decision_effect(saved)
+                    self.assertIn(effect, body)
+                    # A universal description must not erase distinct recorded actions.
+                    self.assertNotIn(effect, effects)
+                    effects.append(effect)
+                    self.assertIn(saved.record_id, body)
+                    self.assertIn(saved.checklist_digest, body)
+                    self.assertEqual(
+                        response.json()["review"]["latest_decision"]["record_id"], saved.record_id
+                    )
+        self.assertEqual(self.store.list_deployment_records(), ())
 
     async def test_client_can_accept_again_after_a_stopped_release(self) -> None:
         from control_plane.client_release import ClientReleaseRunView

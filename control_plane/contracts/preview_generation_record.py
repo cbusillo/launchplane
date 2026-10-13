@@ -2,6 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.artifact_identity import ArtifactSourceBuild
 from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 
@@ -70,6 +71,7 @@ class PreviewGenerationRecord(BaseModel):
     expires_at: str = ""
     resolved_manifest_fingerprint: str
     artifact_id: str = ""
+    source_build: ArtifactSourceBuild | None = None
     baseline_release_tuple_id: str = ""
     source_map: tuple[PreviewSourceRecord, ...] = ()
     anchor_summary: PreviewPullRequestSummary
