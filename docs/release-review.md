@@ -184,6 +184,17 @@ The invitation names each Client-facing member from its generated notes heading
 and includes that member's instructions, rather than naming the synthetic batch.
 Fenced examples cannot introduce member sections; duplicate member sections
 refuse publication. The release still needs its own Client Accept.
+Missing Client constituent notes or repeated constituent sections also appear as
+`review.invitation_notes_error` on the supported release-review read and in the
+admin/read-only page. The diagnostic names the recorded batch and constituent
+and tells the admin to fix the batch PR's notes. It is derived from durable
+train membership and current source notes on every read, so correcting the notes
+clears it across worker restarts without a second failure record. It changes no
+checklist digest, completeness, acceptance or release gate. An inconsistent
+batch provenance record still refuses invitation publication without making the
+release checklist unavailable through this diagnostic read. The worker logs the
+same bounded reason at its existing five-minute retry cadence for unchanged
+profile/lane versions; it never logs the PR body or arbitrary exception text.
 Durable `release-client-change` receipts record which PRs have been announced in
 this open review. Engineering-only candidates update an already open invitation
 silently, with no new comment or mention. Notes edits and already-announced changes

@@ -4442,6 +4442,7 @@ export type ReleaseReviewStatus = {
     checklist: ReleaseChecklist | null;
     checklist_complete?: boolean | null;
     checklist_digest: string;
+    invitation_notes_error?: string;
     latest_decision: ReleaseReviewDecisionRecord | null;
     no_new_release?: boolean;
     required: boolean;

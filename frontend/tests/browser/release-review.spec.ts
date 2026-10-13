@@ -60,6 +60,33 @@ test("A new invitation has its own progress and formatted linked PR checks", { t
   expect(writes).toEqual(["POST"]);
 });
 
+test("Invitation notes failures are visible to engineering and clear after correction", async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("products");
+  });
+  const diagnostic = "Client notes for example/site#43 are missing from batch example/site#99.";
+  response.review.invitation_notes_error = diagnostic;
+  response.viewer_is_owner = false;
+  response.can_override = true;
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "engineer", github_id: 9002, role: "admin", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.goto("/ui/owner-review?product=example-site");
+  await expect(page.getByRole("alert").filter({ hasText: diagnostic })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("invitation-notes-admin.png"), fullPage: true });
+  response.viewer_is_owner = true;
+  response.can_override = false;
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Accept release", exact: true })).toBeEnabled();
+  await expect(page.getByText(diagnostic, { exact: false })).toHaveCount(0);
+  response.viewer_is_owner = false;
+  response.review.invitation_notes_error = "";
+  await page.reload();
+  await expect(page.getByText(diagnostic, { exact: false })).toHaveCount(0);
+});
+
 test("Identical testing and production preserve the completed run without decision controls @responsive", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   const heading = page.locator("[data-route-heading]");
