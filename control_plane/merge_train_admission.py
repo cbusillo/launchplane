@@ -4,6 +4,7 @@ from control_plane.merge_train_policy_binding import merge_train_policy_bindings
 
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Literal, Protocol, cast
 
@@ -296,6 +297,39 @@ def evaluate_merge_train_admission_from_store(
     backoff_seconds: int = 300,
     policy_record: MergeTrainPolicyRecord | None = None,
 ) -> MergeTrainAdmissionDecision:
+    return _read_merge_train_admission_snapshot(
+        store=store,
+        repository=repository,
+        base_branch=base_branch,
+        requested_at=requested_at,
+        current_policy_key=current_policy_key,
+        current_policy_sha256=current_policy_sha256,
+        poll_interval_seconds=poll_interval_seconds,
+        backoff_seconds=backoff_seconds,
+        policy_record=policy_record,
+    ).admission
+
+
+@dataclass(frozen=True)
+class _MergeTrainAdmissionSnapshot:
+    admission: MergeTrainAdmissionDecision
+    controller_records: MergeTrainControllerRecords
+    controller_state: MergeTrainControllerStateRecord | None
+    latest_run: MergeTrainRunRecord | None
+
+
+def _read_merge_train_admission_snapshot(
+    *,
+    store: MergeTrainRunHistoryStore,
+    repository: str,
+    base_branch: str,
+    requested_at: str,
+    current_policy_key: str,
+    current_policy_sha256: str,
+    poll_interval_seconds: int,
+    backoff_seconds: int,
+    policy_record: MergeTrainPolicyRecord | None,
+) -> _MergeTrainAdmissionSnapshot:
     controller_records = _list_active_controller_records(
         store=store, repository=repository, base_branch=base_branch
     )
@@ -330,11 +364,18 @@ def evaluate_merge_train_admission_from_store(
         poll_interval_seconds=poll_interval_seconds,
         backoff_seconds=backoff_seconds,
     )
-    return defer_for_recorded_github_quota(
+    admission = defer_for_recorded_github_quota(
         decision=decision,
         controller_state=controller_state,
         store=store,
         policy_record=policy_record,
+    )
+
+    return _MergeTrainAdmissionSnapshot(
+        admission=admission,
+        controller_records=controller_records,
+        controller_state=controller_state,
+        latest_run=latest_run,
     )
 
 
@@ -350,46 +391,20 @@ def build_merge_train_controller_status_read_model(
     backoff_seconds: int = 300,
     policy_record: MergeTrainPolicyRecord | None = None,
 ) -> MergeTrainControllerStatusReadModel:
-    controller_records = _list_active_controller_records(
-        store=store, repository=repository, base_branch=base_branch
-    )
-    controller_state = _latest_controller_state(
+    snapshot = _read_merge_train_admission_snapshot(
         store=store,
-        repository=repository,
-        base_branch=base_branch,
-    )
-    latest_run = store.latest_merge_train_run_record(
-        repository=repository,
-        base_branch=base_branch,
-    )
-    actionable_records = _filter_actionable_controller_records(
-        controller_records=controller_records,
-        latest_run=latest_run,
-        current_policy_key=current_policy_key,
-        current_policy_sha256=current_policy_sha256,
-        controller_state=controller_state,
-        record_store=store,
-    )
-    controller_decision = build_merge_train_controller_admission_decision(
-        candidate_records=actionable_records.candidate_records,
-        landing_plan_records=actionable_records.landing_plan_records,
-        stack_collapse_plan_records=actionable_records.stack_collapse_plan_records,
-    )
-    admission = evaluate_merge_train_admission(
         repository=repository,
         base_branch=base_branch,
         requested_at=generated_at,
-        latest_run=latest_run,
-        controller_decision=controller_decision,
+        current_policy_key=current_policy_key,
+        current_policy_sha256=current_policy_sha256,
         poll_interval_seconds=poll_interval_seconds,
         backoff_seconds=backoff_seconds,
-    )
-    admission = defer_for_recorded_github_quota(
-        decision=admission,
-        controller_state=controller_state,
-        store=store,
         policy_record=policy_record,
     )
+    controller_records = snapshot.controller_records
+    controller_state = snapshot.controller_state
+    latest_run = snapshot.latest_run
     latest_run_age_seconds: int | None = None
     if latest_run is not None:
         try:
@@ -400,7 +415,9 @@ def build_merge_train_controller_status_read_model(
             # Imported Level 1 dry-run history may not contain a parseable date.
             pass
     stall = None
-    read_stall = getattr(store, "read_merge_train_stall_record", None)
+    read_stall: Callable[[str], MergeTrainStallRecord] | None = getattr(
+        store, "read_merge_train_stall_record", None
+    )
     if callable(read_stall):
         try:
             stall = read_stall(repository)
@@ -413,7 +430,7 @@ def build_merge_train_controller_status_read_model(
         generated_at=generated_at,
         current_policy_key=current_policy_key,
         current_policy_sha256=current_policy_sha256,
-        admission=admission,
+        admission=snapshot.admission,
         latest_run=latest_run,
         latest_run_source="level1" if latest_run is not None else None,
         latest_run_age_seconds=latest_run_age_seconds,
@@ -711,14 +728,14 @@ def _entry_reconciliation_diagnostic(
             return diagnostic("binding_stale", "outcome_binding_changed")
     except (AttributeError, LookupError, TypeError, ValueError):
         return diagnostic("binding_unavailable", "history_unavailable")
-    classification = {
+    outcome_classification = {
         "reconcile_required": "outcome_reconcile_required",
         "rejected": "outcome_rejected",
         "landed": "outcome_landed",
     }.get(outcome.status)
-    if classification is None:
+    if outcome_classification is None:
         return diagnostic("binding_unavailable", "outcome_status_unknown")
-    return diagnostic(cast(MergeTrainReconciliationClassification, classification))
+    return diagnostic(cast(MergeTrainReconciliationClassification, outcome_classification))
 
 
 def _admission_matches_entry(
@@ -858,7 +875,7 @@ def _summarize_latest_dry_run(
 
 
 def _summarize_dry_run_queue(payload: object) -> tuple[MergeTrainDryRunQueueEntrySummary, ...]:
-    if not isinstance(payload, list | tuple):
+    if not isinstance(payload, (list, tuple)):
         return ()
     entries: list[MergeTrainDryRunQueueEntrySummary] = []
     for item in payload:
@@ -902,7 +919,7 @@ def _int_field(payload: dict[str, object], key: str) -> int:
 
 def _string_tuple_field(payload: dict[str, object], key: str) -> tuple[str, ...]:
     value = payload.get(key)
-    if not isinstance(value, list | tuple):
+    if not isinstance(value, (list, tuple)):
         return ()
     return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
 
