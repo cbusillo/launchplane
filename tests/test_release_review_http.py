@@ -11,7 +11,7 @@ from control_plane.contracts.artifact_identity import ArtifactAddonSource
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.release_review import build_release_review
-from control_plane.release_review_record import publish_release_decision
+from control_plane.release_review_record import _decision_effect, publish_release_decision
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -166,6 +166,69 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             saved.release_issue_url,
         )
         self.assertTrue(response.json()["review"]["approved"])
+
+    async def test_publication_describes_the_saved_release_action(self) -> None:
+        from tests.test_release_review_record import FakeReleaseIssues
+
+        github = FakeReleaseIssues()
+        cases = (
+            ("held", "accepted", ""),
+            ("promote", "accepted", "promote"),
+            (
+                "promote_with_rollback_drill",
+                "accepted",
+                "promote_with_rollback_drill",
+            ),
+            ("promote", "overridden", ""),
+            ("promote", "changes_requested", ""),
+        )
+        effects: list[str] = []
+        with (
+            patch(
+                "control_plane.http_app.publish_release_decision", wraps=publish_release_decision
+            ),
+            patch(
+                "control_plane.release_review_record.resolve_launchplane_github_token",
+                return_value="test-token",
+            ),
+            patch(
+                "control_plane.release_review_record.github_api_request", side_effect=github.request
+            ),
+        ):
+            for mode, outcome, start in cases:
+                with self.subTest(mode=mode, outcome=outcome):
+                    self.store.write_product_profile_record(
+                        profile().model_copy(update={"release_on_acceptance": mode})
+                    )
+                    response = await self.post(
+                        actor="operator" if outcome == "overridden" else "site-owner",
+                        github_id=9003 if outcome == "overridden" else 9001,
+                        outcome=outcome,
+                        reason="Prices need review." if outcome != "accepted" else "",
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    saved = self.store.list_release_review_decision_records(product="example-site")[
+                        0
+                    ]
+                    self.assertEqual(saved.release_start, start)
+                    issue = github.issues[-1]
+                    self.assertEqual(
+                        saved.release_issue_url,
+                        f"https://github.com/example/site/issues/{issue['number']}",
+                    )
+                    # Read the body submitted to publication, not a separate rendering.
+                    body = str(issue["body"])
+                    effect = _decision_effect(saved)
+                    self.assertIn(effect, body)
+                    # A universal description must not erase distinct recorded actions.
+                    self.assertNotIn(effect, effects)
+                    effects.append(effect)
+                    self.assertIn(saved.record_id, body)
+                    self.assertIn(saved.checklist_digest, body)
+                    self.assertEqual(
+                        response.json()["review"]["latest_decision"]["record_id"], saved.record_id
+                    )
+        self.assertEqual(self.store.list_deployment_records(), ())
 
     async def test_client_can_accept_again_after_a_stopped_release(self) -> None:
         from control_plane.client_release import ClientReleaseRunView
