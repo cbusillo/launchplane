@@ -281,6 +281,7 @@ class PublicIngressMonitorTarget:
     tls_stale_after: str = ""
     tls_provider_evidence: dict[str, str] | None = None
     deploy_fence: LaunchplaneIdempotencyRecord | None = None
+    preview_fence: bool = False
     testing_replacement: OdooStableTargetReplacementOperationRecord | None = None
 
 
@@ -428,6 +429,40 @@ def discover_public_ingress_monitor_targets(
                         testing_replacement=replacement,
                     )
                 )
+    from control_plane.preview_reservation_recovery import held_preview_reservations
+
+    for profile in product_profiles:
+        holds = held_preview_reservations(record_store, product=profile.product, limit=1001)
+        by_instance = {"preview-" + record.record_id: record for record in holds}
+        # Keep a probe after settlement long enough to resolve its existing incident.
+        instances = set(by_instance) | {
+            instance
+            for product, context, instance in open_deploy_fence_lanes
+            if product == profile.product and instance.startswith("preview-mutation-reservation-")
+        }
+        for instance in sorted(instances):
+            targets.append(
+                PublicIngressMonitorTarget(
+                    product=profile.product,
+                    repository=profile.repository,
+                    driver_id=profile.driver_id,
+                    context=profile.preview.context,
+                    instance=instance,
+                    base_url="",
+                    health_url="",
+                    check_name=DEPLOY_FENCE_CHECK_NAME,
+                    check_kind="provider",
+                    profile_sha256=product_profile_record_sha256(profile),
+                    monitoring_intent="prelaunch",
+                    incident_eligible=True,
+                    expected_runtime_identity=None,
+                    require_runtime_identity=False,
+                    provider=DEPLOY_FENCE_PROVIDER,
+                    provider_check=DEPLOY_FENCE_CHECK_NAME,
+                    deploy_fence=by_instance.get(instance),
+                    preview_fence=True,
+                )
+            )
     return tuple(targets)
 
 
@@ -2652,6 +2687,18 @@ def _check_deploy_fence(
             url=url,
             status="pass",
             summary="No unresolved deploy is holding this target.",
+        )
+    if target.preview_fence:
+        return PublicIngressTargetObservation(
+            target="provider",
+            url=url,
+            status="fail",
+            failure_code="deploy_fence_held",
+            summary=(
+                f"Preview reservation {fence.record_id} remains held ({fence.state}, attempt "
+                f"{fence.attempt}, since {fence.created_at}). Use the product preview-reservations "
+                "classification read and original-intent recovery; missing proof keeps the fence."
+            ),
         )
     phase = fence.provider_effect_phase or "no provider effect"
     return PublicIngressTargetObservation(

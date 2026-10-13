@@ -911,11 +911,20 @@ def odoo_preview_supersession_is_quiescent(
     control_plane_root_path: Path,
     request: OdooPreviewApplyEnvelope,
     database_url: str | None,
+    schedule_binding: object = None,
 ) -> bool:
+    from control_plane.dokploy.post_deploy import ComposeDataWorkflowBinding
+
+    binding = (
+        ComposeDataWorkflowBinding.model_validate(schedule_binding)
+        if schedule_binding is not None
+        else None
+    )
     return odoo_preview_target_is_quiescent(
         control_plane_root=control_plane_root_path,
         request=request.apply,
         database_url=database_url,
+        schedule_binding=binding,
     )
 
 

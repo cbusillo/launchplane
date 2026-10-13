@@ -41,6 +41,7 @@ from tests.test_odoo_import_override_reconciliation import (
     override_record as _import_override_record,
     runtime_record as _import_runtime_record,
 )
+from tests import test_preview_reservation_recovery as preview_reservation_tests
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from tests.test_odoo_addon_settings_override import _existing_record as _addon_override_record
@@ -9859,3 +9860,12 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 store.list_product_reconcile_requests(product="site")[0].state, "pending"
             )
+
+
+class RealPostgresPreviewReservationRecoveryTests(
+    preview_reservation_tests.PreviewReservationRecoveryTests
+):
+    """Run original-intent/exclusion/settlement and visibility contracts on PostgreSQL."""
+
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())

@@ -102,6 +102,51 @@ class OdooPreviewProviderMutationAdapter:
             if issued_plan.operation == "refresh"
             else None
         )
+        self.execution_check: Callable[[], None] = lambda: None
+        self.schedule_binding: dict[str, object] | None = None
+
+    def capture_schedule_binding(self) -> None:
+        from control_plane.dokploy import post_deploy, source
+
+        plan = self._apply_request.apply.dry_run_plan
+        target_id = plan.compose_ref
+        if target_id.startswith("${created."):
+            target_id = plan.template_compose_id
+        if not target_id:
+            return
+        try:
+            host, token = source.read_dokploy_config(
+                control_plane_root=self._control_plane_root, database_url=self._database_url
+            )
+            binding = post_deploy.compose_data_workflow_binding(
+                host=host,
+                token=token,
+                target_definition=source.DokployTargetDefinition(
+                    context=plan.product,
+                    instance=plan.preview_slug,
+                    target_id=target_id,
+                    target_name=plan.compose_name,
+                ),
+            )
+        except (FileNotFoundError, ValueError, click.ClickException):
+            # Missing read evidence is retained as missing, never synthesized.
+            return
+        self.schedule_binding = binding.model_dump(mode="json")
+
+    def original_intent(self) -> dict[str, object]:
+        # The HTTP service resolves environment values from managed records;
+        # caller values are ignored and must never become plaintext recovery data.
+        retained_request = self._apply_request.model_copy(
+            update={
+                "apply": self._apply_request.apply.model_copy(update={"environment_values": {}})
+            }
+        )
+        return {
+            "product": self._profile.product,
+            "issued_plan": self._issued_plan.model_dump(mode="json"),
+            "apply_request": retained_request.model_dump(mode="json"),
+            **({"schedule_binding": self.schedule_binding} if self.schedule_binding else {}),
+        }
 
     def reconciliation_key(self) -> str:
         plan = self._apply_request.apply.dry_run_plan
@@ -150,6 +195,7 @@ class OdooPreviewProviderMutationAdapter:
         reconciliation_key: str,
     ) -> ProviderObservation:
         del reconciliation_key
+        self.execution_check()
         observation_outcome, driver_result, retry_safe = self._observe_apply(
             control_plane_root_path=self._control_plane_root,
             profile=self._profile,
@@ -163,6 +209,7 @@ class OdooPreviewProviderMutationAdapter:
                 outcome=cast(ProviderObservationOutcome, observation_outcome),
                 retry_safe=retry_safe,
             )
+        self.execution_check()
         driver_result.pop("provider_effect_attempted", None)
         response_status_code = 202
         records: dict[str, object] = {}
@@ -184,11 +231,17 @@ class OdooPreviewProviderMutationAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        self.execution_check()
         if self._pre_mutation_guard is not None:
             try:
                 self._pre_mutation_guard()
             except Exception as error:
                 raise ProviderMutationRejectedError(error) from error
+
+        def checkpoint_effect(phase: str) -> None:
+            self.execution_check()
+            lease.checkpoint_effect(phase)
+
         try:
             driver_result = self._execute_apply(
                 control_plane_root_path=self._control_plane_root,
@@ -198,7 +251,7 @@ class OdooPreviewProviderMutationAdapter:
                 issued_plan=self._issued_plan,
                 database_url=self._database_url,
                 provider_operation_title=provider_operation_title(provider_operation_key),
-                provider_effect_checkpoint=lease.checkpoint_effect,
+                provider_effect_checkpoint=checkpoint_effect,
                 provider_lease_check=lease.assert_current,
                 deployment_record_id=self._deployment_record_id,
                 runtime_identity=self._runtime_identity,
@@ -290,6 +343,41 @@ class OdooPreviewApplyOperation:
     def run(
         self, store: DurableProviderOperationStore, *, allow_mutation: bool = True
     ) -> DurableProviderOperationResult:
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        if not isinstance(store, PostgresRecordStore):
+            raise ValueError("Odoo preview execution requires database storage.")
+        existing = store.read_idempotency_record(
+            scope=self.reservation_scope,
+            route_path=self.route_path,
+            idempotency_key=self.idempotency_key,
+        )
+        retained_intent = (
+            store.read_original_mutation_intent(existing) if existing is not None else {}
+        )
+        if existing is not None and existing.state != "completed" and not retained_intent:
+            return DurableProviderOperationResult("reconcile_required", existing, 409, {})
+        with store.testing_replacement_execution_lock(
+            preview_execution_lock_name(self.adapter.target_key())
+        ) as check:
+            if check is None:
+                return DurableProviderOperationResult("in_progress", None, 409, {})
+            check()
+            if existing is None:
+                self.adapter.capture_schedule_binding()
+            elif isinstance(retained_intent.get("schedule_binding"), dict):
+                self.adapter.schedule_binding = retained_intent["schedule_binding"]
+            return self.run_excluded(store, allow_mutation=allow_mutation, check=check)
+
+    def run_excluded(
+        self,
+        store: DurableProviderOperationStore,
+        *,
+        allow_mutation: bool,
+        check: Callable[[], None],
+    ) -> DurableProviderOperationResult:
+        check()
+        self.adapter.execution_check = check
         return run_durable_provider_operation(
             store=store,
             scope=self.reservation_scope,
@@ -301,7 +389,12 @@ class OdooPreviewApplyOperation:
             adapter=self.adapter,
             target_supersession=self.target_supersession,
             allow_mutation=allow_mutation,
+            original_intent=self.adapter.original_intent(),
         )
+
+
+def preview_execution_lock_name(target_key: str) -> str:
+    return f"preview:{target_key}"
 
 
 def prepare_odoo_preview_apply_operation(
@@ -360,12 +453,17 @@ def prepare_odoo_preview_apply_operation(
             },
         ),
         minimum_expired_seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
-        quiescence_check=lambda _reservation: supersession_is_quiescent(
-            control_plane_root_path=control_plane_root,
+        quiescence_check=lambda reservation: _original_supersession_is_quiescent(
+            reservation=reservation,
+            profile=profile,
             request=apply_request,
-            database_url=getattr(record_store, "database_url", None),
+            root=control_plane_root,
+            database_url=database_url,
+            check=supersession_is_quiescent,
+            store=record_store,
         ),
     )
+
     return OdooPreviewApplyOperation(
         reservation_scope=reservation_scope,
         idempotency_key=idempotency_key,
@@ -373,6 +471,60 @@ def prepare_odoo_preview_apply_operation(
         trace_id=trace_id,
         adapter=adapter,
         target_supersession=target_supersession,
+    )
+
+
+def _original_supersession_is_quiescent(
+    *,
+    reservation: object,
+    profile: LaunchplaneProductProfileRecord,
+    request: OdooPreviewApplyEnvelope,
+    root: Path,
+    database_url: str | None,
+    check: OdooPreviewSupersessionQuiescenceCheck,
+    store: object,
+) -> bool:
+    from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+    from control_plane.preview_reservation_recovery import original_preview_intent
+
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if not isinstance(reservation, LaunchplaneIdempotencyRecord) or not isinstance(
+        store, PostgresRecordStore
+    ):
+        return False
+    try:
+        original = original_preview_intent(reservation, profile=profile, store=store)
+    except ValueError:
+        return False
+    if (
+        original.apply_request.apply.dry_run_plan.compose_ref
+        != request.apply.dry_run_plan.compose_ref
+    ):
+        old_plan = original.apply_request.apply.dry_run_plan
+        new_plan = request.apply.dry_run_plan
+        if (
+            not old_plan.compose_ref.startswith("${created.")
+            or old_plan.environment_id != new_plan.environment_id
+        ):
+            return False
+        from control_plane.workflows.odoo_preview_runtime import resolve_original_preview_compose_id
+
+        try:
+            resolved_id = resolve_original_preview_compose_id(
+                control_plane_root=root,
+                request=original.apply_request.apply,
+                database_url=database_url,
+            )
+        except (ValueError, click.ClickException):
+            return False
+        if not resolved_id or resolved_id != new_plan.compose_ref:
+            return False
+    return check(
+        control_plane_root_path=root,
+        request=original.apply_request,
+        database_url=database_url,
+        schedule_binding=store.read_original_mutation_intent(reservation).get("schedule_binding"),
     )
 
 

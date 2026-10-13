@@ -4292,3 +4292,53 @@ republished. Only after these receipts and
 remaining-consumer checks should Chris disable the confirmed obsolete service
 `GITHUB_TOKEN` records through the controls above and revoke the old PAT. Other-token migrations keep their
 separate issue scopes; the hold on the shared Odoo Docker token still applies.
+
+### Held Odoo preview reservations
+
+`GET /v1/products/{product}/preview-reservations?limit=100` is a database-only,
+bounded read under the product's existing `preview.read` authority. It lists
+held reservations even when a PR disappeared, the current preview is destroyed,
+or reconcile `last_plan` was overwritten. Each entry returns an opaque
+reservation id and snapshot-bound recovery reference, state/attempt, original
+plan/action/binding availability, and the next supported action. It returns no
+provider coordinates, operation keys, issued plans or request bodies. A
+truncated result is incomplete coverage; the read never acquires, renews,
+transitions or settles a reservation.
+
+New Odoo preview applies retain their service-issued plan and validated request
+in a private companion receipt committed atomically with the reservation, plus
+the original server-side data-schedule
+binding when the provider read can establish it. This is the original-intent
+source; mutable reconcile plans are not recovery authority. The receipt uses
+the existing completed idempotency envelope, keeping strict reservation payloads
+readable by older images during overlap or rollback and adding no held fence.
+Execution and
+recovery share a target execution lock. The periodic reconcile sweep includes
+retained original PR anchors independently of current desired previews; the
+report-only lifecycle sweep lists reservation residue and reports unresolved
+holds. A cleanup apply refuses before discovery or effects while holds exist;
+it does not turn a saved cleanup plan into recovery authority.
+
+Recovery observes that exact original intent before fresh PR/target discovery.
+It requires executor exclusion, the expired 15-minute recovery grace, complete
+terminal deployment and data-schedule history, unchanged original target and
+product authority, and exact-reservation compare-and-swap. Observation cannot
+dispatch provider effects. A different-key operation can supersede only through
+the existing guarded supersession with that original target proof and a fresh
+service-issued plan. Missing/ambiguous legacy intent, unknown deployments,
+incomplete schedule history, changed coordinates, an active executor/lease or
+stale snapshots retain the fence and report refusal. A removed compose alone is
+not quiescence proof: its retained server schedule binding is still checked.
+Created composes are resolved only from complete inventory matching the retained
+original environment and compose name, never reconstructed history.
+
+The existing provider-fence monitor also watches Odoo preview reservations,
+including reservation-only legacy residue. Its incident uses the opaque
+reservation id, never private keys/target coordinates, and routes through
+existing matching notification policies and the Discord outbox. It resolves
+after supported settlement; monitoring itself never clears a hold. Separately,
+a typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
+reporter and manual break-glass link. It explicitly reports zero replacement
+dispatch; the rollback dispatch classifier still treats that refusal as
+pre-effect. Installation and later live settlement remain separate proof from
+source tests or a merge.

@@ -5,9 +5,10 @@ import shlex
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Literal, TypeVar, cast
 
 import click
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from control_plane.contracts.odoo_online_backup import OdooProdBackupCaptureEvidence
@@ -2287,39 +2288,103 @@ def _resolve_dokploy_schedule_runtime(
     return "dokploy-server", user_id, compose_app_name, None
 
 
-def compose_data_workflow_is_quiescent(
+class ComposeDataWorkflowBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schedule_type: Literal["server", "dokploy-server"]
+    lookup_id: str = Field(min_length=1)
+    app_name: str = Field(min_length=1)
+
+
+def compose_data_workflow_binding(
     *,
     host: str,
     token: str,
     target_definition: DokployTargetDefinition,
-) -> bool:
+) -> ComposeDataWorkflowBinding:
     target_payload = api.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type="compose",
         target_id=target_definition.target_id,
     )
-    schedule_type, schedule_lookup_id, _compose_app_name, _schedule_server_id = (
-        _resolve_dokploy_schedule_runtime(
-            host=host,
-            token=token,
-            compose_id=target_definition.target_id,
-            compose_name=target_definition.target_name,
-            target_payload=target_payload,
-        )
-    )
-    schedule = api.find_matching_dokploy_schedule(
+    schedule_type, schedule_lookup_id, _, _ = _resolve_dokploy_schedule_runtime(
         host=host,
         token=token,
-        target_id=schedule_lookup_id,
-        schedule_type=schedule_type,
-        schedule_name=DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME,
+        compose_id=target_definition.target_id,
+        compose_name=target_definition.target_name,
+        target_payload=target_payload,
+    )
+    return ComposeDataWorkflowBinding(
+        schedule_type=cast(Literal["server", "dokploy-server"], schedule_type),
+        lookup_id=schedule_lookup_id,
         app_name=_build_dokploy_data_workflow_schedule_app_name(
             context_name=target_definition.context,
             instance_name=target_definition.instance,
         ),
     )
-    return not _has_running_schedule_deployment(schedule)
+
+
+def bound_data_workflow_is_quiescent(
+    *,
+    host: str,
+    token: str,
+    binding: ComposeDataWorkflowBinding,
+) -> bool:
+    schedules = api.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/schedule.list",
+        query={"id": binding.lookup_id, "scheduleType": binding.schedule_type},
+    )
+    if isinstance(schedules, dict):
+        wrappers = [
+            schedules[key] for key in ("data", "schedules", "items", "result") if key in schedules
+        ]
+        if len(wrappers) != 1:
+            return False
+        schedules = wrappers[0]
+    if not isinstance(schedules, list) or any(not isinstance(item, dict) for item in schedules):
+        return False
+    terminal = (
+        DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
+        | DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
+        | {"error", "failed", "fail"}
+    )
+    for schedule in schedules:
+        if (
+            not isinstance(schedule, dict)
+            or not schedule.get("appName")
+            or not schedule.get("name")
+        ):
+            return False
+        if schedule["appName"] != binding.app_name:
+            continue
+        deployments = schedule.get("deployments")
+        if not isinstance(deployments, list):
+            return False
+        history = api.parse_deployment_history(deployments)
+        if history.state == "unknown" or any(
+            api.deployment_status(deployment) not in terminal
+            for deployment in api.collect_dokploy_object_items(deployments)
+        ):
+            return False
+    return True
+
+
+def compose_data_workflow_is_quiescent(
+    *,
+    host: str,
+    token: str,
+    target_definition: DokployTargetDefinition,
+) -> bool:
+    return bound_data_workflow_is_quiescent(
+        host=host,
+        token=token,
+        binding=compose_data_workflow_binding(
+            host=host, token=token, target_definition=target_definition
+        ),
+    )
 
 
 def _build_dokploy_data_workflow_script(

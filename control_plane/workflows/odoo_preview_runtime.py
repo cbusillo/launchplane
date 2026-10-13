@@ -1402,44 +1402,151 @@ def odoo_preview_target_is_quiescent(
     control_plane_root: Path,
     request: OdooPreviewDokployApplyRequest,
     database_url: str | None,
+    schedule_binding: dokploy_post_deploy.ComposeDataWorkflowBinding | None = None,
 ) -> bool:
     plan = request.dry_run_plan
-    if not plan.compose_ref or plan.compose_ref.startswith("${created."):
+    if not plan.compose_ref:
         return False
     try:
         host, token = dokploy_source.read_dokploy_config(
             control_plane_root=control_plane_root,
             database_url=database_url,
         )
-        if not _compose_exists_by_id(
+        compose_id = plan.compose_ref
+        if compose_id.startswith("${created."):
+            compose_id = _original_compose_id_from_complete_inventory(
+                host=host,
+                token=token,
+                environment_id=plan.environment_id,
+                compose_name=plan.compose_name,
+            )
+        if not compose_id or not _compose_exists_by_id(
             host=host,
             token=token,
-            compose_id=plan.compose_ref,
+            compose_id=compose_id,
         ):
-            return True
+            # Removed composes still have server-side schedule history. Only the
+            # original retained binding can prove those jobs quiescent.
+            return (
+                schedule_binding is not None
+                and dokploy_post_deploy.bound_data_workflow_is_quiescent(
+                    host=host,
+                    token=token,
+                    binding=schedule_binding,
+                )
+            )
         if any(
             dokploy_api.deployment_status(deployment)
-            in dokploy_post_deploy.DOKPLOY_RUNNING_DEPLOYMENT_STATUSES
+            not in (
+                dokploy_post_deploy.DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
+                | dokploy_post_deploy.DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
+                | {"error", "failed", "fail"}
+            )
             for deployment in dokploy_api.list_deployments_for_target(
                 host=host,
                 token=token,
                 target_type="compose",
-                target_id=plan.compose_ref,
+                target_id=compose_id,
+                require_complete=True,
             )
         ):
             return False
+        if schedule_binding is not None:
+            current_binding = dokploy_post_deploy.compose_data_workflow_binding(
+                host=host,
+                token=token,
+                target_definition=dokploy_source.DokployTargetDefinition(
+                    context=plan.product,
+                    instance=plan.preview_slug,
+                    target_id=compose_id,
+                    target_name=plan.compose_name,
+                ),
+            )
+            return (
+                current_binding == schedule_binding
+                and dokploy_post_deploy.bound_data_workflow_is_quiescent(
+                    host=host,
+                    token=token,
+                    binding=schedule_binding,
+                )
+            )
         return dokploy_post_deploy.compose_data_workflow_is_quiescent(
             host=host,
             token=token,
             target_definition=dokploy_source.DokployTargetDefinition(
                 context=plan.product,
                 instance=plan.preview_slug,
-                target_id=plan.compose_ref,
+                target_id=compose_id,
                 target_name=plan.compose_name,
             ),
         )
     except click.ClickException:
         return False
+
+
+def resolve_original_preview_compose_id(
+    *,
+    control_plane_root: Path,
+    request: OdooPreviewDokployApplyRequest,
+    database_url: str | None,
+) -> str:
+    plan = request.dry_run_plan
+    if not plan.compose_ref.startswith("${created."):
+        return plan.compose_ref
+    host, token = dokploy_source.read_dokploy_config(
+        control_plane_root=control_plane_root,
+        database_url=database_url,
+    )
+    return _original_compose_id_from_complete_inventory(
+        host=host,
+        token=token,
+        environment_id=plan.environment_id,
+        compose_name=plan.compose_name,
+    )
+
+
+def _original_compose_id_from_complete_inventory(
+    *,
+    host: str,
+    token: str,
+    environment_id: str,
+    compose_name: str,
+) -> str:
+    if not environment_id:
+        raise click.ClickException("Original preview environment binding is unavailable.")
+    projects = dokploy_api.dokploy_request(host=host, token=token, path="/api/project.all")
+    if not isinstance(projects, list):
+        raise click.ClickException("Original preview inventory is incomplete.")
+    matches: list[str] = []
+    for project in projects:
+        if not isinstance(project, dict):
+            raise click.ClickException("Original preview inventory is incomplete.")
+        environments = project.get("environments")
+        if not isinstance(environments, list):
+            raise click.ClickException("Original preview inventory is incomplete.")
+        for environment in environments:
+            if not isinstance(environment, dict) or not environment.get("environmentId"):
+                raise click.ClickException("Original preview inventory is incomplete.")
+            if environment["environmentId"] != environment_id:
+                continue
+            collections = [
+                environment[key] for key in ("compose", "composes") if key in environment
+            ]
+            composes = collections[0] if len(collections) == 1 else None
+            if not isinstance(composes, list):
+                raise click.ClickException("Original preview compose inventory is incomplete.")
+            for compose in composes:
+                if (
+                    not isinstance(compose, dict)
+                    or not compose.get("name")
+                    or not compose.get("composeId")
+                ):
+                    raise click.ClickException("Original preview compose inventory is incomplete.")
+                if compose["name"] == compose_name:
+                    matches.append(str(compose["composeId"]))
+    if len(matches) > 1:
+        raise click.ClickException("Original preview compose binding is ambiguous.")
+    return matches[0] if matches else ""
 
 
 def _missing_endpoint_paths(*, request: OdooPreviewDokployDryRunRequest) -> tuple[str, ...]:
