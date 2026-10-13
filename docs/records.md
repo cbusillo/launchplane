@@ -2410,9 +2410,13 @@ run` is the foreground loop intended for an external process supervisor, and
   origin's rendered page with the public URL. Backup restore and verification
   replay use the same public canonical expectation after post-deploy, without
   changing their internal-origin or backup authority. Lanes without public
-  hosts retain their previous behavior; previews and the destructive restore
-  payload itself do not inherit this URL. Public URLs are ephemeral in website
-  rendering too, so clearing public hosts leaves no persisted public canonical.
+  hosts retain explicit base-URL overrides and website intent. When neither
+  supplies a URL, prod deploy/promotion renders the recorded origin into
+  `web.base.url`, including after public hosts are withdrawn. This fallback is
+  ephemeral and never selects a website or enables a disabled override phase.
+  Previews and the destructive restore payload itself do not inherit this URL.
+  Public URLs are ephemeral in website rendering too, so clearing public hosts
+  leaves no persisted public canonical.
 - Isolated Odoo previews inherit only `website_bootstrap` from the preview
   template instance when that record applies on deploy. Launchplane renders an
   ephemeral payload with the preview URL as `canonical_url`; it does not persist

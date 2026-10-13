@@ -332,11 +332,24 @@ def record_with_public_base_url(
     instance: str,
     public_hosts: tuple[str, ...],
     updated_at: str,
+    origin_base_url: str = "",
 ) -> OdooInstanceOverrideRecord | None:
-    """Derive an ephemeral payload; public_hosts remains the stored authority."""
+    """Render public authority or restore the prod origin without inventing a website."""
     base_url = resolve_public_base_url(instance=instance, public_hosts=public_hosts)
     if not base_url:
-        return record
+        if (
+            instance != "prod"
+            or not origin_base_url
+            or (
+                record is not None
+                and (
+                    record.website_bootstrap is not None
+                    or any(item.key == "web.base.url" for item in record.config_parameters)
+                )
+            )
+        ):
+            return record
+        base_url = origin_base_url.rstrip("/")
     parameter = OdooConfigParameterOverride(
         key="web.base.url", value=OdooOverrideValue(source="literal", value=base_url)
     )
