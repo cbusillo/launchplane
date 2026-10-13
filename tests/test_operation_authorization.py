@@ -13,6 +13,7 @@ from control_plane.contracts.operation_descriptor import OperationDescriptor
 from control_plane.drivers.native_routes import bind_native_fastapi_driver_handler
 from control_plane.drivers.registry import list_driver_descriptors
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.launchplane_github_delivery import DELIVERY_GITHUB_APP_ID_KEY
 from control_plane.operation_authorization import (
     OBSERVATION_AUTHZ_ACTION,
     bind_operation_handler,
@@ -255,7 +256,10 @@ class DeliveryObservationHttpTests(unittest.IsolatedAsyncioTestCase):
                     app, "GET", SERVICE_GITHUB_DELIVERY_ROUTE, headers=headers
                 )
                 self.assertEqual(response.status_code, 200, response.text)
-                self.assertEqual(response.json()["app_id"], "76")
+                expected_app_id = store.list_runtime_environment_records(
+                    scope="context", context_name="launchplane"
+                )[0].env[DELIVERY_GITHUB_APP_ID_KEY]
+                self.assertEqual(response.json()["app_id"], expected_app_id)
                 self.assertNotIn("encrypted_value", response.text)
                 self.assertNotIn("private_key_pem", response.text)
                 denied_write = await _asgi_request(
