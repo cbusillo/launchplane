@@ -444,7 +444,12 @@ def plan_product_onboarding_authority_bundle(
             preserved_targets.append(target)
         else:
             preserved_targets.append(
-                target.model_copy(update={"public_hosts": current_target.public_hosts})
+                target.model_copy(
+                    update={
+                        "public_hosts": current_target.public_hosts,
+                        "pending_public_host_effects": current_target.pending_public_host_effects,
+                    }
+                )
             )
     provider_targets = tuple(preserved_targets)
     provider_target_ids = build_provider_target_id_records(

@@ -11180,6 +11180,14 @@
             "title": "Instance",
             "type": "string"
           },
+          "pending_public_host_effects": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PublicHostEffect"
+            },
+            "title": "Pending Public Host Effects",
+            "type": "array"
+          },
           "policies": {
             "$ref": "#/components/schemas/DokployTargetPolicies"
           },
@@ -11268,6 +11276,7 @@
           "healthcheck_path",
           "healthcheck_timeout_seconds",
           "instance",
+          "pending_public_host_effects",
           "policies",
           "project_name",
           "public_hosts",
@@ -33944,6 +33953,44 @@
           "storage_id"
         ],
         "title": "ProxmoxStorageBackupDestinationReference",
+        "type": "object"
+      },
+      "PublicHostEffect": {
+        "additionalProperties": false,
+        "description": "Write-ahead addition and its provider identity, independent of config success.",
+        "properties": {
+          "domain_id": {
+            "default": "",
+            "title": "Domain Id",
+            "type": "string"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "provider_host": {
+            "title": "Provider Host",
+            "type": "string"
+          },
+          "runtime_port": {
+            "maximum": 65535,
+            "minimum": 1,
+            "title": "Runtime Port",
+            "type": "integer"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain_id",
+          "host",
+          "provider_host",
+          "runtime_port",
+          "target_id"
+        ],
+        "title": "PublicHostEffect",
         "type": "object"
       },
       "PublicPauseRecord": {
