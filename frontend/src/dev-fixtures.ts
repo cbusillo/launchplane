@@ -2867,6 +2867,7 @@ export function productReviewForFixture(
     pull_request_url: "https://github.com/example/control-plane/pull/308",
     preview_url: previewUrl,
     head_sha: previewUrl ? "a".repeat(40) : "",
+    preview_generation_id: previewUrl ? "fixture-review-generation" : "",
     owner_set: ownerSet,
     owner_github_login: ownerSet ? "example-owner" : "",
     viewer_is_owner: viewerIsOwner,
