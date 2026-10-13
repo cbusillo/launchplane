@@ -335,9 +335,10 @@ Each repository policy contains:
 - `enqueue_label`: Label required before a pull request can enter the train.
 - `blocked_label`: Label Launchplane applies when a queued pull request blocks.
 - `stack_child_disposition_label`: Label Launchplane applies to child PRs after
-  a same-repository stack has landed through its root PR. It must be configured
-  for stack child disposition and must differ from `enqueue_label` and
-  `blocked_label`.
+  a same-repository stack has landed through its root PR. When empty or omitted,
+  execution resolves the built-in `stack-landed` label. This is a use-time default,
+  not a schema default: stored policy values and historical digests remain
+  unchanged. The resolved label must differ from `enqueue_label` and `blocked_label`.
 - `merge_method`: GitHub merge strategy, one of `merge`, `squash`, or `rebase`.
 - `max_batch_size`: Optional cap on how many pull requests a new batch candidate
   takes, in queue order; the rest wait for the next candidate. Unset leaves
@@ -1394,8 +1395,18 @@ paths, or unchecked provider responses.
 
 Controller actions have these retry/stop semantics:
 
-- `plan_stack_collapse`: A same-repo linear stack was found and a collapse plan
-  is next. Dry-run may report. Mutate once, then call again.
+- `plan_stack_collapse`: A same-repo linear stack was found. Before persisting a
+  new collapse plan, the controller prepares its disposition label, creating it
+  if missing. A provider refusal returns `stack_disposition_preparation_failed`;
+  a label that conflicts with enqueue/block control returns
+  `stack_disposition_label_conflicts_with_train_label`. Neither starts stack
+  work or changes a stack PR, branch, collapse, candidate or landing record.
+  Dry-run never creates the label: if missing, it returns
+  `stack_disposition_label_creation_required`; a mutating pass can prepare it.
+  Saved collapse and landing recovery bypass this new-work preparation and use
+  the resolved label during disposition, retaining ordinary provider-error and
+  unknown-effect fences. Preparation verifies label availability, not future
+  provider uptime or child-head stability. Mutate once, then call again.
 - `execute_stack_collapse`: A stored planned or partially `collapsing` plan
   should be applied or resumed. Mutate once, then call again. Stop if the
   resulting plan is `blocked` or `stale`. Saved execution is selected from

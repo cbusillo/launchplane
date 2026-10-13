@@ -106,6 +106,7 @@ from control_plane.merge_train_original_review import (
 )
 from control_plane.merge_train_diagnostics import controller_last_result
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.merge_train_stack_disposition import resolve_stack_child_disposition_label
 from control_plane.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecordStore,
     stack_collapse_expected_root_head_sha,
@@ -782,62 +783,6 @@ def _resume_merge_train_controller_state(
             and lease.record.active_phase
         ):
             return None
-        if not repository_policy.stack_child_disposition_label:
-            landing_record_id = lease.record.step_payload.get("landing_plan_record_id")
-            landing = _merge_train_landing_record_by_id(
-                record_store=landing_store,
-                repository=request.repository,
-                base_branch=request.base_branch,
-                record_id=(
-                    landing_record_id
-                    if isinstance(landing_record_id, str) and landing_record_id
-                    else lease.record.active_record_id
-                ),
-            ) or latest_merge_train_batch_landing_plan_record(
-                record_store=landing_store,
-                repository=request.repository,
-                base_branch=request.base_branch,
-            )
-            if landing is not None and (
-                merge_train_policy_bindings_match(
-                    record_store=landing_store,
-                    policy_key=landing.landing_plan.policy_key,
-                    recorded_sha256=landing.landing_plan.policy_sha256,
-                    current_sha256=policy_sha256,
-                )
-            ):
-                completed = latest_completed_merge_train_batch_landing_plan_record(
-                    record_store=landing_store,
-                    repository=request.repository,
-                    base_branch=request.base_branch,
-                    batch_id=landing.landing_plan.batch_id,
-                    candidate_sha=landing.landing_plan.candidate_sha,
-                    policy_sha256=policy_sha256,
-                )
-                landing = completed or landing
-                if completed is not None:
-                    collapses = stack_collapse_records_for_completed_landing(
-                        record_store=stack_collapse_store,
-                        github_client=github_client,
-                        repository=request.repository,
-                        base_branch=request.base_branch,
-                        landing_plan=landing.landing_plan,
-                        policy_sha256=policy_sha256,
-                    )
-                else:
-                    collapse = latest_merge_train_stack_collapse_plan_record_for_landing(
-                        record_store=stack_collapse_store,
-                        repository=request.repository,
-                        base_branch=request.base_branch,
-                        landing_plan=landing.landing_plan,
-                        policy_sha256=policy_sha256,
-                    )
-                    collapses = (collapse,) if collapse is not None else ()
-                unfinished = tuple(r for r in collapses if r.plan.status != "ready_for_train")
-                if unfinished:
-                    return _stack_disposition_configuration_block(
-                        landing_record=landing, collapse_records=unfinished
-                    )
         return {
             "repository": request.repository,
             "base_branch": request.base_branch,
@@ -1371,10 +1316,6 @@ def _advance_active_landing_record(
             )
         except ValueError as error:
             raise MergeTrainControllerRequestError(str(error)) from error
-        if not repository_policy.stack_child_disposition_label:
-            return _stack_disposition_configuration_block(
-                landing_record=active_landing_record, collapse_records=(collapse_record,)
-            )
     candidate_record = _candidate_record_for_landing_plan(
         record_store=candidate_store,
         landing_plan_record=active_landing_record,
@@ -1984,42 +1925,6 @@ def _finish_retired_policy_landing(
     }
 
 
-def _stack_disposition_configuration_block(
-    *,
-    landing_record: MergeTrainBatchLandingPlanRecord,
-    collapse_records: tuple[MergeTrainStackCollapsePlanRecord, ...],
-) -> dict[str, object]:
-    plan = landing_record.landing_plan
-    reason = (
-        "completed_landing_stack_disposition_not_configured"
-        if _landing_cleanup_allowed(landing_record)
-        else "landing_stack_disposition_not_configured"
-    )
-    return {
-        "repository": plan.repository,
-        "base_branch": plan.base_branch,
-        "mode": "blocked",
-        "controller_action": "block",
-        "reason_code": reason,
-        "controller_reconciliation_status": "required",
-        "reconciliation_detail": reason,
-        "merge_train_batch_landing_plan_record_id": landing_record.record_id,
-        "blocking_reason": {
-            "code": reason,
-            "message": (
-                "Current policy has no stack child disposition label. "
-                "Submit a managed merge-train policy proposal for this target, obtain "
-                "Director approval, then retry the normal controller under the installed policy."
-            ),
-        },
-        "details": {
-            "policy_key": plan.policy_key,
-            "recovery_action": "privileged-policy-propose",
-            "stack_collapse_plan_record_ids": [record.record_id for record in collapse_records],
-        },
-    }
-
-
 def _finish_landed_merge_train_batch(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -2080,11 +1985,6 @@ def _finish_landed_merge_train_batch(
     if landed_record.ordinary_job_binding is not None and collapse_records:
         raise MergeTrainControllerRequestError(
             "ordinary merge train landing does not support stack collapse"
-        )
-    unfinished = tuple(r for r in collapse_records if r.plan.status != "ready_for_train")
-    if unfinished and not repository_policy.stack_child_disposition_label:
-        return _stack_disposition_configuration_block(
-            landing_record=landed_record, collapse_records=unfinished
         )
     lease.checkpoint(
         active_action="land_batch",
@@ -2240,10 +2140,6 @@ def _reconcile_completed_landing_after_policy_change(
     unfinished = tuple(
         record for record in collapse_records if record.plan.status != "ready_for_train"
     )
-    if unfinished and not repository_policy.stack_child_disposition_label:
-        return _stack_disposition_configuration_block(
-            landing_record=landed_record, collapse_records=unfinished
-        )
     # Historical plans are evidence of an already-landed effect, never authority
     # for another collapse or merge. Verify every child before any provider write.
     verified_records = []
@@ -2416,7 +2312,7 @@ def _annotate_historical_closed_stack_children(
                 )
             ):
                 continue
-            label = repository_policy.stack_child_disposition_label
+            label = resolve_stack_child_disposition_label(repository_policy)
             body = (
                 f"Launchplane verified this already-closed stacked PR's head "
                 f"`{child.expected_head_sha}` in root PR #{root.pull_request_number}, "
@@ -2541,7 +2437,7 @@ def _reconcile_landed_stack_children(
         disposition_client=github_client,
         effect_executor=github_client.semantic_effect_executor,
         root_merge_commit_sha=root_entry.merge_commit_sha,
-        label=repository_policy.stack_child_disposition_label,
+        label=resolve_stack_child_disposition_label(repository_policy),
         updated_at=recorded_at,
         checkpoint=checkpoint_child_disposition,
     )
@@ -4258,6 +4154,45 @@ def _apply_queue_block(
     return result
 
 
+def _prepare_new_stack_disposition(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    repository_policy: MergeTrainRepositoryPolicy,
+    github_client: GitHubMergeTrainClient,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object] | None:
+    # Only fresh discovery calls this. Saved collapse/landing recovery must keep
+    # its existing route even if preparation is temporarily unavailable.
+    reason = "stack_disposition_label_conflicts_with_train_label"
+    try:
+        label = resolve_stack_child_disposition_label(repository_policy)
+        reason = "stack_disposition_preparation_failed"
+        if request.mutate:
+            lease.checkpoint(
+                active_action=MERGE_TRAIN_CONTROLLER_ACTIVE_ACTION,
+                active_phase="prepare_stack_child_disposition",
+            )
+        if github_client.ensure_repository_label(
+            repository=request.repository, label=label, mutate=request.mutate
+        ):
+            return None
+        reason = "stack_disposition_label_creation_required"
+        message = "The disposition label is missing; a mutating pass prepares it before stack work."
+    except ValueError as error:
+        message = str(error)
+    except MergeTrainGitHubError:
+        message = "The provider could not prepare the stack child disposition label; no stack work started."
+    return {
+        "repository": request.repository,
+        "base_branch": request.base_branch,
+        "mode": "blocked",
+        "controller_action": "block",
+        "reason_code": reason,
+        "blocking_reason": {"code": reason, "message": message},
+        "details": {"prerequisite": "stack_child_disposition_label"},
+    }
+
+
 def _advance_from_live_snapshot(
     *,
     request: MergeTrainControllerRunOnceEnvelope,
@@ -4386,6 +4321,17 @@ def _advance_from_live_snapshot(
     else:
         stack_discovery = None
     if stack_discovery is not None and stack_discovery.status == "ready_for_collapse":
+        preparation_block = _prepare_new_stack_disposition(
+            request=request,
+            repository_policy=policy.find_repository_policy(
+                repository=request.repository, base_branch=request.base_branch
+            ),
+            github_client=github_client,
+            lease=lease,
+        )
+        if preparation_block is not None:
+            preparation_block["stack_discovery"] = stack_discovery.model_dump(mode="json")
+            return preparation_block
         controller_action = "plan_stack_collapse"
         stack_collapse_plan = build_merge_train_stack_collapse_plan(
             discovery_result=stack_discovery,

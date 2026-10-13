@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 import base64
 import hashlib
 import json
@@ -1181,6 +1182,7 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             hashlib.sha256(policy_text.encode("utf-8")).hexdigest(),
         )
 
+    @scoped_agent_test
     async def test_authz_policy_administrator_cannot_read_runtime_contract(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
@@ -1583,6 +1585,7 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "operation_record_storage_required")
 
+    @scoped_agent_test
     async def test_worker_status_requires_service_read_authz(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -1600,6 +1603,7 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
+    @scoped_agent_test
     async def test_verireel_worker_status_requires_service_read_authz(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),

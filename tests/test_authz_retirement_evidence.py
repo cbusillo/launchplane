@@ -1,4 +1,6 @@
 from __future__ import annotations
+from tests.support.auth import scoped_agent_test
+
 
 import json
 from pathlib import Path
@@ -582,6 +584,7 @@ class RetirementEvidenceHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(response.status_code, 403, response.text)
             self.assertEqual(sessions.read_session(session_id), before)
 
+    @scoped_agent_test
     async def test_missing_database_and_active_policy_fail_closed(self) -> None:
         record = _record(policy=_operator_read_policy())
         with TemporaryDirectory() as directory:

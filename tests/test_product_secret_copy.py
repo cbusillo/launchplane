@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 import os
 import json
 import subprocess
@@ -252,6 +253,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202, response.text)
         self.assertNotIn("source-only-test-token", response.text)
 
+    @scoped_agent_test
     async def test_environment_read_on_another_product_neither_lists_nor_copies(self) -> None:
         app = self._environment_read_app(products=("other-site",))
         response = await _asgi_request(
@@ -574,6 +576,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             "source-only-test-token",
         )
 
+    @scoped_agent_test
     async def test_metadata_filters_restricted_bindings_instead_of_blocking_copy_discovery(
         self,
     ) -> None:

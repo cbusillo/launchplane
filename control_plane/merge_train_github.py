@@ -2250,6 +2250,42 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             raise MergeAdmissionDeniedError("Batch PR retirement requires the service adapter.")
         close_batch_pull_request(client=self, candidate=candidate)
 
+    def ensure_repository_label(self, *, repository: str, label: str, mutate: bool = True) -> bool:
+        repository_path = _repository_path(repository)
+        normalized_label = _required_value(label, "GitHub label is required.")
+        label_path = f"/repos/{repository_path}/labels/{quote(normalized_label, safe='')}"
+        try:
+            self.transport.request(method="GET", path=label_path)
+            return True
+        except MergeTrainGitHubError as error:
+            if error.status_code != 404:
+                raise
+        if not mutate:
+            return False
+        if self._effect_executor is not None and not isinstance(
+            self._effect_executor, LegacyMergeTrainEffectExecutor
+        ):
+            raise MergeTrainGitHubError(
+                "Repository label preparation requires the service adapter."
+            )
+        self._create_repository_label(repository_path=repository_path, label=normalized_label)
+        return True
+
+    def _create_repository_label(self, *, repository_path: str, label: str) -> None:
+        try:
+            self.transport.request(
+                method="POST",
+                path=f"/repos/{repository_path}/labels",
+                body={"name": label, "color": "b60205"},
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code != 422:
+                raise
+            # Another controller may have created the label on a different base lane.
+            self.transport.request(
+                method="GET", path=f"/repos/{repository_path}/labels/{quote(label, safe='')}"
+            )
+
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
     ) -> None:
@@ -2274,17 +2310,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                     raise
             else:
                 raise error
-        try:
-            self.transport.request(
-                method="POST",
-                path=f"/repos/{repository_path}/labels",
-                body={"name": normalized_label, "color": "b60205"},
-            )
-        except MergeTrainGitHubError as error:
-            if error.status_code != 422:
-                raise
-            # Another controller may have created the label on a different base lane.
-            self.transport.request(method="GET", path=label_path)
+        self._create_repository_label(repository_path=repository_path, label=normalized_label)
         self.transport.request(
             method="POST",
             path=f"/repos/{repository_path}/issues/{pull_request_number}/labels",

@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -182,6 +183,7 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     store.close()
 
+    @scoped_agent_test
     async def test_read_denial_precedes_operation_lookup(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),

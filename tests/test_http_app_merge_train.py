@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 from datetime import datetime, timezone
 import asyncio
 import threading
@@ -229,6 +230,7 @@ class _StructuralDiagnosticAdmissionEvaluator:
 
 
 class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
+    @scoped_agent_test
     async def test_complete_policy_read_needs_read_authority_and_never_resolves_tokens(
         self,
     ) -> None:

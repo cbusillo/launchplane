@@ -802,6 +802,7 @@ from control_plane.service_auth import (
     LocalOperatorIdentity,
     TerminalAgentIdentity,
     configured_local_operator_identity,
+    director_agent_identity,
     configured_terminal_agent_identity,
     TokenVerifier,
     agent_authz_audit,
@@ -3974,6 +3975,10 @@ class LaunchplaneAuthzPolicyRuntime:
         self._aggregate_product_authorizer = aggregate_authorizer
 
     def read_role_products(self, *, identity: LaunchplaneIdentity, context: str) -> frozenset[str]:
+        # Collection callers use this to detect standing readers, then authorize
+        # each returned product. The Director has no hand-kept product catalog.
+        if director_agent_identity(identity):
+            return frozenset({"*"})
         rules = (
             self.policy.local_operators
             if isinstance(identity, LocalOperatorIdentity)
@@ -4050,6 +4055,8 @@ class LaunchplaneAuthzPolicyRuntime:
         )
         if explicit.decision == "allowed":
             return evaluate_policy()
+        if inherit_agent_read_role and director_agent_identity(identity):
+            return evaluate_policy(inherited=True)
         if (
             not inherit_agent_read_role
             or not agent_read_role_covers(action)
@@ -4513,6 +4520,21 @@ def create_launchplane_fastapi_app(
         target: AuthorizationTarget,
         record_store: object,
     ) -> AuthzEvaluation:
+        # A diagnostic principal is untrusted input. Bind it to the exact
+        # configured Director identity before applying the installed declaration.
+        for configured_identity in (
+            configured_local_operator_identity(bearer_identity_config or BearerIdentityConfig()),
+            configured_terminal_agent_identity(bearer_identity_config or BearerIdentityConfig()),
+        ):
+            if (
+                configured_identity is not None
+                and type(identity) is type(configured_identity)
+                and isinstance(identity, LocalOperatorIdentity | TerminalAgentIdentity)
+                and identity.subject == configured_identity.subject
+                and identity.token_label == configured_identity.token_label
+            ):
+                identity = configured_identity
+                break
         runtime = LaunchplaneAuthzPolicyRuntime(policy)
         runtime.configure_context_product_resolver(
             lambda selected_context: _lane_setup_context_owner(
@@ -5476,7 +5498,9 @@ def create_launchplane_fastapi_app(
                 code="database_storage_required",
                 message="Stored-record snapshots require database-backed storage.",
             )
-        explicit_service_reader = resolved_authz_policy_runtime.allows(
+        explicit_service_reader = director_agent_identity(
+            identity
+        ) or resolved_authz_policy_runtime.allows(
             identity=identity,
             action="launchplane_service.read",
             product="launchplane",
@@ -8616,7 +8640,11 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             denied_message=_TESTING_HOLD_DENIED_MESSAGE,
         )
-        if isinstance(identity, LocalOperatorIdentity) and not hold_request.hold:
+        if (
+            isinstance(identity, LocalOperatorIdentity)
+            and not hold_request.hold
+            and (hold_request.mode == "apply" or not director_agent_identity(identity))
+        ):
             # Lifting a hold requests a testing reconcile, which can deploy.
             raise _launchplane_http_error(
                 status_code=403,
@@ -16150,7 +16178,9 @@ def create_launchplane_fastapi_app(
                     " product/context."
                 ),
             )
-        if isinstance(identity, LocalOperatorIdentity):
+        if isinstance(identity, LocalOperatorIdentity) and (
+            product_config_request.mode == "apply" or not director_agent_identity(identity)
+        ):
             scope_refusal = _local_operator_product_config_scope_refusal(
                 record_store=record_store,
                 product_config_request=product_config_request,
@@ -19604,26 +19634,30 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Retirement evidence includes policy scopes outside this reader's coverage.",
             )
-        if not active_record.policy.allows(
-            identity=identity,
-            action=AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ) and any(
-            not rule.products
-            or any(
-                not active_record.policy.agent_read_role_allows(
-                    identity=identity,
-                    product=product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                )
-                for product in rule.products
+        if (
+            not active_record.policy.allows(
+                identity=identity,
+                action=AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
+                product="launchplane",
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
             )
-            for rule in active_record.policy.github_actions
-            if not rule.managed_set_id
+            and not director_agent_identity(identity)
             and any(
-                rule.repository.casefold() == candidate.repository.casefold()
-                for candidate in payload.workflows
+                not rule.products
+                or any(
+                    not active_record.policy.agent_read_role_allows(
+                        identity=identity,
+                        product=product,
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    )
+                    for product in rule.products
+                )
+                for rule in active_record.policy.github_actions
+                if not rule.managed_set_id
+                and any(
+                    rule.repository.casefold() == candidate.repository.casefold()
+                    for candidate in payload.workflows
+                )
             )
         ):
             raise _launchplane_http_error(
@@ -24486,7 +24520,7 @@ def create_launchplane_fastapi_app(
                 action="dokploy_target.plan",
                 product=setup_request.product,
                 context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                inherit_agent_read_role=False,
+                inherit_agent_read_role=director_agent_identity(identity),
             )
         )
         if setup_request.operation == "repair-domain-authority":
@@ -24500,7 +24534,7 @@ def create_launchplane_fastapi_app(
                         action="dokploy_target.repair_domain_authority.plan",
                         product=setup_request.product,
                         context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                        inherit_agent_read_role=False,
+                        inherit_agent_read_role=director_agent_identity(identity),
                     )
                 )
             )

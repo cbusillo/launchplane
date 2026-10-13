@@ -121,6 +121,11 @@ class _FakeMergeTrainGitHubClient:
     ) -> None:
         return None
 
+    @staticmethod
+    def ensure_repository_label(*, repository: str, label: str, mutate: bool = True) -> bool:
+        _ = repository, label, mutate
+        return True
+
     def update_pull_request_branch(
         self, *, repository: str, pull_request_number: int, expected_head_sha: str
     ) -> None:
