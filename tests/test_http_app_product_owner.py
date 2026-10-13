@@ -13,6 +13,7 @@ from httpx2 import Response
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.github_app_identity import GitHubAppIdentity
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -110,6 +111,52 @@ def _workflow_app(
 
 
 class ProductOwnerSettingHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_credential_failure_stage_reaches_client_setting_without_profile_write(
+        self,
+    ) -> None:
+        for target, stage in (
+            ("resolve_delivery_github_app_identity", "identity"),
+            ("_tracked_repository", "repository_inventory"),
+            ("mint_delivery_installation_token", "token_mint"),
+        ):
+            with self.subTest(stage=stage), TemporaryDirectory() as directory:
+                original = _profile()
+                store = _store(Path(directory), original)
+                self.addCleanup(store.close)
+                with (
+                    patch(
+                        "control_plane.launchplane_github_delivery.resolve_delivery_github_app_identity",
+                        return_value=GitHubAppIdentity(app_id=76, private_key="fixture-key"),
+                    ),
+                    patch("control_plane.launchplane_github_delivery._tracked_repository"),
+                    patch(
+                        f"control_plane.launchplane_github_delivery.{target}",
+                        side_effect=ValueError("sensitive-provider-key-url"),
+                    ),
+                    patch("control_plane.http_app.github_api_request") as lookup,
+                ):
+                    response = await _asgi_request(
+                        _workflow_app(store),
+                        "POST",
+                        _OWNER_ROUTE,
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": "failed-client",
+                        },
+                        payload={
+                            "mode": "apply",
+                            "github_login": "site-owner",
+                            "reason": "Set Client.",
+                        },
+                    )
+                self.assertEqual(response.status_code, 503)
+                error = response.json()["error"]
+                self.assertEqual(error["code"], "github_credentials_unavailable")
+                self.assertIn(stage, error["message"])
+                self.assertNotIn("sensitive-provider-key-url", response.text)
+                self.assertEqual(store.read_product_profile_record(_PRODUCT), original)
+                lookup.assert_not_called()
+
     async def test_lookup_revokes_off_event_loop_on_success_and_provider_failure(self) -> None:
         loop_thread = threading.get_ident()
         for provider, expected_status in ((_github_user(), 202), (_github_user_missing, 400)):

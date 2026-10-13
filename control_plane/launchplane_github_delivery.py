@@ -4,6 +4,7 @@ import logging
 from email.message import Message
 from http.client import HTTPException
 from pathlib import Path
+from typing import Literal
 from urllib.error import HTTPError, URLError
 
 import click
@@ -58,6 +59,17 @@ _LOGGER = logging.getLogger(__name__)
 
 class DeliveryGitHubTokenUnavailable(click.ClickException):
     """A temporary provider failure; consumers must preserve retry/reconcile state."""
+
+
+DeliveryCredentialStage = Literal["request", "identity", "repository_inventory", "token_mint"]
+
+
+class DeliveryGitHubCredentialsUnavailable(click.ClickException):
+    """Sanitized diagnostic: never expose provider messages, keys or tokens."""
+
+    def __init__(self, stage: DeliveryCredentialStage) -> None:
+        self.stage = stage
+        super().__init__(f"Delivery App credential resolution failed at {stage}.")
 
 
 def _temporary_failure(error: BaseException) -> bool:
@@ -146,14 +158,21 @@ def resolve_delivery_github_token(
     repository: str,
     purpose: str,
     retry_provider_errors: bool = False,
+    report_failure: bool = False,
 ) -> str:
     if not repository.strip():
+        if report_failure:
+            raise DeliveryGitHubCredentialsUnavailable("request")
         return ""
+    stage: DeliveryCredentialStage = "request"
     try:
         permissions = _PERMISSIONS[purpose]
+        stage = "identity"
         identity = resolve_delivery_github_app_identity(control_plane_root=control_plane_root)
         repository = repository.strip().lower()
+        stage = "repository_inventory"
         inventory = _tracked_repository(control_plane_root, repository)
+        stage = "token_mint"
         return mint_delivery_installation_token(
             identity=identity,
             repository=repository,
@@ -173,5 +192,9 @@ def resolve_delivery_github_token(
             raise DeliveryGitHubTokenUnavailable(
                 "Delivery App provider is temporarily unavailable."
             ) from error
-        _LOGGER.warning("Delivery App credentials unavailable (%s).", type(error).__name__)
+        _LOGGER.warning(
+            "Delivery App credentials unavailable at %s (%s).", stage, type(error).__name__
+        )
+        if report_failure:
+            raise DeliveryGitHubCredentialsUnavailable(stage) from error
         return ""
