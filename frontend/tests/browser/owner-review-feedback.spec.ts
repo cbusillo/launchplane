@@ -61,3 +61,55 @@ test("legacy feedback is shared only when the Owner explicitly sends it", async 
   await expect(decision).not.toContainText("has not been shared");
   await expect(decision).toContainText("Reviewed preview version aaaaaaa");
 });
+
+for (const action of ["Accept", "Request changes"]) {
+  test(`a stale ${action} stays disabled until the current preview is loaded`, { tag: "@layout" }, async ({ page }, testInfo) => {
+    await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308");
+    await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeVisible();
+    const original = await page.evaluate(async () => {
+      const modulePath = "/ui/src/dev-fixtures.ts";
+      return (await import(modulePath)).productReviewForFixture("products");
+    });
+    const current = { ...original, head_sha: "b".repeat(40), preview_generation_id: "generation-next" };
+    let review = original;
+    let refreshFails = false;
+    const submitted: Record<string, unknown>[] = [];
+    await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "example-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+    await page.route("**/v1/product-review?*", route => refreshFails
+      ? route.fulfill({ status: 503, json: { error: { code: "unavailable", message: "Unavailable" } } })
+      : route.fulfill({ json: review }));
+    await page.route("**/v1/product-review/decisions", route => {
+      submitted.push(route.request().postDataJSON());
+      if (submitted.length === 1) {
+        return route.fulfill({ status: 409, json: { error: { code: "product_review_preview_changed", message: "The preview changed. Refresh the review and look at the current preview before deciding again." } } });
+      }
+      return route.fulfill({ json: current });
+    });
+    await page.goto("/ui/owner-review?repository=example%2Fcontrol-plane&pull_request=308");
+    await expect(page.getByText(`Preview version ${original.head_sha.slice(0, 7)}`, { exact: true })).toBeVisible();
+    if (action === "Request changes") await page.getByRole("textbox").fill("Please fix the price.");
+    await page.getByRole("button", { name: action, exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("The preview changed");
+    await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Request changes", exact: true })).toBeDisabled();
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toMatchObject({ reviewed_head_sha: original.head_sha, reviewed_preview_url: original.preview_url, reviewed_generation_id: original.preview_generation_id });
+    await page.screenshot({ path: testInfo.outputPath("stale-preview-refused.png"), fullPage: true });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    // A failed refresh cannot unlock the old review.
+    refreshFails = true;
+    await page.getByRole("button", { name: "Refresh review" }).click();
+    await expect(page.getByRole("alert")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Accept", exact: true })).toHaveCount(0);
+    refreshFails = false;
+    review = current;
+    await page.getByRole("button", { name: "Refresh review" }).click();
+    await expect(page.getByText(`Preview version ${current.head_sha.slice(0, 7)}`, { exact: true })).toBeVisible();
+    expect(submitted).toHaveLength(1);
+    await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "Accept", exact: true }).click();
+    await expect(page.getByRole("region", { name: `Decision for ${current.display_name}` }).getByRole("status")).toBeVisible();
+    expect(submitted).toHaveLength(2);
+    expect(submitted[1]).toMatchObject({ reviewed_head_sha: current.head_sha, reviewed_preview_url: current.preview_url, reviewed_generation_id: current.preview_generation_id });
+  });
+}

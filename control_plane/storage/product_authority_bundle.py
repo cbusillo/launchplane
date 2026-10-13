@@ -71,6 +71,10 @@ class ProductProfileConflictError(ValueError):
     """A product profile changed after it authorized a bundled write."""
 
 
+class PublicHostAuthorityBusy(RuntimeError):
+    """A conflicting authority write must be reviewed again after reconciliation."""
+
+
 class SecretCopySourceConflictError(ValueError):
     """A reviewed copy source changed before the destination committed."""
 

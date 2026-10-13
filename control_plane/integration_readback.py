@@ -129,9 +129,6 @@ INTEGRATION_FAMILIES: tuple[IntegrationFamily, ...] = (
             ),
         ),
     ),
-    IntegrationFamily(integration="mapbox", config_parameters=("web_map.token_map_box",)),
-    IntegrationFamily(integration="unsplash", config_parameters=("unsplash.access_key",)),
-    IntegrationFamily(integration="tenor", config_parameters=("discuss.tenor_api_key",)),
     IntegrationFamily(
         integration="web_push",
         config_parameters=(

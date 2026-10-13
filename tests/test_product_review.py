@@ -2,6 +2,7 @@ from tests.support.auth import scoped_agent_test
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import Mock
 
 from fastapi import FastAPI
 from httpx2 import Response
@@ -10,6 +11,7 @@ from pydantic import ValidationError
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.product_review_status import OwnerReviewStatusPublisher
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanIdentity,
@@ -86,6 +88,7 @@ def _decision(
         pull_request_number=pull_request_number,
         head_sha="abcdef1234567890abcdef1234567890abcdef12",
         preview_url="https://pr-42.example.invalid",
+        preview_generation_id=_preview_generation_read_record().generation_id,
         decision="accepted",
         owner_github_id=str(_OWNER_GITHUB_ID),
         owner_github_login="site-owner",
@@ -155,6 +158,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         temporary_directory = TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         self.store = FilesystemRecordStore(state_dir=Path(temporary_directory.name))
+        self.publisher = Mock(spec=OwnerReviewStatusPublisher)
         self.session_manager = HumanSessionManager(
             config=_github_oauth_config(),
             session_store=InMemoryHumanSessionStore(),
@@ -174,6 +178,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             authz_policy=_operator_read_policy(),
             record_store_factory=lambda: self.store,
             human_session_manager=self.session_manager,
+            owner_review_status_publisher=self.publisher,
         )
 
     async def _get(self, app: FastAPI, human: GitHubHumanIdentity) -> Response:
@@ -191,6 +196,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         *,
         decision: str,
         reason: str = "",
+        reviewed: dict[str, str] | None = None,
     ) -> Response:
         session = self.session_manager.issue(human)
         return await _asgi_request(
@@ -203,7 +209,118 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                 "pull_request": _PULL_REQUEST,
                 "decision": decision,
                 "reason": reason,
+                **(reviewed if reviewed is not None else self._reviewed_preview()),
             },
+        )
+
+    def _reviewed_preview(self) -> dict[str, str]:
+        generation = _preview_generation_read_record(anchor_pr_number=_PULL_REQUEST)
+        return {
+            "reviewed_head_sha": generation.anchor_summary.head_sha,
+            "reviewed_preview_url": _preview_read_record().canonical_url,
+            "reviewed_generation_id": generation.generation_id,
+        }
+
+    async def test_stale_review_cannot_decide_a_changed_preview(self) -> None:
+        self._write_product()
+        owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
+        app = self._app()
+        read = (await self._get(app, owner)).json()
+        reviewed = {
+            "reviewed_head_sha": read["head_sha"],
+            "reviewed_preview_url": read["preview_url"],
+            "reviewed_generation_id": read["preview_generation_id"],
+        }
+        original_preview = _preview_read_record()
+        original_generation = _preview_generation_read_record()
+        for change in ("head", "url", "generation"):
+            with self.subTest(change=change):
+                generation = original_generation
+                preview = original_preview
+                if change == "head":
+                    generation = generation.model_copy(
+                        update={
+                            "anchor_summary": generation.anchor_summary.model_copy(
+                                update={"head_sha": "b" * 40}
+                            )
+                        }
+                    )
+                elif change == "url":
+                    preview = preview.model_copy(
+                        update={"canonical_url": "https://new.example.invalid"}
+                    )
+                else:
+                    generation = generation.model_copy(
+                        update={"generation_id": "generation-new", "sequence": 2}
+                    )
+                    preview = preview.model_copy(
+                        update={"serving_generation_id": generation.generation_id}
+                    )
+                self.store.write_preview_generation_record(generation)
+                self.store.write_preview_record(preview)
+                for decision in ("accepted", "changes_requested"):
+                    response = await self._post(
+                        app,
+                        owner,
+                        decision=decision,
+                        reason="Fix the price.",
+                        reviewed=reviewed,
+                    )
+                    self.assertEqual(response.status_code, 409)
+                    self.assertEqual(
+                        response.json()["error"]["code"], "product_review_preview_changed"
+                    )
+                    self.publisher.publish.assert_not_called()
+                self.assertEqual(
+                    self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                    ),
+                    (),
+                )
+
+    async def test_lost_response_retry_never_rebinds_to_a_new_preview(self) -> None:
+        self._write_product()
+        owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
+        app = self._app()
+        first = await self._post(app, owner, decision="accepted")
+        retry = await self._post(app, owner, decision="accepted")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(
+            retry.json()["latest_decision"]["record_id"],
+            first.json()["latest_decision"]["record_id"],
+        )
+        generation = _preview_generation_read_record()
+        self.store.write_preview_generation_record(
+            generation.model_copy(
+                update={
+                    "anchor_summary": generation.anchor_summary.model_copy(
+                        update={"head_sha": "b" * 40}
+                    )
+                }
+            )
+        )
+        stale_retry = await self._post(app, owner, decision="accepted")
+        self.assertEqual(stale_retry.status_code, 409)
+        records = self.store.list_product_review_decision_records(
+            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].record_id, first.json()["latest_decision"]["record_id"])
+
+    async def test_unbound_old_tab_is_refused(self) -> None:
+        self._write_product()
+        response = await self._post(
+            self._app(),
+            _human(login="site-owner", github_id=_OWNER_GITHUB_ID),
+            decision="accepted",
+            reviewed={},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            ),
+            (),
         )
 
     async def test_owner_reviews_preview_and_decision_becomes_latest(self) -> None:

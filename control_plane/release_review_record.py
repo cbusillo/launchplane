@@ -43,6 +43,34 @@ def _temporary_hotfix_notice(*, client_login: str, review_url: str) -> list[str]
     ]
 
 
+def _decision_effect(decision: ReleaseReviewDecisionRecord) -> str:
+    """Describe the saved action, without deriving policy from today's profile."""
+
+    if decision.release_start == "rollback":
+        return (
+            "The Client requested changes to a live temporary hotfix. Launchplane rolls "
+            "the site back to their last accepted release."
+        )
+    if decision.release_start in ("promote", "promote_with_rollback_drill"):
+        effect = (
+            "This acceptance starts Launchplane's gated production release: a verified "
+            "backup, promotion of the reviewed version, post-deploy checks, and automatic "
+            "rollback if the release fails."
+        )
+        if decision.release_start == "promote_with_rollback_drill":
+            effect += (
+                " This release also runs the rollback drill: return to the reviewed "
+                "previous production version, take another verified backup, and promote "
+                "the same reviewed version again."
+            )
+        return effect
+    if decision.decision == "changes_requested":
+        return "The Client requested changes. This decision withdraws approval and starts no production release."
+    if decision.decision == "overridden":
+        return "This records an admin override of approval. It starts no production release."
+    return "This records acceptance only. This decision starts no production release."
+
+
 def release_decision_issue_body(
     decision: ReleaseReviewDecisionRecord, *, client_login: str = "", review_url: str = ""
 ) -> str:
@@ -62,9 +90,8 @@ def release_decision_issue_body(
             _temporary_hotfix_notice(client_login=client_login, review_url=review_url)
             if hotfix
             else (
-                "The Client requested changes to a live temporary hotfix. Launchplane rolls the site back to their last accepted release."
-                if decision.release_start == "rollback"
-                else "This records a decision in Launchplane. It does not publish the site, and editing this issue does not change approval.",
+                _decision_effect(decision),
+                "Editing this issue does not change Launchplane approval or the release action.",
             )
         ),
         "",

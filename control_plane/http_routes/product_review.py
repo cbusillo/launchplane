@@ -18,6 +18,8 @@ from control_plane.http_routes.support import (
 )
 from control_plane.product_review import (
     ProductReviewStore,
+    ProductReviewPreview,
+    ProductReviewPreviewChanged,
     latest_product_review_decision,
     product_profiles_for_repository,
     record_product_review_decision,
@@ -54,6 +56,9 @@ class ProductReviewDecisionEnvelope(BaseModel):
 
     repository: str = Field(min_length=3, max_length=256, pattern=r"^[^/\s]+/[^/\s]+$")
     pull_request: int = Field(ge=1)
+    reviewed_head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    reviewed_preview_url: str = Field(min_length=1)
+    reviewed_generation_id: str = Field(min_length=1)
     decision: ProductReviewDecision
     reason: str = Field(default="", max_length=PRODUCT_REVIEW_REASON_MAX_LENGTH)
 
@@ -85,6 +90,7 @@ class ProductReviewResponse(BaseModel):
     pull_request_url: str
     preview_url: str
     head_sha: str
+    preview_generation_id: str
     owner_set: bool
     owner_github_login: str
     viewer_is_owner: bool
@@ -190,6 +196,7 @@ def register_product_review_routes(
             ),
             preview_url=preview.preview_url,
             head_sha=preview.head_sha,
+            preview_generation_id=preview.generation_id,
             owner_set=profile.owner.is_set,
             owner_github_login=profile.owner.github_login,
             viewer_is_owner=viewer_is_owner,
@@ -305,15 +312,27 @@ def register_product_review_routes(
                 code="product_review_preview_unavailable",
                 message=_NO_PREVIEW_REASON,
             )
-        record_product_review_decision(
-            store=store,
-            profile=profile,
-            pull_request_number=envelope.pull_request,
-            preview=preview,
-            decision=envelope.decision,
-            reason=envelope.reason,
-            identity=identity,
-        )
+        try:
+            record_product_review_decision(
+                store=store,
+                profile=profile,
+                pull_request_number=envelope.pull_request,
+                preview=ProductReviewPreview(
+                    head_sha=envelope.reviewed_head_sha,
+                    preview_url=envelope.reviewed_preview_url,
+                    generation_id=envelope.reviewed_generation_id,
+                ),
+                decision=envelope.decision,
+                reason=envelope.reason,
+                identity=identity,
+            )
+        except ProductReviewPreviewChanged as error:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_review_preview_changed",
+                message=str(error),
+            ) from error
         dependencies.publish_owner_review_status(store, profile, envelope.pull_request)
         return build_response(
             store=store,

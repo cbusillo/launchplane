@@ -540,7 +540,7 @@ an ORM column/table or remains only in the evidence payload.
   notes, and provider route evidence stay payload-only.
 - Preview generation: modeled fields are `generation_id`, `preview_id`,
   `sequence`, `state`, `requested_at`, `finished_at`, and `artifact_id`. Source
-  map, PR summaries, deploy/verify evidence, and failure details stay
+  map, PR summaries, optional verified `source_build`, deploy/verify evidence, and failure details stay
   payload-only.
 - Release tuple: modeled fields are `context`, `channel`, `tuple_id`,
   `artifact_id`, `minted_at`, and `provenance`. Repo SHA maps and source
