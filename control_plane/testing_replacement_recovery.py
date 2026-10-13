@@ -35,6 +35,7 @@ from control_plane.launchplane_reconcile_authorization import (
 
 
 class TestingRecoveryStore(Protocol):
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
     def list_deployment_records(
         self,
         *,

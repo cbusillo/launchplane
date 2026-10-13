@@ -247,6 +247,126 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             self.assertFalse(view["provider_inspected"])
             self.assertEqual(view["status"], "refused")
 
+    def test_legacy_read_inspects_the_retained_schedule_run_without_releasing(self) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            operation = operation.model_copy(
+                update={
+                    "request": operation.request.model_copy(
+                        update={"artifact_id": "original-artifact", "source_git_ref": "a" * 40}
+                    )
+                }
+            )
+            getattr(store, "write_odoo_stable_target_replacement_operation_record")(operation)
+            deployment = DeploymentRecord.model_validate(
+                {
+                    "record_id": "original-deployment",
+                    "context": operation.context,
+                    "instance": operation.instance,
+                    "source_git_ref": operation.request.source_git_ref,
+                    "artifact_identity": {"artifact_id": operation.request.artifact_id},
+                    "resolved_target": {
+                        "target_type": "compose",
+                        "target_id": "compose-123",
+                        "target_name": "fixture-target",
+                    },
+                    "deploy": {
+                        "deploy_mode": "image",
+                        "target_name": "fixture-target",
+                        "target_type": "compose",
+                        "started_at": operation.started_at,
+                    },
+                    "post_deploy_update": {
+                        "attempted": True,
+                        "status": "pass",
+                        "evidence": {
+                            "schedule_id": "private-original-schedule",
+                            "schedule_deployment_id": "private-original-run",
+                        },
+                    },
+                }
+            )
+            getattr(store, "write_deployment_record")(deployment)
+            fenced = self.fence(store)
+            for run_id, status, expected in (
+                ("private-original-run", "done", "terminal"),
+                ("private-original-run", "running", "active"),
+                ("another-run", "done", "unknown"),
+            ):
+                with self.subTest(backend=type(store).__name__, run_id=run_id, status=status):
+                    observed_schedules = []
+
+                    def read(**kwargs: object) -> api.JsonValue:
+                        path = kwargs["path"]
+                        query = cast(dict[str, str], kwargs["query"])
+                        if path == "/api/compose.one":
+                            return {"composeId": "compose-123", "serverId": "fixture-server"}
+                        if path == "/api/schedule.list":
+                            # The immutable reference must survive a mutable name change.
+                            return []
+                        if path == "/api/schedule.one":
+                            observed_schedules.append(query["scheduleId"])
+                            return {"scheduleId": query["scheduleId"], "enabled": False}
+                        if query["type"] == "schedule":
+                            self.assertEqual(query["id"], "private-original-schedule")
+                            return [{"deploymentId": run_id, "status": status}]
+                        return [{"deploymentId": "compose-run", "status": "done"}]
+
+                    diagnostics: list[str] = []
+                    with (
+                        patch(
+                            "control_plane.testing_legacy_replacement_inspection.source.read_dokploy_config",
+                            return_value=("https://provider.test", "fixture-token"),
+                        ),
+                        patch.object(api, "dokploy_request", side_effect=read),
+                    ):
+                        observation = inspect_legacy_replacement(
+                            store, fenced, root, deadline_at=monotonic() + 15
+                        )
+                        self.assertEqual(observed_schedules, ["private-original-schedule"])
+                        self.assertEqual(observation.retained_schedule_run, expected)
+                        view = testing_replacement_recovery_read(
+                            store, fenced, root, diagnostics=diagnostics
+                        )
+                    self.assertEqual(view["status"], "refused")
+                    self.assertFalse(view["safe_to_release"])
+                    self.assertEqual(view["provider_effects"], "unknown")
+                    self.assertNotIn("private", str(view) + str(diagnostics))
+                    self.assertEqual(
+                        store.read_odoo_stable_target_replacement_operation_record(
+                            operation.operation_id
+                        ),
+                        fenced,
+                    )
+                    self.assertFalse(
+                        getattr(store, "list_product_reconcile_requests")(product="site")
+                    )
+
+            def changed_evidence_read(**kwargs: object) -> api.JsonValue:
+                result = read(**kwargs)
+                if kwargs["path"] == "/api/schedule.one":
+                    getattr(store, "write_deployment_record")(
+                        deployment.model_copy(
+                            update={
+                                "post_deploy_update": deployment.post_deploy_update.model_copy(
+                                    update={"evidence": {}}
+                                )
+                            }
+                        )
+                    )
+                return result
+
+            with (
+                patch(
+                    "control_plane.testing_legacy_replacement_inspection.source.read_dokploy_config",
+                    return_value=("https://provider.test", "fixture-token"),
+                ),
+                patch.object(api, "dokploy_request", side_effect=changed_evidence_read),
+            ):
+                view = testing_replacement_recovery_read(store, fenced, root)
+            self.assertFalse(view["provider_inspected"])
+            self.assertFalse(view["safe_to_release"])
+
     def test_inspection_deadline_refuses_before_another_provider_read(self) -> None:
         for store, root in self.stores():
             operation = self.running(store)

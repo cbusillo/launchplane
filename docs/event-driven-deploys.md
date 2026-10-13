@@ -743,13 +743,22 @@ data-workflow schedules after validating the server's complete schedule list;
 unrelated schedules do not consume it. Current schedule names identify observation
 candidates only: missing dispatch acknowledgements and historical data-effect
 attribution remain unknown.
+When the candidate's post-deploy evidence retains a schedule ID and deployment
+ID, inspection reads that exact schedule and run independently of mutable names.
+It reports the run, complete returned schedule history and timer state, without
+exposing references. Missing, changed, unreadable or unmatched evidence stays
+unknown or unavailable. A recorded terminal run does not enumerate every original
+data effect; the operation still lacks complete dispatch proof. The retained
+deployment record is rechecked after provider reads to detect evidence changes.
 This inspection never creates a journal or enables cancellation or a fresh deploy.
 
 The existing target-replacement operation GET also returns a value-free
 `recovery` classification under scoped `operations.read`. It reports persisted
 journal presence or absence, attempt/binding agreement, effect acknowledgement,
-provider inspection and an eligibility/refusal code. It excludes the execution
-worker and rechecks the operation and binding after inspection. Missing journal
+provider inspection and an eligibility/refusal code. It excludes journal-aware
+execution workers and rechecks the operation and binding after inspection. A
+pre-journal executor never acquired that lock; its quiescence needs independent
+evidence. Missing journal
 means unknown historical effects, never an absent provider dispatch. The read
 does not cancel, publish an attestation, queue reconciliation or change incidents;
 `safe_to_release` remains false even when the read observes eligibility. Raw
