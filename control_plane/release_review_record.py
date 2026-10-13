@@ -162,6 +162,13 @@ def release_decision_issue_body(
         lines.extend(["## Additional changes", _literal("\n".join(checklist.additional_changes))])
     if decision.reason:
         lines.extend(["## Decision reason", _literal(decision.reason)])
+    if decision.release_during_business_hours:
+        lines.extend(
+            [
+                "## Release timing",
+                "The signed-in human explicitly requested an urgent release during business hours. The acceptance and backup gates still apply.",
+            ]
+        )
     return "\n\n".join(lines)
 
 

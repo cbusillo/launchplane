@@ -1,6 +1,7 @@
 import unittest
 import asyncio
 import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -782,7 +783,9 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
             plan_id="profile-bound-cleanup",
             product=self.profile.product,
             context=self.profile.preview.context,
-            planned_at=self.preview.created_at,
+            planned_at=(
+                datetime.fromisoformat(self.preview.updated_at) + timedelta(seconds=1)
+            ).isoformat(),
             source="fixture",
             status="pass",
             inventory_scan_id="fixture-inventory",
@@ -835,7 +838,7 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=slow_work,
             ),
             patch(
-                "control_plane.workflows.generic_web_preview._execute_generic_web_preview_destroy_unserialized",
+                "control_plane.workflows.preview_lifecycle_cleanup._execute_generic_web_preview_destroy_unserialized",
                 return_value=result,
             ) as provider,
         ):
@@ -847,12 +850,34 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
             response = await asyncio.wait_for(task, 5)
             self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(response.json()["result"]["status"], "blocked")
+            provider.assert_not_called()
+            self.assertEqual(self.store.read_preview_record(self.preview.preview_id), self.preview)
+            self.store.write_product_profile_record(self.profile)
+            with patch(
+                "control_plane.workflows.preview_lifecycle_cleanup.discover_generic_web_preview_desired_state",
+                return_value=PreviewDesiredStateRecord(
+                    desired_state_id="fresh-fixture-desired",
+                    product=self.profile.product,
+                    context=self.profile.preview.context,
+                    source="fixture",
+                    discovered_at=plan.planned_at,
+                    repository=self.profile.repository,
+                    anchor_repo=self.preview.anchor_repo,
+                    status="pass",
+                    desired_count=0,
+                ),
+            ):
+                response = await call("fresh-checked-cleanup")
+            self.assertEqual(response.json()["result"]["status"], "pass")
+            provider.assert_called_once()
             self.assertEqual(provider.call_args.kwargs["profile"], self.profile)
             self.assertEqual(
                 self.store.read_preview_record(self.preview.preview_id).state, "destroyed"
             )
+            self.store.write_product_profile_record(changed)
         with patch(
-            "control_plane.workflows.generic_web_preview._execute_generic_web_preview_destroy_unserialized"
+            "control_plane.workflows.preview_lifecycle_cleanup._execute_generic_web_preview_destroy_unserialized"
         ) as provider:
             response = await call("wrong-context-cleanup")
             self.assertEqual(response.status_code, 202, response.text)

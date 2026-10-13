@@ -1893,6 +1893,20 @@ that can read lifecycle plan records and write cleanup records, and additionally
 requires preview read/write capability before any `apply=true` provider destroy
 mutation starts. It rejects missing or product-mismatched `plan_id` values before
 writing cleanup state and returns the stored cleanup record as accepted evidence.
+Saved orphan slugs are intent, not current deletion authority. Before each apply,
+cleanup re-reads the complete desired PR set and the matching preview lifecycle
+under preview-operation serialization. A reopened PR, unknown desired state,
+missing preview, invalid or ambiguous lifecycle ordering, or a preview created
+or updated at/after the plan blocks that slug without provider effects. Lifecycle
+changes observed during discovery also block cleanup. Generate a fresh plan after
+such a refusal; report-only requests retain their original saved-plan projection.
+The same checks cover the sweep's discovery-to-cleanup interval. The lock remains
+held through provider deletion and terminal preview recording, including the
+canonical preview identity lock shared with refresh. Generic-web refresh retains
+that lock through provider work and generation evidence recording; cleanup takes
+it before the provider-operation locks, so it cannot validate an old record in
+the interval after a refresh deploys but before its evidence is committed.
+
 
 `POST /v1/previews/lifecycle-sweep` derives enabled preview profiles from
 Launchplane product-profile records, checks both `preview_lifecycle.plan` and

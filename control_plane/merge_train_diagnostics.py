@@ -44,6 +44,14 @@ def controller_last_result(
     reason = _text(result.get("reason_code"), 128)
     if reason == "failed_candidate_recovery_unavailable" or not reason:
         reason = observations.get("reason_code", "") or reason or action
+    selected = _object(_object(result.get("dry_run_result")).get("selected_pr"))
+    if (
+        action in {"wait_for_checks", "wait_for_root_checks"}
+        and reason == action
+        and selected.get("mergeable") == "unknown"
+        and selected.get("required_checks_status") == "pass"
+    ):
+        reason = "head_mergeability_unknown"
     key, changed, initialized = _semantic_key(result, state.semantic_progress_key)
     previous = state.last_result
     batch_id = _text(candidate.get("batch_id") or observations.get("candidate_batch_id"))
@@ -97,6 +105,10 @@ def controller_last_result(
     }:
         actor = "provider"
         observation = "Observe fresh candidate, original-head or base check evidence."
+        if reason == "head_mergeability_unknown":
+            observation = (
+                "Observe fresh mergeability for the selected original head; its checks pass."
+            )
     return (
         MergeTrainControllerLastResult(
             repository=state.repository,

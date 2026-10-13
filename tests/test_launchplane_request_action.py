@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from urllib.parse import urlsplit
+import yaml
 
 from control_plane.deploy_failure_alert import replacement_may_have_dispatched
 
@@ -14,6 +15,52 @@ ACTION_ENTRYPOINT = Path(".github/actions/launchplane-request/dist/index.js")
 
 
 class LaunchplaneRequestActionTests(unittest.TestCase):
+    def test_train_runner_defers_only_controller_lease_contention(self) -> None:
+        workflow = yaml.safe_load(Path(".github/workflows/merge-train-runner.yml").read_text())
+        steps = {step.get("id"): step for step in workflow["jobs"]["run"]["steps"]}
+        for code, succeeds in (
+            ("merge_train_controller_lease_held", True),
+            ("merge_train_effect_reconciliation_required", False),
+            ("authorization_denied", False),
+        ):
+            with self.subTest(code=code), TemporaryDirectory() as directory:
+                response = Path(directory) / "response.json"
+                output = Path(directory) / "output"
+                summary = Path(directory) / "summary"
+                request = self.run_action(
+                    inputs={
+                        "launchplane-url": "https://launchplane.example",
+                        "route-path": "/v1/work-graph/merge-train/controller/run-once",
+                        "expected-status": steps["controller_run"]["with"].get(
+                            "expected-status", ""
+                        ),
+                        "response-output-file": str(response),
+                        "log-response-body": "false",
+                        "fail-result-paths": "",
+                    },
+                    environment={"TEST_STATUS": "409", "TEST_ERROR_CODE": code},
+                )
+                self.assertEqual(request.returncode, 0, request.stderr)
+                result = subprocess.run(
+                    ["bash", "-c", steps["controller_summary"]["run"]],
+                    env={
+                        **os.environ,
+                        "STATUS_CODE": "409",
+                        "RESPONSE_FILE": str(response),
+                        "GITHUB_OUTPUT": str(output),
+                        "GITHUB_STEP_SUMMARY": str(summary),
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+                if succeeds:
+                    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                    self.assertEqual(int(outputs["feedback_count"]), 0)
+                else:
+                    self.assertFalse(output.exists())
+
     def run_action(
         self,
         *,

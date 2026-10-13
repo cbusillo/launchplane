@@ -2,6 +2,62 @@
 title: Client release review
 ---
 
+## Odoo business hours
+
+An admin selects `odoo_business_hours.company_id` in a product profile through
+the existing product-profile API. This selects that company's
+`resource_calendar_id` in Odoo; Launchplane stores no copy of the hours.
+The policy applies only when that product's `production_use` is `live`.
+Configure it for staff-facing Odoo products before live activation; website
+products remain unselected. Removing the policy disables scheduling for that
+product. Existing release holds and exact-candidate acceptance still apply.
+
+For a private Odoo site, `odoo_business_hours.private_endpoint_key` references
+an existing active private health endpoint for the same product's prod lane.
+Its HTTPS origin supplies the calendar transport; the running container and
+`/launchplane/health` must match that lane's recorded runtime identity before
+credentials are used. Public sites use the lane's recorded HTTPS origin and
+verified provider domain binding. Reads use the runtime's existing configured
+Odoo diagnostic login; this feature creates no credentials or access grants.
+Missing transport, credentials, company, calendar, fixed attendance or valid
+bounded evidence holds the release with a public-safe reason.
+
+The fixed company calendar supplies its timezone, weekly or alternating-week
+attendance, and company-wide calendar leave. A business day includes meal
+breaks between its first and last attendance. Optional resource-specific
+attendance is discovered through Odoo field metadata and excluded; base Odoo 19
+needs no such addon field. Personal leave does not close
+the company. Flexible or duration-based calendars cannot establish closing
+and hold the release. Reads are bounded to 128 rows per source and a 15-day
+horizon; truncation or no proved closing window also holds. DST fallback spans
+both folds; a boundary in a nonexistent local time holds rather than guessing.
+Calendar authority and alternating-week semantics come from
+[Odoo's resource calendar](https://github.com/odoo/odoo/blob/19.0/addons/resource/models/resource_calendar.py)
+and [attendance model](https://github.com/odoo/odoo/blob/19.0/addons/resource/models/resource_calendar_attendance.py).
+
+Acceptance remains bound to its exact checklist while the worker waits. The
+release page shows the reason and next closing time in the calendar's timezone.
+Closing is a forecast from a current read, not a stored timetable: the existing
+worker polls and rechecks the calendar before queuing each forward step and
+again before a promotion's first provider effect. A queued promotion whose
+window closes stays pending and resumes without another acceptance. A calendar
+deferral waits for the existing short read-retry delay before another claim, so
+other products' ready or urgent releases can proceed. Once
+production work starts, its gated release, rollback drill and recovery finish
+without another timing hold. Calendar reads never admit a release or modify
+Odoo records. Restarting Launchplane reads Odoo again; no in-memory timer owns
+the acceptance or scheduled release.
+
+The Client's **Accept and release now during business hours** button requires
+a reason and records `release_during_business_hours` on that human's exact
+acceptance. It bypasses timing only. Ordinary acceptance, the verified backup,
+release holds and candidate checks remain required. The Director's existing
+temporary hotfix already names the human and reason and also bypasses timing;
+it retains the existing Client review and rejection rollback path. Neither
+an admin approval override nor an automated identity receives new release
+authority. The release decision record and published release issue retain the
+urgent request and its reason.
+
 Before a customer production promotion, Launchplane compiles the release from
 the current production and testing revisions. The product's Client reviews the
 testing site and the **`Client test notes`** from every merged pull request in that

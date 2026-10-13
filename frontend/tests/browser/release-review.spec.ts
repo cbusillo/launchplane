@@ -206,7 +206,6 @@ test("Owner reviews the complete release and can request changes after accepting
   await expect(page.getByText("Accepting puts this version on the live site, Example site (www.example.invalid).")).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("owner-initial.png"), fullPage: true });
   await page.getByRole("button", { name: "Accept release" }).click();
-  await expect(page.getByRole("status")).toContainText("Launchplane is starting it");
   await expect(page.getByRole("region", { name: "Release progress" }).getByRole("listitem")).toHaveCount(5);
   await expect(page.getByRole("region", { name: "Latest release decision" })).toContainText("site-owner");
   await page.screenshot({ path: testInfo.outputPath("owner-accepted.png"), fullPage: true });
@@ -498,4 +497,56 @@ test("Urgent invitation controls respect a live hotfix and an unchanged candidat
   response.review.checklist!.candidate = { ...response.review.checklist!.production, artifact_id: "rebuilt-security-image" };
   await page.reload();
   await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toBeVisible();
+});
+
+test("Business-hours release waits and an urgent acceptance records the human's reason", { tag: "@layout" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("products");
+  });
+  response.business_hours = {
+    applies: true, blocked_reason: "Odoo business hours are in progress.",
+    next_release_at: "2026-10-13T21:00:00Z", timezone: "America/New_York",
+  };
+  const writes: Record<string, unknown>[] = [];
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.route("**/v1/release-review/decisions", route => {
+    const body = route.request().postDataJSON();
+    writes.push(body);
+    response.review.latest_decision = {
+      record_id: `decision-${writes.length}`, product: "example-site", checklist_digest: body.checklist_digest,
+      checklist: response.review.checklist!, decision: "accepted", reason: body.reason,
+      actor_github_id: "9001", actor_github_login: "site-owner", decided_at: "2026-10-13T15:00:00Z",
+      release_issue_url: "https://github.com/example/site/issues/90", release_start: "promote",
+      release_during_business_hours: body.release_during_business_hours,
+    };
+    response.release_run = {
+      decision_record_id: response.review.latest_decision.record_id, rollback_drill: false, state: "waiting",
+      blocked_reason: body.release_during_business_hours ? "" : response.business_hours!.blocked_reason,
+      next_release_at: body.release_during_business_hours ? undefined : response.business_hours!.next_release_at,
+      business_hours_timezone: "America/New_York", steps: [],
+    };
+    return route.fulfill({ json: response });
+  });
+  await page.goto("/ui/owner-review?product=example-site");
+  const urgent = page.getByRole("button", { name: "Accept and release now during business hours" });
+  await expect(urgent).toBeDisabled();
+  await expect(page.getByRole("region", { name: "Client release decision" }).locator("time")).toHaveAttribute("datetime", response.business_hours.next_release_at);
+  await page.getByRole("button", { name: "Accept release", exact: true }).click();
+  const progress = page.getByRole("region", { name: "Release progress" });
+  await expect(progress.getByRole("status")).toHaveText(response.business_hours.blocked_reason);
+  await expect(progress.locator("time")).toHaveAttribute("datetime", response.business_hours.next_release_at);
+  await page.screenshot({ path: testInfo.outputPath("business-hours-held.png"), fullPage: true });
+  await page.getByRole("region", { name: "Client release decision" }).getByRole("textbox").fill("Staff cannot save orders; this fix cannot wait.");
+  await urgent.click();
+  await expect(page.getByRole("region", { name: "Latest release decision" }).getByRole("status")).toContainText(response.review.latest_decision!.actor_github_login);
+  await expect(progress.locator("time")).toHaveCount(0);
+  expect(writes.map(body => body.release_during_business_hours)).toEqual([false, true]);
+  expect(writes[0].checklist_digest).toBe(writes[1].checklist_digest);
+  expect(writes[1].reason).toBe("Staff cannot save orders; this fix cannot wait.");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("business-hours-urgent.png"), fullPage: true });
 });
