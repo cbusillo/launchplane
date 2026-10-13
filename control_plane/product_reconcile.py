@@ -63,7 +63,7 @@ from control_plane.build_provenance import (
 )
 from control_plane.contracts.record_failures import record_failure_summary
 from control_plane.contracts.promotion_record import env_key_names
-from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest, ArtifactSourceBuild
 from control_plane.contracts.odoo_target_replacement_failures import deploy_failure_description
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -297,6 +297,8 @@ class ProductReconcileStore(Protocol):
     ) -> tuple[PreviewRecord, ...]: ...
 
     def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord: ...
+
+    def write_preview_generation_record(self, record: PreviewGenerationRecord) -> object: ...
 
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
@@ -1652,7 +1654,18 @@ def _plan_preview_target(
     manifest = verified.manifest
     desired_digest = manifest.image.digest.lower()
     plan.update(desired_commit=manifest.source_commit, desired_image_digest=desired_digest)
-    if live and desired_digest == current["current_image_digest"]:
+    source_build = (
+        verified.manifest.source_build
+        if isinstance(verified, VerifiedBuildArtifact)
+        else verified.source_build
+    )
+    if (
+        live
+        and desired_digest == current["current_image_digest"]
+        and manifest.source_commit.lower() == current["current_head_sha"]
+        and source_build is not None
+        and source_build.model_dump(mode="json") == current.get("current_source_build")
+    ):
         plan.update(action="none", reason="already_serving", held=False)
     else:
         try:
@@ -1837,6 +1850,15 @@ def _run_preview_operation(
             issued_plan=operation_plan,
             records=records if isinstance(records, dict) else {},
         )
+        if operation == "refresh" and isinstance(records, dict):
+            refreshed_manifest = operation_plan.plan_request.manifest
+            if refreshed_manifest is not None and refreshed_manifest.source_build is not None:
+                generation = record_store.read_preview_generation_record(
+                    str(records["generation_id"])
+                )
+                record_store.write_preview_generation_record(
+                    generation.model_copy(update={"source_build": refreshed_manifest.source_build})
+                )
         return ReconcileOutcome(plan)
 
     try:
@@ -2080,6 +2102,8 @@ def _run_generic_web_preview_operation(
             preview_url=preview_url,
             verified_at=str(result.get("refresh_finished_at") or "") or _utc_now(),
             control_plane_root=control_plane_root,
+            source_build=verified.source_build,
+            generation_id=str(_records.get("generation_id") or ""),
         )
     return ReconcileOutcome(plan)
 
@@ -2092,12 +2116,15 @@ def _record_generic_web_preview_serving(
     preview_url: str,
     verified_at: str,
     control_plane_root: Path,
+    source_build: ArtifactSourceBuild,
+    generation_id: str,
 ) -> None:
     """Make the refreshed generation the one the preview serves.
 
     The refresh waited until the preview's health endpoint reported the expected
     build, which is the check the product's preview workflow recorded before. A
-    driver that already recorded the generation as ready needs nothing more.
+    driver that already recorded the generation as ready still needs its verified
+    build provenance retained for exact-build reconciliation.
     """
     preview = find_preview_record(
         record_store=cast(PreviewMutationRecordStore, record_store),
@@ -2107,25 +2134,30 @@ def _record_generic_web_preview_serving(
     )
     if preview is None:
         raise ProductReconcileError("The preview refresh passed but recorded no preview.")
-    if preview.active_generation_id and (
-        preview.serving_generation_id == preview.active_generation_id
-    ):
-        return
-    apply_generic_web_preview_verification_result(
-        control_plane_root=control_plane_root,
-        record_store=record_store,
-        request=GenericWebPreviewVerificationEnvelope(
-            product=profile.product,
-            verification=GenericWebPreviewVerificationRequest(
-                context=preview.context,
-                anchor_repo=preview.anchor_repo,
-                anchor_pr_number=pull_request_number,
-                verification_status="pass",
-                verified_at=verified_at,
-                checked_urls=(preview_url,) if preview_url else (),
-                timeout_seconds=GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS,
+    if not preview.active_generation_id:
+        raise ProductReconcileError("The preview refresh passed but recorded no generation.")
+    if preview.active_generation_id != generation_id:
+        raise ProductReconcileError("The refreshed preview generation is no longer active.")
+    if preview.serving_generation_id != preview.active_generation_id:
+        apply_generic_web_preview_verification_result(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=GenericWebPreviewVerificationEnvelope(
+                product=profile.product,
+                verification=GenericWebPreviewVerificationRequest(
+                    context=preview.context,
+                    anchor_repo=preview.anchor_repo,
+                    anchor_pr_number=pull_request_number,
+                    verification_status="pass",
+                    verified_at=verified_at,
+                    checked_urls=(preview_url,) if preview_url else (),
+                    timeout_seconds=GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS,
+                ),
             ),
-        ),
+        )
+    generation = record_store.read_preview_generation_record(preview.active_generation_id)
+    record_store.write_preview_generation_record(
+        generation.model_copy(update={"source_build": source_build})
     )
 
 
@@ -2800,6 +2832,14 @@ def _current_preview(
         current_artifact_id=generation.artifact_id,
         current_observed_at=generation.requested_at,
     )
+    source_build = generation.source_build
+    if source_build is None and not generic_web and generation.artifact_id:
+        try:
+            source_build = record_store.read_artifact_manifest(generation.artifact_id).source_build
+        except FileNotFoundError:
+            pass
+    if source_build is not None:
+        current["current_source_build"] = source_build.model_dump(mode="json")
     return current, lifecycle_token
 
 

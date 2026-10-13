@@ -13,6 +13,7 @@ import uuid
 import click
 
 from control_plane.agent_operator_contract import write_agent_operator_contract
+from control_plane.github_request_timing import configure_github_request_logging
 from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
 from control_plane.owner_control_contract import write_owner_control_contract
 from control_plane.merge_train_scheduler import (
@@ -472,6 +473,7 @@ def service_outbox_workers_run(
 @service.group("merge-train-workers")
 def service_merge_train_workers() -> None:
     """Run the merge train for every scheduler-enabled policy target on a timer."""
+    configure_github_request_logging()
 
 
 @service_merge_train_workers.command("run-once")
