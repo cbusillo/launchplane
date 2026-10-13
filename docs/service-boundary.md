@@ -95,21 +95,12 @@ cleanup scope so the store is always closed.
 - CLI: `uv run launchplane service serve`
 - server runtime: FastAPI served directly by Uvicorn
 
-The ordinary finite worker is a separate, dormant process boundary. Ordinary-agent
-delegated delivery is retired (see `DIRECTION.md`); this worker, the ordinary
-admission described below, and the ordinary-agent enrollment routes remain only
-until their code is deleted and are not to be extended. Its source
-CLI is `uv run launchplane service ordinary-agent-workers run-once` or `run`.
-The worker uses PostgreSQL-backed finite-job claims, an injected purpose
-dispatcher, and independent process-local scan/error telemetry. Startup probes
-the exact compatible Alembic revision and ordinary-job relations before the
-loop. It has no HTTP route, does not share privileged-operation worker error
-accounting, and does not create policy, grant, activation, or provider state.
-The compose definition is deployed with a code-owned zero replica default. A
-reviewed self-deploy topology change checks the reviewed ordinary-worker replica
-state before updating it; the provider does not offer an atomic compare-and-swap.
-Enabling the process remains a separately reviewed worker-start step and does
-not change the independent activation record.
+The retired ordinary finite-job worker, its CLI and Compose service, and its
+privileged-worker enrollment recovery have been removed. Bounded expiry
+maintenance remains for retained ciphertext used by managed-secret key retirement.
+Retained
+delegated-delivery records and schema-3 policy history remain readable;
+remaining domain and storage removal is tracked in #2437.
 
 Ordinary guarded admission and finite continuation refresh independent provider
 protection evidence on demand within the existing delegation. This introduces

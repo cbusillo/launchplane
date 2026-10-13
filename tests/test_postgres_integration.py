@@ -202,8 +202,8 @@ from control_plane.provider_operations import (
 )
 from control_plane.privileged_operation_worker import (
     OrdinaryAgentDeliveryCleanupState,
-    execute_approved_privileged_operations_once,
     run_ordinary_agent_delivery_cleanup_once,
+    execute_approved_privileged_operations_once,
 )
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,

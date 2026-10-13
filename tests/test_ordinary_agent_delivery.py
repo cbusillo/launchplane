@@ -259,8 +259,10 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
         self.assertIsNone(self.claim())
         self.assertIsNone(self.verify(self.bundle.token))
 
-    def test_retained_delivery_blocks_key_retirement_until_ciphertext_cleanup(self) -> None:
+    def test_privileged_worker_cleanup_preserves_key_retirement_of_legacy_ciphertext(self) -> None:
         from control_plane.secrets import KeyRing, reencrypt_secrets
+        from control_plane.cli import main
+        from click.testing import CliRunner
 
         self.enroll()
         key_ring = KeyRing(
@@ -280,7 +282,19 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
                 "_ordinary_agent_database_epoch",
                 return_value=self.envelope.delivery.expires_at + 1,
             ):
-                self.store.expire_ordinary_agent_deliveries()
+                with patch("control_plane.cli_service._store", return_value=self.store):
+                    result = CliRunner().invoke(
+                        main,
+                        [
+                            "service",
+                            "privileged-operation-workers",
+                            "run-once",
+                            "--database-url",
+                            "sqlite+pysqlite:///:memory:",
+                        ],
+                    )
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertEqual(self.store.ordinary_agent_delivery_key_usage(), {})
             after = reencrypt_secrets(record_store=self.store)
             self.assertIn("test-issuer", cast(list[str], after["retirement_ready_key_ids"]))
             self.assertNotEqual(before["plan_digest"], after["plan_digest"])

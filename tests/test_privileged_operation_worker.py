@@ -575,20 +575,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def setUp(self) -> None:
-        # These loop tests isolate generic operations and cleanup. The actual
-        # enrollment recovery is exercised with shared storage by its HTTP test.
-        from control_plane.ordinary_agent_enrollment_worker import (
-            OrdinaryAgentEnrollmentRecoveryResult,
-        )
-
-        self.enrollment_recovery = self.enterContext(
-            patch(
-                "control_plane.cli_service.recover_ordinary_agent_enrollments_once",
-                return_value=OrdinaryAgentEnrollmentRecoveryResult(),
-            )
-        )
-
     def test_delivery_cleanup_retries_without_exposing_failure_detail(self) -> None:
         store = _WorkerStore(
             cleanup_results=[
@@ -1735,107 +1721,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         ]
         self.assertIn("privileged_operation_worker_threshold_exit", str(telemetry))
         self.assertNotIn("privileged_operation_worker_poll_succeeded", str(telemetry))
-
-    def test_ordinary_maintenance_failures_do_not_stop_privileged_polls(self) -> None:
-        from control_plane.ordinary_agent_enrollment_worker import (
-            OrdinaryAgentEnrollmentRecoveryResult,
-        )
-
-        class TestStopEvent:
-            waits = 0
-
-            def is_set(self) -> bool:
-                return self.waits >= 2
-
-            def wait(self, _timeout: int) -> bool:
-                self.waits += 1
-                return self.is_set()
-
-        store = _WorkerStore(cleanup_results=[RuntimeError("private delivery ciphertext")])
-        runner = CliRunner()
-        with (
-            patch("control_plane.cli_service.Event", return_value=TestStopEvent()),
-            patch(
-                "control_plane.cli_service.build_privileged_operation_worker_store",
-                side_effect=lambda **kwargs: (
-                    kwargs["on_schema_probe_succeeded"](),
-                    store,
-                )[1],
-            ),
-            patch(
-                "control_plane.cli_service.execute_approved_privileged_operations_once",
-                return_value=[],
-            ) as execute_once,
-            patch(
-                "control_plane.cli_service._consume_privileged_operation_worker_schema_probe_evidence"
-            ),
-            patch("control_plane.cli_service.signal.signal", return_value=object()),
-            patch("control_plane.cli_service.time.monotonic", side_effect=[10.0, 11.0, 11.0, 12.0]),
-            patch(
-                "control_plane.cli_service.recover_ordinary_agent_enrollments_once",
-                return_value=OrdinaryAgentEnrollmentRecoveryResult(failed=1),
-            ) as recover_once,
-        ):
-            result = runner.invoke(
-                main,
-                [
-                    "service",
-                    "privileged-operation-workers",
-                    "run",
-                    "--database-url",
-                    "sqlite+pysqlite:///:memory:",
-                    "--schema-probe-fd",
-                    "3",
-                    "--error-backoff-seconds",
-                    "3",
-                    "--max-consecutive-errors",
-                    "1",
-                ],
-            )
-
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(execute_once.call_count, 2)
-        self.assertEqual(recover_once.call_count, 2)
-        self.assertIs(
-            recover_once.call_args_list[0].kwargs["state"],
-            recover_once.call_args_list[1].kwargs["state"],
-        )
-        self.assertEqual(len(store.heartbeat_records), 2)
-        self.assertNotIn("private delivery ciphertext", result.output)
-        telemetry = [
-            json.loads(line) for line in result.output.splitlines() if line.startswith("{")
-        ]
-        cleanup_failures = [
-            entry
-            for entry in telemetry
-            if entry["event"] == "ordinary_agent_delivery_cleanup_failed"
-        ]
-        self.assertEqual(
-            [
-                entry["failed"]
-                for entry in telemetry
-                if entry["event"] == "ordinary_agent_enrollment_recovery"
-            ],
-            [1, 1],
-        )
-        self.assertEqual(
-            cleanup_failures,
-            [
-                {
-                    "event": "ordinary_agent_delivery_cleanup_failed",
-                    "error_type": "RuntimeError",
-                    "consecutive_failures": 1,
-                    "retry_seconds": 3,
-                }
-            ],
-        )
-        self.assertEqual(
-            sum(
-                entry["event"] == "privileged_operation_worker_poll_succeeded"
-                for entry in telemetry
-            ),
-            2,
-        )
 
     def test_worker_loop_stops_cleanly_after_sigterm(self) -> None:
         waits: list[float] = []

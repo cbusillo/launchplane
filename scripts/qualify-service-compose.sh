@@ -15,7 +15,7 @@ fixture_dir="$(mktemp -d "$scratch_root/lp-service-compose.XXXXXXXX")"
 project="$(basename "$fixture_dir" | tr '[:upper:].' '[:lower:]-')"
 compose=(docker compose --project-name "$project" --project-directory "$fixture_dir"
   --env-file "$fixture_dir/.env" --file "$fixture_dir/compose.json")
-services=(launchplane launchplane-odoo-workers launchplane-verireel-workers launchplane-ordinary-agent-workers)
+services=(launchplane launchplane-odoo-workers launchplane-verireel-workers)
 active_pid=""
 run_interruptible() {
   "$@" <&0 &
@@ -72,7 +72,7 @@ DOCKER_IMAGE_REFERENCE="$image" LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK=unused-fixt
   jq --arg image "$image" --arg postgres_image "$postgres_image" --arg env_file "$fixture_dir/.env" '
     {services: (.services | with_entries(select(.key == "launchplane" or
       .key == "launchplane-odoo-workers" or .key == "launchplane-verireel-workers" or
-      .key == "launchplane-ordinary-agent-workers" or .key == "launchplane-browser") |
+      .key == "launchplane-browser") |
       .value.image = $image | .value.pull_policy = "never" | .value.restart = "no" |
       .value.deploy.replicas = 1 |
       .value.networks = ["qualification"] |

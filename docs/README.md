@@ -78,7 +78,6 @@ not describe runtime authority until it is implemented, deployed, and activated.
   baseline, Docker credential isolation, and readiness contract.
 - [runner-host-hygiene.md](runner-host-hygiene.md) — report-only shared runner
   host hygiene evidence, budgets, and future apply boundary.
-- [ordinary-agent-execution.md](ordinary-agent-execution.md) — RETIRED, scheduled for deletion; see DIRECTION.md.
 - [provider-delivery-inspection.md](provider-delivery-inspection.md) — RETIRED, scheduled for deletion; see DIRECTION.md.
 - [agent-context-boundary.md](agent-context-boundary.md) — public-safe agent
   context, caller profiles, scoped intent, redaction, and provenance boundary.
