@@ -36,6 +36,7 @@ from control_plane.launchplane_github_delivery import (
     DELIVERY_GITHUB_APP_INTEGRATION_KEY,
     resolve_delivery_github_app_identity,
     resolve_delivery_github_token,
+    resolve_delivery_github_installation_token,
     delivery_github_credentials_ready,
     DeliveryGitHubTokenUnavailable,
     DeliveryGitHubCredentialsUnavailable,
@@ -95,7 +96,7 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
         if path == "/app":
             if self.provider_error is not None:
                 raise click.ClickException("Provider unavailable") from self.provider_error
-            return {"id": self.identity.app_id}
+            return {"id": self.identity.app_id, "slug": "example-delivery"}
         if path == "/repos/example/site/installation":
             return {
                 "id": 12,
@@ -161,6 +162,40 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
                 retry_provider_errors=retry_provider_errors,
                 report_failure=report_failure,
             )
+
+    def test_delivery_identity_carries_slug_from_the_verified_app(self) -> None:
+        def mint(**kwargs: object) -> GitHubAppInstallationToken:
+            return mint_delivery_installation_token(
+                identity=self.identity,
+                repository="example/site",
+                repository_id="7001",
+                permissions={"contents": "read", "pull_requests": "write"},
+                api_request=self.provider,
+                now=self.now,
+            )
+
+        with (
+            patch(
+                "control_plane.launchplane_github_delivery.resolve_delivery_github_app_identity",
+                return_value=self.identity,
+            ),
+            patch(
+                "control_plane.launchplane_github_delivery.mint_delivery_installation_token",
+                side_effect=mint,
+            ),
+        ):
+            issued = resolve_delivery_github_installation_token(
+                control_plane_root=self.root,
+                context_name="site",
+                repository="example/site",
+                purpose="pull_request_feedback",
+                report_failure=True,
+            )
+        self.assertIsNotNone(issued)
+        assert issued is not None
+        self.assertEqual(issued.app_id, self.identity.app_id)
+        self.assertEqual(issued.app_slug, "example-delivery")
+        self.assertEqual(issued.repository, self.token_repository)
 
     def test_diagnostics_distinguish_failed_stages_without_provider_details(self) -> None:
         for target, stage in (

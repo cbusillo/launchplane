@@ -138,6 +138,7 @@ class GitHubAppInstallationToken:
     repository: str
     expires_at: str
     permissions: tuple[str, ...] = ()
+    app_slug: str = ""
 
 
 def resolve_advisory_github_app_identity(*, control_plane_root: Path) -> GitHubAppIdentity:
@@ -376,6 +377,7 @@ def _mint_repository_installation_token(
         )
     except jwt.PyJWTError as error:
         raise GitHubAppIdentityError(f"{identity_label} private key is invalid.") from error
+    app_slug = ""
     if confirm_app_identity_endpoint:
         app_payload = json_object(
             _github_api_request(api_request, path="/app", token=app_jwt),
@@ -391,6 +393,8 @@ def _mint_repository_installation_token(
             != identity.app_id
         ):
             raise GitHubAppIdentityError("GitHub App identity does not match configured app id.")
+        slug = app_payload.get("slug")
+        app_slug = slug.strip() if isinstance(slug, str) else ""
     installation_payload = json_object(
         _github_api_request(
             api_request,
@@ -519,6 +523,7 @@ def _mint_repository_installation_token(
             repository_id=observed_repository_id,
             repository=normalized_repository,
             expires_at=expires_at,
+            app_slug=app_slug,
             permissions=tuple(
                 f"{permission}:{access}"
                 for permission, access in sorted(observed_permissions.items())
