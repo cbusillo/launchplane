@@ -340,6 +340,55 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.store.list_deployment_records(), ())
 
+    async def test_identical_release_preserves_progress_and_refuses_new_decisions(self) -> None:
+        from control_plane.client_release import ClientReleaseRunView
+
+        await self.post()
+        accepted = self.store.list_release_review_decision_records(product="example-site")[0]
+        production = self.store.read_release_tuple_record(
+            context_name="example-site", channel_name="prod"
+        )
+        self.store.write_release_tuple_record(
+            production.model_copy(update={"artifact_id": accepted.checklist.candidate.artifact_id})
+        )
+        run = ClientReleaseRunView(
+            decision_record_id=accepted.record_id,
+            rollback_drill=False,
+            state="passed",
+            steps=(),
+        )
+        with patch(
+            "control_plane.http_routes.release_review.read_client_release_run", return_value=run
+        ):
+            session = self.sessions.issue(_human(login="site-owner", github_id=9001))
+            current = await _asgi_get(
+                self.app,
+                "/v1/release-review?product=example-site",
+                headers={"Cookie": self.sessions.session_cookie_header(session)},
+            )
+            self.assertEqual(current.status_code, 200, current.text)
+            self.assertTrue(current.json()["review"]["no_new_release"])
+            self.assertFalse(current.json()["review"]["required"])
+            self.assertEqual(current.json()["release_run"], run.model_dump(mode="json"))
+            for args in (
+                {},
+                {"outcome": "changes_requested", "reason": "Stale tab"},
+                {
+                    "actor": "operator",
+                    "github_id": 9002,
+                    "outcome": "overridden",
+                    "reason": "Stale tab",
+                },
+            ):
+                with self.subTest(args=args):
+                    refused = await self.post(**args)
+                    self.assertEqual(refused.status_code, 409, refused.text)
+                    self.assertEqual(refused.json()["error"]["code"], "no_new_release")
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product="example-site"), (accepted,)
+        )
+        self.publisher.assert_called_once()
+
     async def test_client_acceptance_starts_the_release_unless_held_or_overridden(self) -> None:
         def newest() -> str:
             return self.store.list_release_review_decision_records(product="example-site")[
