@@ -126,6 +126,16 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
             "testing-hold", hold_payload(), "compare_and_write_dokploy_target_record"
         )
 
+    async def test_generic_web_testing_hold_keeps_lane_ownership_at_commit(self) -> None:
+        for caller in ("local_operator", "github_actions", "local_admin"):
+            await self._apply_route(
+                "testing-hold",
+                hold_payload(),
+                "compare_and_write_dokploy_target_record",
+                caller=caller,
+                driver_id="generic-web",
+            )
+
     async def test_other_callers_addon_settings_keep_named_lane_at_commit(self) -> None:
         for caller in ("github_actions", "local_admin"):
             await self._apply_route(
@@ -160,6 +170,7 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
         writer_name: str,
         *,
         caller: str = "local_operator",
+        driver_id: str = "odoo",
         padding: dict[str, str] | None = None,
         scenarios: tuple[str, ...] = ("unchanged", "reassigned", "shared_context", "lost_instance"),
     ) -> None:
@@ -187,7 +198,7 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
                         store.ensure_schema()
                     profile = LaunchplaneProductProfileRecord.model_validate(
                         _odoo_profile_payload_with_prod_lane()
-                    )
+                    ).model_copy(update={"driver_id": driver_id})
                     if padding and scenario != "duplicate_lane":
                         profile = LaunchplaneProductProfileRecord.model_validate(
                             {

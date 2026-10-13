@@ -45,8 +45,16 @@ class ProductConfigServiceError:
     message: str
 
 
+class ProductConfigProfileReader(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
+    def list_product_profile_records(
+        self, *, driver_id: str = ""
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+
 def resolve_product_config_profile(
-    record_store: PostgresRecordStore,
+    record_store: ProductConfigProfileReader,
     *,
     product: str,
     context: str,

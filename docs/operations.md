@@ -3050,6 +3050,17 @@ context only, and `context_instance` has both context and instance.
   `Idempotency-Key`, lane ownership check, stale refusal and read-back. It
   refuses any lane but `testing` (`testing_hold_not_testing_lane`) and a lane
   with no tracked target record.
+  Both Odoo and generic-web lanes use this path; foreign or ambiguously owned
+  lanes refuse with `product_config_lane_not_owned`. The maintained helper
+  exposes `testing-hold-read`, `testing-hold-dry-run --hold|--lift --reason ...`,
+  and `testing-hold-apply` with the saved dry-run evidence, expected digest,
+  reviewed acknowledgement and idempotency key. Use the same exact
+  `--product`, `--context`, `--instance testing` for review and apply. A lift
+  requests testing reconciliation and can deploy: the Director's agent may
+  plan it, but existing write authority still governs apply (local-operator
+  lift applies remain refused). See the hold's
+  [dispatch limits](event-driven-deploys.md#staff-testing-hold) before isolation
+  staging; a hold is not proof of executor/provider quiescence.
 - `odoo-overrides put-addon-setting --allow-direct-db-mutation` writes
   addon-shaped Odoo override intent such as Authentik or Shopify settings for a
   context and instance. Use it only for explicit local/bootstrap repair.

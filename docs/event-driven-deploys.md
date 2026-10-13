@@ -413,6 +413,9 @@ An admin holds the lane, and lifts the hold when staff are done.
   through `POST /v1/product-config/testing-hold/apply` (dry-run, then a
   reviewed apply; see [operations](operations.md)), never in code or config.
   Only a `testing` lane takes one.
+- Reading and planning a hold checks the named product's exclusive ownership
+  of the lane, independently of its deploy driver. Odoo and generic-web lanes
+  use the same tracked target policy and reviewed hold/lift path.
 - While it's on, the testing reconcile still works out the desired build, then
   records the plan as held with reason `staff_testing` and the hold's reason.
   It records no artifact and queues nothing. A testing lane already running the
@@ -425,6 +428,16 @@ An admin holds the lane, and lifts the hold when staff are done.
 - Lifting the hold requests a reconcile of the product's testing target, so
   the newest verified build deploys right away rather than at the next sweep.
 - Previews are unaffected.
+
+For generic-web, the in-process testing reconciler reads the hold before
+entering deployment/recovery. It does not start a new provider operation while
+held. The hold does not cancel an executor that already passed that check,
+drain queued provider jobs, disable provider schedules, stop containers, or
+settle an unknown-outcome reservation. An isolation procedure must separately
+prove those effects quiescent and the actual rendered storage/ports safe;
+the hold's read-back alone proves neither. Keep the hold through staging and
+historical settlement. Once those gates pass, an authorized admin uses the
+same reviewed lift path to request ordinary testing reconciliation.
 
 ## Bounded work
 

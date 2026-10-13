@@ -2504,7 +2504,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         self.assertEqual(self.deploys.runtime_identities, [])
         self.assertEqual(self.store.list_held_provider_target_reservations(), ())
 
-    def test_a_held_testing_lane_waits_and_deploys_nothing(self) -> None:
+    def test_a_held_testing_lane_waits_then_lifting_resumes_deployment(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.hold_testing()
         self.request()
@@ -2513,6 +2513,15 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
 
         self.assertEqual((plan["action"], plan["reason"]), ("wait", "staff_testing"))
         self.assertEqual(self.deploys.runtime_identities, [])
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
+        self.lift_testing_hold()
+        resumed = self.reconcile()
+
+        self.assertEqual(resumed["action"], "deploy")
+        self.assertEqual(
+            [identity.source_git_ref for identity in self.deploys.runtime_identities], [DEPLOYABLE]
+        )
 
     def test_retargeting_does_not_bypass_an_unknown_deploy_to_the_old_app(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
