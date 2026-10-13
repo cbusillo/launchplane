@@ -7,7 +7,11 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import secrets as control_plane_secrets
-from control_plane.contracts.dokploy_target_record import DokployTargetPolicies, DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetPolicies,
+    DokployTargetRecord,
+    PublicHostEffect,
+)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
@@ -53,6 +57,7 @@ class DokployTargetDefinition(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     domains: tuple[str, ...] = ()
     public_hosts: tuple[str, ...] = ()
+    pending_public_host_effects: tuple[PublicHostEffect, ...] = ()
     policies: DokployTargetPolicies = Field(default_factory=DokployTargetPolicies)
 
     @model_validator(mode="after")
@@ -269,6 +274,7 @@ def build_dokploy_target_record_from_definition(
         env=dict(definition.env),
         domains=definition.domains,
         public_hosts=definition.public_hosts,
+        pending_public_host_effects=definition.pending_public_host_effects,
         policies=definition.policies,
         updated_at=updated_at,
         source_label=source_label,
@@ -331,6 +337,9 @@ def build_dokploy_source_of_truth_from_records(
                 "env": dict(record.env),
                 "domains": list(record.domains),
                 "public_hosts": list(record.public_hosts),
+                "pending_public_host_effects": [
+                    effect.model_dump() for effect in record.pending_public_host_effects
+                ],
                 "policies": record.policies.model_dump(mode="python"),
             }
         )
