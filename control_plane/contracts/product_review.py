@@ -49,6 +49,7 @@ class ProductReviewDecisionRecord(BaseModel):
     pull_request_number: int = Field(ge=1)
     head_sha: str = ""
     preview_url: str = ""
+    preview_generation_id: str = ""
     decision: ProductReviewDecision
     reason: str = Field(default="", max_length=PRODUCT_REVIEW_REASON_MAX_LENGTH)
     owner_github_id: str
