@@ -951,6 +951,17 @@ Recovery results identify the source failure record, and replacement records,
 holds, controller checkpoints and managed PR feedback retain each step's audit
 trail. Dry runs perform no writes.
 
+The isolated service replay in `tests/test_merge_train_recovery_replay.py`
+recreates the HTTP service and reopens file-backed storage between every
+controller pass. It covers a singleton culprit among four members, an
+interaction failure against the newly landed base, and a red base that later
+passes. It checks persisted landing checkpoints, culprit feedback and absence
+of duplicate candidate builds on unchanged inputs. Its source-control provider
+simulates check outcomes and merge effects; it does not prove hosted CI,
+protected GitHub merges, PostgreSQL fencing or the live scheduler. The
+same-SHA flake and historical no-repeat paths have separate coverage in
+`tests/test_merge_train_failed_batch_recovery.py`.
+
 If the eligible queue changes, for example because a new queued PR repairs
 train validation, the controller may supersede the failed candidate batch
 lineage and plan a replacement candidate from the fresh snapshot.
