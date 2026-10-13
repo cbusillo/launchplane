@@ -8,6 +8,15 @@ testing site and the **`Client test notes`** from every merged pull request in t
 commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
 
+Checklist reads retry an individual GitHub GET once after a transport failure,
+invalid JSON response, timeout, or HTTP 408/500/502/503/504. Authorization,
+not-found, and rate-limit responses are not retried. Each failed attempt logs
+the locally compiled API path without its query, HTTP status (when available),
+exception type, product, attempt, and service trace; provider messages and bodies
+are omitted. If the second read fails, the checklist remains unavailable with
+`github_read_failed` and reload guidance. No cached checklist supplies release
+approval, and no decision, promotion, or other write is retried by this path.
+
 Checklist compilation replaces links to preview hostnames (including hosts in
 the product's retained preview records) and per-PR `/ui/owner-review` pages with
 the fixed line `Check this on the testing site.`. Other notes and links remain;
