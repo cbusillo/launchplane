@@ -4893,7 +4893,7 @@ def _resume_known_failed_batch(
     conflict_probe: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
     """Resume recorded failure isolation rather than rebuild identical failed inputs."""
-    matching_records = tuple(
+    compatible_history = tuple(
         record
         for record in _candidate_history_on_base(
             candidate_store=candidate_store,
@@ -4911,7 +4911,11 @@ def _resume_known_failed_batch(
                 current_sha256=policy_sha256,
             )
         )
-        and _merge_train_candidate_matches_dry_run_queue(
+    )
+    matching_records = tuple(
+        record
+        for record in compatible_history
+        if _merge_train_candidate_matches_dry_run_queue(
             candidate=record.candidate,
             dry_run_result=dry_run_result,
             base_sha=snapshot.base_sha,
@@ -4923,7 +4927,7 @@ def _resume_known_failed_batch(
         parent = next(
             (
                 record
-                for record in matching_records
+                for record in compatible_history
                 if record.record_id
                 in {retry.check_retry_of, retry.infrastructure_retry_of, retry.batch_body_retry_of}
                 and record.candidate.required_checks_status == "fail"

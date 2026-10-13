@@ -585,6 +585,39 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 result["superseded_merge_train_batch_candidate_record_id"], failed_record.record_id
             )
 
+    def test_capped_infrastructure_retry_resumes_from_larger_parent(self) -> None:
+        failed = self._four_member_failed_candidate()
+        self.policy = self.policy.model_copy(
+            update={"policies": (self.policy.policies[0].model_copy(update={"max_batch_size": 2}),)}
+        )
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            result = self._reflow(
+                store,
+                failed,
+                failure_evidence=CandidateCheckFailures(
+                    checks=(CandidateCheckFailure(name="ci-gate", conclusion="cancelled", url=""),)
+                ),
+            )
+            retry = MergeTrainBatchCandidate.model_validate(result["candidate"])
+            self.assertEqual([entry.pull_request_number for entry in retry.entries], [1, 2])
+            self.assertTrue(retry.infrastructure_retry_of)
+            # Queue churn retired the unfinished retry; the same heads/base return.
+            record = store.list_merge_train_batch_candidate_records(status="active")[0]
+            store.write_merge_train_batch_candidate_record(
+                record.model_copy(update={"status": "superseded"})
+            )
+            before = store.list_merge_train_batch_candidate_records()
+            dry = self._fresh_plan(store, mutate=False)
+            self.assertEqual(dry["reason_code"], "candidate_retry_resumed")
+            self.assertEqual(store.list_merge_train_batch_candidate_records(), before)
+            resumed_result = self._fresh_plan(store, mutate=True)
+            resumed = MergeTrainBatchCandidate.model_validate(resumed_result["candidate"])
+            self.assertEqual(resumed_result["reason_code"], "candidate_retry_resumed")
+            self.assertEqual(resumed.candidate_ref, retry.candidate_ref)
+            self.assertEqual(resumed.infrastructure_retry_of, retry.infrastructure_retry_of)
+            self.reflow_client.add_pull_request_label.assert_not_called()
+
     def test_later_passing_retry_supersedes_historical_failure(self) -> None:
         for retry_field in ("check_retry_of", "infrastructure_retry_of"):
             with self.subTest(retry_field=retry_field), TemporaryDirectory() as directory:
