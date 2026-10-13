@@ -10,6 +10,7 @@ from control_plane.client_test_notes import _markdown_lines
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.release_review import ReleaseChecklist, ReleaseReviewItem
 from control_plane.product_review import source_control_pull_request_url
 from control_plane.release_review import ReleaseReviewStore
@@ -35,11 +36,63 @@ class ReleaseInvitationNotesUnavailable(ValueError):
     """A Client-facing constituent is missing its recorded batch test notes."""
 
 
+class ReleaseInvitationProvenanceUnavailable(ValueError):
+    """A recorded batch cannot be bound to the release's merged change."""
+
+
 @dataclass(frozen=True, slots=True)
 class InvitationChange:
     item: ReleaseReviewItem
     legacy_url: str
     feature_name: str = ""
+
+
+def _invitation_batch(
+    plans: tuple[MergeTrainBatchLandingPlanRecord, ...],
+    repository: str,
+    item: ReleaseReviewItem,
+) -> MergeTrainBatchLandingPlan | None:
+    recorded = [
+        record
+        for record in plans
+        if record.landing_plan.repository.casefold() == repository.casefold()
+        and record.landing_plan.candidate_pull_request_number == item.pull_request_number
+    ]
+    if not recorded:
+        return None
+    matches = []
+    for record in recorded:
+        if record.status != "active":
+            continue
+        plan = record.landing_plan
+        historical = record.historical_completion
+        if historical is None:
+            if all(
+                entry.status == "merged" and entry.merge_commit_sha == item.merge_commit
+                for entry in plan.entries
+            ):
+                matches.append(plan)
+            continue
+        # Historical entries stay stale. The typed record binds the observed
+        # constituent heads and trees to the immutable plan; the checklist must
+        # identify that plan's candidate head, not just reuse its batch PR number.
+        observed = historical.provider_evidence
+        if (
+            item.head_sha == plan.candidate_sha
+            and observed.observed_base_sha == observed.final_observed_base_sha
+            and plan.candidate_tree_sha == observed.entries[-1].observed_merge_commit_tree_sha
+            and all(
+                entry.observed_merge_commit_tree_sha == entry.expected_result_tree_sha
+                and entry.observed_parent_tree_sha == entry.expected_parent_tree_sha
+                for entry in observed.entries
+            )
+        ):
+            matches.append(plan)
+    if not matches or len({plan.landing_plan_sha256 for plan in matches}) != 1:
+        raise ReleaseInvitationProvenanceUnavailable(
+            f"Release invitation batch provenance is unavailable or inconsistent for {repository}#{item.pull_request_number}."
+        )
+    return matches[0]
 
 
 def _release_items(
@@ -52,18 +105,7 @@ def _release_items(
     for repository, items in groups:
         plans = store.list_merge_train_batch_landing_plan_records(repository=repository)
         for item in items:
-            batch = next(
-                (
-                    record.landing_plan
-                    for record in plans
-                    if record.landing_plan.candidate_pull_request_number == item.pull_request_number
-                    and all(
-                        entry.status == "merged" and entry.merge_commit_sha == item.merge_commit
-                        for entry in record.landing_plan.entries
-                    )
-                ),
-                None,
-            )
+            batch = _invitation_batch(plans, repository, item)
             if batch is None:
                 result.append((repository, InvitationChange(item, item.url)))
                 continue
