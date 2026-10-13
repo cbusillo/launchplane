@@ -1731,10 +1731,12 @@ def _recover_external_stack_landing(
     disposition; flat, partial, ordinary and admitted effects keep their own
     recovery contracts.
     """
-    source_id = str(
+    source_id = (
         lease.record.step_payload.get("external_landing_source_record_id")
         or lease.record.active_record_id
     )
+    if not isinstance(source_id, str):
+        raise MergeTrainControllerRequestError("External recovery requires a record identifier.")
     source = _merge_train_landing_record_by_id(
         record_store=landing_store,
         repository=request.repository,

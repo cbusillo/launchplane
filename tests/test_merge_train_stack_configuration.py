@@ -252,7 +252,7 @@ class StackDispositionConfigurationTests(unittest.IsolatedAsyncioTestCase):
                 return_value=(child.expected_head_sha, "closed"),
             ),
             patch.object(
-                self.client_class,
+                _FakeMergeTrainGitHubClient,
                 "branch_contains_commit",
                 side_effect=lambda **kw: kw["commit_sha"] != child.expected_head_sha,
             ),
