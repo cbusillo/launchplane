@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import unittest
+import hashlib
+import os
+from unittest.mock import patch
 
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.contracts.product_incident_read_model import (
     ProductIncidentEnvironmentScope,
+    ProductIncidentDetail,
     ProductIncidentReadModelCapabilityError,
+    ProductIncidentReferenceUnavailableError,
     build_product_environment_incident_detail,
     build_product_environment_incident_list,
     require_product_incident_read_store,
@@ -19,6 +24,8 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationAttemptRecord,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
+    build_public_ingress_notification_attempt_id,
+    build_public_ingress_reminder_state_id,
     public_ingress_material_fingerprint_sha256,
 )
 
@@ -178,7 +185,7 @@ class _Store:
                 updated_at=NOW,
             ),
         )
-        self.attempts = (
+        self.attempts: tuple[PublicIngressNotificationAttemptRecord, ...] = (
             PublicIngressNotificationAttemptRecord(
                 attempt_id="attempt-1",
                 incident_id=self.open_incident.incident_id,
@@ -291,6 +298,109 @@ class _Store:
 
 
 class ProductIncidentReadModelTests(unittest.TestCase):
+    def setUp(self) -> None:
+        keys = patch.dict(
+            os.environ,
+            {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "incident-test-key"},
+            clear=True,
+        )
+        keys.start()
+        self.addCleanup(keys.stop)
+
+    def test_receipt_references_are_opaque_stable_and_preserve_internal_keys(self) -> None:
+        store = _Store()
+        policy = "private-policy"
+        destination = "private-destination"
+        attempt = store.attempts[0]
+        attempt_id = build_public_ingress_notification_attempt_id(
+            incident_id=attempt.incident_id,
+            event=attempt.event,
+            policy_id=policy,
+            destination_id=destination,
+            incident_event_id=attempt.incident_event_id,
+        )
+        reminder_id = build_public_ingress_reminder_state_id(
+            incident_id=attempt.incident_id, policy_id=policy
+        )
+        store.attempts = (
+            attempt.model_copy(
+                update={
+                    "attempt_id": attempt_id,
+                    "policy_id": policy,
+                    "destination_id": destination,
+                }
+            ),
+            attempt.model_copy(update={"attempt_id": attempt_id + "-second"}),
+        )
+        store.reminders = (
+            store.reminders[0].model_copy(
+                update={"reminder_state_id": reminder_id, "policy_id": policy}
+            ),
+        )
+        before = tuple(record.model_dump() for record in (*store.attempts, *store.reminders))
+
+        def read() -> ProductIncidentDetail:
+            return build_product_environment_incident_detail(
+                record_store=store,
+                product="example-product",
+                environment="prod",
+                incident_id=attempt.incident_id,
+            )
+
+        detail = read()
+        self.assertEqual(detail, read())
+        references = {row.attempt_id for row in detail.notification_attempts}
+        self.assertEqual(len(references), len(store.attempts))
+        payload = str(detail.model_dump(mode="json"))
+        for private_id in (policy, destination, attempt_id, reminder_id):
+            self.assertNotIn(private_id, payload)
+        for guessed_policy in (policy, "other-policy"):
+            for guessed_destination in (destination, "other-destination"):
+                guess = build_public_ingress_notification_attempt_id(
+                    incident_id=attempt.incident_id,
+                    event=attempt.event,
+                    policy_id=guessed_policy,
+                    destination_id=guessed_destination,
+                    incident_event_id=attempt.incident_event_id,
+                )
+                self.assertFalse(
+                    any(hashlib.sha256(guess.encode()).hexdigest() in ref for ref in references)
+                )
+        event_ref = detail.events[0].event_id
+        self.assertEqual(detail.incident.latest_material_event_id, event_ref)
+        self.assertEqual(detail.observations[0].incident_event_id, event_ref)
+        self.assertEqual(detail.reminders[0].material_event_id, event_ref)
+        self.assertEqual(detail.notification_attempts[0].incident_event_id, event_ref)
+        collection = build_product_environment_incident_list(
+            record_store=store, product="example-product", environment="prod"
+        )
+        self.assertEqual(collection.incidents[0].latest_material_event_id, event_ref)
+        self.assertEqual(
+            before, tuple(record.model_dump() for record in (*store.attempts, *store.reminders))
+        )
+        with patch.dict(os.environ, {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "rotated-test-key"}):
+            rotated = read()
+        self.assertNotEqual(
+            detail.notification_attempts[0].attempt_id, rotated.notification_attempts[0].attempt_id
+        )
+        self.assertEqual(
+            before, tuple(record.model_dump() for record in (*store.attempts, *store.reminders))
+        )
+
+    def test_missing_or_invalid_keys_refuse_instead_of_exposing_receipts(self) -> None:
+        for key_config in ({}, {"LAUNCHPLANE_SECRET_KEYS_JSON": "malformed-private-config"}):
+            with (
+                self.subTest(key_config=bool(key_config)),
+                patch.dict(os.environ, key_config, clear=True),
+            ):
+                with self.assertRaises(ProductIncidentReferenceUnavailableError):
+                    build_product_environment_incident_detail(
+                        record_store=_Store(),
+                        product="example-product",
+                        environment="prod",
+                        incident_id="incident-open",
+                    )
+
     def test_capability_check_fails_closed(self) -> None:
         class PartialStore:
             def read_product_profile_record(self, product: str) -> None:

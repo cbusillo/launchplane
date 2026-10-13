@@ -20,6 +20,7 @@ from control_plane.contracts.deployment_record import (
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.lane_service_restart import LaneServiceRestartRecovery
+from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromotionOperationRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
@@ -539,7 +540,7 @@ class ProductManagedSecretConfigStatusItem(BaseModel):
     context: str = ""
     instance: str = ""
     updated_at: str = ""
-    trust_state: ProductSecretBindingTrustState | Literal["unsupported"] = "missing"
+    trust_state: ProductSecretBindingTrustState = "missing"
 
 
 class ProductConfigOperationAvailability(BaseModel):
@@ -1381,6 +1382,59 @@ def _promotion_activity_events(
     source_limit: int,
 ) -> tuple[ProductActivityEvent, ...]:
     events: list[ProductActivityEvent] = []
+    operations = tuple(
+        record
+        for record in _optional_records(
+            record_store,
+            "list_odoo_prod_promotion_operation_records",
+            product=profile.product,
+            context_name=lane.context,
+            instance_name=lane.instance,
+            limit=source_limit,
+        )
+        if isinstance(record, OdooProdPromotionOperationRecord)
+    )
+    operation_promotion_ids = {
+        operation.result.promotion_record_id
+        for operation in operations
+        if operation.result is not None and operation.result.promotion_record_id
+    }
+    for operation in operations:
+        links = [_record_link("operation", operation.operation_id)]
+        decision_id = operation.authorization.release_decision_record_id
+        if decision_id:
+            links.append(_record_link("release_decision", decision_id))
+        result = operation.result
+        if result is not None:
+            for record_type, record_id in (
+                ("promotion", result.promotion_record_id),
+                ("deployment", result.deployment_record_id),
+                ("backup_gate", result.backup_record_id),
+            ):
+                if record_id:
+                    links.append(_record_link(record_type, record_id))
+        infrastructure_backup_id = (
+            result.infrastructure_backup_record_id if result is not None else ""
+        ) or operation.request.infrastructure_backup_record_id
+        if infrastructure_backup_id and not any(
+            link.record_id == infrastructure_backup_id for link in links
+        ):
+            links.append(_record_link("backup_gate", infrastructure_backup_id))
+        events.append(
+            _activity_event(
+                event_type="promotion",
+                product=profile.product,
+                context=lane.context,
+                environment=lane.instance,
+                driver_id=profile.driver_id,
+                action_id="prod_promotion",
+                status=operation.status,
+                occurred_at=operation.finished_at or operation.updated_at or operation.created_at,
+                title=f"{profile.display_name} {lane.instance} prod promotion",
+                summary=f"{operation.request.from_instance} to {operation.request.to_instance} {operation.status}.",
+                records=tuple(links),
+            )
+        )
     for record in _optional_records(
         record_store,
         "list_promotion_records",
@@ -1391,6 +1445,11 @@ def _promotion_activity_events(
         deploy = getattr(record, "deploy")
         rollback = getattr(record, "rollback")
         rollback_attempted = bool(getattr(rollback, "attempted", False))
+        # Odoo's durable operation owns completion time and release linkage.
+        # Its generic promotion record may have no deploy timestamps or may
+        # later describe a rollback; preserve that separate rollback event.
+        if not rollback_attempted and getattr(record, "record_id") in operation_promotion_ids:
+            continue
         occurred_at = (
             rollback.finished_at or rollback.started_at
             if rollback_attempted

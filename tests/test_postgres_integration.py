@@ -45,7 +45,10 @@ from tests import test_preview_reservation_recovery as preview_reservation_tests
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from tests.test_odoo_addon_settings_override import _existing_record as _addon_override_record
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecord,
+    DokployTargetRecordChanged,
+)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from tests import test_http_app_product_retirement as retirement_tests
 from tests import test_legacy_preview_reconciliation as legacy_preview_tests
@@ -250,6 +253,7 @@ from tests.test_detached_application_retirement import (
 )
 from control_plane.contracts.secret_record import SecretRecord, SecretVersion
 from control_plane.storage.product_authority_bundle import (
+    PublicHostAuthorityBusy,
     ProductProfileConflictError,
     ProductContextOwnershipError,
     ProductAuthorityBundle,
@@ -1124,6 +1128,14 @@ class RealPostgresLegacyPreviewReconciliationTests(
 
 
 class RealPostgresTrackedRetirementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_partial_retirement_disable_preserves_approved_rotation(self) -> None:
+        from tests.test_retirement_approved_rotation import RetirementApprovedRotationTests
+
+        with _head_postgres_database() as url:
+            await RetirementApprovedRotationTests().assert_approved_rotation_survives(
+                url, partial_disable=True
+            )
+
     async def test_approved_rotation_survives_stale_retirement(self) -> None:
         from tests.test_retirement_approved_rotation import RetirementApprovedRotationTests
 
@@ -1331,6 +1343,289 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def _public_host_bundle(
+        self, store: PostgresRecordStore
+    ) -> tuple[
+        LaunchplaneProductProfileRecord,
+        DokployTargetRecord,
+        DokployTargetIdRecord,
+        ProviderTargetRecord,
+        ProductAuthorityBundle,
+    ]:
+        profile = _product_profile().model_copy(
+            update={"lanes": (ProductLaneProfile(context="public-site", instance="prod"),)}
+        )
+        store.write_product_profile_record(profile)
+        target = DokployTargetRecord(
+            context="public-site",
+            instance="prod",
+            domains=("origin.example",),
+            updated_at=profile.updated_at,
+        )
+        target_id = DokployTargetIdRecord(
+            context=target.context,
+            instance=target.instance,
+            target_id="public-compose",
+            updated_at=target.updated_at,
+        )
+        provider = ProviderTargetRecord.from_dokploy_records(
+            target_record=target, target_id_record=target_id
+        )
+        store.write_dokploy_target_record(target)
+        store.write_dokploy_target_id_record(target_id)
+        store.write_provider_target_record(provider)
+        replacement = target.model_copy(update={"public_hosts": ("public.example",)})
+        receipt = _idempotency_record(response_trace_id="public-hosts", request_fingerprint="hosts")
+        bundle = ProductAuthorityBundle(
+            dokploy_targets=(replacement,),
+            required_product_config_target=(profile.product, target.context, target.instance),
+            idempotency_record=receipt,
+        )
+        return profile, target, target_id, provider, bundle
+
+    def test_public_hosts_provider_does_not_hold_unrelated_product_writes(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            profile, target, target_id, provider, bundle = self._public_host_bundle(store)
+            replacement = bundle.dokploy_targets[0]
+            receipt = bundle.idempotency_record
+            assert receipt is not None
+            entered_provider, release_provider = threading.Event(), threading.Event()
+            from control_plane.product_public_hosts import plan_public_hosts
+            from tests.test_product_public_hosts import StubProvider
+
+            stub = StubProvider()
+            stub.routes[0].update(composeId=target_id.target_id, host=target.domains[0])
+            with (
+                patch(
+                    "control_plane.dokploy.source.read_dokploy_config",
+                    return_value=("stub", "test"),
+                ),
+                patch("control_plane.dokploy.api.dokploy_request", side_effect=stub.call),
+            ):
+                plan = plan_public_hosts(
+                    record_store=store,
+                    control_plane_root=Path("."),
+                    context=target.context,
+                    instance=target.instance,
+                    hosts=replacement.public_hosts,
+                    mode="apply",
+                )
+
+            def slow_provider() -> None:
+                entered_provider.set()
+                if not release_provider.wait(10):
+                    raise TimeoutError("Stub provider was not released")
+                with patch("control_plane.dokploy.api.dokploy_request", side_effect=stub.call):
+                    plan.apply_provider()
+
+            other = PostgresRecordStore(database_url=store.database_url)
+            try:
+                with ThreadPoolExecutor(max_workers=2) as workers:
+                    applying = workers.submit(
+                        store.write_product_public_hosts_bundle,
+                        bundle,
+                        expected_target=target,
+                        expected_target_id=target_id,
+                        expected_provider_target=provider,
+                        apply_provider=slow_provider,
+                    )
+                    try:
+                        self.assertTrue(entered_provider.wait(10))
+                        self.assertEqual(
+                            other.read_dokploy_target_record(
+                                context_name=target.context, instance_name=target.instance
+                            ),
+                            target,
+                        )
+                        self.assertIsNone(
+                            other.read_idempotency_record(
+                                scope=receipt.scope,
+                                route_path=receipt.route_path,
+                                idempotency_key=receipt.idempotency_key,
+                            )
+                        )
+                        unrelated = workers.submit(
+                            other.write_product_authority_bundle,
+                            ProductAuthorityBundle(
+                                product_profiles=(
+                                    profile.model_copy(
+                                        update={"product": "unrelated", "lanes": ()}
+                                    ),
+                                )
+                            ),
+                        )
+                        unrelated.result(timeout=1)
+                        # These writers include paths outside authority bundles. Their
+                        # DB fences fail promptly rather than holding the global lock
+                        # while waiting on this provider operation.
+                        for write in (
+                            lambda: other.write_product_profile_record(
+                                profile.model_copy(update={"lanes": ()})
+                            ),
+                            lambda: other.write_product_profile_record(
+                                profile.model_copy(update={"product": "new-owner"})
+                            ),
+                            lambda: other.write_product_profile_record(
+                                profile.model_copy(
+                                    update={
+                                        "product": "historical-owner",
+                                        "lanes": (),
+                                        "historical_contexts": (target.context.upper(),),
+                                    }
+                                )
+                            ),
+                            lambda: other.write_dokploy_target_record(
+                                target.model_copy(update={"domains": ("new-origin.example",)})
+                            ),
+                            lambda: other.write_dokploy_target_id_record(
+                                target_id.model_copy(update={"target_id": "rebound"})
+                            ),
+                            lambda: other.write_provider_target_record(
+                                provider.model_copy(update={"target_id": "rebound"})
+                            ),
+                            lambda: other.write_dokploy_target_record(
+                                target.model_copy(
+                                    update={
+                                        "context": "other",
+                                        "public_hosts": replacement.public_hosts,
+                                    }
+                                )
+                            ),
+                            lambda: other.write_dokploy_target_id_record(
+                                target_id.model_copy(update={"context": "alias"})
+                            ),
+                        ):
+                            with self.assertRaises(PublicHostAuthorityBusy):
+                                workers.submit(write).result(timeout=1)
+                        with self.assertRaises(ValueError):
+                            other.write_provider_target_record(
+                                provider.model_copy(update={"context": "alias"})
+                            )
+                        never_apply = Mock()
+                        with self.assertRaises(PublicHostAuthorityBusy):
+                            workers.submit(
+                                other.write_product_public_hosts_bundle,
+                                bundle,
+                                expected_target=target,
+                                expected_target_id=target_id,
+                                expected_provider_target=provider,
+                                apply_provider=never_apply,
+                            ).result(timeout=1)
+                        never_apply.assert_not_called()
+                        workers.submit(
+                            other.write_product_authority_bundle,
+                            ProductAuthorityBundle(
+                                product_profiles=(
+                                    profile.model_copy(
+                                        update={"product": "still-unrelated", "lanes": ()}
+                                    ),
+                                )
+                            ),
+                        ).result(timeout=1)
+                    finally:
+                        release_provider.set()
+                    applying.result(timeout=10)
+                self.assertEqual(
+                    store.read_dokploy_target_record(
+                        context_name=target.context, instance_name=target.instance
+                    ),
+                    replacement,
+                )
+                self.assertEqual(
+                    store.read_idempotency_record(
+                        scope=receipt.scope,
+                        route_path=receipt.route_path,
+                        idempotency_key=receipt.idempotency_key,
+                    ),
+                    receipt,
+                )
+                self.assertEqual(
+                    {route["host"] for route in stub.routes},
+                    set(target.domains + replacement.public_hosts),
+                )
+                # Locks end with the transaction: the supported fresh request works.
+                other.write_dokploy_target_record(
+                    replacement.model_copy(update={"source_label": "after-reconciliation"})
+                )
+            finally:
+                other.close()
+
+    def test_public_hosts_failure_rolls_back_receipt_and_releases_fences(self) -> None:
+        for failure in ("provider", "commit"):
+            with self.subTest(failure=failure), _store_for_fresh_head_database() as store:
+                _profile, target, target_id, provider, bundle = self._public_host_bundle(store)
+                provider_verified = threading.Event()
+                original_write = store._write_product_authority_bundle
+
+                def apply_provider() -> None:
+                    provider_verified.set()
+                    if failure == "provider":
+                        raise RuntimeError("Stub provider disconnected before verified read-back")
+
+                def failing_commit(*args: Any, **kwargs: Any) -> None:
+                    if provider_verified.is_set():
+                        raise RuntimeError("Commit failed after provider read-back")
+                    original_write(*args, **kwargs)
+
+                with (
+                    patch.object(
+                        store, "_write_product_authority_bundle", side_effect=failing_commit
+                    ),
+                    self.assertRaises(RuntimeError),
+                ):
+                    store.write_product_public_hosts_bundle(
+                        bundle,
+                        expected_target=target,
+                        expected_target_id=target_id,
+                        expected_provider_target=provider,
+                        apply_provider=apply_provider,
+                    )
+                self.assertTrue(provider_verified.is_set())
+                self.assertEqual(
+                    store.read_dokploy_target_record(
+                        context_name=target.context, instance_name=target.instance
+                    ),
+                    target,
+                )
+                receipt = bundle.idempotency_record
+                assert receipt is not None
+                self.assertIsNone(
+                    store.read_idempotency_record(
+                        scope=receipt.scope,
+                        route_path=receipt.route_path,
+                        idempotency_key=receipt.idempotency_key,
+                    )
+                )
+                # A new connection must be able to take every fence after failure.
+                other = PostgresRecordStore(database_url=store.database_url)
+                try:
+                    other.write_product_public_hosts_bundle(
+                        bundle,
+                        expected_target=target,
+                        expected_target_id=target_id,
+                        expected_provider_target=provider,
+                        apply_provider=lambda: None,
+                    )
+                finally:
+                    other.close()
+
+    def test_public_hosts_stale_binding_refuses_provider_effects(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            _profile, target, target_id, provider, bundle = self._public_host_bundle(store)
+            store.write_dokploy_target_id_record(
+                target_id.model_copy(update={"target_id": "changed-compose"})
+            )
+            apply = Mock()
+            with self.assertRaises(DokployTargetRecordChanged):
+                store.write_product_public_hosts_bundle(
+                    bundle,
+                    expected_target=target,
+                    expected_target_id=target_id,
+                    expected_provider_target=provider,
+                    apply_provider=apply,
+                )
+            apply.assert_not_called()
+
     def test_snapshot_cursor_cancellation_reports_family_and_closes_transaction(self) -> None:
         from sqlalchemy import func
         from control_plane.storage.postgres import LaunchplaneAuthzPolicyRow

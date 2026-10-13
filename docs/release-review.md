@@ -102,6 +102,16 @@ preview feedback; titles, labels and the existence of a preview are not classifi
 For a batch landing, the stored landing plan binds the batch PR and merge commit
 to its constituent PRs; each constituent uses its own review evidence and its
 section of the batch's Client test notes.
+An observation-only [historical completion](merge-train-historical-completion.md)
+can also supply those constituents. Its active, typed successor must bind the
+batch PR and checklist head to the persisted candidate, with a stable observed
+base and matching constituent result trees. The entries remain stale: reading
+them for notification creates no merge admission, release decision or approval.
+Missing, inconsistent or conflicting completion evidence for a recorded batch
+raises `ReleaseInvitationProvenanceUnavailable` naming the repository and batch
+PR before publication; it never silently treats that batch as engineering-only.
+Restoring correctly bound persisted evidence permits receipt-aware publication
+and legacy invitation adoption without a new ping for already announced changes.
 The invitation names each Client-facing member from its generated notes heading
 and includes that member's instructions, rather than naming the synthetic batch.
 Fenced examples cannot introduce member sections; duplicate member sections
@@ -159,14 +169,16 @@ uv run python -m control_plane.release_invitation --product example-site --candi
 It prints the issue and comment markers and makes no service or GitHub request.
 
 The review leads with the product, the viewer's role, the
-testing-site link, and **What to test**. Pull requests with identical
-`Client test notes` appear as one check listing each change it covers, and a change missing
-notes appears as its own check. Changes with valid `Nothing for the Client to test: <reason>` notes collapse
+testing-site link, and **What to test**. Each pull request appears as its own
+check headed by its title linked to the pull request, with Markdown-formatted
+Client test notes. Raw HTML is omitted; note links use HTTP or HTTPS and images
+show their alternative text without fetching external resources.
+Changes with valid `Nothing for the Client to test: <reason>` notes collapse
 into one expandable count. The reason must be nonempty, and a change carrying
 the product's review label cannot use that declaration. Invalid or missing
 notes stay visible and block Client acceptance, including shared-repository
 changes. Real test notes also request the change's preview review without a
-label; see [Client review](owner-acceptance.md). This grouping
+label; see [Client review](owner-acceptance.md). This presentation
 is display only: the checklist, its digest, and blockers remain per pull request. A collapsed **Technical details**
 section identifies the **Current production version** and **Proposed production
 version** (currently in testing). Accepting records approval for that proposed
@@ -801,7 +813,11 @@ this worker, and record fresh acceptance if such a release was stopped.
 
 The review page says before the Accept button whether accepting puts the
 version on the live site, naming it, or whether releases are held. After
-acceptance it shows each step's status. A stopped step also shows its bounded,
+acceptance it shows each step's status. Progress belongs to the reviewed release:
+a new testing candidate does not show an earlier release's completed steps.
+The just-completed release remains visible while testing and production both
+carry its candidate, and an active temporary hotfix retains its own progress.
+A stopped step also shows its bounded,
 redacted recorded reason and code. Expand **Failure details** for the failure
 record, operation and recorded trace IDs. Cancellation can replace an operation's
 saved trace with the cancellation request's trace. A missing saved trace says **Not
@@ -816,6 +832,15 @@ in `records`. Reading this evidence never retries a stopped release.
 `release_on_acceptance` (what the next acceptance would do), `live_site_url`,
 and `release_run`, derived from the step operations, whose ids come from the
 decision.
+
+For an unfinished run, `blocked_reason` also explains locally recorded holds,
+unpublished approval, a decision that no longer covers the product, unavailable
+lane evidence, or changed testing/production versions. Waiting runs with a reason
+display **Blocked**, while queued/running operations and their completed steps
+remain visible. The page keeps refreshing so a lifted hold can resume its display.
+These reads do not recompile the checklist, contact a provider, publish approval,
+or authorize a release. Completed and stopped runs retain their recorded outcome
+and failure details when a later hold or candidate change occurs.
 
 Shared Odoo source changes use the detailed checklist coverage requirements
 above. The Client cannot undo a live release; that is an admin rollback.
