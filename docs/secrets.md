@@ -568,6 +568,13 @@ decryption key state denies the reveal or resolution.
   before any managed secret write starts. Runtime-environment secret bundles
   also require an active runtime key-safety policy that allows each requested
   binding for the target runtime class.
+- A context-shared runtime secret still needs a lane for key-safety evaluation:
+  keep `scope: context` on the secret entry and set the request's top-level
+  `context` and `instance` to an owned stable lane. The stored secret remains
+  context-scoped. Omitting the safety lane returns HTTP 400 with
+  `runtime_key_safety_target_required` and a trace ID, before any configuration
+  write. Context-wide non-secret settings and secrets in other purpose stores
+  do not need a runtime key-safety target.
 - Trusted local agents that need to call the deployed service instead of a
   browser session should source `~/.config/launchplane/local-operator.env` and
   use `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` for routine Director-agent writes. Exact
