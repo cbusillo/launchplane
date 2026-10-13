@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
+from urllib.error import HTTPError, URLError
 from urllib.parse import unquote
 
 import click
@@ -98,10 +99,42 @@ RELEASE_EVIDENCE_MESSAGES: dict[ReleaseEvidenceReason, str] = {
     "production_identity_missing": "Production has no recorded deployed version.",
     "candidate_identity_missing": "Testing has no recorded deployed version.",
     "release_record_missing": "A release record Launchplane needs is missing.",
-    "github_read_failed": "Reading this release's changes from GitHub failed.",
+    "github_read_failed": "Reading this release's changes from GitHub failed. Reload to try again.",
 }
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _read_release_github(*, path: str, token: str, product: str, trace_id: str) -> object:
+    """Retry one transient checklist GET, never a release decision or provider write."""
+    for attempt in (1, 2):
+        try:
+            return github_api_request(path=path, token=token)
+        except click.ClickException as error:
+            cause = error.__cause__
+            status = cause.code if isinstance(cause, HTTPError) else None
+            transient = (
+                status in {408, 500, 502, 503, 504}
+                if isinstance(cause, HTTPError)
+                else isinstance(cause, (URLError, OSError, json.JSONDecodeError))
+            )
+            retry = attempt == 1 and transient
+            # Paths are locally compiled API routes. Drop queries and all provider text,
+            # which can contain private URLs, headers, or response bodies.
+            _LOGGER.warning(
+                "release checklist GitHub read failed product=%s path=%s trace_id=%s "
+                "attempt=%d status=%s error_type=%s retry=%s",
+                product,
+                path.split("?", 1)[0],
+                trace_id or "-",
+                attempt,
+                status or "-",
+                type(cause or error).__name__,
+                retry,
+            )
+            if not retry:
+                raise
+    raise AssertionError("Checklist read attempts exhausted without a result.")
 
 
 @dataclass(eq=False)
@@ -439,7 +472,9 @@ def current_release_review(
                     )
                 if not tokens[repository]:
                     raise ReleaseEvidenceUnavailable("source_control_access_unavailable")
-                return github_api_request(path=path, token=tokens[repository])
+                return _read_release_github(
+                    path=path, token=tokens[repository], product=profile.product, trace_id=trace_id
+                )
 
             return build_release_review(
                 store=cast(ReleaseReviewStore, record_store),

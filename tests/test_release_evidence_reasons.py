@@ -1,6 +1,9 @@
+import json
 import unittest
+from email.message import Message
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
 import click
@@ -9,7 +12,7 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
-from control_plane.release_review import current_release_review
+from control_plane.release_review import current_release_review, unavailable_release_review
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.test_release_review import BASE, HEAD, github_read, profile, seed
 
@@ -60,7 +63,9 @@ class ReleaseEvidenceReasonTests(unittest.TestCase):
         self.enterContext(
             patch(
                 "control_plane.release_review.github_api_request",
-                side_effect=lambda *, path, token: github_read(path),
+                side_effect=lambda *, path, token, method="GET": (
+                    None if method == "DELETE" else github_read(path)
+                ),
             )
         )
 
@@ -73,9 +78,10 @@ class ReleaseEvidenceReasonTests(unittest.TestCase):
                 trace_id="trace-123",
             )
         self.assertIsNone(review.checklist)
-        self.assertIn(f"reason={review.unavailable_reason}", logs.output[0])
-        self.assertIn("trace_id=trace-123", logs.output[0])
-        self.assertNotIn(PRIVATE_URL, logs.output[0] + " ".join(review.blockers))
+        logged = " ".join(logs.output)
+        self.assertIn(f"reason={review.unavailable_reason}", logged)
+        self.assertIn("trace_id=trace-123", logged)
+        self.assertNotIn(PRIVATE_URL, logged + " ".join(review.blockers))
         return review.unavailable_reason
 
     def test_compiles_from_recorded_runtime_identities(self) -> None:
@@ -115,6 +121,86 @@ class ReleaseEvidenceReasonTests(unittest.TestCase):
             side_effect=click.ClickException(f"GitHub API request failed for {PRIVATE_URL}"),
         ):
             self.assertEqual(self.reason(web_profile()), "github_read_failed")
+
+    def test_single_transient_comparison_or_coverage_failure_recovers_checklist(self) -> None:
+        for endpoint in ("/compare/", "/commits/"):
+            for cause in (
+                HTTPError(PRIVATE_URL, 502, "upstream failed", Message(), None),
+                URLError(TimeoutError(PRIVATE_URL)),
+                json.JSONDecodeError("invalid response", "", 0),
+            ):
+                with self.subTest(endpoint=endpoint, cause=type(cause).__name__):
+                    paths: list[str] = []
+                    failed_path = ""
+
+                    def read(*, path: str, method: str = "GET", **_kwargs: object) -> object:
+                        nonlocal failed_path
+                        if method == "DELETE":
+                            return None
+                        paths.append(path)
+                        if endpoint in path and not failed_path:
+                            failed_path = path
+                            raise click.ClickException(PRIVATE_URL) from cause
+                        return github_read(path)
+
+                    with (
+                        patch("control_plane.release_review.github_api_request", side_effect=read),
+                        self.assertLogs("control_plane.release_review", "WARNING") as logs,
+                    ):
+                        review = current_release_review(
+                            control_plane_root=self.root,
+                            record_store=self.store,
+                            profile=web_profile(),
+                            trace_id="trace-retry",
+                        )
+                    self.assertIsNone(review.unavailable_reason)
+                    assert review.checklist is not None
+                    self.assertEqual(review.checklist.candidate.source_commit, HEAD)
+                    self.assertEqual(review.checklist.items[0].pull_request_number, 42)
+                    self.assertEqual(paths.count(failed_path), 2)
+                    self.assertEqual(len(paths), 3)
+                    self.assertIn("trace_id=trace-retry", logs.output[0])
+                    self.assertIn(failed_path.split("?", 1)[0], logs.output[0])
+                    self.assertNotIn(PRIVATE_URL, " ".join(logs.output))
+
+    def test_persistent_transient_failure_stops_after_second_get(self) -> None:
+        def read(*, method: str = "GET", **_kwargs: object) -> object:
+            if method == "DELETE":
+                return None
+            raise click.ClickException(PRIVATE_URL) from TimeoutError(PRIVATE_URL)
+
+        with patch("control_plane.release_review.github_api_request", side_effect=read) as api:
+            self.assertEqual(self.reason(web_profile()), "github_read_failed")
+        reads = [call for call in api.call_args_list if call.kwargs.get("method", "GET") == "GET"]
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(reads[0], reads[1])
+        self.assertEqual(api.call_args_list[-1].kwargs["method"], "DELETE")
+
+    def test_authorization_missing_resource_and_quota_failures_are_not_retried(self) -> None:
+        for status in (401, 403, 404, 429):
+            with self.subTest(status=status):
+
+                def read(*, method: str = "GET", **_kwargs: object) -> object:
+                    if method == "DELETE":
+                        return None
+                    raise click.ClickException(PRIVATE_URL) from HTTPError(
+                        PRIVATE_URL, status, "denied", Message(), None
+                    )
+
+                with patch(
+                    "control_plane.release_review.github_api_request", side_effect=read
+                ) as api:
+                    self.assertEqual(self.reason(web_profile()), "github_read_failed")
+                reads = [
+                    call for call in api.call_args_list if call.kwargs.get("method", "GET") == "GET"
+                ]
+                self.assertEqual(len(reads), 1)
+
+    def test_unavailable_checklist_offers_reload_without_provider_details(self) -> None:
+        review = unavailable_release_review("github_read_failed")
+        self.assertIsNone(review.checklist)
+        self.assertFalse(review.approved)
+        self.assertIn("reload", " ".join(review.blockers).casefold())
 
 
 if __name__ == "__main__":
