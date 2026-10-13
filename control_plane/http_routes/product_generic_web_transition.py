@@ -66,10 +66,6 @@ def register_product_generic_web_transition_routes(
         agent_plan = (
             body.mode == "dry-run"
             and isinstance(identity, LocalOperatorIdentity | TerminalAgentIdentity)
-            and product
-            in dependencies.read_role_products(
-                identity=identity, context=LAUNCHPLANE_SERVICE_CONTEXT
-            )
             and dependencies.authorization_allows(
                 identity=identity,
                 action="product_profile.plan",

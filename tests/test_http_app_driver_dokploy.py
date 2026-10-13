@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 import json
 import os
 import unittest
@@ -136,6 +137,7 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "authentication_required")
         self.assertEqual(response.headers["WWW-Authenticate"], 'Bearer realm="Launchplane API"')
 
+    @scoped_agent_test
     async def test_driver_descriptors_reject_wrong_context_grant(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -151,6 +153,7 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    @scoped_agent_test
     async def test_driver_descriptor_rejects_wrong_context_grant(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -398,6 +401,7 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
             "deployment-example-site-testing",
         )
 
+    @scoped_agent_test
     async def test_driver_instance_view_denies_ungranted_instance_in_shared_context(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = _driver_context_store(Path(temporary_directory_name) / "state")
@@ -456,6 +460,7 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "authentication_required")
         self.assertEqual(response.headers["WWW-Authenticate"], 'Bearer realm="Launchplane API"')
 
+    @scoped_agent_test
     async def test_driver_context_view_rejects_wrong_context_grant(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -538,6 +543,49 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_director_inspects_explicit_target_without_a_grant_and_redacts_values(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            database_url = _sqlite_database_url(root / "records.sqlite3")
+            _seed_dokploy_target_inspect_records(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            self.addCleanup(store.close)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(schema_version=2),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+            with (
+                patch(
+                    "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config",
+                    return_value=("https://provider.example.invalid", "provider-only-token"),
+                ),
+                patch(
+                    "control_plane.dokploy_target_inspect.dokploy_api.fetch_dokploy_target_payload",
+                    return_value={
+                        "id": "compose-cm-prod",
+                        "name": "cm-prod",
+                        "env": "ODOO_DB_PASSWORD=withheld-provider-value\n",
+                    },
+                ) as inspect,
+            ):
+                response = await _get_dokploy_target_inspect(
+                    app,
+                    target_type="compose",
+                    target_id="compose-cm-prod",
+                    authorization="Bearer local-operator-token",
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertTrue(response.json()["inspect"]["provider_payload_redacted"])
+                self.assertNotIn("withheld-provider-value", response.text)
+                self.assertNotIn("provider-only-token", response.text)
+                inspect.assert_called_once()
+
+    @scoped_agent_test
     async def test_operator_target_read_preserves_scope_and_redaction(self) -> None:
         cases = (
             ("driver.read", "launchplane", "cm_website", ("prod",), "local-owner-agent", 200),
@@ -628,6 +676,7 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
                         read_config.assert_not_called()
                         fetch_target.assert_not_called()
 
+    @scoped_agent_test
     async def test_operator_driver_read_does_not_authorize_explicit_target(self) -> None:
         with patch(
             "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config"
@@ -650,6 +699,7 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
         read_config.assert_not_called()
 
+    @scoped_agent_test
     async def test_operator_denial_records_inspect_action(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

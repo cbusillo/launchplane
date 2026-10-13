@@ -1,5 +1,7 @@
 """Recover exact Client promotions using real storage and a fake runtime."""
 
+from tests.support.auth import scoped_agent_test
+
 import hashlib
 import json
 import unittest
@@ -468,6 +470,7 @@ class PromotionRecoveryTests(unittest.TestCase):
         self.assertEqual(self.apply(plan)[0], 409)
         self.assertEqual(self.provider.deployed_artifacts, [])
 
+    @scoped_agent_test
     def test_missing_cross_product_and_denied_read_select_nothing(self) -> None:
         self.assertEqual(self.request()[0], 404)
         self.interrupt_completion()

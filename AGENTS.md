@@ -87,9 +87,8 @@ Treat this file as the launch checklist for each engineering session in
 - Do not propose, add, or apply new GitHub-secret/workflow-managed
   authorization grants; granting access is a stop boundary. On
   `authorization_denied`, name the exact denied action and follow
-  `docs/authorization-authority.md#denial-handling`: a refused read is a missing
-  standing read grant to report, and a refused write, grant, or change means
-  asking the Director once. Continue with work that does not depend on it.
+  `docs/authorization-authority.md#denial-handling`. Continue with work that does
+  not depend on the refusal.
 - Dispatch and watch protected GitHub admin workflows only through the
   installed `github_workflow_babysit.py` helper. Do not use raw
   `gh workflow run`, `gh run watch`, or a generic run waiter for those jobs;

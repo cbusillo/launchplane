@@ -399,7 +399,7 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(lifted.json()["result"]["reconcile_requested"])
         self.assertEqual([request.target_key for request in requests], [f"{_PRODUCT}:testing"])
 
-    async def test_operator_agent_can_set_but_not_lift_a_hold(self) -> None:
+    async def test_director_can_plan_a_hold_lift_but_cannot_apply_it(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             store = self._store(root)
@@ -439,10 +439,25 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
                 headers=headers,
                 payload=_payload(hold=False, reason="Staff testing finished."),
             )
+            denied_apply = await http_request(
+                app,
+                "POST",
+                TESTING_HOLD_APPLY_ROUTE,
+                headers=headers | {"Idempotency-Key": "director-hold-lift"},
+                payload=_payload(
+                    hold=False,
+                    reason="Staff testing finished.",
+                    mode="apply",
+                    reviewed_plan_sha256=lift.json()["result"]["plan_sha256"],
+                ),
+            )
+            self.assertIsNone(_read_hold(store))
+            self.assertEqual(store.list_product_reconcile_requests(), ())
 
         self.assertEqual(hold.status_code, 202, hold.text)
-        self.assertEqual(lift.status_code, 403, lift.text)
-        self.assertEqual(lift.json()["error"]["code"], "local_operator_lane_scope_required")
+        self.assertEqual(lift.status_code, 202, lift.text)
+        self.assertEqual(denied_apply.status_code, 403, denied_apply.text)
+        self.assertEqual(denied_apply.json()["error"]["code"], "local_operator_lane_scope_required")
 
     async def test_plan_and_apply_require_their_actions(self) -> None:
         with TemporaryDirectory() as directory:

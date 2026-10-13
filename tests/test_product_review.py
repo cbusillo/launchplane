@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -339,6 +340,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             (),
         )
 
+    @scoped_agent_test
     async def test_local_operator_reads_only_granted_product_and_cannot_change_owner_decision(
         self,
     ) -> None:

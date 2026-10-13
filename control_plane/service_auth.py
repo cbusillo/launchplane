@@ -70,12 +70,14 @@ class GitHubHumanIdentity:
 class TerminalAgentIdentity:
     subject: str
     token_label: str
+    director_agent: bool = False
 
 
 @dataclass(frozen=True)
 class LocalOperatorIdentity:
     subject: str
     token_label: str
+    director_agent: bool = False
 
 
 @dataclass(frozen=True)
@@ -397,6 +399,7 @@ def configured_terminal_agent_identity(
                 config.terminal_agent_token_label,
                 "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL",
             ),
+            director_agent=True,
         )
     except PermissionError:
         return None
@@ -418,6 +421,7 @@ def configured_local_operator_identity(
                 config.local_operator_token_label,
                 "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL",
             ),
+            director_agent=True,
         )
     except PermissionError:
         return None
@@ -463,6 +467,7 @@ def bearer_identity_from_token(
                 config.local_operator_token_label,
                 "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL",
             ),
+            director_agent=True,
         )
     if config.terminal_agent_token.strip() and secrets.compare_digest(
         token, config.terminal_agent_token.strip()
@@ -476,6 +481,7 @@ def bearer_identity_from_token(
                 config.terminal_agent_token_label,
                 "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL",
             ),
+            director_agent=True,
         )
     return None
 
@@ -874,6 +880,20 @@ def local_operator_identity_valid(*, identity: LocalOperatorIdentity, action: st
     )
 
 
+def director_agent_identity(identity: LaunchplaneIdentity) -> bool:
+    """Trust only the marker set by the service's authenticated bootstrap transport.
+
+    Policy principals and diagnostic request bodies never supply this marker.
+    Other agent identities retain their product-scoped policy rules.
+    """
+    return (
+        isinstance(identity, LocalOperatorIdentity | TerminalAgentIdentity)
+        and identity.director_agent
+        and bool(identity.subject.strip())
+        and bool(identity.token_label.strip())
+    )
+
+
 def local_admin_identity_valid(*, identity: LocalAdminIdentity, action: str) -> bool:
     return (
         bool(identity.subject.strip())
@@ -1171,7 +1191,11 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 for rule in self.github_humans
             )
         elif isinstance(identity, TerminalAgentIdentity):
-            allowed = any(
+            allowed = (
+                inherit_agent_read_role
+                and director_agent_identity(identity)
+                and agent_read_role_covers(action)
+            ) or any(
                 rule.allows(
                     identity=identity,
                     action=action,
@@ -1195,7 +1219,11 @@ class LaunchplaneAuthzPolicy(BaseModel):
                     reason_code="principal_binding_invalid",
                     record_context=record_context,
                 )
-            allowed = any(
+            allowed = (
+                inherit_agent_read_role
+                and director_agent_identity(identity)
+                and agent_read_role_covers(action)
+            ) or any(
                 rule.allows(
                     identity=identity,
                     action=action,
@@ -1283,6 +1311,15 @@ class LaunchplaneAuthzPolicy(BaseModel):
         context: str,
         target: AuthorizationTarget | None = None,
     ) -> bool:
+        if director_agent_identity(identity):
+            return self.allows(
+                identity=identity,
+                action=AGENT_READ_ROLE_ACTION,
+                product=product,
+                context=context,
+                target=target,
+                inherit_agent_read_role=True,
+            )
         if isinstance(identity, LocalOperatorIdentity):
             matches = any(
                 AGENT_READ_ROLE_ACTION in rule.actions

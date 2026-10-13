@@ -2078,5 +2078,7 @@ class ConfiguredLocalOperatorIdentityTests(unittest.TestCase):
                     local_operator_token_label="operator-agent-token",
                 )
             ),
-            LocalOperatorIdentity(subject="operator-agent", token_label="operator-agent-token"),
+            LocalOperatorIdentity(
+                subject="operator-agent", token_label="operator-agent-token", director_agent=True
+            ),
         )

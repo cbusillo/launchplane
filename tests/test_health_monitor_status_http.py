@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -121,6 +122,7 @@ class HealthMonitorStatusHttpTests(unittest.IsolatedAsyncioTestCase):
                 app.openapi()["paths"]["/v1/service/health-monitor/status"]["get"]["responses"],
             )
 
+    @scoped_agent_test
     async def test_requires_authentication_service_read_and_database_storage(self) -> None:
         for authorized, token, expected in (
             (True, False, 401),

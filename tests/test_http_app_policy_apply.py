@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 import json
 import os
 import unittest
@@ -3020,6 +3021,7 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["result"]["mode"], "dry-run")
 
+    @scoped_agent_test
     async def test_product_config_local_operator_stays_on_its_products_own_lane(self) -> None:
         context_scoped = _meta_product_config_payload(reason="Context-scoped secret.")
         _product_config_secrets(context_scoped)[0]["scope"] = "context"

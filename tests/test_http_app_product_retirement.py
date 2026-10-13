@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 import asyncio
 import json
 from contextvars import ContextVar
@@ -2106,6 +2107,7 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(held.state, "reconcile_required")
                 store.close()
 
+    @scoped_agent_test
     async def test_provider_failure_persists_reconciliation_and_retiring_lifecycle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = self._store(Path(temporary_directory_name))

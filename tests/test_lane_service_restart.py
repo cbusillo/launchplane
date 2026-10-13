@@ -1,4 +1,6 @@
 from __future__ import annotations
+from tests.support.auth import scoped_agent_test
+
 
 import asyncio
 from contextlib import redirect_stderr
@@ -342,6 +344,7 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertIn("local-owner-agent", event.summary)
         self.assertIn(self.provider.container_id, event.summary)
 
+    @scoped_agent_test
     def test_denied_scope_and_terminal_identity_never_inspect_or_restart(self) -> None:
         self.app = self.create_app(contexts=("other-context",))
         with patch(
