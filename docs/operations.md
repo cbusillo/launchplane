@@ -3147,6 +3147,15 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   without another restore, before health, canonical and logo verification. A
   failure in either pass is recorded on the operation and the deployment
   record.
+  A prod upstream restore with public hosts requires deploy-enabled website
+  bootstrap intent: otherwise planning reports the missing intent before
+  provider writes instead of restoring data and then expecting a canonical URL
+  it cannot configure. Read the current intent through the
+  [website-bootstrap read route](records.md), then
+  configure the intended website through `Odoo Website Bootstrap Override`
+  (the service-backed admin workflow) and replan. Preserve existing override
+  phases unless intentionally changing the lane's intent; no website is inferred
+  from the hostname.
 - Dokploy keeps `schedule.runManually` open until the job ends, so the trigger
   request has its own short deadline
   (`DEFAULT_DOKPLOY_SCHEDULE_TRIGGER_TIMEOUT_SECONDS`, 300 s). The execution

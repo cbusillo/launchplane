@@ -1127,6 +1127,27 @@ def _restore_omits_website_bootstrap(record: OdooInstanceOverrideRecord | None) 
     )
 
 
+def _public_restore_website_intent_error(
+    *,
+    data_source_mode: str,
+    instance: str,
+    public_hosts: tuple[str, ...],
+    record: OdooInstanceOverrideRecord | None,
+) -> str:
+    if (
+        data_source_mode == "upstream_restore"
+        and instance == "prod"
+        and public_hosts
+        and not _restore_omits_website_bootstrap(record)
+    ):
+        return (
+            "Public-host upstream restore requires deploy-enabled website bootstrap "
+            "intent before provider effects. Read and configure the lane's website "
+            "through the supported website-bootstrap service workflow, then replan."
+        )
+    return ""
+
+
 def _write_failed_deployment(
     *,
     record_store: OdooStableTargetReplacementStore,
@@ -1474,6 +1495,14 @@ def build_odoo_stable_target_replacement_plan(
             override_record = _read_odoo_instance_override_record(
                 record_store=record_store, context=lane.context, instance=lane.instance
             )
+            website_intent_error = _public_restore_website_intent_error(
+                data_source_mode=request.data_source_mode,
+                instance=lane.instance,
+                public_hosts=target_record.public_hosts,
+                record=override_record,
+            )
+            if website_intent_error:
+                block("compose_or_override_render_failed", website_intent_error)
             if override_record is not None and "deploy" in override_record.apply_on:
                 override = control_plane_odoo_instance_overrides.build_post_deploy_environment(
                     override_record,
@@ -1923,6 +1952,17 @@ def execute_odoo_stable_target_replacement_apply(
         context=plan.context,
         instance=plan.instance,
     )
+    website_intent_error = _public_restore_website_intent_error(
+        data_source_mode=plan.data_source_mode,
+        instance=plan.instance,
+        public_hosts=target_record.public_hosts,
+        record=odoo_override_record,
+    )
+    if website_intent_error:
+        raise OdooTargetReplacementStageError(
+            "plan_not_ready.compose_or_override_render_failed",
+            website_intent_error,
+        )
     normalized_override_record = _record_with_target_replacement_canonical(
         record=odoo_override_record,
         canonical_url=_target_origin_base_url(
@@ -1949,6 +1989,7 @@ def execute_odoo_stable_target_replacement_apply(
         context=plan.context,
         instance=plan.instance,
         public_hosts=target_record.public_hosts,
+        origin_domains=target_record.domains,
         updated_at=started_at,
     )
     if rendering_record is not None:
