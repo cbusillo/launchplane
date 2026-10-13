@@ -105,6 +105,16 @@ provider effect was attempted for the blocked entry and the controller lease is
 released cleanly. Earlier entries in a multi-PR batch may already be merged; the
 returned landing plan identifies their persisted status.
 
+The web service and `service merge-train-workers run` / `run-once` enable INFO
+logging for GitHub request timing at startup. Each controller operation emits a
+`GitHub request tally` to stderr, including short and failed passes, with its
+repository/base and trace, total requests, `not_modified` responses and
+`non_304_requests`. Stdout retains the worker's JSON pass results. Existing
+Python logging handlers are preserved; other libraries' INFO logs stay disabled
+by default. Use timestamped tallies across a full observation window to attribute
+controller traffic; non-304 attempts include failures and are not a substitute
+for the installation's quota response headers or GraphQL point costs.
+
 When a controller call keeps returning `merge_train_controller_lease_held`
 because an earlier call is still running, read the service log before calling
 again. Any GitHub API request taking 5s or more logs `Slow GitHub API request`.
