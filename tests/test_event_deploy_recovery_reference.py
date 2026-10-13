@@ -1,5 +1,7 @@
 """Service-owned event coordinates with real temporary reservation storage."""
 
+from tests.support.auth import scoped_agent_test
+
 import json
 import unittest
 from datetime import timedelta
@@ -223,6 +225,7 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
         code, result = self.read()
         self.assertEqual(code, 409, result)
 
+    @scoped_agent_test
     def test_unauthorized_read_and_apply_refuse_before_coordinate_lookup(self) -> None:
         denied = _create_recovery_app(
             root=self.root, store=self.store, actions=("generic_web_preview.execute",)

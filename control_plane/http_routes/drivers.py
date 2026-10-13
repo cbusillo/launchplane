@@ -61,6 +61,7 @@ from control_plane.service_auth import (
     LaunchplaneIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
+    director_agent_identity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.testing_replacement_recovery import TestingReplacementRecoveryRead
@@ -961,7 +962,7 @@ def register_dokploy_target_inspect_read_routes(
                 action="dokploy_target.inspect",
                 product="launchplane",
                 context=LAUNCHPLANE_SERVICE_CONTEXT,
-                inherit_agent_read_role=False,
+                inherit_agent_read_role=director_agent_identity(identity),
             )
         if not inspect_allowed:
             raise common.http_error(

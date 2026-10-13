@@ -20,11 +20,13 @@ from control_plane.drivers.registry import list_driver_descriptors
 from control_plane.service_auth import (
     AuthorizationTarget,
     AuthzEvaluation,
+    BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
     LocalOperatorIdentity,
     LocalOperatorPolicyRule,
     TerminalAgentIdentity,
     TerminalAgentPolicyRule,
+    bearer_identity_from_token,
 )
 from tests.support.http import lifespan_client
 from control_plane.service_github_delivery_controls import (
@@ -58,6 +60,50 @@ def reader_policy(*, product: str = "") -> LaunchplaneAuthzPolicy:
 
 
 class ActionEffectTests(unittest.TestCase):
+    def test_authenticated_director_reads_and_plans_without_any_grant(self) -> None:
+        policy = LaunchplaneAuthzPolicy(schema_version=3)
+        for transport in ("local_operator", "terminal_agent"):
+            config = BearerIdentityConfig.model_validate(
+                {
+                    f"{transport}_token": "director-test-token",
+                    f"{transport}_subject": "director-test-agent",
+                    f"{transport}_token_label": "director-test-label",
+                }
+            )
+            identity = bearer_identity_from_token(token="director-test-token", config=config)
+            assert identity is not None
+            for action, effect in ACTION_EFFECTS.items():
+                with self.subTest(transport=transport, action=action):
+                    self.assertEqual(
+                        policy.allows(
+                            identity=identity,
+                            action=action,
+                            product="new-product-with-no-grants",
+                            context="new-context",
+                            target=AuthorizationTarget(scope="instance", instances=("testing",)),
+                            inherit_agent_read_role=True,
+                        ),
+                        effect in {"read", "plan"},
+                    )
+            # Metadata used by a credential-copy request is explicitly gated.
+            self.assertFalse(
+                policy.allows(
+                    identity=identity,
+                    action="secret.read",
+                    product="new-product-with-no-grants",
+                    context="new-context",
+                )
+            )
+            self.assertFalse(
+                policy.allows(
+                    identity=identity,
+                    action="undeclared.read",
+                    product="new-product-with-no-grants",
+                    context="new-context",
+                    inherit_agent_read_role=True,
+                )
+            )
+
     def test_role_requires_exact_agent_and_product_scope(self) -> None:
         rule = reader_policy(product="sample").local_operators[0].model_dump()
         for field in ("products", "subjects", "token_labels"):
@@ -292,6 +338,133 @@ class ActionEffectTests(unittest.TestCase):
 
 
 class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_director_discord_testing_runtime_plan_without_grants_keeps_write_denied(
+        self,
+    ) -> None:
+        import os
+
+        from control_plane import secrets as control_plane_secrets
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+        from tests.support.stores import _seed_tracked_target_records
+        from tests.test_service import _write_dokploy_managed_secrets
+
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            product_profile_payload("discord-blue")
+        )
+        lane = profile.lanes[0]
+        policy = LaunchplaneAuthzPolicy(schema_version=2)
+        with _database_app(policy, director_agent=True) as (store, _, app):
+            store.write_product_profile_record(profile)
+            settings = RuntimeEnvironmentRecord(
+                scope="instance",
+                context=lane.context,
+                instance=lane.instance,
+                env={"SITE_LABEL": "withheld-runtime-setting-value"},
+                updated_at=profile.updated_at,
+            )
+            store.write_runtime_environment_record(settings)
+            _seed_tracked_target_records(
+                database_url=store.database_url,
+                context=lane.context,
+                instance=lane.instance,
+                target_id="discord-testing-target",
+                target_type="application",
+                target_name="discord-testing-app",
+            )
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                _write_dokploy_managed_secrets(store=store)
+                with (
+                    patch(
+                        "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                        return_value={
+                            "applicationId": "discord-testing-target",
+                            "name": "discord-testing-app",
+                            "env": "",
+                        },
+                    ),
+                    patch("control_plane.dokploy.api.update_dokploy_target_env") as update_env,
+                    patch(
+                        "control_plane.live_target_runtime.trigger_and_wait_for_dokploy_target_deploy"
+                    ) as deploy,
+                ):
+                    async with lifespan_client(app) as client:
+                        headers = {"Authorization": "Bearer reader-token"}
+                        payload = {
+                            "mode": "dry-run",
+                            "product": profile.product,
+                            "context": lane.context,
+                            "instance": lane.instance,
+                        }
+                        planned = await client.post(
+                            "/v1/live-target-runtime/apply", headers=headers, json=payload
+                        )
+                        self.assertEqual(planned.status_code, 202, planned.text)
+                        self.assertEqual(planned.json()["result"]["mode"], "dry-run")
+                        self.assertNotIn(settings.env["SITE_LABEL"], planned.text)
+                        denied = await client.post(
+                            "/v1/live-target-runtime/apply",
+                            headers={**headers, "Idempotency-Key": "director-write-denied"},
+                            json={**payload, "mode": "apply"},
+                        )
+                        self.assertEqual(denied.status_code, 403, denied.text)
+                        self.assertEqual(denied.json()["error"]["code"], "authorization_denied")
+                    update_env.assert_not_called()
+                    deploy.assert_not_called()
+            self.assertEqual(store.read_product_profile_record(profile.product), profile)
+            self.assertEqual(
+                store.list_runtime_environment_records(
+                    scope="instance", context_name=lane.context, instance_name=lane.instance
+                ),
+                (settings,),
+            )
+
+    async def test_director_reads_policy_and_new_products_without_product_rules(self) -> None:
+        policy = LaunchplaneAuthzPolicy(schema_version=2)
+        with _database_app(policy, director_agent=True) as (store, _, app):
+            for name in ("client-one-site", "client-two-site"):
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(product_profile_payload(name))
+                )
+            async with lifespan_client(app) as client:
+                headers = {"Authorization": "Bearer reader-token"}
+                for path in (
+                    SERVICE_GITHUB_DELIVERY_ROUTE,
+                    "/v1/service/runtime",
+                    "/v1/authz-policies/administration",
+                    "/v1/authz-policies/revisions",
+                    "/v1/authz-diagnostics/active-policy/health",
+                    "/v1/product-profiles/client-two-site",
+                ):
+                    response = await client.get(path, headers=headers)
+                    self.assertEqual(response.status_code, 200, response.text)
+                response = await client.get("/v1/product-profiles", headers=headers)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(
+                    {row["product"] for row in response.json()["profiles"]},
+                    {"client-one-site", "client-two-site"},
+                )
+                for principal, decision in (
+                    ({"subject": "record-reader", "token_label": "record-reader-label"}, "allowed"),
+                    ({"subject": "client-agent", "token_label": "client-label"}, "denied"),
+                ):
+                    response = await client.post(
+                        "/v1/authz-diagnostics/effective-access/evaluate",
+                        headers=headers,
+                        json={
+                            "principal": {"principal_type": "local_operator", **principal},
+                            "action": "live_target_runtime.plan",
+                            "product": "client-two-site",
+                            "context": "client-two-site-testing",
+                            "target_scope": "context",
+                        },
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["evaluation"]["decision"], decision)
+
     async def test_product_role_filters_global_records_from_context_collections(self) -> None:
         from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 
@@ -1140,7 +1313,10 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
         with _database_app(reader_policy(product=profile.product)) as (store, _, app):
             store.write_product_profile_record(profile)
             other = LaunchplaneProductProfileRecord.model_validate(
-                product_profile_payload("other-site")
+                {
+                    **product_profile_payload("other-site"),
+                    "owner": {"github_login": "another-client", "github_id": "9002"},
+                }
             )
             store.write_product_profile_record(other)
             decision = _decision(record_id="saved-review", decided_at="2026-10-01T10:00:00Z")
@@ -1274,7 +1450,16 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("record-reader-label", result.text)
 
     async def test_ingress_and_backup_planners_accept_role_but_refuse_apply(self) -> None:
-        with _database_app(reader_policy()) as (store, _, app):
+        await self._exercise_ingress_and_backup_plans(director_agent=False)
+
+    async def test_director_ingress_plan_redacts_provider_config_and_validates_domains(
+        self,
+    ) -> None:
+        await self._exercise_ingress_and_backup_plans(director_agent=True)
+
+    async def _exercise_ingress_and_backup_plans(self, *, director_agent: bool) -> None:
+        policy = LaunchplaneAuthzPolicy(schema_version=2) if director_agent else reader_policy()
+        with _database_app(policy, director_agent=director_agent) as (store, _, app):
             headers = {"Authorization": "Bearer reader-token"}
             from control_plane.http_app import create_launchplane_fastapi_app
             from control_plane.service_auth import BearerIdentityConfig
@@ -1306,7 +1491,7 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             app = create_launchplane_fastapi_app(
                 verifier=_RejectingVerifier(),
-                authz_policy=reader_policy(),
+                authz_policy=policy,
                 record_store_factory=lambda: store,
                 bearer_identity_config=BearerIdentityConfig(
                     local_operator_token="reader-token",

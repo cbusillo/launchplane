@@ -1,3 +1,4 @@
+from tests.support.auth import scoped_agent_test
 import asyncio
 import json
 import unittest
@@ -5486,6 +5487,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "authorization_denied")
         self.assertNotIn("authz", payload)
 
+    @scoped_agent_test
     async def test_local_operator_token_cannot_read_product_profiles_without_grant(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -5611,6 +5613,7 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("artifact-preview-verireel-pr-196", protected_artifacts["artifact_ids"])
         self.assertNotIn("artifact-preview-verireel-pr-195", protected_artifacts["artifact_ids"])
 
+    @scoped_agent_test
     async def test_protected_artifacts_requires_wildcard_context_for_whole_product(
         self,
     ) -> None:
@@ -5660,6 +5663,7 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(protected_artifacts["product"], "verireel")
         self.assertEqual(protected_artifacts["context"], "verireel")
 
+    @scoped_agent_test
     async def test_protected_artifacts_rejects_wrong_product_scope(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(Path(temporary_directory_name) / "state")
@@ -5782,6 +5786,7 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["protected_artifacts"]["product"], "verireel")
 
+    @scoped_agent_test
     async def test_protected_artifacts_rejects_terminal_agent_without_artifact_grant(
         self,
     ) -> None:
