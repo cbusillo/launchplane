@@ -9,6 +9,10 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_landing_plan_record,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_historical_completion import (
+    MergeTrainHistoricalCompletionEntryEvidence,
+    MergeTrainHistoricalCompletionProviderEvidence,
+)
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
 from control_plane.merge_train_stack_disposition import DEFAULT_STACK_CHILD_DISPOSITION_LABEL
@@ -21,6 +25,7 @@ from tests.support.merge_train import (
     _FakeCollapsedRootStackedMergeTrainSnapshotReader,
     _FakeMergeTrainGitHubClient,
     _FakeStackedMergeTrainSnapshotReader,
+    _FakeEmptyMergeTrainSnapshotReader,
     _merge_train_service_identity,
     _merge_train_service_policy,
 )
@@ -84,6 +89,10 @@ class StackDispositionConfigurationTests(unittest.IsolatedAsyncioTestCase):
             ensure_repository_label = GitHubMergeTrainClient.ensure_repository_label
             _create_repository_label = GitHubMergeTrainClient._create_repository_label
             add_pull_request_label = GitHubMergeTrainClient.add_pull_request_label
+            observe_historical_batch_completion = (
+                GitHubMergeTrainClient.observe_historical_batch_completion
+            )
+            read_pull_request_head = GitHubMergeTrainClient.read_pull_request_head
 
             def pull_request_has_label(
                 self, *, pull_request_number: int, label: str, **_: Any
@@ -143,6 +152,197 @@ class StackDispositionConfigurationTests(unittest.IsolatedAsyncioTestCase):
             if result["controller_action"] == "plan_landing":
                 return
         self.fail("Landing was not prepared")
+
+    async def _prepare_external_landing(self) -> MergeTrainHistoricalCompletionProviderEvidence:
+        await self._prepare_landing()
+        landing = self.store.list_merge_train_batch_landing_plan_records()[0]
+        entry = landing.landing_plan.entries[0]
+        state = self.store.list_merge_train_controller_state_records()[0]
+        self.store.write_merge_train_controller_state_record(
+            state.model_copy(
+                update={
+                    "status": "reconcile_required",
+                    "active_action": "land_batch",
+                    "active_phase": "merge_batch_entries",
+                    "active_record_id": landing.record_id,
+                    "reconciliation_status": "required",
+                    "reconciliation_detail": "operator_required:unexpected:MergeAdmissionReconciliationRequiredError",
+                }
+            )
+        )
+        self.transport.effects.clear()
+        return MergeTrainHistoricalCompletionProviderEvidence(
+            observed_at=state.updated_at,
+            observed_base_sha="merge-1",
+            observed_base_tree_sha="external-result-tree",
+            final_observed_base_sha="merge-1",
+            entries=(
+                MergeTrainHistoricalCompletionEntryEvidence(
+                    pull_request_number=entry.pull_request_number,
+                    position=entry.position,
+                    expected_head_sha=entry.expected_head_sha,
+                    expected_head_tree_sha=entry.expected_head_tree_sha or "root-tree",
+                    expected_base_sha=entry.expected_base_sha,
+                    expected_parent_tree_sha="base-tree",
+                    expected_result_tree_sha="external-result-tree",
+                    observed_head_sha=entry.expected_head_sha,
+                    observed_head_tree_sha=entry.expected_head_tree_sha or "root-tree",
+                    observed_merge_commit_sha="merge-1",
+                    observed_merge_commit_tree_sha="external-result-tree",
+                    observed_parent_sha=entry.expected_base_sha,
+                    observed_parent_tree_sha="base-tree",
+                    base_contains_merge_commit=True,
+                ),
+            ),
+        )
+
+    async def test_external_stack_merge_retires_without_admission_or_second_merge(self) -> None:
+        proof = await self._prepare_external_landing()
+        collapse = self.store.list_merge_train_stack_collapse_plan_records()[0]
+        child = collapse.plan.child_dispositions[0]
+        with (
+            patch.object(
+                self.client_class, "observe_historical_batch_completion", return_value=proof
+            ),
+            patch.object(
+                self.client_class,
+                "read_pull_request_head",
+                return_value=(child.expected_head_sha, "closed"),
+            ),
+        ):
+            before = self.store.list_merge_train_controller_state_records()[0]
+            records_before = self.store.list_merge_train_stack_collapse_plan_records()
+            dry = await self._run(collapsed=True, mutate=False)
+            self.assertEqual(dry["controller_action"], "retire_stale_landing")
+            self.assertEqual(self.transport.effects, [])
+            self.assertEqual(self.store.list_merge_train_controller_state_records()[0], before)
+            self.assertEqual(
+                self.store.list_merge_train_stack_collapse_plan_records(), records_before
+            )
+            result = await self._run(collapsed=True)
+        self.assertEqual(result["reason_code"], "external_stack_landing_observed")
+        self.assertTrue(
+            all(entry["status"] == "stale" for entry in result["landing_plan"]["entries"])
+        )
+        self.assertEqual(self.store.list_merge_admission_records(), ())
+        self.assertEqual(self.store.list_merge_landing_outcome_records(), ())
+        state = self.store.list_merge_train_controller_state_records()[0]
+        self.assertEqual((state.status, state.reconciliation_status), ("idle", "clean"))
+        self.assertNotIn("land", self.transport.effects)
+        self.assertNotIn("collapse", self.transport.effects)
+        self.assertTrue(
+            next(
+                record
+                for record in self.store.list_merge_train_batch_landing_plan_records()
+                if record.record_id == result["merge_train_batch_landing_plan_record_id"]
+            ).source.startswith("service:controller:external-landing-observed:")
+        )
+
+    async def test_external_stack_child_containment_failure_preserves_fence(self) -> None:
+        proof = await self._prepare_external_landing()
+        collapse = self.store.list_merge_train_stack_collapse_plan_records()[0]
+        child = collapse.plan.child_dispositions[0]
+        with (
+            patch.object(
+                self.client_class, "observe_historical_batch_completion", return_value=proof
+            ),
+            patch.object(
+                self.client_class,
+                "read_pull_request_head",
+                return_value=(child.expected_head_sha, "closed"),
+            ),
+            patch.object(
+                self.client_class,
+                "branch_contains_commit",
+                side_effect=lambda **kw: kw["commit_sha"] != child.expected_head_sha,
+            ),
+        ):
+            result = await self._run(collapsed=True)
+        self.assertEqual(result["reason_code"], "completed_landing_stack_child_not_contained")
+        self.assertEqual(self.transport.effects, [])
+        self.assertEqual(
+            self.store.list_merge_train_controller_state_records()[0].status, "reconcile_required"
+        )
+        self.assertTrue(
+            all(
+                entry.status == "planned"
+                for entry in self.store.list_merge_train_batch_landing_plan_records()[
+                    0
+                ].landing_plan.entries
+            )
+        )
+
+    async def test_external_recovery_resumes_after_child_effect_before_retirement(self) -> None:
+        proof = await self._prepare_external_landing()
+        collapse = self.store.list_merge_train_stack_collapse_plan_records()[0]
+        child = collapse.plan.child_dispositions[0]
+        write = self.store.write_merge_train_batch_landing_plan_record
+
+        def interrupted(record: Any) -> Any:
+            if record.source.startswith("service:controller:external-landing-observed:"):
+                raise OSError("interrupt before retirement")
+            return write(record)
+
+        with (
+            patch.object(
+                self.client_class, "observe_historical_batch_completion", return_value=proof
+            ),
+            patch.object(
+                self.client_class,
+                "read_pull_request_head",
+                return_value=(child.expected_head_sha, "closed"),
+            ),
+        ):
+            with patch.object(
+                self.store, "write_merge_train_batch_landing_plan_record", side_effect=interrupted
+            ):
+                with self.assertRaisesRegex(OSError, "interrupt before retirement"):
+                    await self._run(collapsed=True)
+            effects = self.transport.effects.copy()
+            state = self.store.list_merge_train_controller_state_records()[0]
+            self.assertEqual(state.status, "reconcile_required")
+            self.assertIn("external_landing_source_record_id", state.step_payload)
+            result = await self._run(collapsed=True)
+            self.assertEqual(result["controller_action"], "retire_stale_landing")
+            self.assertEqual(self.transport.effects, effects)
+        with patch(
+            "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+            _FakeEmptyMergeTrainSnapshotReader,
+        ):
+            response = await _post_merge_train_controller_run_once(
+                self.app, {"repository": self.policy.policy.policies[0].repository, "mutate": True}
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["result"]["controller_action"], "idle")
+        self.assertEqual(self.store.list_merge_admission_records(), ())
+        self.assertEqual(self.store.list_merge_landing_outcome_records(), ())
+
+    async def test_external_recovery_keeps_unknown_provider_proof_fenced(self) -> None:
+        await self._prepare_external_landing()
+        with patch.object(
+            self.client_class,
+            "observe_historical_batch_completion",
+            side_effect=MergeTrainGitHubError("Provider unavailable", status_code=503),
+        ):
+            with patch(
+                "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                _FakeCollapsedRootStackedMergeTrainSnapshotReader,
+            ):
+                response = await _post_merge_train_controller_run_once(
+                    self.app,
+                    {"repository": self.policy.policy.policies[0].repository, "mutate": True},
+                )
+        self.assertGreaterEqual(response.status_code, 400)
+        self.assertEqual(self.transport.effects, [])
+        self.assertEqual(
+            self.store.list_merge_train_controller_state_records()[0].status, "reconcile_required"
+        )
+        self.assertEqual(
+            self.store.list_merge_train_batch_landing_plan_records()[0]
+            .landing_plan.entries[0]
+            .status,
+            "planned",
+        )
 
     async def test_empty_label_repository_lands_stack_with_use_time_default(self) -> None:
         await self._prepare_landing()

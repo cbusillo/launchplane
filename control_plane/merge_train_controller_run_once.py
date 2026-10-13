@@ -776,6 +776,31 @@ def _resume_merge_train_controller_state(
     admission_store: MergeAdmissionRecordStore,
     lease: MergeTrainControllerLeaseContext,
 ) -> dict[str, object] | None:
+    # An external merge is not a prior train effect. Observe it under the
+    # existing lease instead of asking admission recovery to invent authority.
+    if (
+        lease.record.ordinary_job_binding is None
+        and lease.record.active_action == "land_batch"
+        and (
+            "MergeAdmissionReconciliationRequiredError" in lease.record.reconciliation_detail
+            or lease.record.step_payload.get("external_landing_source_record_id")
+        )
+    ):
+        recovered = _recover_external_stack_landing(
+            request=request,
+            policy_sha256=policy_sha256,
+            repository_policy=repository_policy,
+            trace_id=trace_id,
+            recorded_at=recorded_at,
+            github_client=github_client,
+            candidate_store=candidate_store,
+            landing_store=landing_store,
+            stack_collapse_store=stack_collapse_store,
+            admission_store=admission_store,
+            lease=lease,
+        )
+        if recovered is not None:
+            return recovered
     if not request.mutate:
         if not (
             lease.record.status in {"running", "reconcile_required"}
@@ -1681,7 +1706,183 @@ _RETIRED_LANDING_SOURCE_PREFIXES = (
     "service:controller:policy-changed-landing:",
     _LINEAGE_RETIREMENT_SOURCE_PREFIX,
     "service:controller:original-review-recovery:",
+    "service:controller:external-landing-observed:",
 )
+
+
+def _recover_external_stack_landing(
+    *,
+    request: MergeTrainControllerRunOnceEnvelope,
+    policy_sha256: str,
+    repository_policy: MergeTrainRepositoryPolicy,
+    trace_id: str,
+    recorded_at: str,
+    github_client: GitHubMergeTrainClient,
+    candidate_store: MergeTrainBatchCandidateRecordStore,
+    landing_store: MergeTrainBatchLandingPlanRecordStore,
+    stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
+    admission_store: MergeAdmissionRecordStore,
+    lease: MergeTrainControllerLeaseContext,
+) -> dict[str, object] | None:
+    """Retire an externally merged collapsed root without claiming admission.
+
+    This deliberately does not broaden historical-completion eligibility. It
+    uses the live controller lease, current stack policy and checkpointed child
+    disposition; flat, partial, ordinary and admitted effects keep their own
+    recovery contracts.
+    """
+    source_id = str(
+        lease.record.step_payload.get("external_landing_source_record_id")
+        or lease.record.active_record_id
+    )
+    source = _merge_train_landing_record_by_id(
+        record_store=landing_store,
+        repository=request.repository,
+        base_branch=request.base_branch,
+        record_id=source_id,
+    )
+    if source is None or source.ordinary_job_binding is not None:
+        return None
+    plan = source.landing_plan
+    if len(plan.entries) != 1 or plan.entries[0].status != "planned":
+        return None
+    entry = plan.entries[0]
+    # An admission in any lineage can represent an unresolved effect. Never
+    # infer absence merely from the currently selected plan's admission list.
+    if admission_store.list_merge_admission_records(
+        repository=request.repository,
+        base_branch=request.base_branch,
+        pull_request_number=entry.pull_request_number,
+        limit=1,
+    ):
+        return None
+    completed = latest_completed_merge_train_batch_landing_plan_record(
+        record_store=landing_store,
+        repository=request.repository,
+        base_branch=request.base_branch,
+        batch_id=plan.batch_id,
+        candidate_sha=plan.candidate_sha,
+        policy_sha256=policy_sha256,
+    )
+    if completed is not None and completed.source.startswith(
+        "service:controller:external-landing-observed:"
+    ):
+        if not request.mutate:
+            return {
+                "repository": request.repository,
+                "base_branch": request.base_branch,
+                "mode": "dry-run",
+                "controller_action": "retire_stale_landing",
+                "merge_train_batch_landing_plan_record_id": completed.record_id,
+            }
+        return _finish_retired_policy_landing(
+            candidate_store=candidate_store, retired_record=completed, lease=lease
+        )
+    validate_merge_train_landing_record_for_controller(
+        landing_record=source,
+        policy_key=repository_policy.policy_key,
+        policy_sha256=policy_sha256,
+        record_store=landing_store,
+    )
+    candidate = _candidate_record_for_landing_plan(
+        record_store=candidate_store, landing_plan_record=source
+    )
+    if (
+        candidate is None
+        or candidate.ordinary_job_binding is not None
+        or candidate.candidate.stack_collapse_root is None
+    ):
+        return None
+    collapse = latest_merge_train_stack_collapse_plan_record_for_landing(
+        record_store=stack_collapse_store,
+        repository=request.repository,
+        base_branch=request.base_branch,
+        landing_plan=plan,
+        policy_sha256=policy_sha256,
+    )
+    if collapse is None or collapse.ordinary_job_binding is not None:
+        raise MergeTrainControllerRequestError("External landing requires its completed stack.")
+    validate_stack_collapse_record_for_landing(
+        collapse_record=collapse,
+        landing_plan=plan,
+        policy_sha256=policy_sha256,
+        record_store=stack_collapse_store,
+    )
+    evidence = github_client.observe_historical_batch_completion(
+        landing_plan=plan, observed_at=recorded_at
+    )
+    observed = evidence.entries[0]
+    # This model is transient input to the existing child-disposition proof.
+    # It is never persisted as a successful Launchplane landing.
+    observed_entry = MergeTrainBatchLandingEntry.model_validate(
+        {
+            **entry.model_dump(mode="json"),
+            "status": "merged",
+            "recorded_rolling_base_sha": observed.observed_parent_sha,
+            "recorded_rolling_base_tree_sha": observed.observed_parent_tree_sha,
+            "landed_head_sha": observed.observed_head_sha,
+            "landed_head_tree_sha": observed.observed_head_tree_sha,
+            "merge_commit_sha": observed.observed_merge_commit_sha,
+            "merge_commit_tree_sha": observed.observed_merge_commit_tree_sha,
+        }
+    )
+    observed_record = source.model_copy(
+        update={"landing_plan": plan.model_copy(update={"entries": (observed_entry,)})}
+    )
+    if request.mutate:
+        lease.checkpoint(
+            active_action="land_batch",
+            active_phase="observe_external_landing",
+            active_record_id=source.record_id,
+            step_payload={
+                **lease.record.step_payload,
+                "external_landing_source_record_id": source.record_id,
+                "observed_external_merge_commit_sha": observed.observed_merge_commit_sha,
+            },
+        )
+    result = _reconcile_completed_landing_after_policy_change(
+        request=request,
+        repository_policy=repository_policy,
+        trace_id=trace_id,
+        recorded_at=recorded_at,
+        github_client=github_client,
+        stack_collapse_store=stack_collapse_store,
+        landed_record=observed_record,
+        lease=lease,
+    )
+    # Do not expose the transient successful-entry shape as a train receipt.
+    result.pop("landing_plan", None)
+    if result.get("mode") == "blocked":
+        return result
+    if not request.mutate:
+        result.update(
+            mode="dry-run",
+            controller_action="retire_stale_landing",
+            reason_code="external_stack_landing_observed",
+        )
+        return result
+    lease.checkpoint(
+        active_phase="retire_stale_policy_landing",
+        active_record_id=source.record_id,
+        step_payload={
+            **lease.record.step_payload,
+            "retirement_source": "external-landing-observed",
+        },
+    )
+    retired = build_merge_train_batch_landing_plan_record(
+        landing_plan=stale_merge_train_landing_plan(plan),
+        source=(
+            "service:controller:external-landing-observed:"
+            f"{observed.observed_merge_commit_sha}:{trace_id}"
+        ),
+        updated_at=lease.record.updated_at,
+    )
+    landing_store.write_merge_train_batch_landing_plan_record(retired)
+    result = _finish_retired_policy_landing(
+        candidate_store=candidate_store, retired_record=retired, lease=lease
+    )
+    result["reason_code"] = "external_stack_landing_observed"
+    return result
 
 
 def _retire_changed_policy_landing(
@@ -2212,6 +2413,8 @@ def _reconcile_completed_landing_after_policy_change(
             )
         )
     for record in verified_records:
+        if not request.mutate:
+            continue
         reconciled = _reconcile_landed_stack_children(
             collapse_record=record,
             landed_record=landed_record,

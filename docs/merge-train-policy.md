@@ -1666,6 +1666,37 @@ conclusive no effect. A provider rejection requires a fresh L2 evaluation and a
 new admission. Candidate-ref cleanup remains downstream of landing evidence and
 cannot downgrade it.
 
+### Externally merged collapsed roots
+
+If a single collapsed root was merged outside the train before admission, the
+ordinary landing observer refuses to create a successful train outcome without
+an immutable admission. On the next reconciliation pass, the controller can
+observe that external merge and retire its stale plan under its existing lease.
+Run the normal controller dry run first: eligible recovery reports
+`retire_stale_landing` with reason `external_stack_landing_observed`. A mutating
+pass then completes recovery; a fresh controller/status read must show
+`idle`/`clean` before claiming that the train is recovered.
+
+Recovery requires the exact expected root head and tree, merge parent and result
+tree, containment in a pinned protected base, current policy and completed
+collapse history. It verifies child heads and containment before the existing
+checkpointed child disposition, preserving a changed child instead of closing
+new work. Provider uncertainty or missing containment retains the fence. An
+interruption re-observes the root and resumes child checkpoints without another
+root or child merge.
+
+The persisted landing entries are `stale`, never successful train landings.
+The retirement source records the observed external merge commit and trace;
+the original plan retains its immutable expected head/tree and candidate
+identity. No admission or landing outcome is created. Candidate records are
+superseded; their branch ref is retained. A crash after retirement resumes that
+terminal record before clearing the fence. This recovery is limited to a
+single legacy collapsed root with no admission for that PR in any lineage.
+Partial batches, ordinary-bound work and admitted effects retain their existing
+reconciliation contracts. It does not change the separate
+[historical-completion](merge-train-historical-completion.md) API's stack
+exclusion or authorize a new merge.
+
 Scheduler admission is a deterministic decision over the latest stored
 `launchplane_merge_train_runs` record for the repository/base branch. Dry-run
 records do not throttle the scheduler. Mutation records with `reread_required`
