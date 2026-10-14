@@ -166,6 +166,7 @@ def main(argv):
         log("exec readback" + (" -i" if interactive else ""))
         environment = dict(os.environ)
         environment["PYTHONPATH"] = str(state_dir / "modules")
+        environment.update(exec_environment)
         # Docker attaches the caller's stdin only with -i.
         stdin = None if interactive else subprocess.DEVNULL
         if program[2:] == ["/volumes/scripts/odoo_website_bootstrap.py"]:
@@ -480,6 +481,14 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         modules = self.root / "modules"
         modules.mkdir()
         (modules / "psycopg2.py").write_text(_FAKE_PSYCOPG2, encoding="utf-8")
+        (modules / "run_odoo_startup.py").write_text(
+            "import os\n"
+            "def _load_settings(arguments): return arguments\n"
+            "def _run_odoo_shell(settings, program, *, label):\n"
+            "    if os.environ.get('FAKE_WEBSITE_SETTINGS_FAILURE') == '1': raise RuntimeError('native consumer failed')\n"
+            "    print('website_settings_nonproduction_excluded=true')\n",
+            encoding="utf-8",
+        )
         assert BASH is not None
         self.bash = BASH
         self.base_environment = {
@@ -1137,6 +1146,17 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertNotIn("odoo_restore_completed", run.stdout)
         self.assertNotIn("odoo_restore_failure_logged", run.stdout)
+
+    def test_native_settings_failure_keeps_web_stopped_on_success_and_error_paths(self) -> None:
+        for workflow_exit in ("0", "7"):
+            with self.subTest(workflow_exit=workflow_exit):
+                run = self._run(
+                    _render_restore_script(),
+                    FAKE_WORKFLOW_EXIT=workflow_exit,
+                    FAKE_WEBSITE_SETTINGS_FAILURE="1",
+                )
+                self.assertNotEqual(run.returncode, 0)
+                self.assertFalse(run.web_restarted, run.docker_log)
 
 
 if __name__ == "__main__":

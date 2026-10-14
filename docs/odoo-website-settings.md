@@ -32,7 +32,11 @@ prepared settings cannot alter an accepted release. The native consumer checks
 that the selected website's domain equals the reviewed public origin, writes
 and reads back native analytics/consent fields and
 `cm_website.public_indexing_enabled` in its transaction. Launchplane requires
-the matching readback digest. An older consumer cannot claim successful apply.
+the matching post-commit readback digest. The stopped-web maintenance driver
+also executes a generated copy of the committed devkit consumer through the
+runtime's native Odoo shell; rollback images need not contain the new consumer.
+A failed consumer, including the recovery path after a failed workflow, keeps
+web stopped. No new credential or provider interface is introduced.
 
 Rollback selects the previous artifact's saved accepted settings. Historical
 artifacts without a website snapshot disable indexing and analytics; they do
@@ -40,10 +44,20 @@ not retain forward-release settings. Successful readback retains the actually
 applied snapshot separately from pending intent, so subsequent review compares
 against production's applied settings.
 
-The devkit consumer clears every copied website's native GA key and disables
+The devkit consumer runs on data workflows and every web startup, clearing
+every copied website's native GA key and disabling
 the indexing parameter on every nonproduction data workflow, including a
 production restore with `--no-sanitize`. Previews never receive the production
-settings payload. This exclusion is independent of optional sanitization.
+settings payload. This exclusion is independent of optional sanitization. Indexing exclusion is
+the CM addon contract; other tenants' general indexing policy and arbitrary
+custom-script trackers are outside this native-GA4 path.
+
+Maintain the generated maintenance program from one committed source with
+`uv run python scripts/generate_odoo_website_settings_program.py --devkit-repo
+<checkout> --revision <commit>`. It reads the Git blob at that immutable commit,
+not the working tree. Commit the generated module with its source revision;
+include consumer changes, native-shell/transport tests and review in the same
+delivery. Values still come only from the accepted runtime payload.
 
 Native Odoo consent behavior remains Essential only / Accept all. These fields
 are an application contract, not proof of Client consent acceptance, personal-
