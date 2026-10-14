@@ -2544,7 +2544,14 @@ apply always requires `dokploy_target.setup`, all for product/context
 `launchplane`. Apply requires exact confirmation, an admin reason, and an
 idempotency key. Apply
 requests keep the `Idempotency-Key` replay/conflict contract; dry-runs remain
-repeatable and are not stored as idempotency responses. The manual
+repeatable and are not stored as idempotency responses.
+Creation dry-runs check existing provider-target authority using the same
+comparison as apply. An occupied lane requires an exact
+`expected_current_provider_target`; a missing or mismatched expectation fails
+before any provider mutation. A matching expectation can plan a replacement,
+and an unoccupied lane can plan ordinary creation. Apply rechecks current
+authority because a successful dry-run does not reserve the lane.
+The manual
 `Dokploy Target Setup` workflow is the supported shared and production caller;
 product repos must not store live target IDs or provider fixtures as setup
 authority. Runtime port is accepted for `create-compose` and `reconcile-compose-domain`

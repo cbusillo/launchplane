@@ -530,6 +530,13 @@ def create_dokploy_application_target(
         },
     )
 
+    _ensure_create_route_has_no_provider_target(
+        record_store=record_store,
+        context=normalized_context,
+        instance=normalized_instance,
+        expected_current_provider_target=expected_current_provider_target,
+    )
+
     if not apply:
         target_record = DokployTargetRecord(
             context=normalized_context,
@@ -564,13 +571,6 @@ def create_dokploy_application_target(
             provider_requests=provider_requests,
             warnings=("dry run only; provider was not mutated and records were not written",),
         )
-
-    _ensure_create_route_has_no_provider_target(
-        record_store=record_store,
-        context=normalized_context,
-        instance=normalized_instance,
-        expected_current_provider_target=expected_current_provider_target,
-    )
 
     created_project_id = normalized_project_id
     if not created_project_id and not normalized_environment_id:
@@ -758,6 +758,13 @@ def create_dokploy_compose_target(
             },
         )
 
+    _ensure_create_route_has_no_provider_target(
+        record_store=record_store,
+        context=normalized_context,
+        instance=normalized_instance,
+        expected_current_provider_target=expected_current_provider_target,
+    )
+
     recorded_at = updated_at.strip() or utc_now_timestamp()
     if not apply:
         target_record = DokployTargetRecord(
@@ -797,13 +804,6 @@ def create_dokploy_compose_target(
             provider_requests=provider_requests,
             warnings=("dry run only; provider was not mutated and records were not written",),
         )
-
-    _ensure_create_route_has_no_provider_target(
-        record_store=record_store,
-        context=normalized_context,
-        instance=normalized_instance,
-        expected_current_provider_target=expected_current_provider_target,
-    )
 
     created_project_id = normalized_project_id
     if not created_project_id and not normalized_environment_id:
