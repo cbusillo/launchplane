@@ -85,6 +85,13 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
         for store, root in self.stores():
             self.running(store)
             fenced = self.fence(store)
+            retained_target = store.read_dokploy_target_id_record(
+                context_name=fenced.context, instance_name=fenced.instance
+            ).target_id
+            self.assertTrue(
+                getattr(store, "prepare_disposable_testing_replacement")(fenced, "director-fixture")
+            )
+            fenced = store.read_odoo_stable_target_replacement_operation_record(fenced.operation_id)
             self.assertIsNone(fenced.recovery_journal)
             getattr(store, "write_dokploy_target_id_record")(
                 DokployTargetIdRecord(
@@ -100,7 +107,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 "cm",
                 "testing",
                 replaces_operation_id=fenced.operation_id,
-                replaced_target_id="compose-123",
+                replaced_target_id=retained_target,
             )
             with (
                 patch(
@@ -124,7 +131,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             self.assertIsNone(replaced.recovery_journal)
             self.assertIsNotNone(replaced.disposable_supersession)
             assert replaced.disposable_supersession is not None
-            self.assertEqual(replaced.disposable_supersession.retained_target_id, "compose-123")
+            self.assertEqual(replaced.disposable_supersession.retained_target_id, retained_target)
             self.assertEqual(
                 replaced.disposable_supersession.replacement_target_id, "new-isolated-compose"
             )
@@ -153,6 +160,13 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
         for store, _ in self.stores():
             self.running(store)
             fenced = self.fence(store)
+            retained_target = store.read_dokploy_target_id_record(
+                context_name=fenced.context, instance_name=fenced.instance
+            ).target_id
+            self.assertTrue(
+                getattr(store, "prepare_disposable_testing_replacement")(fenced, "director-fixture")
+            )
+            fenced = store.read_odoo_stable_target_replacement_operation_record(fenced.operation_id)
             supersede = getattr(store, "supersede_disposable_testing_replacement")
             record_safety(
                 store,
@@ -160,7 +174,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 "cm",
                 "testing",
                 replaces_operation_id=fenced.operation_id,
-                replaced_target_id="compose-123",
+                replaced_target_id=retained_target,
             )
             self.assertFalse(supersede(fenced))
             getattr(store, "write_dokploy_target_id_record")(
@@ -175,15 +189,17 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 {"usage": "in_use"},
                 {"data": "only_copy"},
                 {"production_resources": "unknown"},
+                {"replaced_target_id": "invented-retained-target"},
             ):
+                replacement_identity = changes.get("replaced_target_id", retained_target)
                 record_safety(
                     store,
                     "site",
                     "cm",
                     "testing",
                     replaces_operation_id=fenced.operation_id,
-                    replaced_target_id="compose-123",
-                    **changes,
+                    replaced_target_id=replacement_identity,
+                    **{key: value for key, value in changes.items() if key != "replaced_target_id"},
                 )
                 self.assertFalse(supersede(fenced))
                 self.assertEqual(
@@ -196,7 +212,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 "cm",
                 "testing",
                 replaces_operation_id=fenced.operation_id,
-                replaced_target_id="compose-123",
+                replaced_target_id=retained_target,
             )
             with store.testing_replacement_execution_lock(fenced.operation_id) as lock:
                 self.assertIsNotNone(lock)
@@ -207,6 +223,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                     "request": fenced.request.model_copy(update={"instance": "prod"}),
                     "authorization": None,
                     "schema_version": 1,
+                    "disposable_replacement_preparation": None,
                 }
             )
             getattr(store, "write_odoo_stable_target_replacement_operation_record")(production)

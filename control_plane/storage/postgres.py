@@ -10362,6 +10362,67 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
             return True
 
+    def prepare_disposable_testing_replacement(
+        self, expected: OdooStableTargetReplacementOperationRecord, prepared_by: str
+    ) -> bool:
+        from control_plane.contracts.disposable_lane import DisposableTestingReplacementPreparation
+        from control_plane.testing_replacement_recovery import service_testing_operation
+
+        if not service_testing_operation(expected) or expected.status != "reconciliation_required":
+            return False
+        with self.testing_replacement_execution_lock(expected.operation_id) as check:
+            if check is None:
+                return False
+            with self._session_factory() as session:
+                self._lock_odoo_stable_lane(
+                    session,
+                    product=expected.product,
+                    context=expected.context,
+                    instance=expected.instance,
+                )
+                row = session.scalar(
+                    select(LaunchplaneOdooStableTargetReplacementOperationRow)
+                    .where(
+                        LaunchplaneOdooStableTargetReplacementOperationRow.operation_id
+                        == expected.operation_id
+                    )
+                    .with_for_update()
+                )
+                if row is None:
+                    return False
+                current = self._read_payload(
+                    model_type=OdooStableTargetReplacementOperationRecord, payload=row.payload
+                )
+                if current != expected:
+                    return False
+                if current.disposable_replacement_preparation is not None:
+                    return True
+                target = session.scalar(
+                    select(LaunchplaneDokployTargetIdRow)
+                    .where(
+                        LaunchplaneDokployTargetIdRow.context == current.context,
+                        LaunchplaneDokployTargetIdRow.instance == current.instance,
+                    )
+                    .with_for_update()
+                )
+                if target is None:
+                    return False
+                target_id = self._read_payload(
+                    model_type=DokployTargetIdRecord, payload=target.payload
+                )
+                preparation = DisposableTestingReplacementPreparation(
+                    retained_target_id=target_id.target_id,
+                    prepared_by=prepared_by,
+                    recorded_at=datetime.now(timezone.utc),
+                )
+                check()
+                self._sync_odoo_stable_target_replacement_operation_row(
+                    row,
+                    current.model_copy(update={"disposable_replacement_preparation": preparation}),
+                )
+                session.commit()
+                return True
+
     def supersede_disposable_testing_replacement(
         self, expected: OdooStableTargetReplacementOperationRecord
     ) -> bool:
@@ -10371,6 +10432,14 @@ class PostgresRecordStore(HumanSessionStore):
         )
         from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 
+        if expected.disposable_replacement_preparation is None:
+            return False
+        profile = self.read_product_profile_record(expected.product)
+        if not any(
+            item.replaces_operation_id == expected.operation_id
+            for item in profile.disposable_lane_safety
+        ):
+            return False
         with self.testing_replacement_execution_lock(expected.operation_id) as check_lock:
             if check_lock is None:
                 return False

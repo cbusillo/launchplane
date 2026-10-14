@@ -11059,6 +11059,16 @@
             "title": "Observed At",
             "type": "string"
           },
+          "observed_by": {
+            "minLength": 1,
+            "title": "Observed By",
+            "type": "string"
+          },
+          "observer_kind": {
+            "const": "director_agent",
+            "title": "Observer Kind",
+            "type": "string"
+          },
           "production_resources": {
             "default": "unknown",
             "enum": [
@@ -11105,6 +11115,8 @@
           "instance",
           "isolation_evidence",
           "observed_at",
+          "observed_by",
+          "observer_kind",
           "production_resources",
           "replaced_target_id",
           "replaces_operation_id",

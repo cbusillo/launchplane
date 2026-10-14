@@ -99,6 +99,11 @@ def disposable_testing_supersession(
         for item in bindings.profile.disposable_lane_safety
         if (item.context, item.instance) == (operation.context, operation.instance)
     )
+    preparation = operation.disposable_replacement_preparation
+    if preparation is None or preparation.retained_target_id != evidence.replaced_target_id:
+        raise DisposableLaneSafetyUnknown(
+            "Rebuild requires its service-captured retained target identity."
+        )
     if evidence.replaces_operation_id != operation.operation_id or not evidence.replaced_target_id:
         raise DisposableLaneSafetyUnknown(
             "Replacement evidence does not identify the retained operation and target."

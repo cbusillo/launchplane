@@ -1084,7 +1084,7 @@ def _next_testing_attempt(
                 return _TestingAttempt(
                     idempotency_key=key, deployed_operation_id=existing.operation_id
                 )
-        elif not is_staff_testing_hold_cancellation(existing):
+        elif existing.status != "superseded" and not is_staff_testing_hold_cancellation(existing):
             failed_attempts += 1
             last_failed = existing
         # A passed attempt that testing no longer runs was rolled back: deploy again.

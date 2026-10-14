@@ -442,6 +442,8 @@ export type DisposableLaneSafety = {
     instance: string;
     isolation_evidence: string;
     observed_at: string;
+    observed_by: string;
+    observer_kind: 'director_agent';
     production_resources: 'unknown' | 'isolated' | 'separation_ready' | 'shared';
     replaced_target_id: string;
     replaces_operation_id: string;

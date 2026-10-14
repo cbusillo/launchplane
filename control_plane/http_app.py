@@ -799,10 +799,18 @@ from control_plane.runtime_key_safety import (
     latest_active_runtime_key_safety_policy,
     runtime_key_safety_environment_class,
 )
+from control_plane.contracts.disposable_lane import (
+    DisposableLaneSafety,
+    DisposableLaneObservationRequest,
+)
+
 from control_plane.disposable_lanes import (
     DisposableLaneSafetyUnknown,
     DisposableLaneStore,
+    disposable_lane_binding_sha256,
+    disposable_lane_configuration,
     require_disposable_lane,
+    resolve_disposable_preview,
 )
 
 from control_plane.service_auth import (
@@ -5325,6 +5333,14 @@ def create_launchplane_fastapi_app(
         if not isinstance(oidc_identity, GitHubActionsIdentity):
             raise _authentication_required_error("Mutation routes require GitHub Actions OIDC.")
         return oidc_identity
+
+    def read_disposable_runtime_identity(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+    ) -> LaunchplaneIdentity:
+        if isinstance(identity, TerminalAgentIdentity) and director_agent_identity(identity):
+            return identity
+        return read_write_identity(authorization=authorization)
 
     register_updater_proposal_route(
         app,
@@ -12890,6 +12906,15 @@ def create_launchplane_fastapi_app(
             existing_profile = profile_store.read_product_profile_record(profile.product)
         except (FileNotFoundError, KeyError):
             existing_profile = None
+        if profile.disposable_lane_safety != (
+            existing_profile.disposable_lane_safety if existing_profile is not None else ()
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="disposable_safety_bounded_write_required",
+                message="Record disposable safety through the authenticated observation endpoint.",
+            )
         if profile.release_on_acceptance != (
             existing_profile.release_on_acceptance if existing_profile is not None else "held"
         ) or (
@@ -20585,7 +20610,7 @@ def create_launchplane_fastapi_app(
 
     async def apply_live_target_runtime(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_disposable_runtime_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -20624,29 +20649,7 @@ def create_launchplane_fastapi_app(
             if live_target_runtime_request.apply_changes
             else "live_target_runtime.plan"
         )
-        director_disposable_apply = (
-            director_agent_identity(identity)
-            and live_target_runtime_request.apply_changes
-            and live_target_runtime_request.instance == "testing"
-        )
-        disposable_runtime_binding = ""
-        if director_disposable_apply:
-            try:
-                disposable_runtime_binding = require_disposable_lane(
-                    cast(DisposableLaneStore, record_store),
-                    product=live_target_runtime_request.product,
-                    context=live_target_runtime_request.context,
-                    instance=live_target_runtime_request.instance,
-                    separation_only=not live_target_runtime_request.deploy,
-                )
-            except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
-                raise _launchplane_http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="disposable_lane_safety_unknown",
-                    message=str(error),
-                ) from error
-        if not director_disposable_apply and not resolved_authz_policy_runtime.allows(
+        explicit_runtime = resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=live_target_runtime_request.product,
@@ -20654,7 +20657,22 @@ def create_launchplane_fastapi_app(
             target=AuthorizationTarget(
                 scope="instance", instances=(live_target_runtime_request.instance,)
             ),
+        )
+        # Terminal credentials previously had no write path here. Even an old
+        # policy entry cannot acquire production writes through this repair.
+        if (
+            isinstance(identity, TerminalAgentIdentity)
+            and live_target_runtime_request.apply_changes
         ):
+            explicit_runtime = False
+        director_disposable_apply = (
+            director_agent_identity(identity)
+            and not explicit_runtime
+            and live_target_runtime_request.apply_changes
+            and live_target_runtime_request.instance != "prod"
+        )
+        disposable_runtime_binding = ""
+        if not director_disposable_apply and not explicit_runtime:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -20679,6 +20697,22 @@ def create_launchplane_fastapi_app(
         )
         if replay_response is not None:
             return replay_response
+        if director_disposable_apply:
+            try:
+                disposable_runtime_binding = require_disposable_lane(
+                    cast(DisposableLaneStore, record_store),
+                    product=live_target_runtime_request.product,
+                    context=live_target_runtime_request.context,
+                    instance=live_target_runtime_request.instance,
+                    separation_only=not live_target_runtime_request.deploy,
+                )
+            except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="disposable_lane_safety_unknown",
+                    message=str(error),
+                ) from error
         live_target_runtime_store = require_live_target_runtime_database_store(
             record_store=record_store,
             trace_id=trace_id,
@@ -22960,6 +22994,187 @@ def create_launchplane_fastapi_app(
             operation=execute_sweep,
         )
 
+    async def record_disposable_lane_safety(
+        observation: DisposableLaneObservationRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not director_agent_identity(identity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Disposable observations require the authenticated Director agent.",
+            )
+        store = require_provider_operation_store(record_store=record_store, trace_id=trace_id)
+        try:
+            profile = store.read_product_profile_record(observation.product)
+            preview = None
+            if observation.preview_id:
+                preview = resolve_disposable_preview(
+                    store, profile, observation.context, observation.instance
+                )
+                if preview.preview_id != observation.preview_id:
+                    raise ValueError("Observation does not match the owned preview.")
+            elif observation.instance != "testing" or not any(
+                (lane.context, lane.instance) == (observation.context, observation.instance)
+                for lane in profile.lanes
+            ):
+                raise ValueError("Observation requires an exact owned testing lane.")
+            try:
+                target = store.read_dokploy_target_record(
+                    context_name=observation.context, instance_name=observation.instance
+                )
+            except FileNotFoundError:
+                target = None
+            try:
+                target_id = store.read_dokploy_target_id_record(
+                    context_name=observation.context, instance_name=observation.instance
+                )
+            except FileNotFoundError:
+                target_id = None
+            try:
+                provider_target = store.read_provider_target_record(
+                    context_name=observation.context, instance_name=observation.instance
+                )
+            except FileNotFoundError:
+                provider_target = None
+            fingerprint = disposable_lane_binding_sha256(
+                profile,
+                target,
+                target_id,
+                preview,
+                disposable_lane_configuration(store, observation.context, observation.instance),
+            )
+            if observation.mode == "inspect":
+                return accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={"product_profile": profile.product},
+                    result={
+                        "mode": "inspect",
+                        "binding_sha256": fingerprint,
+                        "usage": "unknown",
+                        "data": "unknown",
+                        "production_resources": "unknown",
+                        "automatic_fact_collection": "unavailable",
+                    },
+                )
+            if fingerprint != observation.expected_binding_sha256:
+                raise ValueError("Observed lane bindings changed; inspect them again.")
+            operation = None
+            if observation.replaces_operation_id:
+                operation = store.read_odoo_stable_target_replacement_operation_record(
+                    observation.replaces_operation_id
+                )
+                if (operation.product, operation.context, operation.instance) != (
+                    profile.product,
+                    observation.context,
+                    observation.instance,
+                ):
+                    raise ValueError("Replacement operation belongs to another lane.")
+            if observation.mode == "prepare-rebuild":
+                if operation is None or not store.prepare_disposable_testing_replacement(
+                    operation, launchplane_identity_actor(identity)
+                ):
+                    raise ValueError(
+                        "The retained testing operation cannot be prepared for replacement."
+                    )
+                return accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={"product_profile": profile.product},
+                    result={
+                        "mode": "prepare-rebuild",
+                        "operation_id": operation.operation_id,
+                        "binding_sha256": fingerprint,
+                        "historical_effects": "unknown",
+                        "provider_mutation": False,
+                    },
+                )
+            now = datetime.now(timezone.utc)
+            retained_target = ""
+            if operation is not None:
+                if operation.disposable_replacement_preparation is None:
+                    raise ValueError(
+                        "Prepare the retained target identity before binding its replacement."
+                    )
+                retained_target = operation.disposable_replacement_preparation.retained_target_id
+            evidence = DisposableLaneSafety.model_validate(
+                {
+                    **observation.model_dump(
+                        exclude={
+                            "mode",
+                            "product",
+                            "preview_id",
+                            "expected_binding_sha256",
+                            "lifetime_seconds",
+                        }
+                    ),
+                    "binding_sha256": fingerprint,
+                    "observed_by": launchplane_identity_actor(identity),
+                    "observer_kind": "director_agent",
+                    "observed_at": now,
+                    "expires_at": now + timedelta(seconds=observation.lifetime_seconds),
+                    "replaced_target_id": retained_target,
+                }
+            )
+            observations = tuple(
+                item
+                for item in profile.disposable_lane_safety
+                if (item.context, item.instance) != (evidence.context, evidence.instance)
+                and item.expires_at > now
+            ) + (evidence,)
+            replacement = profile.model_copy(update={"disposable_lane_safety": observations})
+            # Absent previews can have no tracking bundle. Their observation
+            # still binds that absence: any later target creation invalidates it
+            # at the destructive checkpoint. The existing bundle CAS requires
+            # a complete physical provider identity.
+            complete_bundle = (
+                provider_target is not None and target is not None and target_id is not None
+            )
+            written = store.compare_and_write_product_profile_record(
+                expected_record=profile,
+                replacement_record=replacement,
+                expected_provider_targets=(provider_target,)
+                if complete_bundle and provider_target is not None
+                else (),
+                expected_dokploy_targets=(target,)
+                if complete_bundle and target is not None
+                else (),
+                expected_dokploy_target_ids=(target_id,)
+                if complete_bundle and target_id is not None
+                else (),
+            )
+            if written.status != "written":
+                raise ValueError("Lane authority changed while recording its observation.")
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={"product_profile": profile.product},
+                result={
+                    "mode": "record",
+                    "binding_sha256": fingerprint,
+                    "observed_by": evidence.observed_by,
+                    "usage": evidence.usage,
+                    "data": evidence.data,
+                    "production_resources": evidence.production_resources,
+                    "provider_mutation": False,
+                },
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="disposable_lane_not_found",
+                message="The requested lane or record is unavailable.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="disposable_observation_refused",
+                message=str(error),
+            ) from error
+
     async def execute_product_retirement(
         request: Request,
         retirement_request: ProductRetirementRequest,
@@ -23090,6 +23305,24 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
 
+        if director_retirement and retirement_request.mode == "apply":
+            for completed in retirement_store.list_product_retirement_records(
+                product=retirement_request.product,
+                actor=product_retirement_identity(identity).actor,
+                mode="apply",
+                idempotency_key=normalized_key,
+            ):
+                if (
+                    completed.outcome in {"retired", "already_absent"}
+                    and completed.identity == product_retirement_identity(identity)
+                    and completed.plan_sha256 == retirement_request.reviewed_plan_sha256
+                    and completed.continuity_sha256 == retirement_request.continuity_sha256
+                ):
+                    return AcceptedEvidenceResponse.model_validate(
+                        control_plane_product_retirement.redacted_product_retirement_response(
+                            completed
+                        )
+                    )
         if director_retirement:
             try:
                 current_profile = retirement_store.read_product_profile_record(
@@ -25546,6 +25779,19 @@ def create_launchplane_fastapi_app(
             403: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/disposable-lanes/observations",
+        record_disposable_lane_safety,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        operation_id="record_disposable_lane_safety",
+        responses={
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
         },
     )
 

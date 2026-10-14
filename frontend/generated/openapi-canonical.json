@@ -4946,6 +4946,111 @@
         "title": "DetachedApplicationRetirementRequest",
         "type": "object"
       },
+      "DisposableLaneObservationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "data": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "reproducible",
+              "only_copy"
+            ],
+            "title": "Data",
+            "type": "string"
+          },
+          "data_evidence": {
+            "default": "",
+            "title": "Data Evidence",
+            "type": "string"
+          },
+          "expected_binding_sha256": {
+            "default": "",
+            "title": "Expected Binding Sha256",
+            "type": "string"
+          },
+          "instance": {
+            "minLength": 1,
+            "title": "Instance",
+            "type": "string"
+          },
+          "isolation_evidence": {
+            "default": "",
+            "title": "Isolation Evidence",
+            "type": "string"
+          },
+          "lifetime_seconds": {
+            "default": 300,
+            "exclusiveMinimum": 0.0,
+            "maximum": 900.0,
+            "title": "Lifetime Seconds",
+            "type": "integer"
+          },
+          "mode": {
+            "default": "inspect",
+            "enum": [
+              "inspect",
+              "record",
+              "prepare-rebuild"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "preview_id": {
+            "default": "",
+            "title": "Preview Id",
+            "type": "string"
+          },
+          "product": {
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "production_resources": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "isolated",
+              "separation_ready",
+              "shared"
+            ],
+            "title": "Production Resources",
+            "type": "string"
+          },
+          "replaces_operation_id": {
+            "default": "",
+            "title": "Replaces Operation Id",
+            "type": "string"
+          },
+          "usage": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "unused",
+              "in_use"
+            ],
+            "title": "Usage",
+            "type": "string"
+          },
+          "usage_evidence": {
+            "default": "",
+            "title": "Usage Evidence",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance"
+        ],
+        "title": "DisposableLaneObservationRequest",
+        "type": "object"
+      },
       "DisposableLaneSafety": {
         "additionalProperties": false,
         "properties": {
@@ -4994,6 +5099,16 @@
             "title": "Observed At",
             "type": "string"
           },
+          "observed_by": {
+            "minLength": 1,
+            "title": "Observed By",
+            "type": "string"
+          },
+          "observer_kind": {
+            "const": "director_agent",
+            "title": "Observer Kind",
+            "type": "string"
+          },
           "production_resources": {
             "default": "unknown",
             "enum": [
@@ -5034,6 +5149,8 @@
         "required": [
           "context",
           "instance",
+          "observed_by",
+          "observer_kind",
           "binding_sha256",
           "observed_at",
           "expires_at"
@@ -54353,6 +54470,86 @@
         "summary": "Read one detached application retirement record's structured outcome"
       }
     },
+    "/v1/disposable-lanes/observations": {
+      "post": {
+        "operationId": "record_disposable_lane_safety",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DisposableLaneObservationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Record Disposable Lane Safety"
+      }
+    },
     "/v1/dokploy-targets/inspect": {
       "get": {
         "operationId": "read_dokploy_target_inspect",
@@ -71625,6 +71822,16 @@
             "schema": {
               "default": "",
               "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
               "type": "string"
             }
           }

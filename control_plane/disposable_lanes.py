@@ -30,6 +30,12 @@ class DisposableLaneStore(Protocol):
 
     def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]: ...
 
+    def list_preview_records(self, *, context_name: str = "") -> tuple[PreviewRecord, ...]: ...
+
+    def list_product_profile_records(
+        self, *, driver_id: str = ""
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
     def list_runtime_environment_records(
         self, *, scope: str = "", context_name: str = "", instance_name: str = ""
     ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
@@ -96,6 +102,10 @@ def require_disposable_lane(
     now: datetime | None = None,
 ) -> str:
     profile = store.read_product_profile_record(product)
+    if instance == "prod":
+        raise DisposableLaneSafetyUnknown("Production cannot use disposable-lane permission.")
+    if preview is None and instance != "testing":
+        preview = resolve_disposable_preview(store, profile, context, instance)
     stable = [
         lane for lane in profile.lanes if (lane.context, lane.instance) == (context, instance)
     ]
@@ -149,7 +159,7 @@ def require_disposable_lane(
             "Disposable lane safety evidence is stale or not yet valid."
         )
     if evidence.binding_sha256 != disposable_lane_binding_sha256(
-        profile, target, target_id, preview, disposable_lane_configuration(store, context)
+        profile, target, target_id, preview, disposable_lane_configuration(store, context, instance)
     ):
         raise DisposableLaneSafetyUnknown(
             "Disposable lane bindings changed after the safety observation."
@@ -166,13 +176,71 @@ def require_disposable_lane(
     return evidence.binding_sha256
 
 
+def resolve_disposable_preview(
+    store: DisposableLaneStore,
+    profile: LaunchplaneProductProfileRecord,
+    context: str,
+    instance: str,
+) -> PreviewRecord:
+    """Resolve an actual uniquely owned preview; a slug alone is never authority."""
+    if instance == "prod" or context != profile.preview.context:
+        raise DisposableLaneSafetyUnknown("The requested lane is not this product's preview.")
+    if any(
+        other.product != profile.product
+        and context
+        in {
+            other.preview.context,
+            *other.historical_contexts,
+            *(lane.context for lane in other.lanes),
+        }
+        for other in store.list_product_profile_records()
+    ):
+        raise DisposableLaneSafetyUnknown("The preview context has shared or uncertain ownership.")
+    matches = [
+        item
+        for item in store.list_preview_records(context_name=context)
+        if profile.preview.slug_template.format(number=item.anchor_pr_number) == instance
+    ]
+    if (
+        len(matches) != 1
+        or matches[0].anchor_repo
+        not in {
+            profile.repository,
+            profile.repository.partition("/")[2],
+        }
+        or matches[0].state == "destroyed"
+    ):
+        raise DisposableLaneSafetyUnknown(
+            "The preview is absent, ambiguous or owned by another product."
+        )
+    return matches[0]
+
+
 def disposable_lane_configuration(
-    store: DisposableLaneStore, context: str
+    store: DisposableLaneStore, context: str, instance: str
 ) -> tuple[RuntimeEnvironmentRecord | SecretRecord | SecretBinding, ...]:
     # Site values and version pointers stay inside the service and only enter
     # the digest. Secret values are never read or returned.
+    bindings = tuple(
+        item
+        for item in store.list_secret_bindings(
+            integration="runtime_environment", context_name=context
+        )
+        if item.instance in ("", instance)
+    )
+    referenced_secrets = {item.secret_id for item in bindings}
     return (
-        *store.list_runtime_environment_records(context_name=context),
-        *store.list_secret_records(integration="runtime_environment", context_name=context),
-        *store.list_secret_bindings(integration="runtime_environment", context_name=context),
+        *(
+            item
+            for item in store.list_runtime_environment_records(context_name=context)
+            if item.instance in ("", instance)
+        ),
+        *(
+            item
+            for item in store.list_secret_records(
+                integration="runtime_environment", context_name=context
+            )
+            if item.instance in ("", instance) or item.secret_id in referenced_secrets
+        ),
+        *bindings,
     )

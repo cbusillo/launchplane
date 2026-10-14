@@ -11,6 +11,8 @@ class DisposableLaneSafety(BaseModel):
 
     context: str = Field(min_length=1)
     instance: str = Field(min_length=1)
+    observed_by: str = Field(min_length=1)
+    observer_kind: Literal["director_agent"]
     binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     usage: Literal["unknown", "unused", "in_use"] = "unknown"
     data: Literal["unknown", "reproducible", "only_copy"] = "unknown"
@@ -38,6 +40,39 @@ class DisposableLaneSafety(BaseModel):
                 raise ValueError("Known disposable safety facts require their source evidence.")
         if bool(self.replaces_operation_id) != bool(self.replaced_target_id):
             raise ValueError("Replacement evidence names both the operation and retained target.")
+        return self
+
+
+class DisposableLaneObservationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["inspect", "record", "prepare-rebuild"] = "inspect"
+    product: str = Field(min_length=1)
+    context: str = Field(min_length=1)
+    instance: str = Field(min_length=1)
+    preview_id: str = ""
+    expected_binding_sha256: str = ""
+    usage: Literal["unknown", "unused", "in_use"] = "unknown"
+    data: Literal["unknown", "reproducible", "only_copy"] = "unknown"
+    production_resources: Literal["unknown", "isolated", "separation_ready", "shared"] = "unknown"
+    usage_evidence: str = ""
+    data_evidence: str = ""
+    isolation_evidence: str = ""
+    replaces_operation_id: str = ""
+    lifetime_seconds: int = Field(default=300, gt=0, le=900)
+
+
+class DisposableTestingReplacementPreparation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    retained_target_id: str = Field(min_length=1)
+    prepared_by: str = Field(min_length=1)
+    recorded_at: datetime
+
+    @model_validator(mode="after")
+    def validate_preparation(self) -> "DisposableTestingReplacementPreparation":
+        if self.recorded_at.utcoffset() is None:
+            raise ValueError("Replacement preparation requires a timezone-aware timestamp.")
         return self
 
 

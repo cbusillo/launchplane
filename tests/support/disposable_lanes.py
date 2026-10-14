@@ -31,12 +31,14 @@ def record_safety(
         {
             "context": context,
             "instance": instance,
+            "observed_by": "director-fixture",
+            "observer_kind": "director_agent",
             "binding_sha256": disposable_lane_binding_sha256(
                 profile,
                 targets[0],
                 targets[1],
                 preview,
-                disposable_lane_configuration(store, context),
+                disposable_lane_configuration(store, context, instance),
             ),
             "usage": "unused",
             "data": "reproducible",

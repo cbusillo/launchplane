@@ -387,12 +387,15 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status_code, 202, response.text)
         plan = response.json()
+        from control_plane.contracts.product_retirement import ProductRetirementRequest
+
         return {
             **self.payload,
             "mode": "apply",
             "reviewed_plan_record_id": plan["records"]["product_retirement_plan_id"],
             "reviewed_plan_sha256": plan["result"]["plan_sha256"],
-            "confirmation": plan["result"]["confirmation"],
+            "confirmation": plan["result"].get("confirmation")
+            or ProductRetirementRequest.model_validate(self.payload).expected_confirmation,
         }
 
     async def test_director_retires_never_live_product_with_previews_without_grants(self) -> None:
@@ -411,6 +414,102 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.store.read_product_profile_record(self.profile.product).lifecycle_state, "retired"
         )
+        # A completed receipt is readable after observations expire or tracking
+        # is removed; replay never uses expired permission for another effect.
+        self.store.write_product_profile_record(
+            self.store.read_product_profile_record(self.profile.product).model_copy(
+                update={"disposable_lane_safety": ()}
+            )
+        )
+        replay = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertEqual(set(self.deleted), {"testing-app", "preview-6"})
+
+    async def test_director_terminal_can_retire_previews_but_cannot_retire_production(self) -> None:
+        from control_plane.service_auth import BearerIdentityConfig
+
+        self.use_director_identity()
+        self.app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="fixture-terminal-token",
+                terminal_agent_subject="fixture-director",
+                terminal_agent_token_label="fixture-terminal",
+            ),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        self.director_headers["Authorization"] = "Bearer fixture-terminal-token"
+        self.record_retirement_safety()
+        payload = await self.director_plan()
+        denied = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload={**self.payload, "instance": "prod"},
+        )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertFalse(self.deleted)
+        applied = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertEqual(set(self.deleted), {"testing-app", "preview-6"})
+
+    async def test_bounded_observer_supports_an_absent_preview_without_assuming_safety(
+        self,
+    ) -> None:
+        self.use_director_identity()
+        preview = self.store.read_preview_record("legacy-1")
+        observation = {
+            "product": self.profile.product,
+            "context": preview.context,
+            "instance": "pr-1",
+            "preview_id": preview.preview_id,
+        }
+        inspected = await request(
+            self.app,
+            "POST",
+            "/v1/disposable-lanes/observations",
+            headers=self.director_headers,
+            payload={**observation, "mode": "inspect"},
+        )
+        self.assertEqual(inspected.status_code, 202, inspected.text)
+        self.assertEqual(inspected.json()["result"]["usage"], "unknown")
+        recorded = await request(
+            self.app,
+            "POST",
+            "/v1/disposable-lanes/observations",
+            headers=self.director_headers,
+            payload={
+                **observation,
+                "mode": "record",
+                "expected_binding_sha256": inspected.json()["result"]["binding_sha256"],
+            },
+        )
+        self.assertEqual(recorded.status_code, 202, recorded.text)
+        payload = await self.director_plan()
+        applied = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(applied.status_code, 409, applied.text)
+        self.assertFalse(self.deleted)
 
     async def test_director_retirement_refuses_missing_usage_or_only_copy_evidence(self) -> None:
         self.use_director_identity()
@@ -437,6 +536,62 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
                 # Use a fresh inert plan key for the next observation.
                 self.director_headers["Idempotency-Key"] += "-next"
 
+    async def test_safety_expiry_before_testing_delete_retains_a_visible_fence_and_receipt(
+        self,
+    ) -> None:
+        from control_plane.disposable_lanes import require_disposable_lane
+        from datetime import datetime, timedelta, timezone
+
+        self.use_director_identity()
+        self.payload["include_previews"] = False
+        from control_plane.contracts.product_retirement import provider_identifier_sha256
+
+        self.payload["expected_target_sha256"] = provider_identifier_sha256(
+            self.store.read_dokploy_target_id_record(
+                context_name=self.profile.lanes[0].context, instance_name="testing"
+            ).target_id
+        )
+        self.store.write_product_profile_record(
+            self.profile.model_copy(
+                update={"preview": self.profile.preview.model_copy(update={"enabled": False})}
+            )
+        )
+        # Testing-only retirement must not have active previews in its scope.
+        for preview in self.store.list_preview_records():
+            self.store.write_preview_record(
+                preview.model_copy(
+                    update={"state": "destroyed", "destroyed_at": preview.updated_at}
+                )
+            )
+        self.record_retirement_safety()
+        payload = await self.director_plan()
+        calls = 0
+
+        def expire(*args: Any, **kwargs: Any) -> str:
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                kwargs["now"] = datetime.now(timezone.utc) + timedelta(minutes=20)
+            return require_disposable_lane(*args, **kwargs)
+
+        with patch("control_plane.http_app.require_disposable_lane", side_effect=expire):
+            response = await request(
+                self.app,
+                "POST",
+                "/v1/product-retirement",
+                headers=self.director_headers,
+                payload=payload,
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.deleted)
+        receipts = self.store.list_product_retirement_records(
+            product=self.profile.product, mode="apply"
+        )
+        self.assertTrue(any(item.outcome in {"failed", "reconcile_required"} for item in receipts))
+        self.assertEqual(
+            self.store.read_product_profile_record(self.profile.product).lifecycle_state, "retiring"
+        )
+
     async def test_director_cannot_retire_live_product_or_production_lane(self) -> None:
         self.use_director_identity()
         self.record_retirement_safety()
@@ -454,6 +609,7 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(self.deleted, [])
+
         self.payload["instance"] = "prod"
         response = await request(
             self.app,
@@ -464,6 +620,68 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(self.deleted, [])
+
+    async def test_director_retirement_refuses_protected_preview_even_when_testing_is_disposable(
+        self,
+    ) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        self.use_director_identity()
+        self.record_retirement_safety()
+        preview = self.store.read_preview_record("legacy-6")
+        record_safety(
+            self.store,
+            self.profile.product,
+            preview.context,
+            "pr-6",
+            preview=preview,
+            data="only_copy",
+        )
+        payload = await self.director_plan()
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.deleted)
+
+    async def test_director_retirement_retry_can_refresh_safety_without_changing_reviewed_authority(
+        self,
+    ) -> None:
+        self.use_director_identity()
+        self.record_retirement_safety()
+        payload = await self.director_plan()
+        original = self.delete_resource
+
+        def committed_then_lost(**kwargs: Any) -> None:
+            original(**kwargs)
+            raise TimeoutError("lost provider response")
+
+        with patch(
+            "control_plane.workflows.preview_resource_destroy._delete_preview_resource",
+            side_effect=committed_then_lost,
+        ):
+            first = await request(
+                self.app,
+                "POST",
+                "/v1/product-retirement",
+                headers=self.director_headers,
+                payload=payload,
+            )
+        self.assertEqual(first.status_code, 409, first.text)
+        self.record_retirement_safety()
+        retry = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(retry.status_code, 202, retry.text)
+        self.assertEqual(self.deleted, ["preview-6", "testing-app"])
 
     async def test_instance_grant_does_not_expand_to_product_preview_retirement(self) -> None:
         from tests.test_http_app_product_retirement import ProductRetirementHttpTests

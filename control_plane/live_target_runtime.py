@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from collections.abc import Callable, Iterable
-from typing import Protocol
+from typing import Protocol, cast
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -11,6 +11,11 @@ from control_plane import runtime_environments as control_plane_runtime_environm
 from control_plane import runtime_platform_credentials
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.disposable_lanes import (
+    DisposableLaneStore,
+    DisposableLaneSafetyUnknown,
+    resolve_disposable_preview,
+)
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyTarget,
 )
@@ -390,7 +395,9 @@ def require_product_profile_runtime_keys(
         ),
         None,
     )
-    if lane is None:
+    if lane is None and not _owned_runtime_preview(
+        record_store, profile, context_name, instance_name
+    ):
         raise LiveTargetRuntimeError(
             f"Product {product_name!r} has no lane for {context_name}/{instance_name}.",
             code="product_lane_not_found",
@@ -567,7 +574,7 @@ def product_lane_declared_keys(
         profile = record_store.read_product_profile_record(product_name)
     if not any(
         lane.context == context_name and lane.instance == instance_name for lane in profile.lanes
-    ):
+    ) and not _owned_runtime_preview(record_store, profile, context_name, instance_name):
         raise LiveTargetRuntimeError(
             f"Product {product_name!r} has no lane for {context_name}/{instance_name}.",
             code="product_lane_not_found",
@@ -575,6 +582,21 @@ def product_lane_declared_keys(
     return _declared_runtime_keys(
         profile=profile, context_name=context_name, instance_name=instance_name
     )
+
+
+def _owned_runtime_preview(
+    store: LiveTargetRuntimeProfileStore,
+    profile: LaunchplaneProductProfileRecord,
+    context: str,
+    instance: str,
+) -> bool:
+    if not profile.preview.context or context != profile.preview.context:
+        return False
+    try:
+        resolve_disposable_preview(cast(DisposableLaneStore, store), profile, context, instance)
+    except DisposableLaneSafetyUnknown:
+        return False
+    return True
 
 
 def _require_expected_runtime_secret_values(
