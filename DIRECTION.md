@@ -13,9 +13,28 @@ Client's accept-or-reject decision. A live site is the production lane of a
 product recorded as live. A product is recorded as live when its Client uses
 production for real business.
 
+Where it is going: Launchplane becomes where the work lives, for people and
+agents. A Supervisor agent will run in a loop from it, reading what needs
+doing, starting agents on it and recording what they did and decided, so the
+Director acts only at the stop boundaries. It gets there in two legs, each a
+milestone below: first operations, then planning.
+
+Today: Launchplane deploys and promotes the products it manages, but
+operations a person or agent decides on still start from GitHub workflows,
+and they move in one by one. Plans, claims and waits live in GitHub issues
+through the codex-skills helpers, which other Directors use without
+Launchplane, and the Supervisor runs outside Launchplane. Nothing for planning
+or the Supervisor is built in Launchplane before its milestone comes up.
+
+Whenever agents work in Launchplane, they do so under one standing permission,
+named on the record by their own identity, never through enrollment, leases or
+per-agent grants; a claim records who is working on what and locks nothing.
+When Launchplane is down, agents fix it with what GitHub keeps below, without
+needing Launchplane to track or merge the fix.
+
 Judge every change by one question: can a product be maintained without
-anyone touching Launchplane? Work that adds upkeep to Launchplane itself needs
-a strong reason.
+anyone touching Launchplane by hand? Work that adds upkeep to Launchplane
+itself needs a strong reason.
 
 A product repository builds its own artifacts from its own files, with
 provenance Launchplane can verify; it never calls Launchplane, and Launchplane
@@ -24,11 +43,18 @@ verifies which repository and commit an artifact came from, and deploys it
 with the site's runtime settings and secrets. The artifact is the only handoff
 between them.
 
-Launchplane should not depend on GitHub. GitHub is the git host we use
-today; others may follow, including one we run ourselves. New code talks to
-GitHub through Launchplane's own names for things (a change, a comment, a
-check result, a merge); old code moves over only when other work touches it.
-Adding another host is its own milestone, when the Director chooses it.
+Launchplane should not depend on GitHub. GitHub is the git host and CI we
+use today; others may follow, including one we run ourselves. New code
+talks to GitHub through Launchplane's own names for things (a change, a
+comment, a check result, a merge); existing call sites move over when other
+work touches them. GitHub is never an authority: an operation a person or
+agent decides on belongs in Launchplane, under that person's or agent's own
+identity, and so do the runtime secrets and variables products and operations
+use. GitHub keeps product builds and their credentials, Launchplane's own
+CI and deploy, Launchplane's independent emergency rollback, and the values
+those need before Launchplane can run, such as its decryption root and
+database connection. Adding another host is its own
+milestone, when the Director chooses it.
 
 Code and tests are upkeep. A change that deletes code or tests without losing
 a behavior needs no other reason. A test earns its place by catching a real
@@ -87,6 +113,12 @@ blocks that run is the next piece of work.
   reusable Launchplane workflows, and Launchplane-held build settings
 - caller-grant rules for the preview and testing deploys Launchplane starts
   from source-control events
+- GitHub workflows that run an operation a person or agent decides on,
+  other than what the Purpose says GitHub keeps, with the GitHub secrets
+  and variables behind them; each is deleted once its operation's
+  Launchplane path works
+- fences, recovery journals, proof-of-safety, and per-product or per-action
+  agent write grants on testing and preview lanes
 
 A retired concept comes back only through a direction change, in a shape that
 fits this file.
@@ -113,3 +145,12 @@ fits this file.
   Live product's promotion happens without one.
 - `Retired machinery deleted` proves the retired designs above are gone from
   the code; ends if a deletion breaks a live product.
+- `Operations live in Launchplane` proves no GitHub workflow runs an
+  operation a person or agent decides on, other than what the Purpose says
+  GitHub keeps, and the runtime secrets and variables live in Launchplane;
+  ends if a new operation needs a GitHub workflow.
+- `Supervisor runs from Launchplane` proves a Client's request reaches an
+  accepted release with the work, claims and records only in Launchplane, and
+  the Director acting only at the stop boundaries; ends if the Director has
+  to start or restart a session for ordinary work, or work is tracked in two
+  places.
