@@ -66,6 +66,96 @@ def _write_dokploy_managed_secrets(*, store: PostgresRecordStore) -> None:
 
 
 class DokployTargetAdoptionTests(unittest.TestCase):
+    def test_setup_dry_runs_check_current_provider_binding_without_writes(self) -> None:
+        for operation in ("application", "compose", "adopt"):
+            with self.subTest(operation=operation), TemporaryDirectory() as directory:
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(Path(directory) / "db.sqlite3")
+                )
+                store.ensure_schema()
+                current = ProviderTargetRecord(
+                    context="synthetic-site",
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_category="compose",
+                    provider_target_type="compose",
+                    target_id="retained-compose",
+                    display_name="retained-testing",
+                    updated_at="2026-01-01T00:00:00Z",
+                    source_label="test:retained-target",
+                )
+                store.write_provider_target_record(current)
+
+                def no_provider_write(*_args: object) -> JsonObject:
+                    raise AssertionError("A dry run must not mutate the provider.")
+
+                def dry_run(expectation: DeployedTargetReference | None = None) -> bool:
+                    if operation == "adopt":
+                        return adopt_dokploy_target(
+                            record_store=store,
+                            host="https://provider.example.invalid",
+                            token="synthetic-token",
+                            context=current.context,
+                            instance=current.instance,
+                            target_type="compose",
+                            target_id="fresh-compose",
+                            target_name="fresh-testing",
+                            apply=False,
+                            expected_current_provider_target=expectation,
+                            fetch_target_payload=lambda *_args: {"name": "fresh-testing"},
+                        ).applied
+                    create = (
+                        create_dokploy_application_target
+                        if operation == "application"
+                        else create_dokploy_compose_target
+                    )
+                    return create(
+                        record_store=store,
+                        host="https://provider.example.invalid",
+                        token="synthetic-token",
+                        context=current.context,
+                        instance=current.instance,
+                        target_name="fresh-testing",
+                        environment_id="synthetic-environment",
+                        server_id="synthetic-server",
+                        apply=False,
+                        mutate_provider=no_provider_write,
+                        fetch_target_payload=no_provider_write,
+                        expected_current_provider_target=expectation,
+                    ).applied
+
+                if operation == "adopt":
+                    repeated = adopt_dokploy_target(
+                        record_store=store,
+                        host="https://provider.example.invalid",
+                        token="synthetic-token",
+                        context=current.context,
+                        instance=current.instance,
+                        target_type="compose",
+                        target_id=current.target_id,
+                        apply=False,
+                        fetch_target_payload=lambda *_args: {"name": current.display_name},
+                    )
+                    self.assertFalse(repeated.applied)
+
+                with self.assertRaises(ValueError):
+                    dry_run()
+                expectation = current.to_deployed_target_reference()
+                self.assertFalse(dry_run(expectation))
+                with self.assertRaises(ValueError):
+                    dry_run(expectation.model_copy(update={"target_id": "different-compose"}))
+                self.assertEqual(store.list_physical_provider_target_records(), (current,))
+                self.assertEqual(store.list_dokploy_target_records(), ())
+                self.assertEqual(store.list_dokploy_target_id_records(), ())
+                store.delete_provider_target_record(expected_record=current)
+                with self.assertRaises(ValueError):
+                    dry_run(expectation)
+                self.assertFalse(dry_run())
+                self.assertEqual(store.list_physical_provider_target_records(), ())
+                self.assertEqual(store.list_dokploy_target_records(), ())
+                self.assertEqual(store.list_dokploy_target_id_records(), ())
+                store.close()
+
     @staticmethod
     def _live_domains(*hosts: str) -> tuple[JsonObject, ...]:
         return tuple({"host": host} for host in hosts)

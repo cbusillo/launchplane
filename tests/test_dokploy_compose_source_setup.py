@@ -331,6 +331,7 @@ class ComposeSourceSetupTests(unittest.TestCase):
     def test_creation_sets_source_before_adoption_and_reports_it_in_plan(self) -> None:
         request = self.request(
             operation="create-compose",
+            instance="preview",
             target_name="New compose",
             project_name="New",
             server_id="server-one",
@@ -350,7 +351,7 @@ class ComposeSourceSetupTests(unittest.TestCase):
         result = execute_dokploy_target_setup(
             control_plane_root_path=self.root,
             record_store=self.store,
-            request=request.model_copy(update={"mode": "apply", "instance": "preview"}),
+            request=request.model_copy(update={"mode": "apply"}),
         )
         self.assertTrue(result["applied"])
         self.assertEqual(
