@@ -208,6 +208,19 @@ class WebsiteSettingsTests(unittest.TestCase):
             self.assertEqual(captured[1]["website_settings"]["google_analytics_key"], "")
             self.assertFalse(captured[1]["website_settings"]["public_indexing_enabled"])
 
+    def test_unpublished_acceptance_cannot_activate_prepared_settings(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            seed(store)
+            prepare(store)
+            accepted = decision(store).model_copy(update={"release_issue_url": ""})
+            store.create_release_review_decision_record_if_absent(accepted)
+            self.assertIsNone(
+                accepted_website_settings(
+                    store, product="example-site", artifact_id="artifact-testing"
+                )
+            )
+
     def test_analytics_requires_explicit_native_consent_controls(self) -> None:
         for values in (
             {"cookies_bar": False},

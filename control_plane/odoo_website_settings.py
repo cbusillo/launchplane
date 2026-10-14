@@ -171,6 +171,7 @@ def accepted_website_settings(
         decision
         for decision in decisions
         if decision.decision == "accepted"
+        and decision.release_issue_url
         and decision.checklist.candidate.artifact_id == artifact_id
     ]
     latest = max(matching, key=lambda item: (item.decided_at, item.record_id), default=None)
