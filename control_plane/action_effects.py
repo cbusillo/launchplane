@@ -232,6 +232,9 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "tenant_repository_classification.write": ActionDeclaration("write"),
         "trusted_maintenance_policy.read": ActionDeclaration("read"),
         "trusted_maintenance_policy.write": ActionDeclaration("write"),
+        # Historical policy parsing only; the Odoo publish routes are retired.
+        "odoo_artifact_publish_inputs.read": ActionDeclaration("read"),
+        "odoo_artifact_publish.write": ActionDeclaration("write"),
         "verireel_app_maintenance.execute": ActionDeclaration("write"),
         "verireel_preview_destroy.execute": ActionDeclaration("write"),
         "verireel_preview_inventory.read": ActionDeclaration("read"),
