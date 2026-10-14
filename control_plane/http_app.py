@@ -23081,7 +23081,7 @@ def create_launchplane_fastapi_app(
                         "usage": "unknown",
                         "data": "unknown",
                         "production_resources": "unknown",
-                        "automatic_fact_collection": "unavailable",
+                        "automatic_fact_collection": "limited_service_records",
                         "source_coverage": disposable_collection_coverage(),
                     },
                 )
@@ -25904,7 +25904,10 @@ def create_launchplane_fastapi_app(
         response_model=AcceptedEvidenceResponse,
         operation_id="record_disposable_lane_safety",
         responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
         },
     )

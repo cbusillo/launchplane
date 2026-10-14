@@ -2,6 +2,7 @@
 
 from contextlib import redirect_stdout
 import io
+import http.client
 import json
 from pathlib import Path
 import runpy
@@ -14,7 +15,13 @@ from control_plane.disposable_lane_collection import disposable_collection_cover
 
 class DisposableLaneClientTests(unittest.TestCase):
     def call_client(
-        self, *, collection_mode: str = "collect", private_fact: bool = False
+        self,
+        *,
+        collection_mode: str = "collect",
+        private_fact: bool = False,
+        truncated: bool = False,
+        provider_mutation: bool = False,
+        binding_sha256: str = "a" * 64,
     ) -> tuple[int, str, Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/collect-disposable-lane.py")
@@ -27,6 +34,8 @@ class DisposableLaneClientTests(unittest.TestCase):
         collected_result: dict[str, object] = {
             "mode": collection_mode,
             "source_coverage": disposable_collection_coverage(),
+            "binding_sha256": binding_sha256,
+            "provider_mutation": provider_mutation,
             **facts,
         }
         collected = {
@@ -36,7 +45,9 @@ class DisposableLaneClientTests(unittest.TestCase):
         }
         if private_fact:
             collected_result["usage"] = "private-fixture"
-        request = Mock(side_effect=[inspected, collected])
+        request = Mock(
+            side_effect=[inspected, http.client.IncompleteRead(b"", 1) if truncated else collected]
+        )
         transport = {
             "resolve_settings": lambda args: {
                 "service_url": "https://service.invalid",
@@ -92,3 +103,16 @@ class DisposableLaneClientTests(unittest.TestCase):
                 self.assertEqual(status, 1)
                 self.assertEqual(json.loads(output)["status"], "unverified")
                 self.assertNotIn("private-fixture", output)
+
+    def test_truncated_or_mismatched_receipt_stays_unverified(self) -> None:
+        for truncated, mutation, digest in (
+            (True, False, "a" * 64),
+            (False, True, "a" * 64),
+            (False, False, "b" * 64),
+        ):
+            with self.subTest(truncated=truncated, mutation=mutation, digest=digest):
+                status, output, _ = self.call_client(
+                    truncated=truncated, provider_mutation=mutation, binding_sha256=digest
+                )
+                self.assertEqual(status, 1)
+                self.assertEqual(json.loads(output)["status"], "unverified")

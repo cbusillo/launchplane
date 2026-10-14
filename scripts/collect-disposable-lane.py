@@ -1,6 +1,7 @@
 """Bounded evidence-only client; use the installed operator helper's transport."""
 
 import argparse
+import http.client
 import json
 from pathlib import Path
 import runpy
@@ -64,14 +65,19 @@ def main() -> int:
         result = response["result"]
         if result["mode"] != args.mode:
             raise ValueError("The collection did not settle as requested.")
+        if args.mode == "collect" and (
+            result["binding_sha256"] != payload.expected_binding_sha256
+            or result["provider_mutation"] is not False
+        ):
+            raise ValueError("The collection receipt does not match the inert inspection.")
         coverage = result["source_coverage"]
         if coverage != disposable_collection_coverage():
             raise ValueError("The collection coverage differs from this client.")
         facts = {key: result[key] for key in ("usage", "data", "production_resources")}
         for key, allowed in (
-            ("usage", {"unknown", "unused", "in_use"}),
-            ("data", {"unknown", "reproducible", "only_copy"}),
-            ("production_resources", {"unknown", "isolated", "shared", "separation_ready"}),
+            ("usage", {"unknown", "in_use"}),
+            ("data", {"unknown"}),
+            ("production_resources", {"unknown", "shared"}),
         ):
             if facts[key] not in allowed:
                 raise ValueError("Invalid fact response.")
@@ -92,7 +98,14 @@ def main() -> int:
             request={"product": args.product, "context": args.context, "instance": args.instance},
             exc=error,
         )
-    except (KeyError, TypeError, ValueError, OSError, urllib.error.URLError):
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        OSError,
+        urllib.error.URLError,
+        http.client.HTTPException,
+    ):
         print(json.dumps({"status": "unverified", "mode": args.mode}))
     return 1
 

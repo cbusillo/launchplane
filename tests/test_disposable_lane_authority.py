@@ -409,6 +409,19 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.read_preview_record(preview.preview_id), preview)
         self.assertEqual(self.store.read_product_profile_record("example-site"), profile)
 
+    async def test_collection_missing_product_and_invalid_request_keep_structured_refusals(
+        self,
+    ) -> None:
+        missing = await self.observe(mode="collect", product="absent-product")
+        self.assertEqual(missing.status_code, 404, missing.text)
+        self.assertTrue(missing.json()["trace_id"])
+        invalid = await self.observe(mode="not-a-mode")
+        self.assertEqual(invalid.status_code, 400, invalid.text)
+        self.assertTrue(invalid.json()["trace_id"])
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        )
+
     async def test_rebuild_preparation_captures_the_stored_target_once_under_the_agent_identity(
         self,
     ) -> None:

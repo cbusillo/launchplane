@@ -63,14 +63,17 @@
         "purpose": "Inspect or collect exact-lane service safety evidence, record unknown assertions, clear evidence or prepare a retained testing replacement; unavailable facts stay unknown.",
         "response_statuses": [
           "202",
+          "400",
+          "401",
           "403",
+          "404",
           "409",
           "503"
         ],
         "reviewed_evidence": [
           "expected_binding_sha256"
         ],
-        "schema_fingerprint_sha256": "4ccd0000ed5c20033f66d4a31f3bab1f0fd78ef8659cf2e43e34d304fbe8f1ae",
+        "schema_fingerprint_sha256": "544c4ee51320540564d30bcddd3d12450555631efa403b2ca519964b8a975458",
         "supported_surfaces": [
           "service_api"
         ]
@@ -530,8 +533,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "f8e8d7dc2f75030082f241bb25759ed1e4da9bd5"
+    "source_commit_sha": "3db8ee5ff499b9c21d9949b6f5bed49957a2e15a"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "1c36be9bb8b6469b4305ae7306cc69cd4b40a28ae917d1cc101e7015c27ad2e4"
+  "semantic_digest_sha256": "e202457e7e77d577c2bceed1b49b6d8bddf0842dadec1f6c2c82838f02ce9ca9"
 }
