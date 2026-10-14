@@ -413,13 +413,13 @@ def adopt_dokploy_target(
         provider_target_record=provider_target_record,
     )
 
+    provider_target_record = prepare_provider_target_from_dokploy_records(
+        record_store=record_store,
+        target_record=target_record,
+        target_id_record=target_id_record,
+        expected_current_provider_target=expected_current_provider_target,
+    )
     if apply:
-        provider_target_record = prepare_provider_target_from_dokploy_records(
-            record_store=record_store,
-            target_record=target_record,
-            target_id_record=target_id_record,
-            expected_current_provider_target=expected_current_provider_target,
-        )
         current_provider_targets = {
             (record.context, record.instance): record
             for record in record_store.list_physical_provider_target_records()

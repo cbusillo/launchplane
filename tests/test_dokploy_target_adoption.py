@@ -66,9 +66,9 @@ def _write_dokploy_managed_secrets(*, store: PostgresRecordStore) -> None:
 
 
 class DokployTargetAdoptionTests(unittest.TestCase):
-    def test_create_dry_runs_check_current_provider_binding_without_writes(self) -> None:
-        for create in (create_dokploy_application_target, create_dokploy_compose_target):
-            with self.subTest(create=create.__name__), TemporaryDirectory() as directory:
+    def test_setup_dry_runs_check_current_provider_binding_without_writes(self) -> None:
+        for operation in ("application", "compose", "adopt"):
+            with self.subTest(operation=operation), TemporaryDirectory() as directory:
                 store = PostgresRecordStore(
                     database_url=_sqlite_database_url(Path(directory) / "db.sqlite3")
                 )
@@ -90,6 +90,25 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                     raise AssertionError("A dry run must not mutate the provider.")
 
                 def dry_run(expectation: DeployedTargetReference | None = None) -> bool:
+                    if operation == "adopt":
+                        return adopt_dokploy_target(
+                            record_store=store,
+                            host="https://provider.example.invalid",
+                            token="synthetic-token",
+                            context=current.context,
+                            instance=current.instance,
+                            target_type="compose",
+                            target_id="fresh-compose",
+                            target_name="fresh-testing",
+                            apply=False,
+                            expected_current_provider_target=expectation,
+                            fetch_target_payload=lambda *_args: {"name": "fresh-testing"},
+                        ).applied
+                    create = (
+                        create_dokploy_application_target
+                        if operation == "application"
+                        else create_dokploy_compose_target
+                    )
                     return create(
                         record_store=store,
                         host="https://provider.example.invalid",
@@ -112,6 +131,13 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     dry_run(expectation.model_copy(update={"target_id": "different-compose"}))
                 self.assertEqual(store.list_physical_provider_target_records(), (current,))
+                self.assertEqual(store.list_dokploy_target_records(), ())
+                self.assertEqual(store.list_dokploy_target_id_records(), ())
+                store.delete_provider_target_record(expected_record=current)
+                with self.assertRaises(ValueError):
+                    dry_run(expectation)
+                self.assertFalse(dry_run())
+                self.assertEqual(store.list_physical_provider_target_records(), ())
                 self.assertEqual(store.list_dokploy_target_records(), ())
                 self.assertEqual(store.list_dokploy_target_id_records(), ())
                 store.close()
