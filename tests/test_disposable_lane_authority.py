@@ -759,6 +759,12 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.sync(instance="staging"), 202)
             self.assertIsNone(driver.call_args.kwargs["before_provider_mutation"])
             self.assertFalse(driver.call_args.kwargs["allow_owned_preview"])
+            driver.reset_mock()
+            with patch.object(
+                self.store, "read_product_profile_record", side_effect=FileNotFoundError
+            ):
+                self.assertEqual(await self.sync(instance="another-stable"), 404)
+            driver.assert_not_called()
 
     async def test_replacing_observation_does_not_change_an_inflight_apply_binding(self) -> None:
         from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord

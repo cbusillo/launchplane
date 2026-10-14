@@ -20691,9 +20691,17 @@ def create_launchplane_fastapi_app(
             and explicit_runtime
             and live_target_runtime_request.instance not in {"testing", "prod"}
         ):
-            profile = cast(DisposableLaneStore, record_store).read_product_profile_record(
-                live_target_runtime_request.product
-            )
+            try:
+                profile = cast(DisposableLaneStore, record_store).read_product_profile_record(
+                    live_target_runtime_request.product
+                )
+            except FileNotFoundError as error:
+                raise _launchplane_http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="product_profile_not_found",
+                    message="The requested product profile is unavailable.",
+                ) from error
             director_disposable_apply = (
                 profile.preview.context == live_target_runtime_request.context
                 and not any(
