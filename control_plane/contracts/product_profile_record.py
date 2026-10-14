@@ -6,7 +6,6 @@ from typing import Literal, get_args
 
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
 from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
-from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
@@ -628,11 +627,6 @@ class LaunchplaneProductProfileRecord(BaseModel):
     lifecycle_state: ProductLifecycleState = "active"
     # Unknown existing records require review; only explicit prelaunch records are exempt.
     production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
-    disposable_lane_safety: tuple[DisposableLaneSafety, ...] = Field(
-        default=(),
-        exclude_if=lambda value: not value,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
     odoo_business_hours: OdooBusinessHoursPolicy | None = Field(
         default=None,
         exclude_if=lambda value: value is None,

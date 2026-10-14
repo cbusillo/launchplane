@@ -374,7 +374,11 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         for number in (1, 6):
             preview = self.store.read_preview_record(f"legacy-{number}")
             record_safety(
-                self.store, self.profile.product, preview.context, f"pr-{number}", preview=preview
+                self.store,
+                self.profile.product,
+                preview.context,
+                self.profile.preview.slug_template.format(number=number),
+                preview=preview,
             )
 
     async def director_plan(self) -> dict[str, Any]:
@@ -416,10 +420,8 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         )
         # A completed receipt is readable after observations expire or tracking
         # is removed; replay never uses expired permission for another effect.
-        self.store.write_product_profile_record(
-            self.store.read_product_profile_record(self.profile.product).model_copy(
-                update={"disposable_lane_safety": ()}
-            )
+        self.store.clear_disposable_lane_safety(
+            self.profile.product, self.profile.lanes[0].context, "testing"
         )
         replay = await request(
             self.app,
@@ -591,6 +593,60 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.store.read_product_profile_record(self.profile.product).lifecycle_state, "retiring"
         )
+
+    async def test_no_target_retirement_rechecks_usage_before_metadata_commit(self) -> None:
+        from control_plane.product_retirement_no_target import observe_no_target_absence
+        from tests.support.disposable_lanes import record_safety
+
+        self.use_director_identity()
+        context = self.profile.lanes[0].context
+        current = self.store.read_provider_target_record(
+            context_name=context, instance_name="testing"
+        )
+        self.store.delete_provider_target_record(expected_record=current)
+        target = self.store.read_dokploy_target_id_record(
+            context_name=context, instance_name="testing"
+        )
+        self.store.delete_dokploy_target_id_record(expected_record=target)
+        self.apps.clear()
+        self.store.write_product_profile_record(
+            self.profile.model_copy(
+                update={"preview": self.profile.preview.model_copy(update={"enabled": False})}
+            )
+        )
+        self.payload.update(include_previews=False, no_target=True)
+        record_safety(self.store, self.profile.product, context, "testing")
+        payload = await self.director_plan()
+
+        def usage_changed(**kwargs: Any) -> Any:
+            observation = observe_no_target_absence(**kwargs)
+            record_safety(self.store, self.profile.product, context, "testing", usage="in_use")
+            return observation
+
+        with (
+            patch(
+                "control_plane.product_retirement_no_target.observe_no_target_absence",
+                side_effect=usage_changed,
+            ),
+            patch.object(
+                self.store,
+                "commit_no_target_retirement",
+                wraps=self.store.commit_no_target_retirement,
+            ) as commit,
+        ):
+            response = await request(
+                self.app,
+                "POST",
+                "/v1/product-retirement",
+                headers=self.director_headers,
+                payload=payload,
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        commit.assert_not_called()
+        self.assertEqual(
+            self.store.read_product_profile_record(self.profile.product).lifecycle_state, "active"
+        )
+        self.assertFalse(self.deleted)
 
     async def test_director_cannot_retire_live_product_or_production_lane(self) -> None:
         self.use_director_identity()

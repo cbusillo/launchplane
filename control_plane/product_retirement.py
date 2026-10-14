@@ -26,7 +26,6 @@ from control_plane.contracts.product_retirement import (
     canonical_sha256,
     provider_identifier_sha256,
     product_retirement_secret_authority,
-    product_retirement_profile_authority,
     preview_inclusive_retirement_confirmation,
 )
 from control_plane.contracts.runtime_environment_record import (
@@ -442,7 +441,7 @@ def authority_snapshot(bound: BoundProductRetirement) -> ProductRetirementAuthor
     secret_refs, secret_sha256 = _secret_snapshot(bound.secret_records)
     return ProductRetirementAuthoritySnapshot(
         context=bound.context,
-        profile_sha256=canonical_sha256(product_retirement_profile_authority(bound.profile)),
+        profile_sha256=canonical_sha256(bound.profile.model_dump(mode="json")),
         profile_updated_at=bound.profile.updated_at,
         provider_target_sha256=canonical_sha256(
             bound.provider_target.model_dump(mode="json") if bound.provider_target else None
@@ -939,15 +938,13 @@ class DokployProductRetirementAdapter:
                     fence.plan_sha256 != self._plan.plan_sha256
                     or fence.identity != self._identity
                     or fence.mutation_evidence.retiring_profile_sha256
-                    != canonical_sha256(product_retirement_profile_authority(profile))
+                    != canonical_sha256(profile.model_dump(mode="json"))
                 ):
                     raise ProductRetirementBlockedError(
                         "Retiring profile does not match this operation checkpoint."
                     )
                 return profile
-            if self._plan.profile_record is None or product_retirement_profile_authority(
-                profile
-            ) != product_retirement_profile_authority(self._plan.profile_record):
+            if profile != self._plan.profile_record:
                 raise ProductRetirementBlockedError("Reviewed product profile changed.")
             replacement = profile.model_copy(
                 update={
@@ -968,7 +965,7 @@ class DokployProductRetirementAdapter:
                     "mutation_evidence": fence.mutation_evidence.model_copy(
                         update={
                             "retiring_profile_sha256": canonical_sha256(
-                                product_retirement_profile_authority(replacement)
+                                replacement.model_dump(mode="json")
                             )
                         }
                     ),
@@ -983,7 +980,7 @@ class DokployProductRetirementAdapter:
         if profile.lifecycle_state == "retiring":
             return profile
         if (
-            canonical_sha256(product_retirement_profile_authority(profile))
+            canonical_sha256(profile.model_dump(mode="json"))
             != self._plan.authority_snapshot.profile_sha256
         ):
             raise ProductRetirementBlockedError("Product profile changed after planning.")
@@ -1042,7 +1039,7 @@ class DokployProductRetirementAdapter:
             if profile.lifecycle_state == "retired"
             else ""
         )
-        if canonical_sha256(product_retirement_profile_authority(profile)) != expected:
+        if canonical_sha256(profile.model_dump(mode="json")) != expected:
             raise ProductRetirementBlockedError("Product profile changed during finalization.")
         if active_preview_ids(record_store=self._record_store, profile=profile):
             raise ProductRetirementBlockedError("Active previews block finalization recovery.")
@@ -1141,10 +1138,10 @@ class DokployProductRetirementAdapter:
                     "mutation_evidence": checkpoint.mutation_evidence.model_copy(
                         update={
                             "finalization_profile_sha256": canonical_sha256(
-                                product_retirement_profile_authority(profile)
+                                profile.model_dump(mode="json")
                             ),
                             "finalization_retired_profile_sha256": canonical_sha256(
-                                product_retirement_profile_authority(retired_profile)
+                                retired_profile.model_dump(mode="json")
                             ),
                             "finalization_at": self._requested_at,
                         }

@@ -9,7 +9,8 @@ protected. A label, missing staff hold, distinct volume name or distinct secret
 version is not proof of those facts.
 
 The source accepts exact-scope `disposable_lane_safety` observations on the
-DB-backed product profile. Each observation binds the profile and current
+dedicated DB-backed lane record (and a separate collection for filesystem
+rehearsals). Each observation binds the profile and current
 tracked target/target ID (and the preview record for a preview). It records
 usage (`unused`/`in_use`/`unknown`), data custody
 (`reproducible`/`only_copy`/`unknown`) and production-resource isolation
@@ -18,9 +19,9 @@ reference and a timezone-aware observation/expiry window of at most fifteen
 minutes. A changed binding, duplicate observation, expired observation, positive
 staff-testing hold or any required unknown fact refuses the new permission.
 A target ID also bound to production refuses it independently of the observation.
-Safety observations are excluded from retirement's ownership digest, so they can
-be refreshed on the same reviewed retry; actual ownership and runtime/secret
-authority still must match, and each destructive checkpoint validates fresh facts.
+Recording or refreshing an observation changes no profile or ownership digest.
+Actual ownership and runtime/secret authority still must match, and each
+destructive checkpoint validates fresh facts.
 
 The bounded service API `POST /v1/disposable-lanes/observations` accepts only the
 authenticated Director agent. `inspect` returns the binding digest and unknown
@@ -32,8 +33,9 @@ stores usage, custody and isolation as `unknown`, even if the request asserts
 `clear` removes this product's exact-scope observation, including stale preview
 observations; it changes no staff hold, custody inventory, provider resource or
 historical operation. Missing observations continue to refuse disposable writes. The
-generic profile-write API cannot create or change safety observations, and this
-change grants no profile-write access. An absent preview can be inspected and
+generic profile-write API retains its original payload and behavior; it cannot
+write these separate records. This change grants no profile-write access.
+An absent preview can be inspected and
 recorded without a tracking bundle; creating a target later invalidates that
 observation. Known facts must be produced from authoritative people and
 data-custody records and actual resource inspection, not be manufactured to
@@ -59,7 +61,9 @@ or successful plans.
 A disposable Odoo testing rebuild first calls `prepare-rebuild` on the same API,
 with the old binding digest and `replaces_operation_id`. The service excludes
 the old executor and captures the retained target ID immutably, without proving
-past provider effects or changing its held status. With authoritative current
+past provider effects or changing its held status or serialized payload. The
+captured identity lives in a separate preparation record keyed by operation ID.
+With authoritative current
 usage/custody/separation facts, `POST /v1/dokploy-targets/setup` supports an agent
 `create-compose` request naming that operation and the exact
 `expected_current_provider_target`. It creates a fresh project, environment and
@@ -91,10 +95,13 @@ and every production, backup, promotion and release path remain as before.
 
 Deployment and lane qualification are separate from these source changes.
 Before any use, preserve the previous image and the normal DB recovery point.
-For observation-only use, clear each observation through the supported API and
-verify the profile omits `disposable_lane_safety` before rolling back to an older
-image. Do not clear staff holds or data-custody records. After preparation or
-supersession records are written, older validators reject their new fields and
-terminal status; retain compatible readers and
+The additive migration's downgrade retains the observation and preparation
+tables and their evidence; its upgrade adopts those existing tables again.
+Profiles and held-operation payloads remain unchanged, so recording a gap or
+preparing a rebuild cannot break an older record reader. Before an older-image
+rollback, use the service's normal schema rollback procedure; do not drop these
+tables or erase captured target references. Filesystem rehearsals likewise keep
+separate collections. After an actual supersession, the new terminal status and
+replacement evidence need compatible readers: retain such an image and
 forward-fix the service; do not rewrite history or restore an old DB snapshot to
 clear a fence. This source session performs no live qualification or deployment.

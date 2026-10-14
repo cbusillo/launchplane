@@ -207,6 +207,10 @@ from control_plane.contracts.public_ingress_monitoring import PublicIngressObser
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.disposable_lane import (
+    DisposableLaneSafety,
+    DisposableTestingReplacementPreparation,
+)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
@@ -5382,6 +5386,50 @@ class FilesystemRecordStore:
             )
             return True
 
+    def read_disposable_lane_safety(
+        self, product: str, context: str, instance: str
+    ) -> DisposableLaneSafety | None:
+        with self._product_authority_bundle_lock():
+            return self._read_disposable_lane_safety_locked(product, context, instance)
+
+    def _read_disposable_lane_safety_locked(
+        self, product: str, context: str, instance: str
+    ) -> DisposableLaneSafety | None:
+        key = hashlib.sha256(json.dumps((product, context, instance)).encode()).hexdigest()
+        try:
+            return self._read_model_locked(DisposableLaneSafety, "disposable_lane_safety", key)
+        except FileNotFoundError:
+            return None
+
+    def write_disposable_lane_safety(self, record: DisposableLaneSafety) -> None:
+        key = hashlib.sha256(
+            json.dumps((record.product, record.context, record.instance)).encode()
+        ).hexdigest()
+        self._write_model("disposable_lane_safety", key, record)
+
+    def clear_disposable_lane_safety(self, product: str, context: str, instance: str) -> None:
+        key = hashlib.sha256(json.dumps((product, context, instance)).encode()).hexdigest()
+        with self._product_authority_bundle_lock():
+            self._record_path("disposable_lane_safety", key).unlink(missing_ok=True)
+
+    def read_disposable_replacement_preparation(
+        self, operation_id: str
+    ) -> DisposableTestingReplacementPreparation | None:
+        with self._product_authority_bundle_lock():
+            return self._read_disposable_replacement_preparation_locked(operation_id)
+
+    def _read_disposable_replacement_preparation_locked(
+        self, operation_id: str
+    ) -> DisposableTestingReplacementPreparation | None:
+        try:
+            return self._read_model_locked(
+                DisposableTestingReplacementPreparation,
+                "disposable_replacement_preparations",
+                operation_id,
+            )
+        except FileNotFoundError:
+            return None
+
     def prepare_disposable_testing_replacement(
         self, expected: OdooStableTargetReplacementOperationRecord, prepared_by: str
     ) -> bool:
@@ -5406,7 +5454,10 @@ class FilesystemRecordStore:
                 )
                 if current != expected:
                     return False
-                if current.disposable_replacement_preparation is not None:
+                if (
+                    self._read_disposable_replacement_preparation_locked(current.operation_id)
+                    is not None
+                ):
                     return True
                 target_id = self._read_model_locked(
                     DokployTargetIdRecord,
@@ -5414,15 +5465,18 @@ class FilesystemRecordStore:
                     _context_instance_record_id(current.context, current.instance),
                 )
                 preparation = DisposableTestingReplacementPreparation(
+                    operation_id=current.operation_id,
+                    product=current.product,
+                    context=current.context,
                     retained_target_id=target_id.target_id,
                     prepared_by=prepared_by,
                     recorded_at=datetime.now(timezone.utc),
                 )
                 check()
                 self._write_model_locked(
-                    "odoo_stable_target_replacement_operations",
+                    "disposable_replacement_preparations",
                     expected.operation_id,
-                    current.model_copy(update={"disposable_replacement_preparation": preparation}),
+                    preparation,
                 )
                 return True
 
@@ -5435,12 +5489,14 @@ class FilesystemRecordStore:
         )
         from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 
-        if expected.disposable_replacement_preparation is None:
-            return False
-        profile = self.read_product_profile_record(expected.product)
-        if not any(
-            item.replaces_operation_id == expected.operation_id
-            for item in profile.disposable_lane_safety
+        preparation = self.read_disposable_replacement_preparation(expected.operation_id)
+        safety = self.read_disposable_lane_safety(
+            expected.product, expected.context, expected.instance
+        )
+        if (
+            preparation is None
+            or safety is None
+            or safety.replaces_operation_id != expected.operation_id
         ):
             return False
         with self.testing_replacement_execution_lock(expected.operation_id) as check_lock:
@@ -5466,6 +5522,14 @@ class FilesystemRecordStore:
                     return False
                 route = _context_instance_record_id(expected.context, expected.instance)
                 try:
+                    safety = self._read_disposable_lane_safety_locked(
+                        expected.product, expected.context, expected.instance
+                    )
+                    preparation = self._read_disposable_replacement_preparation_locked(
+                        expected.operation_id
+                    )
+                    if safety is None or preparation is None:
+                        return False
                     bindings = ReplacementBindings(
                         self._read_product_profile_record_path(
                             self._record_path("launchplane_product_profiles", expected.product)
@@ -5496,10 +5560,13 @@ class FilesystemRecordStore:
                             if item.context == expected.context
                             and item.integration == "runtime_environment"
                         ),
+                        safety,
+                        preparation,
                     )
                     replacement = disposable_testing_supersession(current, bindings)
                 except (DisposableLaneSafetyUnknown, ValueError, FileNotFoundError):
                     return False
+                check_lock()
                 self._write_model_locked(
                     "odoo_stable_target_replacement_operations", expected.operation_id, replacement
                 )

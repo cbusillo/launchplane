@@ -317,6 +317,8 @@ class NoTargetProductRetirementAdapter(DokployProductRetirementAdapter):
                 }
             )
             lease.assert_current()
+            if self._disposable_checkpoint is not None:
+                self._disposable_checkpoint("finalize_no_target")
             cast(NoTargetRetirementStore, self._record_store).commit_no_target_retirement(
                 bound=bound, terminal=terminal
             )

@@ -12906,15 +12906,6 @@ def create_launchplane_fastapi_app(
             existing_profile = profile_store.read_product_profile_record(profile.product)
         except (FileNotFoundError, KeyError):
             existing_profile = None
-        if profile.disposable_lane_safety != (
-            existing_profile.disposable_lane_safety if existing_profile is not None else ()
-        ):
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="disposable_safety_bounded_write_required",
-                message="Record disposable safety through the authenticated observation endpoint.",
-            )
         if profile.release_on_acceptance != (
             existing_profile.release_on_acceptance if existing_profile is not None else "held"
         ) or (
@@ -23023,22 +23014,9 @@ def create_launchplane_fastapi_app(
             if observation.mode == "clear":
                 if observation.instance == "prod":
                     raise ValueError("Production is outside disposable observation cleanup.")
-                replacement = profile.model_copy(
-                    update={
-                        "disposable_lane_safety": tuple(
-                            item
-                            for item in profile.disposable_lane_safety
-                            if (item.context, item.instance)
-                            != (observation.context, observation.instance)
-                        )
-                    }
+                store.clear_disposable_lane_safety(
+                    profile.product, observation.context, observation.instance
                 )
-                written = store.compare_and_write_product_profile_record(
-                    expected_record=profile,
-                    replacement_record=replacement,
-                )
-                if written.status != "written":
-                    raise ValueError("Lane authority changed while clearing its observation.")
                 return accepted_evidence_response(
                     trace_id=trace_id,
                     records={"product_profile": profile.product},
@@ -23068,12 +23046,6 @@ def create_launchplane_fastapi_app(
                 )
             except FileNotFoundError:
                 target_id = None
-            try:
-                provider_target = store.read_provider_target_record(
-                    context_name=observation.context, instance_name=observation.instance
-                )
-            except FileNotFoundError:
-                provider_target = None
             fingerprint = disposable_lane_binding_sha256(
                 profile,
                 target,
@@ -23128,11 +23100,12 @@ def create_launchplane_fastapi_app(
             now = datetime.now(timezone.utc)
             retained_target = ""
             if operation is not None:
-                if operation.disposable_replacement_preparation is None:
+                preparation = store.read_disposable_replacement_preparation(operation.operation_id)
+                if preparation is None:
                     raise ValueError(
                         "Prepare the retained target identity before binding its replacement."
                     )
-                retained_target = operation.disposable_replacement_preparation.retained_target_id
+                retained_target = preparation.retained_target_id
             evidence = DisposableLaneSafety.model_validate(
                 {
                     **observation.model_dump(
@@ -23144,6 +23117,7 @@ def create_launchplane_fastapi_app(
                             "lifetime_seconds",
                         }
                     ),
+                    "product": profile.product,
                     "binding_sha256": fingerprint,
                     "observed_by": launchplane_identity_actor(identity),
                     "observer_kind": "director_agent",
@@ -23158,35 +23132,7 @@ def create_launchplane_fastapi_app(
                     "production_resources": "unknown",
                 }
             )
-            observations = tuple(
-                item
-                for item in profile.disposable_lane_safety
-                if (item.context, item.instance) != (evidence.context, evidence.instance)
-                and item.expires_at > now
-            ) + (evidence,)
-            replacement = profile.model_copy(update={"disposable_lane_safety": observations})
-            # Absent previews can have no tracking bundle. Their observation
-            # still binds that absence: any later target creation invalidates it
-            # at the destructive checkpoint. The existing bundle CAS requires
-            # a complete physical provider identity.
-            complete_bundle = (
-                provider_target is not None and target is not None and target_id is not None
-            )
-            written = store.compare_and_write_product_profile_record(
-                expected_record=profile,
-                replacement_record=replacement,
-                expected_provider_targets=(provider_target,)
-                if complete_bundle and provider_target is not None
-                else (),
-                expected_dokploy_targets=(target,)
-                if complete_bundle and target is not None
-                else (),
-                expected_dokploy_target_ids=(target_id,)
-                if complete_bundle and target_id is not None
-                else (),
-            )
-            if written.status != "written":
-                raise ValueError("Lane authority changed while recording its observation.")
+            store.write_disposable_lane_safety(evidence)
             return accepted_evidence_response(
                 trace_id=trace_id,
                 records={"product_profile": profile.product},
@@ -23556,7 +23502,7 @@ def create_launchplane_fastapi_app(
             adapter_type = NoTargetProductRetirementAdapter
 
         def disposable_retirement_checkpoint(phase: str) -> None:
-            if not phase.startswith(("delete_", "preview:")):
+            if phase != "finalize_no_target" and not phase.startswith(("delete_", "preview:")):
                 return
             require_disposable_lane(
                 cast(DisposableLaneStore, retirement_store),
@@ -25116,6 +25062,9 @@ def create_launchplane_fastapi_app(
             operation = database_store.read_odoo_stable_target_replacement_operation_record(
                 setup_request.replaces_operation_id
             )
+            preparation = database_store.read_disposable_replacement_preparation(
+                operation.operation_id
+            )
             from control_plane.testing_replacement_recovery import service_testing_operation
 
             if (
@@ -25123,9 +25072,9 @@ def create_launchplane_fastapi_app(
                 or operation.status != "reconciliation_required"
                 or (operation.product, operation.context, operation.instance)
                 != (lane_owner, setup_request.context, "testing")
-                or operation.disposable_replacement_preparation is None
+                or preparation is None
                 or setup_request.expected_current_provider_target is None
-                or operation.disposable_replacement_preparation.retained_target_id
+                or preparation.retained_target_id
                 != setup_request.expected_current_provider_target.target_id
             ):
                 raise ValueError(

@@ -170,6 +170,10 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecordChanged,
     PublicHostEffect,
 )
+from control_plane.contracts.disposable_lane import (
+    DisposableLaneSafety,
+    DisposableTestingReplacementPreparation,
+)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.durable_operation_authorization import (
     RELEASE_DECISION_GRANTS,
@@ -3866,6 +3870,20 @@ class LaunchplaneRuntimeKeySafetyPolicyRow(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     source: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneDisposableLaneSafetyRow(Base):
+    __tablename__ = "launchplane_disposable_lane_safety"
+    product: Mapped[str] = mapped_column(String, primary_key=True)
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    instance: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneDisposableReplacementPreparationRow(Base):
+    __tablename__ = "launchplane_disposable_replacement_preparations"
+    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -10362,6 +10380,51 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
             return True
 
+    def read_disposable_lane_safety(
+        self, product: str, context: str, instance: str
+    ) -> DisposableLaneSafety | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneDisposableLaneSafetyRow, (product, context, instance))
+            return (
+                self._read_payload(model_type=DisposableLaneSafety, payload=row.payload)
+                if row is not None
+                else None
+            )
+
+    def write_disposable_lane_safety(self, record: DisposableLaneSafety) -> None:
+        self._write_row(
+            LaunchplaneDisposableLaneSafetyRow(
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def clear_disposable_lane_safety(self, product: str, context: str, instance: str) -> None:
+        with self._session_factory() as session:
+            row = session.get(
+                LaunchplaneDisposableLaneSafetyRow,
+                (product, context, instance),
+                with_for_update=True,
+            )
+            if row is not None:
+                session.delete(row)
+                session.commit()
+
+    def read_disposable_replacement_preparation(
+        self, operation_id: str
+    ) -> DisposableTestingReplacementPreparation | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneDisposableReplacementPreparationRow, operation_id)
+            return (
+                self._read_payload(
+                    model_type=DisposableTestingReplacementPreparation, payload=row.payload
+                )
+                if row is not None
+                else None
+            )
+
     def prepare_disposable_testing_replacement(
         self, expected: OdooStableTargetReplacementOperationRecord, prepared_by: str
     ) -> bool:
@@ -10395,7 +10458,12 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 if current != expected:
                     return False
-                if current.disposable_replacement_preparation is not None:
+                existing_preparation = session.get(
+                    LaunchplaneDisposableReplacementPreparationRow,
+                    current.operation_id,
+                    with_for_update=True,
+                )
+                if existing_preparation is not None:
                     return True
                 target = session.scalar(
                     select(LaunchplaneDokployTargetIdRow)
@@ -10411,14 +10479,18 @@ class PostgresRecordStore(HumanSessionStore):
                     model_type=DokployTargetIdRecord, payload=target.payload
                 )
                 preparation = DisposableTestingReplacementPreparation(
+                    operation_id=current.operation_id,
+                    product=current.product,
+                    context=current.context,
                     retained_target_id=target_id.target_id,
                     prepared_by=prepared_by,
                     recorded_at=datetime.now(timezone.utc),
                 )
                 check()
-                self._sync_odoo_stable_target_replacement_operation_row(
-                    row,
-                    current.model_copy(update={"disposable_replacement_preparation": preparation}),
+                session.add(
+                    LaunchplaneDisposableReplacementPreparationRow(
+                        operation_id=current.operation_id, payload=self._payload_dict(preparation)
+                    )
                 )
                 session.commit()
                 return True
@@ -10432,12 +10504,14 @@ class PostgresRecordStore(HumanSessionStore):
         )
         from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 
-        if expected.disposable_replacement_preparation is None:
-            return False
-        profile = self.read_product_profile_record(expected.product)
-        if not any(
-            item.replaces_operation_id == expected.operation_id
-            for item in profile.disposable_lane_safety
+        preparation = self.read_disposable_replacement_preparation(expected.operation_id)
+        safety = self.read_disposable_lane_safety(
+            expected.product, expected.context, expected.instance
+        )
+        if (
+            preparation is None
+            or safety is None
+            or safety.replaces_operation_id != expected.operation_id
         ):
             return False
         with self.testing_replacement_execution_lock(expected.operation_id) as check_lock:
@@ -10491,6 +10565,25 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 if profile_row is None or target_row is None or target_id_row is None:
                     return False
+                safety_row = session.get(
+                    LaunchplaneDisposableLaneSafetyRow,
+                    (expected.product, expected.context, expected.instance),
+                    with_for_update=True,
+                )
+                preparation_row = session.get(
+                    LaunchplaneDisposableReplacementPreparationRow,
+                    expected.operation_id,
+                    with_for_update=True,
+                )
+                if safety_row is None or preparation_row is None:
+                    return False
+                safety = self._read_payload(
+                    model_type=DisposableLaneSafety, payload=safety_row.payload
+                )
+                preparation = self._read_payload(
+                    model_type=DisposableTestingReplacementPreparation,
+                    payload=preparation_row.payload,
+                )
                 bindings = ReplacementBindings(
                     self._read_product_profile_payload(profile_row.payload),
                     self._read_payload(model_type=DokployTargetRecord, payload=target_row.payload),
@@ -10535,11 +10628,14 @@ class PostgresRecordStore(HumanSessionStore):
                             .with_for_update()
                         )
                     ),
+                    safety,
+                    preparation,
                 )
                 try:
                     replacement = disposable_testing_supersession(current, bindings)
                 except (DisposableLaneSafetyUnknown, ValueError, FileNotFoundError):
                     return False
+                check_lock()
                 self._sync_odoo_stable_target_replacement_operation_row(row, replacement)
                 session.commit()
                 return True

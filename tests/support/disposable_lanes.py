@@ -3,14 +3,17 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from control_plane.contracts.disposable_lane import DisposableLaneSafety
+from control_plane.contracts.disposable_lane import (
+    DisposableLaneSafety,
+    MAX_DISPOSABLE_LANE_SAFETY_SECONDS,
+)
 from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
     disposable_lane_configuration,
 )
 
 
-def prepare_held_rebuild(store: Any, product: str, context: str) -> Any:
+def prepare_held_rebuild(store: Any, product: str, context: str, *, prepare: bool = True) -> Any:
     from control_plane.contracts.odoo_stable_target_replacement import (
         OdooStableTargetReplacementApplyRequest,
     )
@@ -50,7 +53,7 @@ def prepare_held_rebuild(store: Any, product: str, context: str) -> Any:
         ),
     )
     store.write_odoo_stable_target_replacement_operation_record(operation)
-    if not store.prepare_disposable_testing_replacement(operation, "fixture-director"):
+    if prepare and not store.prepare_disposable_testing_replacement(operation, "fixture-director"):
         raise AssertionError("Fixture failed to capture the retained target.")
     return store.read_odoo_stable_target_replacement_operation_record(operation.operation_id)
 
@@ -74,6 +77,7 @@ def record_safety(
     now = datetime.now(timezone.utc)
     evidence = DisposableLaneSafety.model_validate(
         {
+            "product": product,
             "context": context,
             "instance": instance,
             "observed_by": "director-fixture",
@@ -92,19 +96,8 @@ def record_safety(
             "data_evidence": "fixture:reproducible-data",
             "isolation_evidence": "fixture:new-resources-and-retained-target-isolation",
             "observed_at": now,
-            "expires_at": now + timedelta(minutes=10),
+            "expires_at": now + timedelta(seconds=MAX_DISPOSABLE_LANE_SAFETY_SECONDS // 2),
             **changes,
         }
     )
-    store.write_product_profile_record(
-        profile.model_copy(
-            update={
-                "disposable_lane_safety": tuple(
-                    item
-                    for item in profile.disposable_lane_safety
-                    if (item.context, item.instance) != (context, instance)
-                )
-                + (evidence,),
-            }
-        )
-    )
+    store.write_disposable_lane_safety(evidence)

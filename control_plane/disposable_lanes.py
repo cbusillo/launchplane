@@ -5,6 +5,7 @@ import hashlib
 import json
 from typing import Protocol
 
+from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -27,6 +28,10 @@ class DisposableLaneStore(Protocol):
     def read_dokploy_target_id_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetIdRecord: ...
+
+    def read_disposable_lane_safety(
+        self, product: str, context: str, instance: str
+    ) -> DisposableLaneSafety | None: ...
 
     def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]: ...
 
@@ -68,9 +73,7 @@ def disposable_lane_binding_sha256(
 ) -> str:
     # The observation itself is not part of the binding it observes. Updating
     # timestamps or retirement lifecycle state does not change lane ownership.
-    payload = profile.model_dump(
-        mode="json", exclude={"disposable_lane_safety", "updated_at", "lifecycle_state", "source"}
-    )
+    payload = profile.model_dump(mode="json", exclude={"updated_at", "lifecycle_state", "source"})
     # Retirement disables future preview admission while retaining its ownership.
     preview_profile = payload.get("preview")
     if isinstance(preview_profile, dict):
@@ -102,7 +105,9 @@ def require_disposable_lane(
     now: datetime | None = None,
 ) -> str:
     profile = store.read_product_profile_record(product)
-    if instance == "prod":
+    if instance == "prod" or any(
+        lane.instance == instance and lane.instance != "testing" for lane in profile.lanes
+    ):
         raise DisposableLaneSafetyUnknown("Production cannot use disposable-lane permission.")
     if preview is None and instance != "testing":
         preview = resolve_disposable_preview(store, profile, context, instance)
@@ -143,16 +148,11 @@ def require_disposable_lane(
         raise DisposableLaneSafetyUnknown(
             "The lane is held for staff testing; usage must be resolved before disposable work."
         )
-    observations = [
-        item
-        for item in profile.disposable_lane_safety
-        if (item.context, item.instance) == (context, instance)
-    ]
-    if len(observations) != 1:
+    evidence = store.read_disposable_lane_safety(product, context, instance)
+    if evidence is None:
         raise DisposableLaneSafetyUnknown(
             "Disposable lane usage, only-copy and production-isolation evidence is unavailable."
         )
-    evidence = observations[0]
     current_time = now or datetime.now(timezone.utc)
     if not evidence.observed_at <= current_time < evidence.expires_at:
         raise DisposableLaneSafetyUnknown(

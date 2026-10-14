@@ -6,9 +6,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+MAX_DISPOSABLE_LANE_SAFETY_SECONDS = 900
+
+
 class DisposableLaneSafety(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    product: str = Field(min_length=1)
     context: str = Field(min_length=1)
     instance: str = Field(min_length=1)
     observed_by: str = Field(min_length=1)
@@ -29,7 +33,11 @@ class DisposableLaneSafety(BaseModel):
     def validate_evidence(self) -> "DisposableLaneSafety":
         if self.observed_at.utcoffset() is None or self.expires_at.utcoffset() is None:
             raise ValueError("Disposable safety observations require timezone-aware timestamps.")
-        if not 0 < (self.expires_at - self.observed_at).total_seconds() <= 900:
+        if (
+            not 0
+            < (self.expires_at - self.observed_at).total_seconds()
+            <= MAX_DISPOSABLE_LANE_SAFETY_SECONDS
+        ):
             raise ValueError("Disposable safety evidence lasts at most fifteen minutes.")
         for fact, reference in (
             (self.usage, self.usage_evidence),
@@ -59,12 +67,16 @@ class DisposableLaneObservationRequest(BaseModel):
     data_evidence: str = ""
     isolation_evidence: str = ""
     replaces_operation_id: str = ""
-    lifetime_seconds: int = Field(default=300, gt=0, le=900)
+    lifetime_seconds: int = Field(default=300, gt=0, le=MAX_DISPOSABLE_LANE_SAFETY_SECONDS)
 
 
 class DisposableTestingReplacementPreparation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    operation_id: str = Field(min_length=1)
+    product: str = Field(min_length=1)
+    context: str = Field(min_length=1)
+    instance: Literal["testing"] = "testing"
     retained_target_id: str = Field(min_length=1)
     prepared_by: str = Field(min_length=1)
     recorded_at: datetime

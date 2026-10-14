@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import cast
 
-from control_plane.contracts.disposable_lane import DisposableTestingSupersession
+from control_plane.contracts.disposable_lane import (
+    DisposableLaneSafety,
+    DisposableTestingReplacementPreparation,
+    DisposableTestingSupersession,
+)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
@@ -29,6 +33,18 @@ class ReplacementBindings:
     runtime_records: tuple[RuntimeEnvironmentRecord, ...]
     secret_records: tuple[SecretRecord, ...]
     secret_bindings: tuple[SecretBinding, ...]
+    safety: DisposableLaneSafety
+    preparation: DisposableTestingReplacementPreparation
+
+    def read_disposable_lane_safety(
+        self, product: str, context: str, instance: str
+    ) -> DisposableLaneSafety | None:
+        return (
+            self.safety
+            if (product, context, instance)
+            == (self.safety.product, self.safety.context, self.safety.instance)
+            else None
+        )
 
     def list_runtime_environment_records(
         self, *, scope: str = "", context_name: str = "", instance_name: str = ""
@@ -94,12 +110,17 @@ def disposable_testing_supersession(
         context=operation.context,
         instance=operation.instance,
     )
-    evidence = next(
-        item
-        for item in bindings.profile.disposable_lane_safety
-        if (item.context, item.instance) == (operation.context, operation.instance)
-    )
-    preparation = operation.disposable_replacement_preparation
+    evidence = bindings.safety
+    preparation = bindings.preparation
+    if (
+        preparation.operation_id,
+        preparation.product,
+        preparation.context,
+        preparation.instance,
+    ) != (operation.operation_id, operation.product, operation.context, operation.instance):
+        raise DisposableLaneSafetyUnknown(
+            "Captured preparation belongs to another operation or lane."
+        )
     if preparation is None or preparation.retained_target_id != evidence.replaced_target_id:
         raise DisposableLaneSafetyUnknown(
             "Rebuild requires its service-captured retained target identity."

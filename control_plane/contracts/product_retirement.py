@@ -32,15 +32,6 @@ def product_retirement_secret_authority(record: SecretRecord) -> dict[str, objec
     return record.model_dump(mode="json", exclude={"status", "updated_at", "updated_by"})
 
 
-def product_retirement_profile_authority(
-    record: LaunchplaneProductProfileRecord,
-) -> dict[str, object]:
-    # Disposable observations expire and can be refreshed independently. They
-    # never change reviewed ownership; the agent path validates them separately
-    # at admission and before each destructive step.
-    return record.model_dump(mode="json", exclude={"disposable_lane_safety"})
-
-
 def canonical_sha256(value: object) -> str:
     canonical = json.dumps(
         value,

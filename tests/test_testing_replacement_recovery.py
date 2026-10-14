@@ -223,7 +223,6 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                     "request": fenced.request.model_copy(update={"instance": "prod"}),
                     "authorization": None,
                     "schema_version": 1,
-                    "disposable_replacement_preparation": None,
                 }
             )
             getattr(store, "write_odoo_stable_target_replacement_operation_record")(production)

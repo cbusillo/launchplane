@@ -8,7 +8,6 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.disposable_lane import (
     DisposableTestingSupersession,
-    DisposableTestingReplacementPreparation,
 )
 
 from control_plane.contracts.durable_operation_authorization import (
@@ -104,14 +103,9 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     disposable_supersession: DisposableTestingSupersession | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    disposable_replacement_preparation: DisposableTestingReplacementPreparation | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
 
     @model_validator(mode="after")
     def _validate_record(self) -> "OdooStableTargetReplacementOperationRecord":
-        if self.disposable_replacement_preparation is not None and self.instance != "testing":
-            raise ValueError("Disposable replacement preparation is restricted to testing.")
         if self.schema_version not in {1, 2}:
             raise ValueError("Unsupported Odoo stable target replacement operation schema version.")
         self.operation_id = _normalize_required(

@@ -118,12 +118,14 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(recorded.status_code, 202, recorded.text)
         stored = self.store.read_product_profile_record("example-site")
-        self.assertEqual(stored.model_copy(update={"disposable_lane_safety": ()}), initial)
-        self.assertTrue(stored.disposable_lane_safety[0].observed_by)
-        self.assertEqual(stored.disposable_lane_safety[0].observer_kind, "director_agent")
-        self.assertEqual(stored.disposable_lane_safety[0].usage, "unknown")
-        self.assertEqual(stored.disposable_lane_safety[0].data, "unknown")
-        self.assertEqual(stored.disposable_lane_safety[0].production_resources, "unknown")
+        self.assertEqual(stored, initial)
+        safety = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        assert safety is not None
+        self.assertTrue(safety.observed_by)
+        self.assertEqual(safety.observer_kind, "director_agent")
+        self.assertEqual(safety.usage, "unknown")
+        self.assertEqual(safety.data, "unknown")
+        self.assertEqual(safety.production_resources, "unknown")
         with patch(
             "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
         ) as driver:
@@ -164,6 +166,9 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         profile = self.store.read_product_profile_record("example-site")
         record_safety(self.store, "example-site", self.context, "testing")
         forged = self.store.read_product_profile_record("example-site").model_dump(mode="json")
+        safety = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        assert safety is not None
+        forged["disposable_lane_safety"] = [safety.model_dump(mode="json")]
         self.store.write_product_profile_record(profile)
         with scoped_agent_transport():
             response = await request(
@@ -176,8 +181,23 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
                 },
                 payload=forged,
             )
-        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.status_code, 400, response.text)
         self.assertEqual(self.store.read_product_profile_record("example-site"), profile)
+        with scoped_agent_transport():
+            ordinary = await request(
+                self.app,
+                "POST",
+                "/v1/product-profiles",
+                headers={
+                    "Authorization": "Bearer local-operator-token",
+                    "Idempotency-Key": "ordinary-profile-write",
+                },
+                payload=profile.model_dump(mode="json"),
+            )
+        self.assertEqual(ordinary.status_code, 202, ordinary.text)
+        self.assertEqual(
+            self.store.read_disposable_lane_safety("example-site", self.context, "testing"), safety
+        )
 
     async def test_rebuild_preparation_captures_the_stored_target_once_under_the_agent_identity(
         self,
@@ -236,11 +256,10 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(captured.status, operation.status)
         self.assertIsNone(captured.recovery_journal)
-        assert captured.disposable_replacement_preparation is not None
-        self.assertEqual(
-            captured.disposable_replacement_preparation.retained_target_id, target.target_id
-        )
-        self.assertTrue(captured.disposable_replacement_preparation.prepared_by)
+        preparation = self.store.read_disposable_replacement_preparation(operation.operation_id)
+        assert preparation is not None
+        self.assertEqual(preparation.retained_target_id, target.target_id)
+        self.assertTrue(preparation.prepared_by)
         self.store.write_dokploy_target_id_record(
             target.model_copy(update={"target_id": "replacement-fixture"})
         )
@@ -571,10 +590,7 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             return_value={},
         ) as driver:
             self.assertEqual(await self.sync(), 202)
-            profile = self.store.read_product_profile_record("example-site")
-            self.store.write_product_profile_record(
-                profile.model_copy(update={"disposable_lane_safety": ()})
-            )
+            self.store.clear_disposable_lane_safety("example-site", self.context, "testing")
             self.assertEqual(await self.sync(), 202)
             driver.assert_called_once()
 
@@ -642,13 +658,15 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
                     record_safety(self.store, "example-site", self.context, "testing", **changes)
                     self.assertEqual(await self.sync(), 409)
             now = datetime.now(timezone.utc)
+            from control_plane.contracts.disposable_lane import MAX_DISPOSABLE_LANE_SAFETY_SECONDS
+
             record_safety(
                 self.store,
                 "example-site",
                 self.context,
                 "testing",
-                observed_at=now - timedelta(minutes=20),
-                expires_at=now - timedelta(minutes=10),
+                observed_at=now - timedelta(seconds=MAX_DISPOSABLE_LANE_SAFETY_SECONDS),
+                expires_at=now - timedelta(seconds=MAX_DISPOSABLE_LANE_SAFETY_SECONDS // 2),
             )
             self.assertEqual(await self.sync(), 409)
             driver.assert_not_called()
