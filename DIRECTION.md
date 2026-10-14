@@ -22,9 +22,9 @@ milestone below: first operations, then planning.
 Today: Launchplane deploys and promotes the products it manages, but
 operations a person or agent decides on still start from GitHub workflows,
 and they move in one by one. Plans, claims and waits live in GitHub issues
-through the existing helpers, and the Supervisor runs outside Launchplane.
-Those helpers are kept running but not extended, and nothing for planning or
-the Supervisor is built in Launchplane before its milestone comes up.
+through the codex-skills helpers, which other Directors use without
+Launchplane, and the Supervisor runs outside Launchplane. Nothing for planning
+or the Supervisor is built in Launchplane before its milestone comes up.
 
 Whenever agents work in Launchplane, they do so under one standing permission,
 named on the record by their own identity, never through enrollment, leases or
