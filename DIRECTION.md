@@ -13,9 +13,25 @@ Client's accept-or-reject decision. A live site is the production lane of a
 product recorded as live. A product is recorded as live when its Client uses
 production for real business.
 
+Where it is going: Launchplane becomes where the work lives, for people and
+agents. A Supervisor agent will run in a loop from it, reading what needs
+doing, starting agents on it and recording what they did and decided, so the
+Director acts only at the stop boundaries. It gets there in two legs, each a
+milestone below: first operations, then planning.
+
+Today: products are released through Launchplane, but operations a person or
+agent decides on still start from GitHub workflows, and they move in one by
+one. Plans, claims and waits live in GitHub issues through the existing
+helpers, and the Supervisor runs outside Launchplane. That planning machinery
+is kept running but not extended.
+
+Whenever agents work in Launchplane, they do so under one standing permission
+and their own identity, never enrollment, leases or per-agent grants. When
+Launchplane is down, agents fix it from git, CI and the emergency rollback.
+
 Judge every change by one question: can a product be maintained without
-anyone touching Launchplane? Work that adds upkeep to Launchplane itself needs
-a strong reason.
+anyone working outside Launchplane, or doing by hand what the loop should do?
+Work that adds upkeep to Launchplane itself needs a strong reason.
 
 A product repository builds its own artifacts from its own files, with
 provenance Launchplane can verify; it never calls Launchplane, and Launchplane
@@ -29,12 +45,12 @@ use today; others may follow, including one we run ourselves. New code
 talks to GitHub through Launchplane's own names for things (a change, a
 comment, a check result, a merge); existing call sites move over when other
 work touches them. GitHub is never an authority: an operation a person or
-agent decides on runs in Launchplane under that person's or agent's own
-identity, and the runtime secrets and variables products and operations use
-live in Launchplane. GitHub keeps product builds and their credentials,
-Launchplane's own CI and deploy, Launchplane's independent emergency
-rollback, and the values those need before Launchplane can run, such as its
-decryption root and database connection. Adding another host is its own
+agent decides on belongs in Launchplane, under that person's or agent's own
+identity, and so do the runtime secrets and variables products and operations
+use. GitHub keeps product builds and their credentials, Launchplane's own
+CI and deploy, Launchplane's independent emergency rollback, and the values
+those need before Launchplane can run, such as its decryption root and
+database connection. Adding another host is its own
 milestone, when the Director chooses it.
 
 Code and tests are upkeep. A change that deletes code or tests without losing
@@ -88,8 +104,8 @@ blocks that run is the next piece of work.
 - Every Code and Codex Lab; old identifiers stay only until their readers
   move
 - hardware-key authorization recovery, disposable canaries, and the dev lane
-- billing and collections, and general planning or work graphs inside
-  Launchplane
+- billing and collections inside Launchplane
+- new planning machinery built on GitHub issues
 - the blanket authorization freeze; granting access is a stop boundary instead
 - product repositories calling Launchplane: workflow-identity grants, pinned
   reusable Launchplane workflows, and Launchplane-held build settings
@@ -126,3 +142,11 @@ fits this file.
   Live product's promotion happens without one.
 - `Retired machinery deleted` proves the retired designs above are gone from
   the code; ends if a deletion breaks a live product.
+- `Operations live in Launchplane` proves no GitHub workflow runs an
+  operation a person or agent decides on, other than the emergency rollback,
+  and the runtime secrets and variables live in Launchplane; ends if a new
+  operation needs a GitHub workflow.
+- `Supervisor runs from Launchplane` proves a Client's request reaches an
+  accepted release with the work, claims and records only in Launchplane, and
+  no act by the Director; ends if the Director has to start or restart a
+  session for ordinary work, or work is tracked in two places.
