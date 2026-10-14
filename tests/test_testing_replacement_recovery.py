@@ -77,6 +77,180 @@ class _FilesystemServiceStore(FilesystemRecordStore):
 class TestingReplacementRecoveryTests(unittest.TestCase):
     database_url = ""
 
+    def test_new_isolated_target_supersedes_a_journalless_testing_fence_without_past_effect_proof(
+        self,
+    ) -> None:
+        from tests.support.disposable_lanes import record_safety
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+
+        for store, root in self.stores():
+            self.running(store)
+            fenced = self.fence(store)
+            retained_target = store.read_dokploy_target_id_record(
+                context_name=fenced.context, instance_name=fenced.instance
+            ).target_id
+            self.assertTrue(
+                getattr(store, "prepare_disposable_testing_replacement")(fenced, "director-fixture")
+            )
+            fenced = store.read_odoo_stable_target_replacement_operation_record(fenced.operation_id)
+            self.assertIsNone(fenced.recovery_journal)
+            getattr(store, "write_dokploy_target_id_record")(
+                DokployTargetIdRecord(
+                    context="cm",
+                    instance="testing",
+                    target_id="new-isolated-compose",
+                    updated_at=stamp(),
+                )
+            )
+            global_config = RuntimeEnvironmentRecord(
+                scope="global",
+                env={"DATABASE_HOST": "fixture-rebuild.invalid"},
+                updated_at=stamp(),
+            )
+            getattr(store, "write_runtime_environment_record")(global_config)
+            record_safety(
+                store,
+                "site",
+                "cm",
+                "testing",
+                replaces_operation_id=fenced.operation_id,
+                replaced_target_id=retained_target,
+            )
+            getattr(store, "write_runtime_environment_record")(
+                global_config.model_copy(update={"env": {"DATABASE_HOST": "fixture-other.invalid"}})
+            )
+            self.assertFalse(getattr(store, "supersede_disposable_testing_replacement")(fenced))
+            record_safety(
+                store,
+                "site",
+                "cm",
+                "testing",
+                replaces_operation_id=fenced.operation_id,
+                replaced_target_id=retained_target,
+            )
+            with (
+                patch(
+                    "control_plane.testing_replacement_recovery.inspect_testing_replacement"
+                ) as historical,
+                patch(
+                    "control_plane.testing_replacement_recovery.source.read_dokploy_config"
+                ) as provider,
+            ):
+                self.assertEqual(
+                    recover_stranded_testing_replacements(store, root), (fenced.operation_id,)
+                )
+                historical.assert_not_called()
+                provider.assert_not_called()
+            replaced = store.read_odoo_stable_target_replacement_operation_record(
+                fenced.operation_id
+            )
+            self.assertEqual(replaced.status, "superseded")
+            self.assertEqual(replaced.request, fenced.request)
+            self.assertIsNone(replaced.cancellation)
+            self.assertIsNone(replaced.recovery_journal)
+            self.assertIsNotNone(replaced.disposable_supersession)
+            assert replaced.disposable_supersession is not None
+            self.assertEqual(replaced.disposable_supersession.retained_target_id, retained_target)
+            self.assertEqual(
+                replaced.disposable_supersession.replacement_target_id, "new-isolated-compose"
+            )
+            next_operation = fenced.model_copy(
+                update={
+                    "operation_id": "new-rebuild",
+                    "idempotency_key": "fresh-rebuild",
+                    "status": "pending",
+                    "phase": "created",
+                    "started_at": "",
+                    "attempt": 0,
+                    "error_code": "",
+                    "error_message": "",
+                }
+            )
+            _, created = getattr(
+                store, "create_odoo_stable_target_replacement_operation_record_if_no_active_lane"
+            )(next_operation)
+            self.assertTrue(created)
+
+    def test_disposable_supersession_refuses_same_target_production_and_protected_data(
+        self,
+    ) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        for store, _ in self.stores():
+            self.running(store)
+            fenced = self.fence(store)
+            retained_target = store.read_dokploy_target_id_record(
+                context_name=fenced.context, instance_name=fenced.instance
+            ).target_id
+            self.assertTrue(
+                getattr(store, "prepare_disposable_testing_replacement")(fenced, "director-fixture")
+            )
+            fenced = store.read_odoo_stable_target_replacement_operation_record(fenced.operation_id)
+            supersede = getattr(store, "supersede_disposable_testing_replacement")
+            record_safety(
+                store,
+                "site",
+                "cm",
+                "testing",
+                replaces_operation_id=fenced.operation_id,
+                replaced_target_id=retained_target,
+            )
+            self.assertFalse(supersede(fenced))
+            getattr(store, "write_dokploy_target_id_record")(
+                DokployTargetIdRecord(
+                    context="cm",
+                    instance="testing",
+                    target_id="new-isolated-compose",
+                    updated_at=stamp(),
+                )
+            )
+            for changes in (
+                {"usage": "in_use"},
+                {"data": "only_copy"},
+                {"production_resources": "unknown"},
+                {"replaced_target_id": "invented-retained-target"},
+            ):
+                replacement_identity = changes.get("replaced_target_id", retained_target)
+                record_safety(
+                    store,
+                    "site",
+                    "cm",
+                    "testing",
+                    replaces_operation_id=fenced.operation_id,
+                    replaced_target_id=replacement_identity,
+                    **{key: value for key, value in changes.items() if key != "replaced_target_id"},
+                )
+                self.assertFalse(supersede(fenced))
+                self.assertEqual(
+                    store.read_odoo_stable_target_replacement_operation_record(fenced.operation_id),
+                    fenced,
+                )
+            record_safety(
+                store,
+                "site",
+                "cm",
+                "testing",
+                replaces_operation_id=fenced.operation_id,
+                replaced_target_id=retained_target,
+            )
+            with store.testing_replacement_execution_lock(fenced.operation_id) as lock:
+                self.assertIsNotNone(lock)
+                self.assertFalse(supersede(fenced))
+            production = fenced.model_copy(
+                update={
+                    "instance": "prod",
+                    "request": fenced.request.model_copy(update={"instance": "prod"}),
+                    "authorization": None,
+                    "schema_version": 1,
+                }
+            )
+            getattr(store, "write_odoo_stable_target_replacement_operation_record")(production)
+            self.assertFalse(supersede(production))
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(fenced.operation_id),
+                production,
+            )
+
     def test_legacy_read_observes_retained_target_and_schedules_without_release(self) -> None:
         for store, root in self.stores():
             operation = self.running(store)

@@ -69,6 +69,10 @@ class TestingRecoveryStore(Protocol):
     def testing_replacement_execution_lock(
         self, operation_id: str
     ) -> AbstractContextManager[Callable[[], None] | None]: ...
+    def supersede_disposable_testing_replacement(
+        self, expected: OdooStableTargetReplacementOperationRecord
+    ) -> bool: ...
+
     def request_product_reconcile(
         self, target: ProductReconcileTarget, requested_at: str
     ) -> object: ...
@@ -457,6 +461,15 @@ def recover_stranded_testing_replacements(
         if not service_testing_operation(operation):
             continue
         try:
+            # Rebuilding is a new resource generation, not historical-effect proof.
+            # The store excludes the old executor and rechecks safety atomically.
+            if store.supersede_disposable_testing_replacement(operation):
+                recovered.append(operation.operation_id)
+                store.request_product_reconcile(
+                    ProductReconcileTarget(product=operation.product, target_kind="testing"),
+                    requested_at=_now(),
+                )
+                continue
             with store.testing_replacement_execution_lock(operation.operation_id) as check_lock:
                 if check_lock is None:
                     continue

@@ -799,6 +799,20 @@ from control_plane.runtime_key_safety import (
     latest_active_runtime_key_safety_policy,
     runtime_key_safety_environment_class,
 )
+from control_plane.contracts.disposable_lane import (
+    DisposableLaneSafety,
+    DisposableLaneObservationRequest,
+)
+
+from control_plane.disposable_lanes import (
+    DisposableLaneSafetyUnknown,
+    DisposableLaneStore,
+    disposable_lane_binding_sha256,
+    disposable_lane_configuration,
+    require_disposable_lane,
+    resolve_disposable_preview,
+)
+
 from control_plane.service_auth import (
     AgentAuthzDecision,
     AuthorizationTarget,
@@ -5319,6 +5333,14 @@ def create_launchplane_fastapi_app(
         if not isinstance(oidc_identity, GitHubActionsIdentity):
             raise _authentication_required_error("Mutation routes require GitHub Actions OIDC.")
         return oidc_identity
+
+    def read_disposable_runtime_identity(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+    ) -> LaunchplaneIdentity:
+        if isinstance(identity, TerminalAgentIdentity) and director_agent_identity(identity):
+            return identity
+        return read_write_identity(authorization=authorization)
 
     register_updater_proposal_route(
         app,
@@ -20579,7 +20601,7 @@ def create_launchplane_fastapi_app(
 
     async def apply_live_target_runtime(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_disposable_runtime_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -20618,12 +20640,27 @@ def create_launchplane_fastapi_app(
             if live_target_runtime_request.apply_changes
             else "live_target_runtime.plan"
         )
-        if not resolved_authz_policy_runtime.allows(
+        explicit_runtime = resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=live_target_runtime_request.product,
             context=live_target_runtime_request.context,
+        )
+        # Terminal credentials previously had no write path here. Even an old
+        # policy entry cannot acquire production writes through this repair.
+        if (
+            isinstance(identity, TerminalAgentIdentity)
+            and live_target_runtime_request.apply_changes
         ):
+            explicit_runtime = False
+        director_disposable_apply = (
+            director_agent_identity(identity)
+            and live_target_runtime_request.apply_changes
+            and live_target_runtime_request.instance != "prod"
+            and (not explicit_runtime or live_target_runtime_request.instance == "testing")
+        )
+        disposable_runtime_binding = ""
+        if not director_disposable_apply and not explicit_runtime:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -20648,10 +20685,70 @@ def create_launchplane_fastapi_app(
         )
         if replay_response is not None:
             return replay_response
+        if (
+            director_agent_identity(identity)
+            and live_target_runtime_request.apply_changes
+            and explicit_runtime
+            and live_target_runtime_request.instance not in {"testing", "prod"}
+        ):
+            try:
+                profile = cast(DisposableLaneStore, record_store).read_product_profile_record(
+                    live_target_runtime_request.product
+                )
+            except FileNotFoundError as error:
+                raise _launchplane_http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="product_profile_not_found",
+                    message="The requested product profile is unavailable.",
+                ) from error
+            director_disposable_apply = (
+                profile.preview.context == live_target_runtime_request.context
+                and not any(
+                    (lane.context, lane.instance)
+                    == (live_target_runtime_request.context, live_target_runtime_request.instance)
+                    for lane in profile.lanes
+                )
+            )
+        if director_disposable_apply:
+            try:
+                disposable_runtime_binding = require_disposable_lane(
+                    cast(DisposableLaneStore, record_store),
+                    product=live_target_runtime_request.product,
+                    context=live_target_runtime_request.context,
+                    instance=live_target_runtime_request.instance,
+                    separation_only=not live_target_runtime_request.deploy,
+                )
+            except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="disposable_lane_safety_unknown",
+                    message=str(error),
+                ) from error
         live_target_runtime_store = require_live_target_runtime_database_store(
             record_store=record_store,
             trace_id=trace_id,
         )
+
+        def disposable_runtime_checkpoint() -> None:
+            try:
+                current_binding = require_disposable_lane(
+                    cast(DisposableLaneStore, record_store),
+                    product=live_target_runtime_request.product,
+                    context=live_target_runtime_request.context,
+                    instance=live_target_runtime_request.instance,
+                    separation_only=not live_target_runtime_request.deploy,
+                )
+                if current_binding != disposable_runtime_binding:
+                    raise DisposableLaneSafetyUnknown(
+                        "Disposable runtime bindings changed during the apply; start a new plan."
+                    )
+            except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
+                raise control_plane_live_target_runtime.LiveTargetRuntimeError(
+                    str(error), code="disposable_lane_safety_unknown"
+                ) from error
+
         try:
             driver_result = control_plane_live_target_runtime.apply_live_target_runtime_environment(
                 control_plane_root=resolved_control_plane_root,
@@ -20663,6 +20760,10 @@ def create_launchplane_fastapi_app(
                 deploy=live_target_runtime_request.deploy,
                 no_cache=live_target_runtime_request.no_cache,
                 deploy_timeout_seconds=live_target_runtime_request.deploy_timeout_seconds,
+                before_provider_mutation=(
+                    disposable_runtime_checkpoint if director_disposable_apply else None
+                ),
+                allow_owned_preview=director_disposable_apply,
                 deploy_trigger=(
                     control_plane_live_target_runtime.trigger_and_wait_for_dokploy_target_deploy
                 ),
@@ -22907,10 +23008,177 @@ def create_launchplane_fastapi_app(
             operation=execute_sweep,
         )
 
+    async def record_disposable_lane_safety(
+        observation: DisposableLaneObservationRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not director_agent_identity(identity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Disposable observations require the authenticated Director agent.",
+            )
+        store = require_provider_operation_store(record_store=record_store, trace_id=trace_id)
+        try:
+            profile = store.read_product_profile_record(observation.product)
+            if observation.mode == "clear":
+                if observation.instance == "prod":
+                    raise ValueError("Production is outside disposable observation cleanup.")
+                store.clear_disposable_lane_safety(
+                    profile.product, observation.context, observation.instance
+                )
+                return accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={"product_profile": profile.product},
+                    result={"mode": "clear", "provider_mutation": False},
+                )
+            preview = None
+            if observation.preview_id:
+                preview = resolve_disposable_preview(
+                    store, profile, observation.context, observation.instance
+                )
+                if preview.preview_id != observation.preview_id:
+                    raise ValueError("Observation does not match the owned preview.")
+            elif observation.instance != "testing" or not any(
+                (lane.context, lane.instance) == (observation.context, observation.instance)
+                for lane in profile.lanes
+            ):
+                raise ValueError("Observation requires an exact owned testing lane.")
+            try:
+                target = store.read_dokploy_target_record(
+                    context_name=observation.context, instance_name=observation.instance
+                )
+            except FileNotFoundError:
+                target = None
+            try:
+                target_id = store.read_dokploy_target_id_record(
+                    context_name=observation.context, instance_name=observation.instance
+                )
+            except FileNotFoundError:
+                target_id = None
+            fingerprint = disposable_lane_binding_sha256(
+                profile,
+                target,
+                target_id,
+                preview,
+                disposable_lane_configuration(store, observation.context, observation.instance),
+            )
+            if observation.mode == "inspect":
+                return accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={"product_profile": profile.product},
+                    result={
+                        "mode": "inspect",
+                        "binding_sha256": fingerprint,
+                        "usage": "unknown",
+                        "data": "unknown",
+                        "production_resources": "unknown",
+                        "automatic_fact_collection": "unavailable",
+                    },
+                )
+            if fingerprint != observation.expected_binding_sha256:
+                raise ValueError("Observed lane bindings changed; inspect them again.")
+            operation = None
+            if observation.replaces_operation_id:
+                operation = store.read_odoo_stable_target_replacement_operation_record(
+                    observation.replaces_operation_id
+                )
+                if (operation.product, operation.context, operation.instance) != (
+                    profile.product,
+                    observation.context,
+                    observation.instance,
+                ):
+                    raise ValueError("Replacement operation belongs to another lane.")
+            if observation.mode == "prepare-rebuild":
+                if operation is None or not store.prepare_disposable_testing_replacement(
+                    operation, launchplane_identity_actor(identity)
+                ):
+                    raise ValueError(
+                        "The retained testing operation cannot be prepared for replacement."
+                    )
+                return accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={"product_profile": profile.product},
+                    result={
+                        "mode": "prepare-rebuild",
+                        "operation_id": operation.operation_id,
+                        "binding_sha256": fingerprint,
+                        "historical_effects": "unknown",
+                        "provider_mutation": False,
+                    },
+                )
+            now = datetime.now(timezone.utc)
+            retained_target = ""
+            if operation is not None:
+                preparation = store.read_disposable_replacement_preparation(operation.operation_id)
+                if preparation is None:
+                    raise ValueError(
+                        "Prepare the retained target identity before binding its replacement."
+                    )
+                retained_target = preparation.retained_target_id
+            evidence = DisposableLaneSafety.model_validate(
+                {
+                    **observation.model_dump(
+                        exclude={
+                            "mode",
+                            "product",
+                            "preview_id",
+                            "expected_binding_sha256",
+                            "lifetime_seconds",
+                        }
+                    ),
+                    "product": profile.product,
+                    "binding_sha256": fingerprint,
+                    "observed_by": launchplane_identity_actor(identity),
+                    "observer_kind": "director_agent",
+                    "observed_at": now,
+                    "expires_at": now + timedelta(seconds=observation.lifetime_seconds),
+                    "replaced_target_id": retained_target,
+                    # References supplied by an agent are assertions, not
+                    # verified occupancy/custody/physical-isolation records.
+                    # There is no complete authoritative collector yet.
+                    "usage": "unknown",
+                    "data": "unknown",
+                    "production_resources": "unknown",
+                }
+            )
+            store.write_disposable_lane_safety(evidence)
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={"product_profile": profile.product},
+                result={
+                    "mode": "record",
+                    "binding_sha256": fingerprint,
+                    "observed_by": evidence.observed_by,
+                    "usage": evidence.usage,
+                    "data": evidence.data,
+                    "production_resources": evidence.production_resources,
+                    "provider_mutation": False,
+                    "automatic_fact_collection": "unavailable",
+                },
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="disposable_lane_not_found",
+                message="The requested lane or record is unavailable.",
+            ) from error
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="disposable_observation_refused",
+                message=str(error),
+            ) from error
+
     async def execute_product_retirement(
         request: Request,
         retirement_request: ProductRetirementRequest,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_browser_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -22932,9 +23200,23 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Browser retirement requires the signed-in administrator.",
             )
-        if retirement_request.include_previews and (
-            not isinstance(identity, GitHubHumanIdentity)
-            or not resolved_authz_policy_runtime.policy.names_administrator(identity)
+        director_retirement = (
+            director_agent_identity(identity) and retirement_request.instance == "testing"
+        )
+        if isinstance(identity, TerminalAgentIdentity) and not director_retirement:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Terminal agent credentials can only read redacted Launchplane context.",
+            )
+        if (
+            retirement_request.include_previews
+            and not director_retirement
+            and (
+                not isinstance(identity, GitHubHumanIdentity)
+                or not resolved_authz_policy_runtime.policy.names_administrator(identity)
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -22947,11 +23229,14 @@ def create_launchplane_fastapi_app(
             if retirement_request.mode == "plan"
             else "product_retirement.apply"
         )
-        if not resolved_authz_policy_runtime.policy.allows_product_instance_preflight(
-            identity=identity,
-            action=action,
-            product=retirement_request.product,
-            instance=retirement_request.instance,
+        if (
+            not director_retirement
+            and not resolved_authz_policy_runtime.policy.allows_product_instance_preflight(
+                identity=identity,
+                action=action,
+                product=retirement_request.product,
+                instance=retirement_request.instance,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -23006,7 +23291,68 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
 
-        if not resolved_authz_policy_runtime.allows(
+        if director_retirement and retirement_request.mode == "apply":
+            for completed in retirement_store.list_product_retirement_records(
+                product=retirement_request.product,
+                actor=product_retirement_identity(identity).actor,
+                mode="apply",
+                idempotency_key=normalized_key,
+            ):
+                if (
+                    completed.outcome in {"retired", "already_absent"}
+                    and completed.identity == product_retirement_identity(identity)
+                    and completed.plan_sha256 == retirement_request.reviewed_plan_sha256
+                    and completed.continuity_sha256 == retirement_request.continuity_sha256
+                ):
+                    return AcceptedEvidenceResponse.model_validate(
+                        control_plane_product_retirement.redacted_product_retirement_response(
+                            completed
+                        )
+                    )
+        if director_retirement:
+            try:
+                current_profile = retirement_store.read_product_profile_record(
+                    retirement_request.product
+                )
+                if (
+                    retirement_request.mode == "apply"
+                    and current_profile.production_use != "prelaunch"
+                ):
+                    raise DisposableLaneSafetyUnknown(
+                        "Agent product retirement requires a never-live product and its testing lane."
+                    )
+                if retirement_request.mode == "apply":
+                    require_disposable_lane(
+                        cast(DisposableLaneStore, retirement_store),
+                        product=retirement_request.product,
+                        context=effective_context,
+                        instance=retirement_request.instance,
+                        retirement=True,
+                    )
+                    if plan_record is not None:
+                        for preview_plan in plan_record.preview_plans:
+                            preview = cast(
+                                PostgresRecordStore, retirement_store
+                            ).read_preview_record(preview_plan.preview.preview_id)
+                            if preview.state != "destroyed":
+                                require_disposable_lane(
+                                    cast(DisposableLaneStore, retirement_store),
+                                    product=retirement_request.product,
+                                    context=preview.context,
+                                    instance=current_profile.preview.slug_template.format(
+                                        number=preview.anchor_pr_number
+                                    ),
+                                    retirement=True,
+                                    preview=preview,
+                                )
+            except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="disposable_lane_safety_unknown",
+                    message=str(error),
+                ) from error
+        if not director_retirement and not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=action,
             product=retirement_request.product,
@@ -23167,7 +23513,43 @@ def create_launchplane_fastapi_app(
             from control_plane.product_retirement_no_target import NoTargetProductRetirementAdapter
 
             adapter_type = NoTargetProductRetirementAdapter
+
+        def disposable_retirement_checkpoint(phase: str) -> None:
+            if phase != "finalize_no_target" and not phase.startswith(("delete_", "preview:")):
+                return
+            require_disposable_lane(
+                cast(DisposableLaneStore, retirement_store),
+                product=retirement_request.product,
+                context=effective_context,
+                instance=retirement_request.instance,
+                retirement=True,
+            )
+            for preview_plan in plan_record.preview_plans:
+                preview = cast(PostgresRecordStore, retirement_store).read_preview_record(
+                    preview_plan.preview.preview_id
+                )
+                if (
+                    phase.startswith(f"preview:{preview.preview_id}:")
+                    and preview.state != "destroyed"
+                ):
+                    current = retirement_store.read_product_profile_record(
+                        retirement_request.product
+                    )
+                    require_disposable_lane(
+                        cast(DisposableLaneStore, retirement_store),
+                        product=retirement_request.product,
+                        context=preview.context,
+                        instance=current.preview.slug_template.format(
+                            number=preview.anchor_pr_number
+                        ),
+                        retirement=True,
+                        preview=preview,
+                    )
+
         adapter = adapter_type(
+            disposable_checkpoint=(
+                disposable_retirement_checkpoint if director_retirement else None
+            ),
             control_plane_root=resolved_control_plane_root,
             record_store=retirement_store,
             request=retirement_request,
@@ -24509,7 +24891,7 @@ def create_launchplane_fastapi_app(
     async def setup_dokploy_target(
         request: Request,
         setup_request: DokployTargetSetupEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_disposable_runtime_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
@@ -24529,6 +24911,24 @@ def create_launchplane_fastapi_app(
             product=setup_request.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
+        if isinstance(identity, TerminalAgentIdentity) and setup_request.mode == "apply":
+            service_scoped = False
+        disposable_rebuild_setup = (
+            director_agent_identity(identity)
+            and bool(setup_request.replaces_operation_id)
+            and bool(lane_owner)
+        )
+        if (
+            isinstance(identity, TerminalAgentIdentity)
+            and setup_request.mode == "apply"
+            and not disposable_rebuild_setup
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Terminal target writes require the bounded disposable rebuild path.",
+            )
         lane_scoped_only = not service_scoped and (
             (
                 setup_request.operation == "create-compose"
@@ -24549,7 +24949,7 @@ def create_launchplane_fastapi_app(
                 target=AuthorizationTarget(scope="instance", instances=(setup_request.instance,)),
             )
         )
-        can_setup_target = service_scoped or lane_scoped_only
+        can_setup_target = service_scoped or lane_scoped_only or disposable_rebuild_setup
         can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (
             can_setup_target
             or resolved_authz_policy_runtime.allows(
@@ -24632,7 +25032,7 @@ def create_launchplane_fastapi_app(
                 message="Workflow cannot plan or apply Launchplane Dokploy target setup.",
             )
         if setup_request.mode == "apply":
-            if setup_request.confirmation != "APPLY DOKPLOY TARGET SETUP":
+            if setup_request.confirmation != setup_request.expected_confirmation:
                 raise _launchplane_http_error(
                     status_code=400,
                     trace_id=trace_id,
@@ -24668,18 +25068,68 @@ def create_launchplane_fastapi_app(
         )
         if replayed_response is not None:
             return replayed_response
-        try:
-            result = execute_dokploy_target_setup(
-                control_plane_root_path=resolved_control_plane_root,
-                record_store=database_store,
-                request=setup_request,
-                # A lane-scoped caller's owner is re-checked when records commit.
-                required_context_owner=(
-                    (lane_owner, setup_request.context)
-                    if lane_scoped_only or role_only_setup
-                    else None
-                ),
+
+        def rebuild_checkpoint() -> None:
+            if not disposable_rebuild_setup or setup_request.mode != "apply":
+                return
+            operation = database_store.read_odoo_stable_target_replacement_operation_record(
+                setup_request.replaces_operation_id
             )
+            preparation = database_store.read_disposable_replacement_preparation(
+                operation.operation_id
+            )
+            from control_plane.testing_replacement_recovery import service_testing_operation
+
+            if (
+                not service_testing_operation(operation)
+                or operation.status != "reconciliation_required"
+                or (operation.product, operation.context, operation.instance)
+                != (lane_owner, setup_request.context, "testing")
+                or preparation is None
+                or setup_request.expected_current_provider_target is None
+                or preparation.retained_target_id
+                != setup_request.expected_current_provider_target.target_id
+            ):
+                raise ValueError(
+                    "A matching service-captured testing fence is required for rebuilding."
+                )
+            require_disposable_lane(
+                database_store,
+                product=lane_owner,
+                context=setup_request.context,
+                instance="testing",
+                separation_only=True,
+            )
+
+        try:
+            rebuild_checkpoint()
+            lock = (
+                database_store.testing_replacement_execution_lock(
+                    setup_request.replaces_operation_id
+                )
+                if disposable_rebuild_setup and setup_request.mode == "apply"
+                else nullcontext(lambda: None)
+            )
+            with lock as check:
+                if check is None:
+                    raise ValueError("The retained testing executor is still active.")
+
+                def checkpoint() -> None:
+                    check()
+                    rebuild_checkpoint()
+
+                result = execute_dokploy_target_setup(
+                    control_plane_root_path=resolved_control_plane_root,
+                    record_store=database_store,
+                    request=setup_request,
+                    # A lane-scoped caller's owner is re-checked when records commit.
+                    required_context_owner=(
+                        (lane_owner, setup_request.context)
+                        if lane_scoped_only or role_only_setup or disposable_rebuild_setup
+                        else None
+                    ),
+                    disposable_checkpoint=checkpoint if disposable_rebuild_setup else None,
+                )
         except DokployComposeDomainPartialError as error:
             raise LaunchplaneHTTPException(
                 status_code=502,
@@ -24711,7 +25161,14 @@ def create_launchplane_fastapi_app(
                 code="dokploy_target_comparison_evidence_unavailable",
                 message=str(error),
             ) from error
-        except (ValueError, click.ClickException) as error:
+        except DisposableLaneSafetyUnknown as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="disposable_lane_safety_unknown",
+                message=str(error),
+            ) from error
+        except (ValueError, FileNotFoundError, click.ClickException) as error:
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,
@@ -25383,6 +25840,19 @@ def create_launchplane_fastapi_app(
             403: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/disposable-lanes/observations",
+        record_disposable_lane_safety,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        operation_id="record_disposable_lane_safety",
+        responses={
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
         },
     )
 

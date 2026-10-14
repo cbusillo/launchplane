@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from collections.abc import Iterable
-from typing import Protocol
+from collections.abc import Callable, Iterable
+from typing import Protocol, cast
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -11,6 +11,11 @@ from control_plane import runtime_environments as control_plane_runtime_environm
 from control_plane import runtime_platform_credentials
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.disposable_lanes import (
+    DisposableLaneStore,
+    DisposableLaneSafetyUnknown,
+    resolve_disposable_preview,
+)
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyTarget,
 )
@@ -380,6 +385,7 @@ def require_product_profile_runtime_keys(
     product_name: str,
     context_name: str,
     instance_name: str,
+    allow_owned_preview: bool = False,
 ) -> set[str]:
     profile = record_store.read_product_profile_record(product_name)
     lane = next(
@@ -390,7 +396,10 @@ def require_product_profile_runtime_keys(
         ),
         None,
     )
-    if lane is None:
+    if lane is None and not (
+        allow_owned_preview
+        and _owned_runtime_preview(record_store, profile, context_name, instance_name)
+    ):
         raise LiveTargetRuntimeError(
             f"Product {product_name!r} has no lane for {context_name}/{instance_name}.",
             code="product_lane_not_found",
@@ -562,11 +571,15 @@ def product_lane_declared_keys(
     context_name: str,
     instance_name: str,
     profile: LaunchplaneProductProfileRecord | None = None,
+    allow_owned_preview: bool = False,
 ) -> set[str]:
     if profile is None:
         profile = record_store.read_product_profile_record(product_name)
     if not any(
         lane.context == context_name and lane.instance == instance_name for lane in profile.lanes
+    ) and not (
+        allow_owned_preview
+        and _owned_runtime_preview(record_store, profile, context_name, instance_name)
     ):
         raise LiveTargetRuntimeError(
             f"Product {product_name!r} has no lane for {context_name}/{instance_name}.",
@@ -575,6 +588,21 @@ def product_lane_declared_keys(
     return _declared_runtime_keys(
         profile=profile, context_name=context_name, instance_name=instance_name
     )
+
+
+def _owned_runtime_preview(
+    store: LiveTargetRuntimeProfileStore,
+    profile: LaunchplaneProductProfileRecord,
+    context: str,
+    instance: str,
+) -> bool:
+    if not profile.preview.context or context != profile.preview.context:
+        return False
+    try:
+        resolve_disposable_preview(cast(DisposableLaneStore, store), profile, context, instance)
+    except DisposableLaneSafetyUnknown:
+        return False
+    return True
 
 
 def _require_expected_runtime_secret_values(
@@ -622,6 +650,8 @@ def apply_live_target_runtime_environment(
     no_cache: bool,
     deploy_timeout_seconds: int | None,
     deploy_trigger: DokployDeployTrigger,
+    before_provider_mutation: Callable[[], None] | None = None,
+    allow_owned_preview: bool = False,
 ) -> dict[str, object]:
     source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
@@ -670,6 +700,7 @@ def apply_live_target_runtime_environment(
                 product_name=product_name.strip(),
                 context_name=context_name,
                 instance_name=instance_name,
+                allow_owned_preview=allow_owned_preview,
             )
             validate_provider_key_retirement(
                 retired_keys=retired_keys,
@@ -758,6 +789,7 @@ def apply_live_target_runtime_environment(
                             product_name=product_name.strip(),
                             context_name=context_name,
                             instance_name=instance_name,
+                            allow_owned_preview=allow_owned_preview,
                         ),
                     )
             finally:
@@ -777,6 +809,8 @@ def apply_live_target_runtime_environment(
                 desired_env_map=desired_env_map,
                 retired_keys=retired_keys,
             )
+            if before_provider_mutation is not None:
+                before_provider_mutation()
             dokploy_api.update_dokploy_target_env(
                 host=host,
                 token=token,
@@ -818,6 +852,8 @@ def apply_live_target_runtime_environment(
 
     if apply_changes and deploy:
         try:
+            if before_provider_mutation is not None:
+                before_provider_mutation()
             deploy_result = deploy_trigger(
                 host=host,
                 token=token,

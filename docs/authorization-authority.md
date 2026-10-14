@@ -151,6 +151,31 @@ agent's real dry run, a refused write and a foreign-product scoped-agent probe.
 Existing DB grants are preserved for image rollback; an older image may still
 refuse a Director read without a matching rule. Report that as a tool defect.
 
+## Disposable-lane engineering
+
+The authenticated Director-agent marker also identifies ordinary disposable-lane
+work under the overall direction. `POST /v1/live-target-runtime/apply` retains
+the existing context-scoped policy check for existing callers, including
+production and Client scopes; an instance rule does not acquire new rights.
+The separate Director path validates an exact testing or uniquely owned preview
+lane. Director testing/preview applies need current safety even with a broad
+context grant; a grant cannot establish that a lane is unused or data is disposable.
+`deploy=false` may stage an independently reviewed separation without starting
+existing shared-storage containers. Staging eligibility never authorizes deploy.
+Preview-inclusive product retirement accepts that identity only for never-live
+products and testing; Client and other machine callers keep their existing rules.
+
+These paths consume [recorded disposable-lane facts](disposable-lanes.md). They
+are generic source behavior, not a new policy grant, administrator identity,
+credential, promotion right or Client-access expansion. Existing runtime key
+safety, transport isolation, reviewed retirement, provider fences and backup
+protection still apply. Missing facts produce `disposable_lane_safety_unknown`.
+The assertion API cannot produce positive facts while the authoritative
+collector is unavailable. Fixing that evidence producer is engineering;
+never ask for a grant to bypass it. Bounded empty testing replacement staging
+also follows this boundary; it creates only new placement and a new empty
+compose, leaving retained target/storage and historical effects untouched.
+
 ## Current Transitional Model
 
 The current service has a DB-backed managed-rule reconciliation endpoint with

@@ -9940,6 +9940,96 @@ class RealPostgresServiceTokenRetirementTests(unittest.TestCase):
 
 
 class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
+    def test_disposable_records_survive_schema_rollback_without_changing_legacy_payloads(
+        self,
+    ) -> None:
+        from tests.support.disposable_lanes import prepare_held_rebuild, record_safety
+        from tests.support.profiles import _generic_site_profile_payload
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+        from control_plane.storage.postgres import (
+            LaunchplaneProductProfileRow,
+            LaunchplaneOdooStableTargetReplacementOperationRow,
+        )
+        from control_plane.storage.migrations.versions import (
+            de647804f004_disposable_lane_records as migration,
+        )
+
+        with _head_postgres_database() as url:
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _generic_site_profile_payload()
+            )
+            store.write_product_profile_record(profile)
+            lane = next(item for item in profile.lanes if item.instance == "testing")
+            store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context=lane.context,
+                    instance="testing",
+                    target_id="retained-fixture",
+                    updated_at=profile.updated_at,
+                )
+            )
+            operation = prepare_held_rebuild(store, profile.product, lane.context, prepare=False)
+            with store._session_factory() as session:
+                before_profile = session.get(LaunchplaneProductProfileRow, profile.product)
+                before_operation = session.get(
+                    LaunchplaneOdooStableTargetReplacementOperationRow, operation.operation_id
+                )
+                assert before_profile is not None and before_operation is not None
+                expected_profile_payload = dict(before_profile.payload)
+                expected_operation_payload = dict(before_operation.payload)
+            self.assertTrue(
+                store.prepare_disposable_testing_replacement(operation, "fixture-director")
+            )
+            record_safety(store, profile.product, lane.context, "testing")
+            evidence = store.read_disposable_lane_safety(profile.product, lane.context, "testing")
+            preparation = store.read_disposable_replacement_preparation(operation.operation_id)
+            with store._session_factory() as session:
+                profile_row = session.get(LaunchplaneProductProfileRow, profile.product)
+                operation_row = session.get(
+                    LaunchplaneOdooStableTargetReplacementOperationRow, operation.operation_id
+                )
+                assert profile_row is not None and operation_row is not None
+                legacy_profile = profile_row.payload
+                legacy_operation = operation_row.payload
+            self.assertEqual(legacy_profile, expected_profile_payload)
+            self.assertEqual(legacy_operation, expected_operation_payload)
+            alembic_command.downgrade(_alembic_config(url), migration.down_revision)
+            self.assertEqual(
+                store.read_disposable_lane_safety(profile.product, lane.context, "testing"),
+                evidence,
+            )
+            self.assertEqual(
+                store.read_disposable_replacement_preparation(operation.operation_id), preparation
+            )
+            self.assertEqual(store.read_product_profile_record(profile.product), profile)
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+                operation,
+            )
+            alembic_command.upgrade(_alembic_config(url), "head")
+            store.verify_schema()
+            self.assertEqual(
+                store.read_disposable_replacement_preparation(operation.operation_id), preparation
+            )
+
+    def test_disposable_replacement_safety_and_exclusion_on_postgres(self) -> None:
+        from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests
+
+        for scenario in (
+            TestingReplacementRecoveryTests.test_new_isolated_target_supersedes_a_journalless_testing_fence_without_past_effect_proof,
+            TestingReplacementRecoveryTests.test_disposable_supersession_refuses_same_target_production_and_protected_data,
+        ):
+            with self.subTest(scenario=scenario.__name__), _head_postgres_database() as url:
+                fixture = TestingReplacementRecoveryTests(scenario.__name__)
+                fixture.database_url = url
+                try:
+                    scenario(fixture)
+                finally:
+                    fixture.doCleanups()
+
     def test_legacy_inspection_with_unrelated_build_history_on_postgres(self) -> None:
         from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests
 

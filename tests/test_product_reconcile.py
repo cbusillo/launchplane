@@ -1314,6 +1314,40 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
 
 
 class ProductReconcileStaffTestingHoldTests(ProductReconcileTestCase):
+    def test_replaced_testing_target_gets_a_fresh_attempt_without_failure_budget(self) -> None:
+        from control_plane.contracts.disposable_lane import DisposableTestingSupersession
+
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        first = cast(str, self.reconcile()["queued_operation_id"])
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(first)
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            OdooStableTargetReplacementOperationRecord.model_validate(
+                {
+                    **operation.model_dump(mode="json"),
+                    "status": "superseded",
+                    "phase": "superseded",
+                    "finished_at": operation.updated_at,
+                    "disposable_supersession": DisposableTestingSupersession(
+                        binding_sha256="a" * 64,
+                        retained_target_id="retained-fixture",
+                        replacement_target_id="replacement-fixture",
+                        evidence_reference="fixture:isolated-replacement",
+                        recorded_at=datetime.now(timezone.utc),
+                    ).model_dump(mode="json"),
+                }
+            )
+        )
+
+        self.request()
+        redeployed = self.reconcile()
+
+        second = cast(str, redeployed["queued_operation_id"])
+        self.assertNotEqual(second, first)
+        self.assertNotIn("last_failed_operation_id", redeployed)
+        retry = self.store.read_odoo_stable_target_replacement_operation_record(second)
+        self.assertNotEqual(retry.idempotency_key, operation.idempotency_key)
+
     def test_held_testing_lane_waits_and_lifting_the_hold_deploys(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
         self.hold_testing()

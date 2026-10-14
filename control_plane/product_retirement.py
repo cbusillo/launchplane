@@ -565,7 +565,9 @@ class DokployProductRetirementAdapter:
         trace_id: str,
         idempotency_key: str,
         requested_at: str,
+        disposable_checkpoint: Callable[[str], None] | None = None,
     ) -> None:
+        self._disposable_checkpoint = disposable_checkpoint
         self._control_plane_root = control_plane_root
         self._record_store = record_store
         self._request = request
@@ -895,6 +897,8 @@ class DokployProductRetirementAdapter:
         return ProviderMutationUnknownError(self._terminal_error_message)
 
     def _checkpoint(self, lease: ProviderOperationLease, phase: str) -> None:
+        if self._disposable_checkpoint is not None:
+            self._disposable_checkpoint(phase)
         if self._request.include_previews:
             from control_plane.product_retirement_previews import validate_product_scope
             from control_plane.storage.postgres import PostgresRecordStore

@@ -11,7 +11,8 @@ workflow, separate cleanup approval, or product-name exception is required.
 ## Review
 
 The card first saves a `mode=plan`, `include_previews=true` request. The service
-requires the existing immutable-ID-bound human administrator, checks one exact
+accepts the existing immutable-ID-bound human administrator or the service-authenticated
+Director agent for disposable testing, checks one exact
 non-live testing lane, and proves exclusive context and provider-target ownership.
 It binds every active preview's exact repository anchor, slug, historical
 runtime identities, generations, deployment references and target records.
@@ -68,8 +69,12 @@ completion; a failed read-back is reported separately.
 Standalone preview reconciliation and preview evidence ingress honor the same
 fence so they cannot replace its reviewed records during recovery.
 
-This path creates no agent access. Instance-scoped retirement grants remain
-instance-scoped: `include_previews=true` is refused for machine callers.
+The Director agent may plan preview-inclusive testing retirement without an
+action grant. Apply additionally requires the product to be recorded `prelaunch`
+and current [disposable-lane safety evidence](disposable-lanes.md) for testing
+and every affected preview. Other machine identities and Client agents retain
+their existing scopes; an instance grant does not authorize product-wide preview
+retirement.
 Standalone preview destroy/reconciliation retains its existing authorization.
 The existing tracked and provider-absent no-target lane requests remain supported
 through their current worker/API contracts. Products with other drivers, a live
@@ -82,25 +87,18 @@ Container images and GHCR packages are retained. Retirement does not delete a
 repository, package, volume, backup or historical generation. Existing package
 retention decisions remain in force.
 
-## First canary use after deployment
+## Director-agent use after deployment
 
-1. Sign in as the administrator, open **Product Ops**, and select the
-   `launchplane-generic-web-canary` product.
-2. In **Retire product**, enter the retirement reason and the related issue
-   `cbusillo/launchplane#2152`, then click **Review retirement plan**.
-3. Check that the plan contains only this product's testing application and
-   previews for PRs 1 and 6, with exact routes, affected records and exclusive
-   ownership. A blocked plan is a reason to investigate, not to clear records.
-4. Check **I reviewed this deletion plan and want to retire this product**,
-   then click **Confirm retirement**. On an uncertain result, keep the tab or
-   reload it and click **Resume original retirement**.
-5. Require the card's **Product retired** read-back. The assigned qualification
-   agent then verifies current preview/provider absence and that the scheduled
-   lifecycle/reconcile sweep no longer selects this product. Keep GHCR packages.
+Use the supported service operation under the existing Director-agent identity:
+plan first, then apply the same reviewed plan, digest, confirmation and original
+idempotency key. A plan does not supply execution authority or safety evidence.
+The service rechecks usage, data custody and isolation before provider effects.
+Never assume the absence of people or unique data, and never use another identity
+or a workflow when a safety check refuses.
 
-Source tests and a merge do not establish deployed capability or live retirement.
-The Supervisor routes the PR, qualifies the deployed card, and records those
-click steps on the canary issue when the capability is available.
+Source tests and a merge do not establish deployed capability or retirement.
+The Supervisor routes the source PR and separately briefs actual lane operations.
+The canary, CM rebuild and RepairShopr separation are separate operational work.
 
 ## Existing lane-scoped requests
 

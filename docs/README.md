@@ -42,7 +42,9 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [preview-workflow-contract.md](preview-workflow-contract.md) — reusable thin
   preview workflow event, idempotency, feedback, and lifecycle contract.
 - [product-retirement.md](product-retirement.md) — reviewed product retirement,
-  including owned previews, admin confirmation, and resumable execution.
+  including owned previews, disposable-lane eligibility, and resumable execution.
+- [disposable-lanes.md](disposable-lanes.md) — usage/data/isolation facts, safe
+  testing writes and replacement of stranded testing operations.
 - [legacy-preview-reconciliation.md](legacy-preview-reconciliation.md) — reviewed
   reconciliation of provider-absent generic-web preview history.
 - [driver-descriptors.md](driver-descriptors.md) — provider-neutral driver

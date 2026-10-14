@@ -323,7 +323,7 @@
       {
         "idempotency": "always",
         "identity_dependencies": [
-          "read_operator_mutation_identity"
+          "read_browser_mutation_identity"
         ],
         "method": "POST",
         "modes": [
@@ -500,8 +500,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "db95d57229aa4d8ef23fad0bde1697a9ec681191"
+    "source_commit_sha": "928325fe2425f4e4f696103682900098b1b50051"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "6593332a819481b340859d83b70cd797562a94646451cd14c308fc9d593f457f"
+  "semantic_digest_sha256": "bc93b702036dc5b0dba3c9ff4ebec647aa5d5c656553d21f1fe32a2bf020f196"
 }
