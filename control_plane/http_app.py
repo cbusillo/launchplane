@@ -20696,6 +20696,11 @@ def create_launchplane_fastapi_app(
             )
             director_disposable_apply = (
                 profile.preview.context == live_target_runtime_request.context
+                and not any(
+                    (lane.context, lane.instance)
+                    == (live_target_runtime_request.context, live_target_runtime_request.instance)
+                    for lane in profile.lanes
+                )
             )
         if director_disposable_apply:
             try:
@@ -25146,6 +25151,13 @@ def create_launchplane_fastapi_app(
                 status_code=400,
                 trace_id=trace_id,
                 code="dokploy_target_comparison_evidence_unavailable",
+                message=str(error),
+            ) from error
+        except DisposableLaneSafetyUnknown as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="disposable_lane_safety_unknown",
                 message=str(error),
             ) from error
         except (ValueError, FileNotFoundError, click.ClickException) as error:

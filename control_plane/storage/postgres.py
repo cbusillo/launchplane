@@ -10602,7 +10602,9 @@ class PostgresRecordStore(HumanSessionStore):
                         )
                         for item in session.scalars(
                             select(LaunchplaneRuntimeEnvironmentRow)
-                            .where(LaunchplaneRuntimeEnvironmentRow.context == expected.context)
+                            .where(
+                                LaunchplaneRuntimeEnvironmentRow.context.in_(("", expected.context))
+                            )
                             .with_for_update()
                         )
                     ),
@@ -10611,7 +10613,7 @@ class PostgresRecordStore(HumanSessionStore):
                         for item in session.scalars(
                             select(LaunchplaneSecretRow)
                             .where(
-                                LaunchplaneSecretRow.context == expected.context,
+                                LaunchplaneSecretRow.context.in_(("", expected.context)),
                                 LaunchplaneSecretRow.integration == "runtime_environment",
                             )
                             .with_for_update()
@@ -10622,7 +10624,7 @@ class PostgresRecordStore(HumanSessionStore):
                         for item in session.scalars(
                             select(LaunchplaneSecretBindingRow)
                             .where(
-                                LaunchplaneSecretBindingRow.context == expected.context,
+                                LaunchplaneSecretBindingRow.context.in_(("", expected.context)),
                                 LaunchplaneSecretBindingRow.integration == "runtime_environment",
                             )
                             .with_for_update()

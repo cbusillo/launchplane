@@ -81,6 +81,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
         self,
     ) -> None:
         from tests.support.disposable_lanes import record_safety
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 
         for store, root in self.stores():
             self.running(store)
@@ -101,6 +102,24 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                     updated_at=stamp(),
                 )
             )
+            global_config = RuntimeEnvironmentRecord(
+                scope="global",
+                env={"DATABASE_HOST": "fixture-rebuild.invalid"},
+                updated_at=stamp(),
+            )
+            getattr(store, "write_runtime_environment_record")(global_config)
+            record_safety(
+                store,
+                "site",
+                "cm",
+                "testing",
+                replaces_operation_id=fenced.operation_id,
+                replaced_target_id=retained_target,
+            )
+            getattr(store, "write_runtime_environment_record")(
+                global_config.model_copy(update={"env": {"DATABASE_HOST": "fixture-other.invalid"}})
+            )
+            self.assertFalse(getattr(store, "supersede_disposable_testing_replacement")(fenced))
             record_safety(
                 store,
                 "site",

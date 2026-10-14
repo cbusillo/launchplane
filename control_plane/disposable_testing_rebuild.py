@@ -121,7 +121,7 @@ def disposable_testing_supersession(
         raise DisposableLaneSafetyUnknown(
             "Captured preparation belongs to another operation or lane."
         )
-    if preparation is None or preparation.retained_target_id != evidence.replaced_target_id:
+    if preparation.retained_target_id != evidence.replaced_target_id:
         raise DisposableLaneSafetyUnknown(
             "Rebuild requires its service-captured retained target identity."
         )

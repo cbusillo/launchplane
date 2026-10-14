@@ -5542,14 +5542,14 @@ class FilesystemRecordStore:
                             for item in self._list_models_locked(
                                 RuntimeEnvironmentRecord, "launchplane_runtime_environments"
                             )
-                            if item.context == expected.context
+                            if item.context in ("", expected.context)
                         ),
                         tuple(
                             item
                             for item in self._list_models_locked(
                                 SecretRecord, "launchplane_secrets"
                             )
-                            if item.context == expected.context
+                            if item.context in ("", expected.context)
                             and item.integration == "runtime_environment"
                         ),
                         tuple(
@@ -5557,7 +5557,7 @@ class FilesystemRecordStore:
                             for item in self._list_models_locked(
                                 SecretBinding, "launchplane_secret_bindings"
                             )
-                            if item.context == expected.context
+                            if item.context in ("", expected.context)
                             and item.integration == "runtime_environment"
                         ),
                         safety,

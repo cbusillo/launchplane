@@ -427,7 +427,8 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             unknown = await stage()
-            self.assertEqual(unknown.status_code, 400, unknown.text)
+            self.assertEqual(unknown.status_code, 409, unknown.text)
+            self.assertEqual(unknown.json()["error"]["code"], "disposable_lane_safety_unknown")
             self.assertFalse(posted)
             # This fixture supplies server facts; the public assertion API
             # cannot manufacture them while the collector is unavailable.
@@ -687,6 +688,77 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         ) as driver:
             self.assertEqual(await self.sync(), 409)
             driver.assert_not_called()
+
+    async def test_another_lanes_target_is_protected_even_with_positive_testing_facts(self) -> None:
+        target = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_id_record(
+            target.model_copy(update={"context": "other-product", "instance": "testing"})
+        )
+        record_safety(self.store, "example-site", self.context, "testing")
+        with patch(
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
+        ) as driver:
+            self.assertEqual(await self.sync(), 409)
+            driver.assert_not_called()
+
+    async def test_global_configuration_drift_invalidates_testing_safety(self) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+
+        record = RuntimeEnvironmentRecord(
+            scope="global",
+            env={"DATABASE_HOST": "fixture-testing.invalid"},
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self.store.write_runtime_environment_record(record)
+        record_safety(self.store, "example-site", self.context, "testing")
+        self.store.write_runtime_environment_record(
+            record.model_copy(update={"env": {"DATABASE_HOST": "fixture-production.invalid"}})
+        )
+        with patch(
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
+        ) as driver:
+            self.assertEqual(await self.sync(), 409)
+            driver.assert_not_called()
+
+    async def test_granted_stable_lane_does_not_become_a_preview_by_context_collision(self) -> None:
+        from control_plane.service_auth import LocalOperatorPolicyRule
+
+        profile = self.store.read_product_profile_record("example-site")
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": (*profile.lanes, lane.model_copy(update={"instance": "staging"})),
+                    "preview": profile.preview.model_copy(update={"context": self.context}),
+                }
+            )
+        )
+        self.app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_operators=(
+                    LocalOperatorPolicyRule(
+                        subjects=("local-owner-agent",),
+                        token_labels=("local-owner-write",),
+                        products=("example-site",),
+                        contexts=(self.context,),
+                        actions=("live_target_runtime.apply",),
+                    ),
+                ),
+            ),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+        )
+        with patch(
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+            return_value={},
+        ) as driver:
+            self.assertEqual(await self.sync(instance="staging"), 202)
+            self.assertIsNone(driver.call_args.kwargs["before_provider_mutation"])
+            self.assertFalse(driver.call_args.kwargs["allow_owned_preview"])
 
     async def test_replacing_observation_does_not_change_an_inflight_apply_binding(self) -> None:
         from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord

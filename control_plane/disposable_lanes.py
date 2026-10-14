@@ -138,11 +138,12 @@ def require_disposable_lane(
     except FileNotFoundError:
         target_id = None
     if target_id is not None and any(
-        other.instance == "prod" and other.target_id == target_id.target_id
+        (other.context, other.instance) != (context, instance)
+        and other.target_id == target_id.target_id
         for other in store.list_dokploy_target_id_records()
     ):
         raise DisposableLaneSafetyUnknown(
-            "The testing or preview target aliases a production target."
+            "The testing or preview target aliases another lane's target."
         )
     if target is not None and target.policies.staff_testing_hold is not None:
         raise DisposableLaneSafetyUnknown(
@@ -223,24 +224,21 @@ def disposable_lane_configuration(
     # the digest. Secret values are never read or returned.
     bindings = tuple(
         item
-        for item in store.list_secret_bindings(
-            integration="runtime_environment", context_name=context
-        )
-        if item.instance in ("", instance)
+        for item in store.list_secret_bindings(integration="runtime_environment")
+        if item.context in ("", context) and item.instance in ("", instance)
     )
     referenced_secrets = {item.secret_id for item in bindings}
     return (
         *(
             item
-            for item in store.list_runtime_environment_records(context_name=context)
-            if item.instance in ("", instance)
+            for item in store.list_runtime_environment_records()
+            if item.context in ("", context) and item.instance in ("", instance)
         ),
         *(
             item
-            for item in store.list_secret_records(
-                integration="runtime_environment", context_name=context
-            )
-            if item.instance in ("", instance) or item.secret_id in referenced_secrets
+            for item in store.list_secret_records(integration="runtime_environment")
+            if (item.context in ("", context) and item.instance in ("", instance))
+            or item.secret_id in referenced_secrets
         ),
         *bindings,
     )

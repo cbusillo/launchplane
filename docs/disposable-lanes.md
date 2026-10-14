@@ -16,9 +16,10 @@ usage (`unused`/`in_use`/`unknown`), data custody
 (`reproducible`/`only_copy`/`unknown`) and production-resource isolation
 (`isolated`/`shared`/`separation_ready`/`unknown`), with each known fact's source
 reference and a timezone-aware observation/expiry window of at most fifteen
-minutes. A changed binding, duplicate observation, expired observation, positive
+minutes. A changed binding, expired observation, positive
 staff-testing hold or any required unknown fact refuses the new permission.
-A target ID also bound to production refuses it independently of the observation.
+A target ID also bound to another lane refuses it independently of the observation.
+Global and lane runtime configuration and secret metadata participate in the binding.
 Recording or refreshing an observation changes no profile or ownership digest.
 Actual ownership and runtime/secret authority still must match, and each
 destructive checkpoint validates fresh facts.
@@ -54,7 +55,9 @@ facts. The assertion API cannot create one and a direct DB write is not a
 qualification procedure. Until a server-backed collector is available, the new apply path
 returns `disposable_lane_safety_unknown`; absent observations never mean unused,
 reproducible or isolated. Operational qualification records the missing sources
-on the owning item. Building the missing producer needs no access grant or new
+on the owning item. The producer is tracked in
+[#3611](https://github.com/cbusillo/launchplane/issues/3611).
+Building the missing producer needs no access grant or new
 Director lane decision. Do not fill observations from names, IDs, old comments
 or successful plans.
 
