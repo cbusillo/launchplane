@@ -89,7 +89,7 @@ OPERATION_SPECS = (
         "POST",
         DISPOSABLE_LANE_OBSERVATION_ROUTE,
         "Inspect or collect exact-lane service safety evidence, record unknown assertions, clear evidence or prepare a retained testing replacement; unavailable facts stay unknown.",
-        ("bounded_admin_helper", "service_api"),
+        ("service_api",),
         ("inspect", "collect", "record", "clear", "prepare-rebuild"),
         "none",
         ("expected_binding_sha256",),

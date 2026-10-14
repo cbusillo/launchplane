@@ -72,7 +72,6 @@
         ],
         "schema_fingerprint_sha256": "4ccd0000ed5c20033f66d4a31f3bab1f0fd78ef8659cf2e43e34d304fbe8f1ae",
         "supported_surfaces": [
-          "bounded_admin_helper",
           "service_api"
         ]
       },
@@ -531,8 +530,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "a88d48668a3d4da33d66989d19ffb2a13cdc27de"
+    "source_commit_sha": "f8e8d7dc2f75030082f241bb25759ed1e4da9bd5"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "2a0549df542b0558b6bd68f102ce43e3d00a8c7dc5319d97c04d2b882fff6558"
+  "semantic_digest_sha256": "1c36be9bb8b6469b4305ae7306cc69cd4b40a28ae917d1cc101e7015c27ad2e4"
 }

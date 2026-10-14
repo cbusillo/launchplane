@@ -59,9 +59,10 @@ actor kind and observation schema remain compatible with the previous image.
 This producer publishes only `in_use` and `shared`. Every fact permitting an
 apply stays unknown. Missing holds, distinct target IDs and old preview-generation
 states do not establish occupancy, custody, physical isolation or executor
-exclusion. The response names these coverage limits. Collection calls no provider,
+exclusion. The response and bounded client name these coverage limits. Collection calls no provider,
 changes only lane evidence and uses its existing expiry cap. It does not qualify
-replacement resources or change production/Client permissions.
+replacement resources or change production/Client permissions. Refresh preserves
+any existing retained-operation linkage, but keeps replacement eligibility unknown.
 
 Use the bounded repo client with the installed skill's existing private transport:
 
@@ -77,8 +78,10 @@ changed bindings refuse. Repeated collection refreshes inert evidence only.
 Refresh after hold, target, profile, runtime or secret-metadata changes. Existing
 `clear` removes only the observation and restores missing evidence. Rollback
 retains observations; the previous service rejects the new `collect` request.
-The catalog integration is coordinated on codex-skills#1308; its vendored
-projection must refresh before advertising this operation.
+The service catalog deliberately publishes all existing API modes. The repo
+client supports only `inspect` and `collect`. Catalog-helper integration is
+coordinated on codex-skills#1308; that consumer must refresh its vendored
+projection before advertising its own support.
 
 **Remaining producer gap:** Launchplane has a positive staff-testing hold, but no
 complete authoritative occupancy or only-copy inventory and no supported

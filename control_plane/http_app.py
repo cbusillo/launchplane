@@ -23098,6 +23098,9 @@ def create_launchplane_fastapi_app(
                     target_id=target_id,
                     binding_sha256=fingerprint,
                 )
+                previous = store.read_disposable_lane_safety(
+                    profile.product, observation.context, observation.instance
+                )
                 now = datetime.now(timezone.utc)
                 evidence = DisposableLaneSafety.model_validate(
                     {
@@ -23107,6 +23110,8 @@ def create_launchplane_fastapi_app(
                         "binding_sha256": fingerprint,
                         "observed_by": launchplane_identity_actor(identity),
                         "observer_kind": "director_agent",
+                        "replaces_operation_id": previous.replaces_operation_id if previous else "",
+                        "replaced_target_id": previous.replaced_target_id if previous else "",
                         "observed_at": now,
                         "expires_at": now + timedelta(seconds=observation.lifetime_seconds),
                         **facts.payload(),

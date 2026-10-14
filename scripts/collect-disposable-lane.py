@@ -11,6 +11,7 @@ from control_plane.contracts.disposable_lane import (
     DISPOSABLE_LANE_OBSERVATION_ROUTE,
     DisposableLaneObservationRequest,
 )
+from control_plane.disposable_lane_collection import disposable_collection_coverage
 
 
 def main() -> int:
@@ -27,7 +28,6 @@ def main() -> int:
     helper = args.operator_helper.expanduser().resolve(strict=True)
     if helper.name != "launchplane-write-action.py":
         parser.error("Select the installed Launchplane operator helper.")
-    sys.path.insert(0, str(helper.parent))
     transport = runpy.run_path(str(helper), run_name="disposable_collection_transport")
     settings = transport["resolve_settings"](args)
     transport["validate_service_url"](settings["service_url"])
@@ -47,6 +47,8 @@ def main() -> int:
             body=payload.model_dump(mode="json"),
             timeout=30,
         )
+        if response["result"]["mode"] != "inspect":
+            raise ValueError("The inspection did not settle as requested.")
         if args.mode == "collect":
             digest = response["result"]["binding_sha256"]
             payload = DisposableLaneObservationRequest(
@@ -60,6 +62,11 @@ def main() -> int:
                 timeout=30,
             )
         result = response["result"]
+        if result["mode"] != args.mode:
+            raise ValueError("The collection did not settle as requested.")
+        coverage = result["source_coverage"]
+        if coverage != disposable_collection_coverage():
+            raise ValueError("The collection coverage differs from this client.")
         facts = {key: result[key] for key in ("usage", "data", "production_resources")}
         for key, allowed in (
             ("usage", {"unknown", "unused", "in_use"}),
@@ -68,7 +75,16 @@ def main() -> int:
         ):
             if facts[key] not in allowed:
                 raise ValueError("Invalid fact response.")
-        print(json.dumps({"mode": args.mode, "facts": facts, "trace_id": response["trace_id"]}))
+        print(
+            json.dumps(
+                {
+                    "mode": args.mode,
+                    "facts": facts,
+                    "source_coverage": coverage,
+                    "trace_id": transport["public_trace_id"](response["trace_id"]),
+                }
+            )
+        )
         return 0
     except urllib.error.HTTPError as error:
         transport["emit_http_error_payload"](
