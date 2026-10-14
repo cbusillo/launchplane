@@ -800,8 +800,13 @@ from control_plane.runtime_key_safety import (
     runtime_key_safety_environment_class,
 )
 from control_plane.contracts.disposable_lane import (
+    DISPOSABLE_LANE_OBSERVATION_ROUTE,
     DisposableLaneSafety,
     DisposableLaneObservationRequest,
+)
+from control_plane.disposable_lane_collection import (
+    collect_disposable_lane_facts,
+    disposable_collection_coverage,
 )
 
 from control_plane.disposable_lanes import (
@@ -23076,11 +23081,59 @@ def create_launchplane_fastapi_app(
                         "usage": "unknown",
                         "data": "unknown",
                         "production_resources": "unknown",
-                        "automatic_fact_collection": "unavailable",
+                        "automatic_fact_collection": "limited_service_records",
+                        "source_coverage": disposable_collection_coverage(),
                     },
                 )
             if fingerprint != observation.expected_binding_sha256:
                 raise ValueError("Observed lane bindings changed; inspect them again.")
+            if observation.mode == "collect":
+                if observation.replaces_operation_id:
+                    raise ValueError("This collector does not qualify replacement resources.")
+                facts = collect_disposable_lane_facts(
+                    store,
+                    context=observation.context,
+                    instance=observation.instance,
+                    target=target,
+                    target_id=target_id,
+                    binding_sha256=fingerprint,
+                )
+                previous = store.read_disposable_lane_safety(
+                    profile.product, observation.context, observation.instance
+                )
+                now = datetime.now(timezone.utc)
+                evidence = DisposableLaneSafety.model_validate(
+                    {
+                        "product": profile.product,
+                        "context": observation.context,
+                        "instance": observation.instance,
+                        "binding_sha256": fingerprint,
+                        "observed_by": launchplane_identity_actor(identity),
+                        "observer_kind": "director_agent",
+                        "replaces_operation_id": previous.replaces_operation_id if previous else "",
+                        "replaced_target_id": previous.replaced_target_id if previous else "",
+                        "observed_at": now,
+                        "expires_at": now + timedelta(seconds=observation.lifetime_seconds),
+                        **facts.payload(),
+                    }
+                )
+                store.write_disposable_lane_safety(evidence)
+                return accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={"product_profile": profile.product},
+                    result={
+                        "mode": "collect",
+                        "binding_sha256": fingerprint,
+                        "observed_by": evidence.observed_by,
+                        "observer_kind": evidence.observer_kind,
+                        **facts.payload(),
+                        "observed_at": evidence.observed_at.isoformat(),
+                        "expires_at": evidence.expires_at.isoformat(),
+                        "provider_mutation": False,
+                        "automatic_fact_collection": "limited_service_records",
+                        "source_coverage": disposable_collection_coverage(),
+                    },
+                )
             operation = None
             if observation.replaces_operation_id:
                 operation = store.read_odoo_stable_target_replacement_operation_record(
@@ -25844,14 +25897,17 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
-        "/v1/disposable-lanes/observations",
+        DISPOSABLE_LANE_OBSERVATION_ROUTE,
         record_disposable_lane_safety,
         methods=["POST"],
         status_code=202,
         response_model=AcceptedEvidenceResponse,
         operation_id="record_disposable_lane_safety",
         responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
         },
     )
