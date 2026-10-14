@@ -124,6 +124,20 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                         expected_current_provider_target=expectation,
                     ).applied
 
+                if operation == "adopt":
+                    repeated = adopt_dokploy_target(
+                        record_store=store,
+                        host="https://provider.example.invalid",
+                        token="synthetic-token",
+                        context=current.context,
+                        instance=current.instance,
+                        target_type="compose",
+                        target_id=current.target_id,
+                        apply=False,
+                        fetch_target_payload=lambda *_args: {"name": current.display_name},
+                    )
+                    self.assertFalse(repeated.applied)
+
                 with self.assertRaises(ValueError):
                     dry_run()
                 expectation = current.to_deployed_target_reference()
