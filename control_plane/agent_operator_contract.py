@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.contracts.disposable_lane import DISPOSABLE_LANE_OBSERVATION_ROUTE
 from control_plane.merge_train_policy_operations import MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
 
 import hashlib
@@ -84,6 +85,15 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        DISPOSABLE_LANE_OBSERVATION_ROUTE,
+        "Inspect or collect exact-lane service safety evidence, record unknown assertions, clear evidence or prepare a retained testing replacement; unavailable facts stay unknown.",
+        ("service_api",),
+        ("inspect", "collect", "record", "clear", "prepare-rebuild"),
+        "none",
+        ("expected_binding_sha256",),
+    ),
     OperationSpec(
         "POST",
         MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE,
