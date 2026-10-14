@@ -504,6 +504,7 @@ def _replacement_record(
         config_parameters=existing.config_parameters if existing is not None else (),
         addon_settings=(*preserved_addon_settings, *desired),
         website_bootstrap=existing.website_bootstrap if existing is not None else None,
+        website_settings=existing.website_settings if existing is not None else None,
         last_apply=existing.last_apply if existing is not None else OdooOverrideApplyResult(),
         updated_at=updated_at,
         source_label=ODOO_ADDON_SETTINGS_SOURCE_LABEL,

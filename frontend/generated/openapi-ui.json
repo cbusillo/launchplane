@@ -19176,6 +19176,16 @@
                 "type": "null"
               }
             ]
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -19188,7 +19198,8 @@
           "schema_version",
           "source_label",
           "updated_at",
-          "website_bootstrap"
+          "website_bootstrap",
+          "website_settings"
         ],
         "title": "OdooInstanceOverrideRecord",
         "type": "object"
@@ -19289,6 +19300,16 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "title": "OdooOverrideApplyResult",
@@ -19297,7 +19318,8 @@
           "applied_at",
           "attempted",
           "detail",
-          "status"
+          "status",
+          "website_settings"
         ]
       },
       "OdooOverrideValue": {
@@ -20517,6 +20539,69 @@
           "url"
         ],
         "title": "OdooWebsiteBootstrapRoute",
+        "type": "object"
+      },
+      "OdooWebsiteSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "block_third_party_domains": {
+            "default": true,
+            "title": "Block Third Party Domains",
+            "type": "boolean"
+          },
+          "cookies_bar": {
+            "default": true,
+            "title": "Cookies Bar",
+            "type": "boolean"
+          },
+          "google_analytics_key": {
+            "default": "",
+            "title": "Google Analytics Key",
+            "type": "string"
+          },
+          "public_indexing_enabled": {
+            "default": false,
+            "title": "Public Indexing Enabled",
+            "type": "boolean"
+          },
+          "public_origin": {
+            "title": "Public Origin",
+            "type": "string"
+          },
+          "website_id": {
+            "minimum": 1,
+            "title": "Website Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "block_third_party_domains",
+          "cookies_bar",
+          "google_analytics_key",
+          "public_indexing_enabled",
+          "public_origin",
+          "website_id"
+        ],
+        "title": "OdooWebsiteSettings",
+        "type": "object"
+      },
+      "OdooWebsiteSettingsIntent": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "minLength": 1,
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/OdooWebsiteSettings"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "settings"
+        ],
+        "title": "OdooWebsiteSettingsIntent",
         "type": "object"
       },
       "OrdinaryAgentDeliveryActivationExecutionEvidence": {
@@ -34427,6 +34512,17 @@
             },
             "title": "Untracked Commits",
             "type": "array"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -35231,6 +35327,12 @@
             "pattern": "^[0-9a-f]{40}$",
             "title": "Source Commit",
             "type": "string"
+          },
+          "website_settings_sha256": {
+            "default": "",
+            "title": "Website Settings Sha256",
+            "type": "string",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [

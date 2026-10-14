@@ -16,6 +16,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideApplyStatus,
 )
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.contracts.public_hosts import resolve_public_base_url
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
 from control_plane.contracts.odoo_target_replacement_failures import (
@@ -108,6 +109,7 @@ def _write_odoo_instance_override_apply_result(
     status: OdooOverrideApplyStatus,
     detail: str,
     source_label: str = "odoo-post-deploy-driver",
+    applied_website_settings: OdooWebsiteSettingsIntent | None = None,
 ) -> OdooInstanceOverrideRecord:
     now = utc_now_timestamp()
     return record_store.update_odoo_instance_override_apply_result(
@@ -118,6 +120,9 @@ def _write_odoo_instance_override_apply_result(
             status=status,
             applied_at=now if status in {"pass", "fail"} else "",
             detail=detail,
+            website_settings=applied_website_settings
+            if status == "pass"
+            else record.last_apply.website_settings,
         ),
         updated_at=now,
         source_label=source_label,
@@ -183,6 +188,7 @@ def execute_odoo_post_deploy(
     provider_operation_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
     allow_historical_sender_contract: bool = False,
+    artifact_id: str = "",
 ) -> OdooPostDeployResult:
     typed_record_store = _require_record_store(record_store)
     odoo_override_record = _read_odoo_instance_override_record(
@@ -231,6 +237,59 @@ def execute_odoo_post_deploy(
         updated_at=utc_now_timestamp(),
     )
 
+    accepted_settings: OdooWebsiteSettingsIntent | None = None
+    if rendering_record is not None and rendering_record.website_settings is not None:
+        if control_plane_odoo_instance_overrides.odoo_instance_is_production(request.instance):
+            from control_plane.odoo_website_settings import accepted_website_settings
+            from control_plane.odoo_post_deploy_http import resolve_odoo_post_deploy_product_route
+
+            profiles = getattr(record_store, "list_product_profile_records")()
+            owners = [
+                profile
+                for profile in profiles
+                if any(
+                    lane.context == request.context and lane.instance == request.instance
+                    for lane in profile.lanes
+                )
+            ]
+            if len(owners) != 1:
+                raise click.ClickException(
+                    "Website settings require unambiguous product lane ownership."
+                )
+            profile = resolve_odoo_post_deploy_product_route(
+                record_store=record_store,
+                product=owners[0].product,
+                context=request.context,
+                instance=request.instance,
+            )
+            if not artifact_id:
+                release_reader = getattr(record_store, "read_release_tuple_record")
+                artifact_id = release_reader(
+                    context_name=request.context, channel_name=request.instance
+                ).artifact_id
+            accepted_settings = accepted_website_settings(
+                record_store, product=profile.product, artifact_id=artifact_id
+            )
+        rendered_settings = accepted_settings
+        if (
+            control_plane_odoo_instance_overrides.odoo_instance_is_production(request.instance)
+            and rendered_settings is None
+        ):
+            # A historical accepted artifact predates this contract. Rollback to it
+            # clears collection/indexing; it cannot inherit the forward release.
+            rendered_settings = rendering_record.website_settings.model_copy(
+                update={
+                    "settings": rendering_record.website_settings.settings.model_copy(
+                        update={
+                            "google_analytics_key": "",
+                            "public_indexing_enabled": False,
+                        }
+                    ),
+                }
+            )
+        rendering_record = rendering_record.model_copy(
+            update={"website_settings": rendered_settings}
+        )
     if rendering_record is not None:
         try:
             post_deploy_environment = (
@@ -295,6 +354,15 @@ def execute_odoo_post_deploy(
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             post_deploy_readback_markers
         )
+        if override_payload is not None and override_payload.website_settings is not None:
+            if (
+                post_deploy_readback_markers.get("website_settings_sha256")
+                != override_payload.website_settings.digest
+            ):
+                raise dokploy_post_deploy.OdooPostDeployReadbackFailure(
+                    "Odoo website settings readback does not match the accepted release.",
+                    evidence=post_deploy_readback_markers,
+                )
         if (
             override_payload
             and override_payload.website_bootstrap
@@ -390,6 +458,7 @@ def execute_odoo_post_deploy(
             record=odoo_override_record,
             status=override_status,
             detail=detail,
+            applied_website_settings=accepted_settings,
         )
         applied_at = updated_record.last_apply.applied_at
 

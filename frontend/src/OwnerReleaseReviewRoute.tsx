@@ -250,6 +250,17 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {response.release_run ? <ReleaseRunProgress run={response.release_run} refreshFailed={refreshFailed} /> : null}
       {checklist && !noNewRelease ? <>
+        {checklist.website_settings ? <section aria-label="Website settings in this release">
+          <h3>Website settings</h3>
+          <p>Accepting this release applies these settings to {checklist.website_settings.settings.public_origin}.</p>
+          <ul>
+            <li>Search indexing: {checklist.website_settings.settings.public_indexing_enabled ? "enabled" : "disabled"}</li>
+            <li>Google Analytics: {checklist.website_settings.settings.google_analytics_key || "disabled"}</li>
+            <li>Cookie consent bar: {checklist.website_settings.settings.cookies_bar ? "enabled" : "disabled"}</li>
+            <li>Third-party blocking: {checklist.website_settings.settings.block_third_party_domains ? "enabled" : "disabled"}</li>
+          </ul>
+          <p>Testing and previews keep production analytics and search indexing disabled.</p>
+        </section> : null}
         <h3>What to test</h3>
         <ReleaseItems items={checklist.items} viewerIsOwner={response.viewer_is_owner} emptyMessage={(checklist.shared_sources ?? []).length ? "No website-repository changes. Review the shared components below." : undefined} />
         {(checklist.shared_sources ?? []).map(source => <section key={source.repository} aria-label={`Shared website components from ${source.repository}`}>

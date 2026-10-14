@@ -2619,6 +2619,7 @@ def execute_odoo_stable_target_replacement_apply(
                     instance=plan.instance,
                     phase=post_deploy_phase,
                 ),
+                artifact_id=artifact_id,
                 run_destructive_restore=plan.data_source_mode == "upstream_restore",
                 provider_effect_checkpoint=(
                     restore_effect_checkpoint
@@ -2709,6 +2710,7 @@ def execute_odoo_stable_target_replacement_apply(
                     instance=plan.instance,
                     phase="deploy",
                 ),
+                artifact_id=artifact_id,
                 run_destructive_restore=False,
                 allow_historical_sender_contract=allow_historical_sender_contract,
                 provider_effect_checkpoint=provider_effect_checkpoint,

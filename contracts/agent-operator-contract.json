@@ -203,6 +203,37 @@
           "dry-run",
           "apply"
         ],
+        "operation_id": "apply_odoo_website_settings",
+        "path": "/v1/product-config/odoo-website-settings/apply",
+        "purpose": "Prepare artifact-bound website intent without changing the Odoo database.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "413",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_digest"
+        ],
+        "schema_fingerprint_sha256": "2b37844addd9af4eaadfeae60d7f5172b7825eef1954a65b238308694123ee7c",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_write_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply"
+        ],
         "operation_id": "apply_odoo_addon_settings",
         "path": "/v1/product-config/odoo-addon-settings/apply",
         "purpose": "Dry-run or apply an Odoo lane's addon settings with secret-binding references.",
@@ -500,8 +531,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "928325fe2425f4e4f696103682900098b1b50051"
+    "source_commit_sha": "a88d48668a3d4da33d66989d19ffb2a13cdc27de"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "bc93b702036dc5b0dba3c9ff4ebec647aa5d5c656553d21f1fe32a2bf020f196"
+  "semantic_digest_sha256": "e3506736d18ca8e5ceecbfa6f9d780910df978aea536746003cdfe65f08dc21d"
 }

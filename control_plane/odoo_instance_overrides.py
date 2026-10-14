@@ -293,6 +293,11 @@ def render_post_deploy_payload(
         config_parameters=tuple(config_parameters),
         addon_settings=tuple(addon_settings),
         website_bootstrap=website_bootstrap,
+        website_settings=(
+            record.website_settings.settings
+            if record.website_settings is not None and odoo_instance_is_production(record.instance)
+            else None
+        ),
     )
 
 
@@ -419,6 +424,7 @@ def build_preview_website_bootstrap_environment(
         update={
             "config_parameters": (),
             "addon_settings": (),
+            "website_settings": None,
             "website_bootstrap": record.website_bootstrap.model_copy(
                 update={"canonical_url": normalized_preview_url}
             ),

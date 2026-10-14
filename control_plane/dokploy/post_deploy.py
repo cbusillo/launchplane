@@ -143,7 +143,9 @@ ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(
     {"website_bootstrap_website_id", INTEGRATION_READBACK_CHECKED_MARKER}
 )
 ODOO_POST_DEPLOY_READBACK_MARKERS = (
-    ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
+    ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS
+    | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
+    | {"website_settings_sha256"}
 )
 ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
     "odoo_module_update_completed",
@@ -302,6 +304,8 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
+    if key == "website_settings_sha256":
+        return bool(re.fullmatch(r"[0-9a-f]{64}", value))
     if key == "website_bootstrap_company_email_skip_reason":
         return value == ODOO_COMPANY_EMAIL_SKIP_REASON
     if key in ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS:

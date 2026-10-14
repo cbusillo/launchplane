@@ -577,3 +577,33 @@ test("Business-hours release waits and an urgent acceptance records the human's 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("business-hours-urgent.png"), fullPage: true });
 });
+
+test("Client sees website settings before accepting the bound release", { tag: "@responsive" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  const review = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("products");
+  });
+  review.review.checklist!.website_settings = {
+    artifact_id: review.review.checklist!.candidate.artifact_id,
+    settings: { website_id: 1, public_origin: "https://site.example", public_indexing_enabled: true,
+      google_analytics_key: "G-TEST123", cookies_bar: true, block_third_party_domains: true },
+  };
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: review }));
+  let submittedDigest = "";
+  await page.route("**/v1/release-review/decisions", async route => {
+    submittedDigest = route.request().postDataJSON().checklist_digest;
+    return route.fulfill({ json: { ...review, review: { ...review.review, approved: true } } });
+  });
+  await page.goto("/ui/owner-review?product=example-site");
+  const settings = page.getByRole("region", { name: "Website settings in this release" });
+  await expect(settings).toContainText(review.review.checklist!.website_settings.settings.public_origin);
+  await expect(settings).toContainText(review.review.checklist!.website_settings.settings.google_analytics_key);
+  await expect(settings).toContainText("Testing and previews keep production analytics and search indexing disabled.");
+  await expect(page.getByRole("button", { name: "Accept release", exact: true })).toBeEnabled();
+  await page.screenshot({ path: testInfo.outputPath("website-settings-before-accept.png"), fullPage: true });
+  await page.getByRole("button", { name: "Accept release", exact: true }).click();
+  await expect.poll(() => submittedDigest).toBe(review.review.checklist_digest);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

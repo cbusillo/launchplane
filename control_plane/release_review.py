@@ -13,6 +13,8 @@ from urllib.parse import unquote
 import click
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
@@ -171,6 +173,25 @@ def checklist_digest(checklist: ReleaseChecklist) -> str:
     ).hexdigest()
 
 
+def release_website_settings(
+    *,
+    store: object,
+    profile: LaunchplaneProductProfileRecord,
+    artifact_id: str,
+    instance: str,
+) -> OdooWebsiteSettingsIntent | None:
+    prod = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
+    reader = getattr(store, "read_odoo_instance_override_record", None)
+    if profile.driver_id != "odoo" or prod is None or not callable(reader):
+        return None
+    try:
+        record: OdooInstanceOverrideRecord = reader(context_name=prod.context, instance_name="prod")
+    except FileNotFoundError:
+        return None
+    settings = record.last_apply.website_settings if instance == "prod" else record.website_settings
+    return settings if settings is not None and settings.artifact_id == artifact_id else None
+
+
 def release_version(
     *, store: ReleaseReviewStore, profile: LaunchplaneProductProfileRecord, instance: str
 ) -> ReleaseVersion:
@@ -206,6 +227,18 @@ def release_version(
                 artifact_id=release.artifact_id,
                 source_commit=artifact.source_commit,
                 shared_addons_digest=shared_digest,
+                website_settings_sha256=(
+                    settings.settings.digest
+                    if (
+                        settings := release_website_settings(
+                            store=store,
+                            profile=profile,
+                            artifact_id=release.artifact_id,
+                            instance=instance,
+                        )
+                    )
+                    else ""
+                ),
             )
         except ValueError as error:
             raise _identity_missing(instance) from error
@@ -332,6 +365,9 @@ def build_release_review(
         untracked_commits=untracked,
         shared_sources=shared_sources,
         additional_changes=additional_changes,
+        website_settings=release_website_settings(
+            store=store, profile=profile, artifact_id=candidate.artifact_id, instance="testing"
+        ),
         database_compatibility=(
             classify_release_database_compatibility(
                 production=store.read_artifact_manifest(production.artifact_id),

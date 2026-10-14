@@ -92,6 +92,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
   history and the current product-profile Client boundary.
 - [`owner-acceptance.md`](owner-acceptance.md) — current Client review and the
   compatibility boundary for retired acceptance history.
+- [odoo-website-settings.md](odoo-website-settings.md) — typed settings preparation, exact release application, rollback and nonproduction exclusion.
 - [release-review.md](release-review.md) — Client checklist decisions for production
   promotion, revision changes, and recorded admin overrides.
 - [mediaforce-releases.md](mediaforce-releases.md) — source-side macOS release

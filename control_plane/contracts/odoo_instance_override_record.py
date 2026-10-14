@@ -5,6 +5,7 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane.contracts.runtime_environment_record import ScalarValue
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.contracts.odoo_import_parameters import import_parameter_runtime_key
 
 OdooOverrideApplyPhase = Literal["restore", "deploy", "promotion", "preview", "manual"]
@@ -211,6 +212,9 @@ class OdooOverrideApplyResult(BaseModel):
     status: OdooOverrideApplyStatus = "skipped"
     applied_at: str = ""
     detail: str = ""
+    website_settings: OdooWebsiteSettingsIntent | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _validate_apply_result(self) -> "OdooOverrideApplyResult":
@@ -237,6 +241,9 @@ class OdooInstanceOverrideRecord(BaseModel):
     config_parameters: tuple[OdooConfigParameterOverride, ...] = ()
     addon_settings: tuple[OdooAddonSettingOverride, ...] = ()
     website_bootstrap: OdooWebsiteBootstrapPayload | None = None
+    website_settings: OdooWebsiteSettingsIntent | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     last_apply: OdooOverrideApplyResult = Field(default_factory=OdooOverrideApplyResult)
     updated_at: str
     source_label: str = ""
@@ -257,6 +264,7 @@ class OdooInstanceOverrideRecord(BaseModel):
             not self.config_parameters
             and not self.addon_settings
             and self.website_bootstrap is None
+            and self.website_settings is None
         ):
             raise ValueError("Odoo instance override record requires at least one override")
         if not self.apply_on:

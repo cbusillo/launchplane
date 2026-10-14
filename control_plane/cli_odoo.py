@@ -313,6 +313,10 @@ def _build_odoo_instance_override_record_with_config_parameter(
         config_parameters=tuple(config_parameters[key] for key in sorted(config_parameters)),
         addon_settings=addon_settings,
         website_bootstrap=target_record.website_bootstrap if target_record is not None else None,
+        website_settings=target_record.website_settings if target_record is not None else None,
+        last_apply=target_record.last_apply
+        if target_record is not None
+        else OdooOverrideApplyResult(),
         updated_at=utc_now_timestamp(),
         source_label=source_label.strip() or "cli",
     )
@@ -362,6 +366,10 @@ def _build_odoo_instance_override_record_with_addon_setting(
         config_parameters=config_parameters,
         addon_settings=tuple(addon_settings[key] for key in sorted(addon_settings)),
         website_bootstrap=target_record.website_bootstrap if target_record is not None else None,
+        website_settings=target_record.website_settings if target_record is not None else None,
+        last_apply=target_record.last_apply
+        if target_record is not None
+        else OdooOverrideApplyResult(),
         updated_at=utc_now_timestamp(),
         source_label=source_label.strip() or "cli",
     )
@@ -395,6 +403,10 @@ def _build_odoo_instance_override_record_with_website_bootstrap(
         config_parameters=target_record.config_parameters if target_record is not None else (),
         addon_settings=target_record.addon_settings if target_record is not None else (),
         website_bootstrap=website_bootstrap,
+        website_settings=target_record.website_settings if target_record is not None else None,
+        last_apply=target_record.last_apply
+        if target_record is not None
+        else OdooOverrideApplyResult(),
         updated_at=utc_now_timestamp(),
         source_label=source_label.strip() or "cli",
     )
@@ -508,6 +520,7 @@ def _migrate_odoo_override_secret_transport_record(
             addon_settings=tuple(addon_settings),
             website_bootstrap=record.website_bootstrap,
             last_apply=record.last_apply,
+            website_settings=record.website_settings,
             updated_at=utc_now_timestamp(),
             source_label=source_label.strip() or "odoo-secret-transport-migration",
         )
