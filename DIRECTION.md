@@ -19,19 +19,22 @@ doing, starting agents on it and recording what they did and decided, so the
 Director acts only at the stop boundaries. It gets there in two legs, each a
 milestone below: first operations, then planning.
 
-Today: products are released through Launchplane, but operations a person or
-agent decides on still start from GitHub workflows, and they move in one by
-one. Plans, claims and waits live in GitHub issues through the existing
-helpers, and the Supervisor runs outside Launchplane. That planning machinery
-is kept running but not extended.
+Today: Launchplane deploys and promotes the products it manages, but
+operations a person or agent decides on still start from GitHub workflows,
+and they move in one by one. Plans, claims and waits live in GitHub issues
+through the existing helpers, and the Supervisor runs outside Launchplane.
+Those helpers are kept running but not extended, and nothing for planning or
+the Supervisor is built in Launchplane before its milestone comes up.
 
-Whenever agents work in Launchplane, they do so under one standing permission
-and their own identity, never enrollment, leases or per-agent grants. When
-Launchplane is down, agents fix it from git, CI and the emergency rollback.
+Whenever agents work in Launchplane, they do so under one standing permission,
+named on the record by their own identity, never through enrollment, leases or
+per-agent grants; a claim records who is working on what and locks nothing.
+When Launchplane is down, agents fix it with what GitHub keeps below, without
+needing Launchplane to track or merge the fix.
 
 Judge every change by one question: can a product be maintained without
-anyone working outside Launchplane, or doing by hand what the loop should do?
-Work that adds upkeep to Launchplane itself needs a strong reason.
+anyone touching Launchplane by hand? Work that adds upkeep to Launchplane
+itself needs a strong reason.
 
 A product repository builds its own artifacts from its own files, with
 provenance Launchplane can verify; it never calls Launchplane, and Launchplane
@@ -105,15 +108,15 @@ blocks that run is the next piece of work.
   move
 - hardware-key authorization recovery, disposable canaries, and the dev lane
 - billing and collections inside Launchplane
-- new planning machinery built on GitHub issues
 - the blanket authorization freeze; granting access is a stop boundary instead
 - product repositories calling Launchplane: workflow-identity grants, pinned
   reusable Launchplane workflows, and Launchplane-held build settings
 - caller-grant rules for the preview and testing deploys Launchplane starts
   from source-control events
 - GitHub workflows that run an operation a person or agent decides on,
-  other than the emergency rollback, with the GitHub secrets and variables
-  behind them; each is deleted once its operation's Launchplane path works
+  other than what the Purpose says GitHub keeps, with the GitHub secrets
+  and variables behind them; each is deleted once its operation's
+  Launchplane path works
 - fences, recovery journals, proof-of-safety, and per-product or per-action
   agent write grants on testing and preview lanes
 
@@ -143,10 +146,11 @@ fits this file.
 - `Retired machinery deleted` proves the retired designs above are gone from
   the code; ends if a deletion breaks a live product.
 - `Operations live in Launchplane` proves no GitHub workflow runs an
-  operation a person or agent decides on, other than the emergency rollback,
-  and the runtime secrets and variables live in Launchplane; ends if a new
-  operation needs a GitHub workflow.
+  operation a person or agent decides on, other than what the Purpose says
+  GitHub keeps, and the runtime secrets and variables live in Launchplane;
+  ends if a new operation needs a GitHub workflow.
 - `Supervisor runs from Launchplane` proves a Client's request reaches an
   accepted release with the work, claims and records only in Launchplane, and
-  no act by the Director; ends if the Director has to start or restart a
-  session for ordinary work, or work is tracked in two places.
+  the Director acting only at the stop boundaries; ends if the Director has
+  to start or restart a session for ordinary work, or work is tracked in two
+  places.
