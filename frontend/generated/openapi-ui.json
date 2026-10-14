@@ -11011,6 +11011,109 @@
         "title": "DeploymentRecord",
         "type": "object"
       },
+      "DisposableLaneSafety": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Binding Sha256",
+            "type": "string"
+          },
+          "context": {
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "data": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "reproducible",
+              "only_copy"
+            ],
+            "title": "Data",
+            "type": "string"
+          },
+          "data_evidence": {
+            "default": "",
+            "title": "Data Evidence",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "instance": {
+            "minLength": 1,
+            "title": "Instance",
+            "type": "string"
+          },
+          "isolation_evidence": {
+            "default": "",
+            "title": "Isolation Evidence",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "production_resources": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "isolated",
+              "separation_ready",
+              "shared"
+            ],
+            "title": "Production Resources",
+            "type": "string"
+          },
+          "replaced_target_id": {
+            "default": "",
+            "title": "Replaced Target Id",
+            "type": "string"
+          },
+          "replaces_operation_id": {
+            "default": "",
+            "title": "Replaces Operation Id",
+            "type": "string"
+          },
+          "usage": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "unused",
+              "in_use"
+            ],
+            "title": "Usage",
+            "type": "string"
+          },
+          "usage_evidence": {
+            "default": "",
+            "title": "Usage Evidence",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_sha256",
+          "context",
+          "data",
+          "data_evidence",
+          "expires_at",
+          "instance",
+          "isolation_evidence",
+          "observed_at",
+          "production_resources",
+          "replaced_target_id",
+          "replaces_operation_id",
+          "usage",
+          "usage_evidence"
+        ],
+        "title": "DisposableLaneSafety",
+        "type": "object"
+      },
       "DokployTargetIdRecord": {
         "additionalProperties": false,
         "properties": {
@@ -14204,6 +14307,15 @@
           "display_name": {
             "title": "Display Name",
             "type": "string"
+          },
+          "disposable_lane_safety": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DisposableLaneSafety"
+            },
+            "title": "Disposable Lane Safety",
+            "type": "array",
+            "x-launchplane-optional-response": true
           },
           "driver_id": {
             "title": "Driver Id",

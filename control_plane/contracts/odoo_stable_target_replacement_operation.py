@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.disposable_lane import DisposableTestingSupersession
 
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
@@ -25,6 +26,7 @@ OdooStableTargetReplacementOperationStatus = Literal[
     "pass",
     "fail",
     "cancelled",
+    "superseded",
 ]
 OdooStableTargetReplacementOperationPhase = Literal[
     "created",
@@ -36,12 +38,14 @@ OdooStableTargetReplacementOperationPhase = Literal[
     "completed",
     "failed",
     "cancelled",
+    "superseded",
 ]
 
 _TERMINAL_OPERATION_STATUSES: tuple[OdooStableTargetReplacementOperationStatus, ...] = (
     "pass",
     "fail",
     "cancelled",
+    "superseded",
 )
 ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES: frozenset[
     OdooStableTargetReplacementOperationStatus
@@ -92,6 +96,9 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     error_description: str = ""
     runner_trace_id: str = ""
     recovery_journal: TestingReplacementRecoveryJournal | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    disposable_supersession: DisposableTestingSupersession | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
 
@@ -169,6 +176,18 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
                 raise ValueError(
                     "Terminal Odoo stable target replacement operations require finished_at."
                 )
+            if self.status == "superseded":
+                if (
+                    self.instance != "testing"
+                    or self.disposable_supersession is None
+                    or self.cancellation is not None
+                    or self.result is not None
+                    or self.lease_owner
+                    or self.lease_expires_at
+                ):
+                    raise ValueError(
+                        "Supersession requires an excluded testing operation and replacement evidence."
+                    )
             if self.status == "pass" and (self.error_code or self.error_message):
                 raise ValueError(
                     "Passing Odoo stable target replacement operations must not include an error."
@@ -201,6 +220,8 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
             raise ValueError(
                 "Only cancelled Odoo target replacement operations can include cancellation evidence."
             )
+        if self.status != "superseded" and self.disposable_supersession is not None:
+            raise ValueError("Only a superseded testing operation carries replacement evidence.")
         return self
 
 

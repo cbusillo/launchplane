@@ -350,6 +350,121 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(self.apps["preview-6"]["appName"], present["application_name"])
         self.assertNotEqual(present["ownership"], absent["ownership"])
 
+    def use_director_identity(self) -> None:
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        self.app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        self.director_headers = {
+            "Authorization": "Bearer local-operator-token",
+            "Idempotency-Key": "director-retirement",
+        }
+
+    def record_retirement_safety(self, **changes: Any) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        record_safety(
+            self.store, self.profile.product, self.profile.lanes[0].context, "testing", **changes
+        )
+        for number in (1, 6):
+            preview = self.store.read_preview_record(f"legacy-{number}")
+            record_safety(
+                self.store, self.profile.product, preview.context, f"pr-{number}", preview=preview
+            )
+
+    async def director_plan(self) -> dict[str, Any]:
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=self.payload,
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        plan = response.json()
+        return {
+            **self.payload,
+            "mode": "apply",
+            "reviewed_plan_record_id": plan["records"]["product_retirement_plan_id"],
+            "reviewed_plan_sha256": plan["result"]["plan_sha256"],
+            "confirmation": plan["result"]["confirmation"],
+        }
+
+    async def test_director_retires_never_live_product_with_previews_without_grants(self) -> None:
+        self.use_director_identity()
+        self.record_retirement_safety()
+        payload = await self.director_plan()
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(set(self.deleted), {"testing-app", "preview-6"})
+        self.assertEqual(
+            self.store.read_product_profile_record(self.profile.product).lifecycle_state, "retired"
+        )
+
+    async def test_director_retirement_refuses_missing_usage_or_only_copy_evidence(self) -> None:
+        self.use_director_identity()
+        for changes in (
+            {},
+            {"usage": "in_use"},
+            {"data": "only_copy"},
+            {"production_resources": "shared"},
+        ):
+            with self.subTest(changes=changes):
+                self.store.write_product_profile_record(self.profile)
+                if changes:
+                    self.record_retirement_safety(**changes)
+                payload = await self.director_plan()
+                response = await request(
+                    self.app,
+                    "POST",
+                    "/v1/product-retirement",
+                    headers=self.director_headers,
+                    payload=payload,
+                )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(self.deleted, [])
+                # Use a fresh inert plan key for the next observation.
+                self.director_headers["Idempotency-Key"] += "-next"
+
+    async def test_director_cannot_retire_live_product_or_production_lane(self) -> None:
+        self.use_director_identity()
+        self.record_retirement_safety()
+        payload = await self.director_plan()
+        current = self.store.read_product_profile_record(self.profile.product)
+        self.store.write_product_profile_record(
+            current.model_copy(update={"production_use": "live"})
+        )
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.deleted, [])
+        self.payload["instance"] = "prod"
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=self.payload,
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.deleted, [])
+
     async def test_instance_grant_does_not_expand_to_product_preview_retirement(self) -> None:
         from tests.test_http_app_product_retirement import ProductRetirementHttpTests
 
@@ -357,13 +472,16 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         machine_app = helper._app(
             self.store, actions=("product_retirement.plan", "product_retirement.apply")
         )
-        response = await request(
-            machine_app,
-            "POST",
-            "/v1/product-retirement",
-            headers=helper.headers,
-            payload=self.payload,
-        )
+        from tests.support.auth import scoped_agent_transport
+
+        with scoped_agent_transport():
+            response = await request(
+                machine_app,
+                "POST",
+                "/v1/product-retirement",
+                headers=helper.headers,
+                payload=self.payload,
+            )
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(self.deleted, [])
 

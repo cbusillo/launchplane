@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Protocol
 
 import click
@@ -622,6 +622,7 @@ def apply_live_target_runtime_environment(
     no_cache: bool,
     deploy_timeout_seconds: int | None,
     deploy_trigger: DokployDeployTrigger,
+    before_provider_mutation: Callable[[], None] | None = None,
 ) -> dict[str, object]:
     source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
@@ -777,6 +778,8 @@ def apply_live_target_runtime_environment(
                 desired_env_map=desired_env_map,
                 retired_keys=retired_keys,
             )
+            if before_provider_mutation is not None:
+                before_provider_mutation()
             dokploy_api.update_dokploy_target_env(
                 host=host,
                 token=token,
@@ -818,6 +821,8 @@ def apply_live_target_runtime_environment(
 
     if apply_changes and deploy:
         try:
+            if before_provider_mutation is not None:
+                before_provider_mutation()
             deploy_result = deploy_trigger(
                 host=host,
                 token=token,

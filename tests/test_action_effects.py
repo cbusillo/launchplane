@@ -338,7 +338,7 @@ class ActionEffectTests(unittest.TestCase):
 
 
 class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
-    async def test_director_discord_testing_runtime_plan_without_grants_keeps_write_denied(
+    async def test_director_testing_runtime_plan_without_grants_requires_known_safety(
         self,
     ) -> None:
         import os
@@ -410,8 +410,10 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                             headers={**headers, "Idempotency-Key": "director-write-denied"},
                             json={**payload, "mode": "apply"},
                         )
-                        self.assertEqual(denied.status_code, 403, denied.text)
-                        self.assertEqual(denied.json()["error"]["code"], "authorization_denied")
+                        self.assertEqual(denied.status_code, 409, denied.text)
+                        self.assertEqual(
+                            denied.json()["error"]["code"], "disposable_lane_safety_unknown"
+                        )
                     update_env.assert_not_called()
                     deploy.assert_not_called()
             self.assertEqual(store.read_product_profile_record(profile.product), profile)

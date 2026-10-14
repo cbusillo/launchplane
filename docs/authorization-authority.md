@@ -151,6 +151,23 @@ agent's real dry run, a refused write and a foreign-product scoped-agent probe.
 Existing DB grants are preserved for image rollback; an older image may still
 refuse a Director read without a matching rule. Report that as a tool defect.
 
+## Disposable-lane engineering
+
+The authenticated Director-agent marker also identifies ordinary disposable-lane
+work under the overall direction. `POST /v1/live-target-runtime/apply` authorizes
+an exact owned testing lane; production retains its existing policy evaluation.
+`deploy=false` may stage an independently reviewed separation without starting
+existing shared-storage containers. Staging eligibility never authorizes deploy.
+Preview-inclusive product retirement accepts that identity only for never-live
+products and testing; Client and other machine callers keep their existing rules.
+
+These paths consume [recorded disposable-lane facts](disposable-lanes.md). They
+are generic source behavior, not a new policy grant, administrator identity,
+credential, promotion right or Client-access expansion. Existing runtime key
+safety, transport isolation, reviewed retirement, provider fences and backup
+protection still apply. Missing facts produce `disposable_lane_safety_unknown`.
+Fixing that evidence producer is engineering; never ask for a grant to bypass it.
+
 ## Current Transitional Model
 
 The current service has a DB-backed managed-rule reconciliation endpoint with

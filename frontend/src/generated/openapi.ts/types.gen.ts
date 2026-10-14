@@ -433,6 +433,22 @@ export type DeploymentRecordOutput = {
     wait_for_completion: boolean;
 };
 
+export type DisposableLaneSafety = {
+    binding_sha256: string;
+    context: string;
+    data: 'unknown' | 'reproducible' | 'only_copy';
+    data_evidence: string;
+    expires_at: string;
+    instance: string;
+    isolation_evidence: string;
+    observed_at: string;
+    production_resources: 'unknown' | 'isolated' | 'separation_ready' | 'shared';
+    replaced_target_id: string;
+    replaces_operation_id: string;
+    usage: 'unknown' | 'unused' | 'in_use';
+    usage_evidence: string;
+};
+
 export type DokployTargetIdRecord = {
     context: string;
     instance: string;
@@ -989,6 +1005,7 @@ export type LaunchplanePreviewSummary = {
 export type LaunchplaneProductProfileRecord = {
     default_branch: string;
     display_name: string;
+    disposable_lane_safety?: Array<DisposableLaneSafety>;
     driver_id: string;
     expected_config: ProductExpectedConfigProfile;
     health_path: string;
@@ -4962,6 +4979,7 @@ export type WriterTarget = {
 export type LaunchplaneProductProfileRecordWritable = {
     default_branch: string;
     display_name: string;
+    disposable_lane_safety?: Array<DisposableLaneSafety>;
     driver_id: string;
     expected_config: ProductExpectedConfigProfile;
     health_path: string;

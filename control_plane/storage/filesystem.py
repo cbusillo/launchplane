@@ -5382,6 +5382,77 @@ class FilesystemRecordStore:
             )
             return True
 
+    def supersede_disposable_testing_replacement(
+        self, expected: OdooStableTargetReplacementOperationRecord
+    ) -> bool:
+        from control_plane.disposable_testing_rebuild import (
+            ReplacementBindings,
+            disposable_testing_supersession,
+        )
+        from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
+
+        with self.testing_replacement_execution_lock(expected.operation_id) as check_lock:
+            if check_lock is None:
+                return False
+            check_lock()
+            reservation = _odoo_stable_lane_reservation_id(
+                product=expected.product, context=expected.context, instance=expected.instance
+            )
+            with (
+                self._exclusive_record_lock("odoo_stable_lane_operation_reservations", reservation),
+                self._exclusive_record_lock(
+                    "odoo_stable_target_replacement_operations", expected.operation_id
+                ),
+                self._product_authority_bundle_lock(),
+            ):
+                current = self._read_model_locked(
+                    OdooStableTargetReplacementOperationRecord,
+                    "odoo_stable_target_replacement_operations",
+                    expected.operation_id,
+                )
+                if current != expected:
+                    return False
+                route = _context_instance_record_id(expected.context, expected.instance)
+                try:
+                    bindings = ReplacementBindings(
+                        self._read_product_profile_record_path(
+                            self._record_path("launchplane_product_profiles", expected.product)
+                        ),
+                        self._read_model_locked(DokployTargetRecord, "dokploy_targets", route),
+                        self._read_model_locked(DokployTargetIdRecord, "dokploy_target_ids", route),
+                        self._list_models_locked(DokployTargetIdRecord, "dokploy_target_ids"),
+                        tuple(
+                            item
+                            for item in self._list_models_locked(
+                                RuntimeEnvironmentRecord, "launchplane_runtime_environments"
+                            )
+                            if item.context == expected.context
+                        ),
+                        tuple(
+                            item
+                            for item in self._list_models_locked(
+                                SecretRecord, "launchplane_secrets"
+                            )
+                            if item.context == expected.context
+                            and item.integration == "runtime_environment"
+                        ),
+                        tuple(
+                            item
+                            for item in self._list_models_locked(
+                                SecretBinding, "launchplane_secret_bindings"
+                            )
+                            if item.context == expected.context
+                            and item.integration == "runtime_environment"
+                        ),
+                    )
+                    replacement = disposable_testing_supersession(current, bindings)
+                except (DisposableLaneSafetyUnknown, ValueError, FileNotFoundError):
+                    return False
+                self._write_model_locked(
+                    "odoo_stable_target_replacement_operations", expected.operation_id, replacement
+                )
+                return True
+
     @contextmanager
     def testing_replacement_execution_lock(
         self, operation_id: str

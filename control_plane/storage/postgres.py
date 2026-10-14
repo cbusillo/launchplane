@@ -10362,6 +10362,119 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
             return True
 
+    def supersede_disposable_testing_replacement(
+        self, expected: OdooStableTargetReplacementOperationRecord
+    ) -> bool:
+        from control_plane.disposable_testing_rebuild import (
+            ReplacementBindings,
+            disposable_testing_supersession,
+        )
+        from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
+
+        with self.testing_replacement_execution_lock(expected.operation_id) as check_lock:
+            if check_lock is None:
+                return False
+            check_lock()
+            # Keep lane, operation and safety bindings locked through publication.
+            with self._session_factory() as session:
+                self._lock_odoo_stable_lane(
+                    session,
+                    product=expected.product,
+                    context=expected.context,
+                    instance=expected.instance,
+                )
+                statement = (
+                    select(LaunchplaneOdooStableTargetReplacementOperationRow)
+                    .where(
+                        LaunchplaneOdooStableTargetReplacementOperationRow.operation_id
+                        == expected.operation_id
+                    )
+                    .with_for_update()
+                )
+                row = session.scalar(statement)
+                if row is None:
+                    return False
+                current = self._read_payload(
+                    model_type=OdooStableTargetReplacementOperationRecord, payload=row.payload
+                )
+                if current != expected:
+                    return False
+                profile_row = session.scalar(
+                    select(LaunchplaneProductProfileRow)
+                    .where(LaunchplaneProductProfileRow.product == expected.product)
+                    .with_for_update()
+                )
+                target_row = session.scalar(
+                    select(LaunchplaneDokployTargetRow)
+                    .where(
+                        LaunchplaneDokployTargetRow.context == expected.context,
+                        LaunchplaneDokployTargetRow.instance == expected.instance,
+                    )
+                    .with_for_update()
+                )
+                target_id_row = session.scalar(
+                    select(LaunchplaneDokployTargetIdRow)
+                    .where(
+                        LaunchplaneDokployTargetIdRow.context == expected.context,
+                        LaunchplaneDokployTargetIdRow.instance == expected.instance,
+                    )
+                    .with_for_update()
+                )
+                if profile_row is None or target_row is None or target_id_row is None:
+                    return False
+                bindings = ReplacementBindings(
+                    self._read_product_profile_payload(profile_row.payload),
+                    self._read_payload(model_type=DokployTargetRecord, payload=target_row.payload),
+                    self._read_payload(
+                        model_type=DokployTargetIdRecord, payload=target_id_row.payload
+                    ),
+                    tuple(
+                        self._read_payload(model_type=DokployTargetIdRecord, payload=item.payload)
+                        for item in session.scalars(
+                            select(LaunchplaneDokployTargetIdRow).with_for_update()
+                        )
+                    ),
+                    tuple(
+                        self._read_payload(
+                            model_type=RuntimeEnvironmentRecord, payload=item.payload
+                        )
+                        for item in session.scalars(
+                            select(LaunchplaneRuntimeEnvironmentRow)
+                            .where(LaunchplaneRuntimeEnvironmentRow.context == expected.context)
+                            .with_for_update()
+                        )
+                    ),
+                    tuple(
+                        self._read_payload(model_type=SecretRecord, payload=item.payload)
+                        for item in session.scalars(
+                            select(LaunchplaneSecretRow)
+                            .where(
+                                LaunchplaneSecretRow.context == expected.context,
+                                LaunchplaneSecretRow.integration == "runtime_environment",
+                            )
+                            .with_for_update()
+                        )
+                    ),
+                    tuple(
+                        self._read_payload(model_type=SecretBinding, payload=item.payload)
+                        for item in session.scalars(
+                            select(LaunchplaneSecretBindingRow)
+                            .where(
+                                LaunchplaneSecretBindingRow.context == expected.context,
+                                LaunchplaneSecretBindingRow.integration == "runtime_environment",
+                            )
+                            .with_for_update()
+                        )
+                    ),
+                )
+                try:
+                    replacement = disposable_testing_supersession(current, bindings)
+                except (DisposableLaneSafetyUnknown, ValueError, FileNotFoundError):
+                    return False
+                self._sync_odoo_stable_target_replacement_operation_row(row, replacement)
+                session.commit()
+                return True
+
     def claim_next_odoo_stable_target_replacement_operation_record(
         self,
         *,

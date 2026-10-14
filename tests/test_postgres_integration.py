@@ -9940,6 +9940,21 @@ class RealPostgresServiceTokenRetirementTests(unittest.TestCase):
 
 
 class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
+    def test_disposable_replacement_safety_and_exclusion_on_postgres(self) -> None:
+        from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests
+
+        for scenario in (
+            "test_new_isolated_target_supersedes_a_journalless_testing_fence_without_past_effect_proof",
+            "test_disposable_supersession_refuses_same_target_production_and_protected_data",
+        ):
+            with self.subTest(scenario=scenario), _head_postgres_database() as url:
+                fixture = TestingReplacementRecoveryTests(scenario)
+                fixture.database_url = url
+                try:
+                    getattr(fixture, scenario)()
+                finally:
+                    fixture.doCleanups()
+
     def test_legacy_inspection_with_unrelated_build_history_on_postgres(self) -> None:
         from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests
 
