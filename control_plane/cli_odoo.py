@@ -37,11 +37,6 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 )
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import is_secret_shaped_runtime_key
-from control_plane.workflows.odoo_artifact_publish import (
-    OdooArtifactPublishRequest,
-    OdooArtifactPublishStore,
-    execute_odoo_artifact_publish,
-)
 from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateRequest,
     execute_odoo_prod_backup_gate,
@@ -70,7 +65,6 @@ _callbacks: OdooCliCallbacks | None = None
 def register_odoo_commands(main: click.Group, *, callbacks: OdooCliCallbacks) -> None:
     global _callbacks
     _callbacks = callbacks
-    main.add_command(odoo_artifacts)
     main.add_command(odoo_backup_gates)
     main.add_command(odoo_overrides)
     main.add_command(odoo_targets)
@@ -126,63 +120,9 @@ def _relabel_odoo_override_secret_binding(
     return desired_binding_id, action
 
 
-@click.group("odoo-artifacts")
-def odoo_artifacts() -> None:
-    """Odoo artifact publish driver commands."""
-
-
 @click.group("odoo-backup-gates")
 def odoo_backup_gates() -> None:
     """Odoo backup-gate driver commands."""
-
-
-@odoo_artifacts.command("publish")
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string for Launchplane artifact and runtime-environment records.",
-)
-@click.option("--context", required=True)
-@click.option("--instance", default="testing", show_default=True)
-@click.option("--manifest", "manifest_path", type=click.Path(path_type=Path), required=True)
-@click.option("--devkit-root", type=click.Path(path_type=Path), required=True)
-@click.option("--image-repository", required=True)
-@click.option("--image-tag", required=True)
-@click.option("--platform", multiple=True, help="Target platform passed to odoo-devkit publish.")
-@click.option("--output-file", type=click.Path(path_type=Path), default=None)
-@click.option("--no-cache", is_flag=True, default=False)
-def odoo_artifacts_publish(
-    database_url: str,
-    context: str,
-    instance: str,
-    manifest_path: Path,
-    devkit_root: Path,
-    image_repository: str,
-    image_tag: str,
-    platform: tuple[str, ...],
-    output_file: Path | None,
-    no_cache: bool,
-) -> None:
-    record_store = _store(Path("state"), database_url=database_url)
-    result = execute_odoo_artifact_publish(
-        control_plane_root=_control_plane_root(),
-        record_store=cast(OdooArtifactPublishStore, record_store),
-        request=OdooArtifactPublishRequest(
-            context=context,
-            instance=instance,
-            manifest_path=manifest_path,
-            devkit_root=devkit_root,
-            image_repository=image_repository,
-            image_tag=image_tag,
-            platforms=platform,
-            output_file=output_file,
-            no_cache=no_cache,
-        ),
-    )
-    click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
-    if result.status != "pass":
-        raise click.ClickException(result.error_message or "Odoo artifact publish failed.")
 
 
 @odoo_backup_gates.command("capture")

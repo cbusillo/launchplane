@@ -1364,33 +1364,31 @@ class AuthzManagedPolicyServiceTests(unittest.TestCase):
         self.assertEqual(removed_policy.github_actions, ())
 
     def test_managed_reconcile_retires_one_safe_name_only_compatibility_rule(self) -> None:
-        caller_workflow_ref = (
-            "cbusillo/odoo-tenant-cm/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
-        )
+        caller_workflow_ref = "cbusillo/odoo-tenant-cm/.github/workflows/odoo-target-replacement-plan.yml@refs/heads/main"
         managed_rule = GitHubActionsPolicyRule(
             managed_set_id="operator.launchplane",
-            managed_rule_id="odoo.cm.artifact-publish.inputs",
+            managed_rule_id="odoo.cm.odoo-target-replacement-plan",
             repository="cbusillo/odoo-tenant-cm",
             repository_id="3001",
             repository_owner_id="2001",
             workflow_refs=(caller_workflow_ref,),
             job_workflow_refs=(
                 "cbusillo/launchplane/.github/workflows/"
-                "reusable-odoo-artifact-publish.yml@" + "a" * 40,
+                "reusable-odoo-target-replacement-plan.yml@" + "a" * 40,
             ),
             event_names=("workflow_dispatch",),
             refs=("refs/heads/main",),
             products=("odoo-tenant-cm",),
             contexts=("cm",),
             instances=("*",),
-            actions=("odoo_artifact_publish_inputs.read",),
+            actions=("odoo_target_replacement_plan.read",),
         )
         compatibility_rule = GitHubActionsPolicyRule(
             repository="cbusillo/odoo-tenant-cm",
             workflow_refs=(caller_workflow_ref,),
             contexts=("*",),
             instances=("*",),
-            actions=("odoo_artifact_publish_inputs.read",),
+            actions=("odoo_target_replacement_plan.read",),
         )
         current_policy = LaunchplaneAuthzPolicy(
             schema_version=2,

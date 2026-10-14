@@ -568,14 +568,18 @@ generate its secret and store it through Launchplane's managed-secret path,
 and subscribe the App to "Workflow runs" and "Pull requests". No product
 repository changes.
 
-## Deleted afterwards (#2606)
+## Odoo call-in retirement
 
-The site's `odoo-preview.yml`, `odoo-testing-deploy.yml`,
-`ship-testing-on-merge.yml`, `odoo-post-deploy.yml` and
-`odoo-artifact-publish.yml`, and their reusable workflows, routes and grants.
-Also the profile's stored `repository_id` and `repository_owner_id` copies and
-`POST /v1/product-profiles/repository-identity/apply`, now that the repository
-inventory is read directly.
+Odoo builds, previews and testing deploy from Build events. The Odoo publish
+and build-input routes, reusable publish/preview/testing workflows and their
+workflow request client are removed. CM website's accepted release/drill proof
+allows its three legacy release callers to be removed too. The shared
+request-notice and PR-feedback wrappers remain while generic-web products use
+them. Data and access retirement require their own exact reviewed disposition;
+source deletion is not evidence that those records are gone.
+
+Repository identity comes from repository inventory rather than the old profile
+copy. Its separate compatibility/admin surface is not retired by this change.
 
 For SellYourOutboard and VeriReel (#2740): each repository's
 `launchplane-preview.yml` and `launchplane-preview-notice.yml`, replaced by its

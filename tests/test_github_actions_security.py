@@ -57,9 +57,6 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     Path(".github/workflows/product-prelaunch-rebuild-policy.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-product-prelaunch-rebuild-policy.yml"}
     ),
-    Path(".github/workflows/odoo-artifact-publish.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-odoo-artifact-publish.yml"}
-    ),
     Path(".github/workflows/odoo-testing-route-binding-refresh.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-odoo-testing-route-binding-refresh.yml"}
     ),
@@ -161,9 +158,6 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
             "bounded legacy generic-web deploy reservation inspection",
         )
     ),
-    "cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client": (
-        ActionClassification("First-party cross-repository", "preview request client setup")
-    ),
     "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml": (
         ActionClassification("First-party same-repository", "authorization policy administration")
     ),
@@ -260,12 +254,6 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
         ActionClassification(
             "First-party same-repository",
             "exact-instance product prelaunch rebuild policy mutation",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-odoo-artifact-publish.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "exact-instance immutable Odoo artifact publication",
         )
     ),
     "cbusillo/launchplane/.github/workflows/reusable-tracked-target-logs.yml": (

@@ -33,12 +33,7 @@ from control_plane.drivers import (
 from control_plane.drivers.generic_web_preview_dispatch import (
     GenericWebPreviewDesiredStateEnvelope,
 )
-from control_plane.odoo_artifact_publish_inputs_http import (
-    ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
-    OdooArtifactPublishInputsEnvelope,
-)
 from control_plane.odoo_app_maintenance_http import ODOO_APP_MAINTENANCE_ROUTE
-from control_plane.odoo_artifact_publish_http import ODOO_ARTIFACT_PUBLISH_ROUTE
 from control_plane.odoo_post_deploy_http import ODOO_POST_DEPLOY_ROUTE
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
@@ -352,7 +347,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                 self.assertEqual(product_driver.descriptor.context_patterns, (context,))
                 action_ids = [action.action_id for action in product_driver.available_actions]
                 self.assertEqual(len(action_ids), len(set(action_ids)))
-                self.assertIn("artifact_publish", action_ids)
                 self.assertIn("stable_deploy", action_ids)
 
     def test_context_view_rejects_unknown_profile_driver(self) -> None:
@@ -1023,24 +1017,9 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
 
     def test_odoo_artifact_execution_metadata_matches_descriptors(self) -> None:
-        odoo_descriptor = read_driver_descriptor("odoo")
-        odoo_actions = {action.action_id: action for action in odoo_descriptor.actions}
-        self.assertEqual(
-            odoo_actions["artifact_publish_inputs"].route_path,
-            ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
-        )
-        self.assertEqual(
-            odoo_actions["artifact_publish_inputs"].authz_action,
-            "odoo_artifact_publish_inputs.read",
-        )
-        self.assertEqual(
-            OdooArtifactPublishInputsEnvelope.model_json_schema()["title"],
-            "OdooArtifactPublishInputsEnvelope",
-        )
         self.assert_route_paths_match_descriptor(
             driver_id="odoo",
             route_paths_by_action={
-                "artifact_publish": ODOO_ARTIFACT_PUBLISH_ROUTE,
                 "post_deploy": ODOO_POST_DEPLOY_ROUTE,
                 "app_maintenance": ODOO_APP_MAINTENANCE_ROUTE,
                 "stable_bootstrap": ODOO_STABLE_BOOTSTRAP_ROUTE,
@@ -1200,7 +1179,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         inherited_actions = {
             action.action_id: action for action in drivers["odoo-tenant-cm"].available_actions
         }
-        self.assertIn("artifact_publish", inherited_actions)
         self.assertEqual(
             inherited_actions["stable_deploy"].route_path,
             "/v1/drivers/generic-web/deploy",
