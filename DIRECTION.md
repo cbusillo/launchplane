@@ -24,11 +24,18 @@ verifies which repository and commit an artifact came from, and deploys it
 with the site's runtime settings and secrets. The artifact is the only handoff
 between them.
 
-Launchplane should not depend on GitHub. GitHub is the git host we use
-today; others may follow, including one we run ourselves. New code talks to
+Launchplane should not depend on GitHub. GitHub is the git host and CI we
+use today; others may follow, including one we run ourselves. Code talks to
 GitHub through Launchplane's own names for things (a change, a comment, a
-check result, a merge); old code moves over only when other work touches it.
-Adding another host is its own milestone, when the Director chooses it.
+check result, a merge). GitHub is never an authority: an operation a person
+or agent decides on runs in Launchplane under that person's or agent's own
+identity, and its secrets and variables live in Launchplane. GitHub keeps
+product builds, Launchplane's own CI and deploy, and only the values
+Launchplane needs before it can run: its decryption root, its database
+connection, and an independent emergency rollback. Each operation workflow,
+and the GitHub secrets and variables behind it, is deleted once its
+Launchplane path works. Adding another host is its own milestone, when the
+Director chooses it.
 
 Code and tests are upkeep. A change that deletes code or tests without losing
 a behavior needs no other reason. A test earns its place by catching a real
@@ -45,6 +52,8 @@ accepting is a production action: the review says so in plain words, the
 decision stays bound to the exact candidate it reviewed, an admin can hold
 releases without editing a record, and an admin override is still a hand
 promotion. Admin is a permission, not a role; the Director normally holds it.
+Permissions follow lanes, not products: a testing or preview lane never
+needs the grant its production lane does.
 
 ## Stop Boundaries
 
@@ -88,6 +97,11 @@ blocks that run is the next piece of work.
   reusable Launchplane workflows, and Launchplane-held build settings
 - caller-grant rules for the preview and testing deploys Launchplane starts
   from source-control events
+- GitHub workflows as the way to run an operation a person or agent decides
+  on, and GitHub secrets and variables for anything Launchplane can hold
+- fences, recovery journals and proof-of-safety on testing and preview
+  lanes, and per-product or per-action write grants for the Director's agents
+  there; a testing lane in an unknown state is rebuilt
 
 A retired concept comes back only through a direction change, in a shape that
 fits this file.
