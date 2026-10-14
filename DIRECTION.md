@@ -81,8 +81,7 @@ blocks that run is the next piece of work.
 - Every Code and Codex Lab; old identifiers stay only until their readers
   move
 - hardware-key authorization recovery, disposable canaries, and the dev lane
-- billing and collections, and general planning or work graphs inside
-  Launchplane
+- billing and collections inside Launchplane
 - the blanket authorization freeze; granting access is a stop boundary instead
 - product repositories calling Launchplane: workflow-identity grants, pinned
   reusable Launchplane workflows, and Launchplane-held build settings
