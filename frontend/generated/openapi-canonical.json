@@ -4995,6 +4995,7 @@
             "default": "inspect",
             "enum": [
               "inspect",
+              "collect",
               "record",
               "clear",
               "prepare-rebuild"

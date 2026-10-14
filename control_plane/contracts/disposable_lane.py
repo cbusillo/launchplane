@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 MAX_DISPOSABLE_LANE_SAFETY_SECONDS = 900
+DISPOSABLE_LANE_OBSERVATION_ROUTE = "/v1/disposable-lanes/observations"
 
 
 class DisposableLaneSafety(BaseModel):
@@ -54,7 +55,7 @@ class DisposableLaneSafety(BaseModel):
 class DisposableLaneObservationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["inspect", "record", "clear", "prepare-rebuild"] = "inspect"
+    mode: Literal["inspect", "collect", "record", "clear", "prepare-rebuild"] = "inspect"
     product: str = Field(min_length=1)
     context: str = Field(min_length=1)
     instance: str = Field(min_length=1)

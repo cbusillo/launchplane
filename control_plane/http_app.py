@@ -800,8 +800,13 @@ from control_plane.runtime_key_safety import (
     runtime_key_safety_environment_class,
 )
 from control_plane.contracts.disposable_lane import (
+    DISPOSABLE_LANE_OBSERVATION_ROUTE,
     DisposableLaneSafety,
     DisposableLaneObservationRequest,
+)
+from control_plane.disposable_lane_collection import (
+    collect_disposable_lane_facts,
+    disposable_collection_coverage,
 )
 
 from control_plane.disposable_lanes import (
@@ -23077,10 +23082,53 @@ def create_launchplane_fastapi_app(
                         "data": "unknown",
                         "production_resources": "unknown",
                         "automatic_fact_collection": "unavailable",
+                        "source_coverage": disposable_collection_coverage(),
                     },
                 )
             if fingerprint != observation.expected_binding_sha256:
                 raise ValueError("Observed lane bindings changed; inspect them again.")
+            if observation.mode == "collect":
+                if observation.replaces_operation_id:
+                    raise ValueError("This collector does not qualify replacement resources.")
+                facts = collect_disposable_lane_facts(
+                    store,
+                    context=observation.context,
+                    instance=observation.instance,
+                    target=target,
+                    target_id=target_id,
+                    binding_sha256=fingerprint,
+                )
+                now = datetime.now(timezone.utc)
+                evidence = DisposableLaneSafety.model_validate(
+                    {
+                        "product": profile.product,
+                        "context": observation.context,
+                        "instance": observation.instance,
+                        "binding_sha256": fingerprint,
+                        "observed_by": launchplane_identity_actor(identity),
+                        "observer_kind": "director_agent",
+                        "observed_at": now,
+                        "expires_at": now + timedelta(seconds=observation.lifetime_seconds),
+                        **facts.payload(),
+                    }
+                )
+                store.write_disposable_lane_safety(evidence)
+                return accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={"product_profile": profile.product},
+                    result={
+                        "mode": "collect",
+                        "binding_sha256": fingerprint,
+                        "observed_by": evidence.observed_by,
+                        "observer_kind": evidence.observer_kind,
+                        **facts.payload(),
+                        "observed_at": evidence.observed_at.isoformat(),
+                        "expires_at": evidence.expires_at.isoformat(),
+                        "provider_mutation": False,
+                        "automatic_fact_collection": "limited_service_records",
+                        "source_coverage": disposable_collection_coverage(),
+                    },
+                )
             operation = None
             if observation.replaces_operation_id:
                 operation = store.read_odoo_stable_target_replacement_operation_record(
@@ -25844,7 +25892,7 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
-        "/v1/disposable-lanes/observations",
+        DISPOSABLE_LANE_OBSERVATION_ROUTE,
         record_disposable_lane_safety,
         methods=["POST"],
         status_code=202,

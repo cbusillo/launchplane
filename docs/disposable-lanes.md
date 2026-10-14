@@ -46,12 +46,46 @@ shared with production changes. It permits runtime sync with deployment
 disabled and the bounded empty replacement staging below. Starting a lane requires `isolated`; normal key-safety and sanitized
 restore checks remain in their existing drivers.
 
-**Current producer gap:** Launchplane has a positive staff-testing hold, but no
+## First service collector
+
+`collect` on the observation API resolves two existing service sources itself:
+an exact lane's staff-testing hold establishes protected usage, and the same
+Dokploy target ID and target kind bound to a `prod` lane establishes a shared
+production target. The source references bind the lane snapshot and a digest
+of any matched production records. The authenticated agent requests collection;
+its supplied facts and references cannot affect the result. The existing stored
+actor kind and observation schema remain compatible with the previous image.
+
+This producer publishes only `in_use` and `shared`. Every fact permitting an
+apply stays unknown. Missing holds, distinct target IDs and old preview-generation
+states do not establish occupancy, custody, physical isolation or executor
+exclusion. The response names these coverage limits. Collection calls no provider,
+changes only lane evidence and uses its existing expiry cap. It does not qualify
+replacement resources or change production/Client permissions.
+
+Use the bounded repo client with the installed skill's existing private transport:
+
+```bash
+uv run python scripts/collect-disposable-lane.py collect \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product> --context <context> --instance <instance>
+```
+
+For a preview add its exact `--preview-id`, using the current profile's context
+and slug. The client inspects the binding first and collects against that digest;
+changed bindings refuse. Repeated collection refreshes inert evidence only.
+Refresh after hold, target, profile, runtime or secret-metadata changes. Existing
+`clear` removes only the observation and restores missing evidence. Rollback
+retains observations; the previous service rejects the new `collect` request.
+The catalog integration is coordinated on codex-skills#1308; its vendored
+projection must refresh before advertising this operation.
+
+**Remaining producer gap:** Launchplane has a positive staff-testing hold, but no
 complete authoritative occupancy or only-copy inventory and no supported
 inspection that proves every writable mount/backing store, live database,
 published port and credential relation. The schema does not pretend to supply
-that inspection. There is currently no supported producer of positive safety
-facts. The assertion API cannot create one and a direct DB write is not a
+that inspection. There is no supported producer of facts permitting a disposable
+apply. The assertion API cannot create one and a direct DB write is not a
 qualification procedure. Until a server-backed collector is available, the new apply path
 returns `disposable_lane_safety_unknown`; absent observations never mean unused,
 reproducible or isolated. Operational qualification records the missing sources
