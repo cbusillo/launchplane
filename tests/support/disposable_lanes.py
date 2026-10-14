@@ -10,6 +10,51 @@ from control_plane.disposable_lanes import (
 )
 
 
+def prepare_held_rebuild(store: Any, product: str, context: str) -> Any:
+    from control_plane.contracts.odoo_stable_target_replacement import (
+        OdooStableTargetReplacementApplyRequest,
+    )
+    from control_plane.contracts.odoo_stable_target_replacement_operation import (
+        OdooStableTargetReplacementOperationRecord,
+    )
+    from control_plane.launchplane_reconcile_authorization import (
+        build_launchplane_reconcile_authorization,
+    )
+
+    stamp = datetime.now(timezone.utc).isoformat()
+    operation = OdooStableTargetReplacementOperationRecord(
+        schema_version=2,
+        operation_id=f"held-{product}",
+        product=product,
+        context=context,
+        instance="testing",
+        idempotency_key="fixture-held",
+        request_fingerprint="fixture",
+        created_at=stamp,
+        updated_at=stamp,
+        status="reconciliation_required",
+        phase="apply",
+        error_code="recovery_journal_absent",
+        error_message="Unknown historical effects.",
+        request=OdooStableTargetReplacementApplyRequest(
+            product=product,
+            instance="testing",
+            strategy="recreate-in-place",
+            data_source_mode="existing",
+            allow_empty_data=True,
+        ),
+        authorization=build_launchplane_reconcile_authorization(
+            product=product,
+            context=context,
+            authorized_at=stamp,
+        ),
+    )
+    store.write_odoo_stable_target_replacement_operation_record(operation)
+    if not store.prepare_disposable_testing_replacement(operation, "fixture-director"):
+        raise AssertionError("Fixture failed to capture the retained target.")
+    return store.read_odoo_stable_target_replacement_operation_record(operation.operation_id)
+
+
 def record_safety(
     store: Any,
     product: str,

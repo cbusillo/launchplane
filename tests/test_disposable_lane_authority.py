@@ -121,6 +121,14 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored.model_copy(update={"disposable_lane_safety": ()}), initial)
         self.assertTrue(stored.disposable_lane_safety[0].observed_by)
         self.assertEqual(stored.disposable_lane_safety[0].observer_kind, "director_agent")
+        self.assertEqual(stored.disposable_lane_safety[0].usage, "unknown")
+        self.assertEqual(stored.disposable_lane_safety[0].data, "unknown")
+        self.assertEqual(stored.disposable_lane_safety[0].production_resources, "unknown")
+        with patch(
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
+        ) as driver:
+            self.assertEqual(await self.sync(), 409)
+            driver.assert_not_called()
         with scoped_agent_transport():
             denied = await self.observe(mode="record", expected_binding_sha256=proof)
         self.assertEqual(denied.status_code, 403)
@@ -128,6 +136,9 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         denied = await self.observe(instance="prod")
         self.assertEqual(denied.status_code, 409, denied.text)
         self.assertEqual(self.store.read_product_profile_record("example-site"), stored)
+        cleared = await self.observe(mode="clear", expected_binding_sha256=proof)
+        self.assertEqual(cleared.status_code, 202, cleared.text)
+        self.assertEqual(self.store.read_product_profile_record("example-site"), initial)
 
     async def test_generic_profile_writer_cannot_manufacture_safety(self) -> None:
         from control_plane.service_auth import LocalOperatorPolicyRule
@@ -241,7 +252,7 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             captured,
         )
 
-    async def test_existing_director_grant_does_not_require_a_new_observation(self) -> None:
+    async def test_existing_context_grant_cannot_bypass_protected_testing_safety(self) -> None:
         from control_plane.service_auth import LocalOperatorPolicyRule
 
         policy = LaunchplaneAuthzPolicy(
@@ -252,7 +263,6 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
                     token_labels=("local-owner-write",),
                     products=("example-site",),
                     contexts=(self.context,),
-                    instances=("testing",),
                     actions=("live_target_runtime.apply",),
                 ),
             ),
@@ -267,9 +277,218 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
             return_value={},
         ) as driver:
+            self.assertEqual(await self.sync(), 409)
+            driver.assert_not_called()
+            record_safety(self.store, "example-site", self.context, "testing")
             self.assertEqual(await self.sync(), 202)
             driver.assert_called_once()
-            self.assertIsNone(driver.call_args.kwargs["before_provider_mutation"])
+            self.assertIsNotNone(driver.call_args.kwargs["before_provider_mutation"])
+            driver.reset_mock()
+            record_safety(self.store, "example-site", self.context, "testing", data="only_copy")
+            self.assertEqual(await self.sync(deploy=True), 409)
+            driver.assert_not_called()
+
+    async def test_original_policy_scope_preserves_context_grants_and_does_not_activate_instance_grants(
+        self,
+    ) -> None:
+        from control_plane.service_auth import LocalOperatorPolicyRule
+
+        for instance_scope, scoped_client, expected in (
+            (("prod",), False, 403),
+            (("testing",), True, 403),
+            ((), False, 202),
+        ):
+            with self.subTest(scope=instance_scope, client=scoped_client):
+                policy = LaunchplaneAuthzPolicy(
+                    schema_version=2,
+                    local_operators=(
+                        LocalOperatorPolicyRule(
+                            subjects=("local-owner-agent",),
+                            token_labels=("local-owner-write",),
+                            products=("example-site",),
+                            contexts=(self.context,),
+                            instances=instance_scope,
+                            actions=("live_target_runtime.apply",),
+                        ),
+                    ),
+                )
+                self.app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=policy,
+                    bearer_identity_config=_local_operator_bearer_config(
+                        token_label="local-owner-write"
+                    ),
+                    record_store_factory=lambda: self.store,
+                )
+                with patch(
+                    "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+                    return_value={},
+                ) as driver:
+                    if scoped_client:
+                        with scoped_agent_transport():
+                            status = await self.sync()
+                    else:
+                        status = await self.sync(instance="prod")
+                    self.assertEqual(status, expected)
+                    self.assertEqual(driver.called, expected == 202)
+
+    async def test_rebuild_stages_fresh_empty_resources_without_a_service_grant_and_retains_the_fence(
+        self,
+    ) -> None:
+        from tests.support.disposable_lanes import prepare_held_rebuild
+        from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
+
+        operation = prepare_held_rebuild(self.store, "example-site", self.context)
+        current = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        payload = {
+            "mode": "apply",
+            "operation": "create-compose",
+            "context": self.context,
+            "instance": "testing",
+            "server_id": "fixture-server",
+            "project_name": "fixture-new-project",
+            "environment_name": "fixture-new-environment",
+            "target_name": "fixture-new-testing",
+            "reason": "Stage an empty disposable replacement.",
+            "replaces_operation_id": operation.operation_id,
+            "expected_current_provider_target": current.to_deployed_target_reference().model_dump(
+                mode="json"
+            ),
+        }
+        envelope = DokployTargetSetupEnvelope.model_validate(payload)
+        payload["confirmation"] = envelope.expected_confirmation
+        posted: list[tuple[str, Any]] = []
+        created = {
+            "/api/project.create": {"projectId": "fixture-new-project-id"},
+            "/api/environment.create": {"environmentId": "fixture-new-environment-id"},
+            "/api/compose.create": {"composeId": "fixture-new-compose-id"},
+        }
+
+        def create(_host: str, _token: str, path: str, body: Any) -> Any:
+            posted.append((path, body))
+            if path not in created:
+                raise AssertionError(f"Unexpected provider mutation: {path}")
+            return created[path]
+
+        async def stage() -> Any:
+            return await request(
+                self.app,
+                "POST",
+                "/v1/dokploy-targets/setup",
+                headers={
+                    "Authorization": "Bearer local-operator-token",
+                    "Idempotency-Key": "empty-rebuild",
+                },
+                payload=payload,
+            )
+
+        with (
+            patch(
+                "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
+                return_value=("https://fixture.invalid", "fixture-token"),
+            ),
+            patch(
+                "control_plane.dokploy_target_setup_http.mutate_dokploy_payload_for_target_setup",
+                side_effect=create,
+            ),
+            patch(
+                "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                return_value={
+                    "composeId": created["/api/compose.create"]["composeId"],
+                    "name": "fixture-new-testing",
+                    "appName": "fixture-new-testing",
+                    "serverId": "fixture-server",
+                    "environmentId": created["/api/environment.create"]["environmentId"],
+                    "env": "",
+                    "composeFile": "",
+                    "sourceType": "raw",
+                },
+            ),
+        ):
+            unknown = await stage()
+            self.assertEqual(unknown.status_code, 400, unknown.text)
+            self.assertFalse(posted)
+            # This fixture supplies server facts; the public assertion API
+            # cannot manufacture them while the collector is unavailable.
+            record_safety(self.store, "example-site", self.context, "testing")
+            with scoped_agent_transport():
+                client = await stage()
+            self.assertEqual(client.status_code, 403, client.text)
+            self.assertFalse(posted)
+            applied = await stage()
+            self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertEqual(
+            [path for path, _ in posted],
+            ["/api/project.create", "/api/environment.create", "/api/compose.create"],
+        )
+        self.assertEqual(posted[1][1]["projectId"], created["/api/project.create"]["projectId"])
+        self.assertEqual(
+            posted[2][1]["environmentId"], created["/api/environment.create"]["environmentId"]
+        )
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+            operation,
+        )
+        self.assertEqual(
+            self.store.read_dokploy_target_id_record(
+                context_name=self.context, instance_name="testing"
+            ).target_id,
+            created["/api/compose.create"]["composeId"],
+        )
+
+    async def test_rebuild_setup_cannot_mutate_production_or_reuse_placement(self) -> None:
+        from tests.support.disposable_lanes import prepare_held_rebuild
+        from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
+
+        operation = prepare_held_rebuild(self.store, "example-site", self.context)
+        current = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        payload = {
+            "mode": "apply",
+            "operation": "create-compose",
+            "context": self.context,
+            "instance": "testing",
+            "server_id": "fixture-server",
+            "project_name": "fixture-project",
+            "environment_name": "fixture-environment",
+            "target_name": "fixture-testing",
+            "reason": "Rebuild.",
+            "replaces_operation_id": operation.operation_id,
+            "expected_current_provider_target": current.to_deployed_target_reference().model_dump(
+                mode="json"
+            ),
+        }
+        for delta in (
+            {"instance": "prod"},
+            {"project_id": "production-project"},
+            {"environment_id": "production-environment"},
+            {"domains": ["live.example.invalid"]},
+            {"custom_git_branch": "main"},
+        ):
+            with self.subTest(delta=delta):
+                with self.assertRaises(ValueError):
+                    DokployTargetSetupEnvelope.model_validate({**payload, **delta})
+        payload.pop("replaces_operation_id")
+        payload["instance"] = "prod"
+        payload["confirmation"] = DokployTargetSetupEnvelope.model_validate(
+            payload
+        ).expected_confirmation
+        with patch("control_plane.http_app.execute_dokploy_target_setup") as driver:
+            response = await request(
+                self.app,
+                "POST",
+                "/v1/dokploy-targets/setup",
+                headers={
+                    "Authorization": "Bearer local-operator-token",
+                    "Idempotency-Key": "production-rebuild-denied",
+                },
+                payload=payload,
+            )
+            self.assertEqual(response.status_code, 403, response.text)
+            driver.assert_not_called()
 
     async def test_testing_sync_on_live_product_gets_no_production_authority(self) -> None:
         record_safety(self.store, "example-site", self.context, "testing")
@@ -321,7 +540,15 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
                 product_name=profile.product,
                 context_name=self.context,
                 instance_name=slug,
+                allow_owned_preview=True,
             )
+            with self.assertRaises(LiveTargetRuntimeError):
+                product_lane_declared_keys(
+                    record_store=self.store,
+                    product_name=profile.product,
+                    context_name=self.context,
+                    instance_name=slug,
+                )
             driver.reset_mock()
             self.assertEqual(await self.sync(instance="prod"), 403)
             self.assertEqual(await self.sync(instance="pr-unowned"), 409)

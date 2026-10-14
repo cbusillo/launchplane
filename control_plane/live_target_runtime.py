@@ -385,6 +385,7 @@ def require_product_profile_runtime_keys(
     product_name: str,
     context_name: str,
     instance_name: str,
+    allow_owned_preview: bool = False,
 ) -> set[str]:
     profile = record_store.read_product_profile_record(product_name)
     lane = next(
@@ -395,8 +396,9 @@ def require_product_profile_runtime_keys(
         ),
         None,
     )
-    if lane is None and not _owned_runtime_preview(
-        record_store, profile, context_name, instance_name
+    if lane is None and not (
+        allow_owned_preview
+        and _owned_runtime_preview(record_store, profile, context_name, instance_name)
     ):
         raise LiveTargetRuntimeError(
             f"Product {product_name!r} has no lane for {context_name}/{instance_name}.",
@@ -569,12 +571,16 @@ def product_lane_declared_keys(
     context_name: str,
     instance_name: str,
     profile: LaunchplaneProductProfileRecord | None = None,
+    allow_owned_preview: bool = False,
 ) -> set[str]:
     if profile is None:
         profile = record_store.read_product_profile_record(product_name)
     if not any(
         lane.context == context_name and lane.instance == instance_name for lane in profile.lanes
-    ) and not _owned_runtime_preview(record_store, profile, context_name, instance_name):
+    ) and not (
+        allow_owned_preview
+        and _owned_runtime_preview(record_store, profile, context_name, instance_name)
+    ):
         raise LiveTargetRuntimeError(
             f"Product {product_name!r} has no lane for {context_name}/{instance_name}.",
             code="product_lane_not_found",
@@ -645,6 +651,7 @@ def apply_live_target_runtime_environment(
     deploy_timeout_seconds: int | None,
     deploy_trigger: DokployDeployTrigger,
     before_provider_mutation: Callable[[], None] | None = None,
+    allow_owned_preview: bool = False,
 ) -> dict[str, object]:
     source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
@@ -693,6 +700,7 @@ def apply_live_target_runtime_environment(
                 product_name=product_name.strip(),
                 context_name=context_name,
                 instance_name=instance_name,
+                allow_owned_preview=allow_owned_preview,
             )
             validate_provider_key_retirement(
                 retired_keys=retired_keys,
@@ -781,6 +789,7 @@ def apply_live_target_runtime_environment(
                             product_name=product_name.strip(),
                             context_name=context_name,
                             instance_name=instance_name,
+                            allow_owned_preview=allow_owned_preview,
                         ),
                     )
             finally:

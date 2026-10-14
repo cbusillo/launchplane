@@ -4996,6 +4996,7 @@
             "enum": [
               "inspect",
               "record",
+              "clear",
               "prepare-rebuild"
             ],
             "title": "Mode",
@@ -5609,6 +5610,11 @@
           "reason": {
             "default": "",
             "title": "Reason",
+            "type": "string"
+          },
+          "replaces_operation_id": {
+            "default": "",
+            "title": "Replaces Operation Id",
             "type": "string"
           },
           "runtime_port": {
@@ -54741,6 +54747,16 @@
             "schema": {
               "default": "",
               "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
               "type": "string"
             }
           }

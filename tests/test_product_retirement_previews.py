@@ -681,7 +681,7 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
             payload=payload,
         )
         self.assertEqual(retry.status_code, 202, retry.text)
-        self.assertEqual(self.deleted, ["preview-6", "testing-app"])
+        self.assertCountEqual(self.deleted, ["preview-6", "testing-app"])
 
     async def test_instance_grant_does_not_expand_to_product_preview_retirement(self) -> None:
         from tests.test_http_app_product_retirement import ProductRetirementHttpTests

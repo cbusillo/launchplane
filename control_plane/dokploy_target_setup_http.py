@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Literal
+from collections.abc import Callable
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -62,8 +63,13 @@ class DokployTargetSetupEnvelope(BaseModel):
     runtime_port: int | None = Field(default=None, ge=1, le=65535)
     deploy_timeout_seconds: int | None = Field(default=None, ge=1)
     expected_current_provider_target: DeployedTargetReference | None = None
+    replaces_operation_id: str = ""
     confirmation: str = ""
     reason: str = ""
+
+    @property
+    def expected_confirmation(self) -> str:
+        return "APPLY DOKPLOY TARGET SETUP"
 
     @model_validator(mode="after")
     def _validate_setup(self) -> "DokployTargetSetupEnvelope":
@@ -85,6 +91,23 @@ class DokployTargetSetupEnvelope(BaseModel):
         self.source_type = self.source_type.strip() or "raw"
         self.compose_path = self.compose_path.strip() or "docker-compose.yml"
         self.custom_git_branch = self.custom_git_branch.strip()
+        if self.replaces_operation_id and (
+            self.operation != "create-compose"
+            or self.instance != "testing"
+            or self.expected_current_provider_target is None
+            or self.project_id
+            or self.environment_id
+            or self.target_id
+            or self.custom_git_branch
+            or self.source_type != "raw"
+            or self.domains
+            or self.runtime_port is not None
+            or not self.project_name
+            or not self.environment_name
+        ):
+            raise ValueError(
+                "Disposable rebuilding only creates a fresh empty testing compose in new placement."
+            )
         if self.custom_git_branch:
             if "compose_path" not in supplied_fields:
                 raise ValueError("Repository source setup requires an explicit compose path.")
@@ -360,7 +383,23 @@ def execute_dokploy_target_setup(
     record_store: PostgresRecordStore,
     request: DokployTargetSetupEnvelope,
     required_context_owner: tuple[str, str] | None = None,
+    disposable_checkpoint: Callable[[], None] | None = None,
 ) -> dict[str, object]:
+    def mutate_setup(
+        host: str, token: str, path: str, payload: dict[str, dokploy_api.JsonValue]
+    ) -> dict[str, dokploy_api.JsonValue]:
+        if disposable_checkpoint is not None:
+            if path not in {
+                "/api/project.create",
+                "/api/environment.create",
+                "/api/compose.create",
+            }:
+                raise ValueError(
+                    "Disposable rebuilding cannot mutate an existing provider resource."
+                )
+            disposable_checkpoint()
+        return mutate_dokploy_payload_for_target_setup(host, token, path, payload)
+
     apply_changes = request.mode == "apply"
     ensure_dokploy_target_setup_context_is_not_historical(
         record_store=record_store,
@@ -376,6 +415,22 @@ def execute_dokploy_target_setup(
         )
     source_profile = None
     source_url = ""
+    if disposable_checkpoint is not None:
+        if required_context_owner is None:
+            raise ValueError("Disposable rebuilding requires its exact recorded product owner.")
+        disposable_checkpoint()
+        source_profile = record_store.read_product_profile_record(required_context_owner[0])
+
+    def fetch_setup(
+        host: str, token: str, target_type: Literal["application", "compose"], target_id: str
+    ) -> dict[str, dokploy_api.JsonValue]:
+        if disposable_checkpoint is not None:
+            disposable_checkpoint()
+        payload = fetch_dokploy_target_payload_for_setup(host, token, target_type, target_id)
+        if disposable_checkpoint is not None:
+            disposable_checkpoint()
+        return payload
+
     if request.operation == "create-compose" and request.custom_git_branch:
         from control_plane.dokploy_compose_source_setup import resolve_compose_source_profile
         from control_plane.dokploy.target_source_setup import repository_source_url
@@ -409,7 +464,9 @@ def execute_dokploy_target_setup(
             expected_current_provider_target=request.expected_current_provider_target,
             source_label="service:dokploy-targets:setup:adopt",
             apply=apply_changes,
-            fetch_target_payload=fetch_dokploy_target_payload_for_setup,
+            fetch_target_payload=fetch_setup
+            if disposable_checkpoint
+            else fetch_dokploy_target_payload_for_setup,
         )
     elif request.operation == "repair-domain-authority":
         if request.expected_current_provider_target is None:
@@ -427,7 +484,9 @@ def execute_dokploy_target_setup(
             domains=request.domains,
             expected_current_provider_target=request.expected_current_provider_target,
             apply=apply_changes,
-            fetch_target_payload=fetch_dokploy_target_payload_for_setup,
+            fetch_target_payload=fetch_setup
+            if disposable_checkpoint
+            else fetch_dokploy_target_payload_for_setup,
             fetch_target_domains=fetch_dokploy_target_domains_for_setup,
         )
     elif request.operation == "reconcile-compose-domain":
@@ -470,8 +529,12 @@ def execute_dokploy_target_setup(
             expected_current_provider_target=request.expected_current_provider_target,
             source_label="service:dokploy-targets:setup:create-application",
             apply=apply_changes,
-            mutate_provider=mutate_dokploy_payload_for_target_setup,
-            fetch_target_payload=fetch_dokploy_target_payload_for_setup,
+            mutate_provider=mutate_setup
+            if disposable_checkpoint
+            else mutate_dokploy_payload_for_target_setup,
+            fetch_target_payload=fetch_setup
+            if disposable_checkpoint
+            else fetch_dokploy_target_payload_for_setup,
         )
     else:
         result = create_dokploy_compose_target(
@@ -502,8 +565,12 @@ def execute_dokploy_target_setup(
             expected_current_provider_target=request.expected_current_provider_target,
             source_label="service:dokploy-targets:setup:create-compose",
             apply=apply_changes,
-            mutate_provider=mutate_dokploy_payload_for_target_setup,
-            fetch_target_payload=fetch_dokploy_target_payload_for_setup,
+            mutate_provider=mutate_setup
+            if disposable_checkpoint
+            else mutate_dokploy_payload_for_target_setup,
+            fetch_target_payload=fetch_setup
+            if disposable_checkpoint
+            else fetch_dokploy_target_payload_for_setup,
             required_context_owner=(source_profile.product, request.context)
             if source_profile
             else required_context_owner,

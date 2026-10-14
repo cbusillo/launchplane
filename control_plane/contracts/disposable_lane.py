@@ -46,7 +46,7 @@ class DisposableLaneSafety(BaseModel):
 class DisposableLaneObservationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["inspect", "record", "prepare-rebuild"] = "inspect"
+    mode: Literal["inspect", "record", "clear", "prepare-rebuild"] = "inspect"
     product: str = Field(min_length=1)
     context: str = Field(min_length=1)
     instance: str = Field(min_length=1)

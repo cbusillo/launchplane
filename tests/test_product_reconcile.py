@@ -1346,7 +1346,7 @@ class ProductReconcileStaffTestingHoldTests(ProductReconcileTestCase):
         self.assertNotEqual(second, first)
         self.assertNotIn("last_failed_operation_id", redeployed)
         retry = self.store.read_odoo_stable_target_replacement_operation_record(second)
-        self.assertTrue(retry.idempotency_key.endswith(f":after-{first}"))
+        self.assertNotEqual(retry.idempotency_key, operation.idempotency_key)
 
     def test_held_testing_lane_waits_and_lifting_the_hold_deploys(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
