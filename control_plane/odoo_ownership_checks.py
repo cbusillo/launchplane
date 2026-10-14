@@ -193,7 +193,6 @@ _RULES: tuple[_Rule, ...] = (
         ),
         families=("tenant", "image", "shared_addons", "devkit", "retired"),
         allowed_path_globs=(
-            ".github/workflows/odoo-artifact-publish.yml",
             ".github/workflows/odoo-preview.yml",
             ".github/workflows/odoo-post-deploy.yml",
             ".github/workflows/odoo-prod-rollback.yml",

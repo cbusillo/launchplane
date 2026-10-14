@@ -3,7 +3,7 @@ import json
 from email.message import Message
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Iterator, Literal, cast
+from typing import Iterator, Literal
 from unittest.mock import ANY, Mock, patch
 from urllib.error import HTTPError, URLError
 
@@ -35,12 +35,8 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewDokployDryRunRequest,
     OdooPreviewDokployEndpointSpec,
     OdooPreviewApplyInputsRequest,
-    OdooPreviewWorkflowRequestFacts,
     build_odoo_preview_dokploy_dry_run,
     build_odoo_preview_apply_inputs,
-    build_odoo_preview_apply_inputs_workflow_request,
-    build_odoo_preview_apply_workflow_request,
-    build_odoo_preview_artifact_publish_inputs_workflow_request,
     execute_odoo_preview_dokploy_apply,
     observe_odoo_preview_dokploy_apply,
     odoo_preview_target_is_quiescent,
@@ -241,21 +237,6 @@ class _OdooApplyInputsStoreWithConfiguredGeneratedKey(_OdooApplyInputsStore):
         return bindings
 
 
-def _workflow_facts(
-    *, operation: Literal["refresh", "destroy"] = "refresh"
-) -> OdooPreviewWorkflowRequestFacts:
-    return OdooPreviewWorkflowRequestFacts(
-        product="odoo-tenant-cm-website",
-        context="cm_website",
-        operation=operation,
-        pr_number=42,
-        preview_slug="pr-42",
-        source_git_ref="abc123",
-        run_id="456",
-        run_attempt="2",
-    )
-
-
 def _profile(
     *, domain_certificate_type: Literal["none", "letsencrypt"] = "none"
 ) -> LaunchplaneProductProfileRecord:
@@ -402,243 +383,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         delete_domain.assert_called_once()
         delete_compose.assert_not_called()
-
-    def test_builds_artifact_publish_inputs_workflow_request_shape(self) -> None:
-        request = build_odoo_preview_artifact_publish_inputs_workflow_request(
-            facts=_workflow_facts()
-        )
-
-        self.assertEqual(request.route_path, "/v1/drivers/odoo/artifact-publish-inputs")
-        self.assertEqual(
-            request.payload,
-            {
-                "schema_version": 1,
-                "product": "odoo-tenant-cm-website",
-                "inputs": {
-                    "schema_version": 1,
-                    "context": "cm_website",
-                    "instance": "testing",
-                    "pr_number": 42,
-                    "isolated": True,
-                    "source_git_ref": "abc123",
-                },
-            },
-        )
-        self.assertEqual(
-            request.idempotency_key,
-            "odoo-artifact-publish-inputs:odoo-tenant-cm-website:cm_website:testing:preview-42-run-456-attempt-2",
-        )
-        self.assertEqual(request.fail_result_paths, ("result.input_status",))
-        self.assertEqual(request.response_output_path, "result")
-
-    def test_artifact_publish_inputs_builder_requires_refresh_operation(self) -> None:
-        with self.assertRaisesRegex(ValueError, "requires refresh operation"):
-            build_odoo_preview_artifact_publish_inputs_workflow_request(
-                facts=_workflow_facts(operation="destroy")
-            )
-
-    def test_builds_preview_apply_inputs_workflow_request_shape(self) -> None:
-        request = build_odoo_preview_apply_inputs_workflow_request(
-            facts=_workflow_facts(),
-            manifest_file="/tmp/preview-artifact.json",
-        )
-
-        self.assertEqual(request.route_path, "/v1/drivers/odoo/preview-apply-inputs")
-        self.assertEqual(
-            request.payload,
-            {
-                "schema_version": 1,
-                "product": "odoo-tenant-cm-website",
-                "inputs": {
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm-website",
-                    "operation": "refresh",
-                    "pr_number": 42,
-                    "source_git_ref": "abc123",
-                    "source": "odoo-tenant-cm-website-preview-apply-inputs",
-                    "timeout_seconds": 300,
-                    "no_cache": False,
-                },
-            },
-        )
-        self.assertEqual(
-            request.payload_json_files, {"inputs.manifest": "/tmp/preview-artifact.json"}
-        )
-        self.assertEqual(
-            request.idempotency_key,
-            "odoo-preview-apply-inputs:odoo-tenant-cm-website:pr-42:abc123:inputs-run-456-attempt-2",
-        )
-        self.assertEqual(request.fail_result_paths, ("result.status",))
-        self.assertEqual(request.response_output_path, "result.dry_run_plan")
-
-    def test_apply_inputs_builder_allows_destroy_without_manifest(self) -> None:
-        request = build_odoo_preview_apply_inputs_workflow_request(
-            facts=_workflow_facts(operation="destroy"),
-        )
-
-        self.assertEqual(request.payload_json_files, {})
-        inputs = cast(dict[str, object], request.payload["inputs"])
-        self.assertIsInstance(inputs, dict)
-        self.assertEqual(inputs["operation"], "destroy")
-        self.assertNotIn("preview_slug", inputs)
-        self.assertEqual(
-            request.idempotency_key,
-            "odoo-preview-apply-inputs:odoo-tenant-cm-website:pr-42:destroy:inputs-run-456-attempt-2",
-        )
-
-    def test_apply_inputs_destroy_without_source_ref_uses_destroy_idempotency_token(self) -> None:
-        facts = OdooPreviewWorkflowRequestFacts(
-            product="odoo-tenant-cm-website",
-            context="cm_website",
-            operation="destroy",
-            pr_number=42,
-            preview_slug="pr-42",
-            source_git_ref="",
-            run_id="456",
-            run_attempt="2",
-        )
-
-        request = build_odoo_preview_apply_inputs_workflow_request(facts=facts)
-
-        self.assertEqual(
-            request.idempotency_key,
-            "odoo-preview-apply-inputs:odoo-tenant-cm-website:pr-42:destroy:inputs-run-456-attempt-2",
-        )
-
-    def test_apply_inputs_destroy_uses_stable_idempotency_token_with_source_ref(self) -> None:
-        request = build_odoo_preview_apply_inputs_workflow_request(
-            facts=_workflow_facts(operation="destroy")
-        )
-
-        self.assertEqual(
-            request.idempotency_key,
-            "odoo-preview-apply-inputs:odoo-tenant-cm-website:pr-42:destroy:inputs-run-456-attempt-2",
-        )
-
-    def test_apply_inputs_builder_requires_manifest_for_refresh(self) -> None:
-        with self.assertRaisesRegex(ValueError, "requires manifest_file"):
-            build_odoo_preview_apply_inputs_workflow_request(facts=_workflow_facts())
-
-    def test_builds_preview_apply_workflow_request_shape(self) -> None:
-        request = build_odoo_preview_apply_workflow_request(
-            facts=_workflow_facts(),
-            dry_run_plan_file="/tmp/dry-run.json",
-            plan_id="odoo-preview-plan-test",
-            manifest_file="/tmp/preview-artifact.json",
-        )
-
-        self.assertEqual(request.route_path, "/v1/drivers/odoo/preview-apply")
-        self.assertEqual(
-            request.payload,
-            {
-                "schema_version": 1,
-                "product": "odoo-tenant-cm-website",
-                "apply": {
-                    "timeout_seconds": 600,
-                    "wait_for_deploy": True,
-                },
-            },
-        )
-        self.assertEqual(
-            request.payload_json_files,
-            {
-                "apply.dry_run_plan": "/tmp/dry-run.json",
-                "apply.manifest": "/tmp/preview-artifact.json",
-            },
-        )
-        self.assertEqual(request.idempotency_key, "odoo-preview-plan-test")
-
-    def test_preview_apply_workflow_request_accepts_manual_apply_overrides(self) -> None:
-        request = build_odoo_preview_apply_workflow_request(
-            facts=_workflow_facts(),
-            dry_run_plan_file="/tmp/dry-run.json",
-            plan_id="odoo-preview-plan-test",
-            manifest_file="/tmp/preview-artifact.json",
-            wait_for_deploy=False,
-            smoke_check=True,
-        )
-
-        self.assertEqual(
-            request.payload["apply"],
-            {"timeout_seconds": 600, "wait_for_deploy": False, "smoke_check": True},
-        )
-
-    def test_preview_apply_workflow_request_accepts_refresh_smoke_disabled(self) -> None:
-        request = build_odoo_preview_apply_workflow_request(
-            facts=_workflow_facts(),
-            dry_run_plan_file="/tmp/dry-run.json",
-            plan_id="odoo-preview-plan-test",
-            manifest_file="/tmp/preview-artifact.json",
-            smoke_check=False,
-        )
-
-        apply = cast(dict[str, object], request.payload["apply"])
-        self.assertIsInstance(apply, dict)
-        self.assertEqual(apply["smoke_check"], False)
-
-    def test_destroy_preview_apply_request_skips_manifest_and_smoke(self) -> None:
-        request = build_odoo_preview_apply_workflow_request(
-            facts=_workflow_facts(operation="destroy"),
-            dry_run_plan_file="/tmp/destroy-dry-run.json",
-            plan_id="odoo-preview-plan-test",
-        )
-
-        self.assertEqual(
-            request.payload_json_files, {"apply.dry_run_plan": "/tmp/destroy-dry-run.json"}
-        )
-        apply = cast(dict[str, object], request.payload["apply"])
-        self.assertIsInstance(apply, dict)
-        self.assertNotIn("smoke_check", apply)
-        self.assertEqual(request.idempotency_key, "odoo-preview-plan-test")
-
-    def test_refresh_preview_apply_request_requires_manifest(self) -> None:
-        with self.assertRaisesRegex(ValueError, "requires manifest_file"):
-            build_odoo_preview_apply_workflow_request(
-                facts=_workflow_facts(),
-                dry_run_plan_file="/tmp/dry-run.json",
-                plan_id="odoo-preview-plan-test",
-            )
-
-    def test_preview_apply_workflow_request_requires_dry_run_plan_file(self) -> None:
-        with self.assertRaisesRegex(ValueError, "requires dry_run_plan_file"):
-            build_odoo_preview_apply_workflow_request(
-                facts=_workflow_facts(),
-                dry_run_plan_file=" ",
-                plan_id="odoo-preview-plan-test",
-                manifest_file="/tmp/preview-artifact.json",
-            )
-
-    def test_preview_apply_workflow_request_requires_plan_id(self) -> None:
-        with self.assertRaisesRegex(ValueError, "requires plan_id"):
-            build_odoo_preview_apply_workflow_request(
-                facts=_workflow_facts(),
-                dry_run_plan_file="/tmp/dry-run.json",
-                plan_id=" ",
-                manifest_file="/tmp/preview-artifact.json",
-            )
-
-    def test_builder_accepts_product_profile_preview_slug_token_without_payload_authority(
-        self,
-    ) -> None:
-        facts = OdooPreviewWorkflowRequestFacts(
-            product="odoo-tenant-cm",
-            context="cm",
-            pr_number=42,
-            preview_slug="preview-42",
-            source_git_ref="abc123",
-            run_id="456",
-            run_attempt="2",
-        )
-
-        request = build_odoo_preview_apply_inputs_workflow_request(
-            facts=facts,
-            manifest_file="/tmp/preview-artifact.json",
-        )
-
-        inputs = cast(dict[str, object], request.payload["inputs"])
-        self.assertIsInstance(inputs, dict)
-        self.assertNotIn("preview_slug", inputs)
-        self.assertIn(":preview-42:", request.idempotency_key)
 
     def test_runtime_binding_evidence_keeps_preview_identity_keys_generated(self) -> None:
         bindings = _preview_runtime_bindings(

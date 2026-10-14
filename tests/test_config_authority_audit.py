@@ -1217,68 +1217,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(product_path_default["classification"], "needs_classification")
         self.assertEqual(product_path_default["allow_reason"], "")
 
-    def test_artifact_publish_schema_constants_are_schema_only(self) -> None:
-        for key, value in (
-            ("DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY", "ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON"),
-            (
-                "PUBLISH_RUNTIME_ENVIRONMENT_KEYS",
-                (
-                    "ODOO_VERSION",
-                    "ODOO_BASE_RUNTIME_IMAGE",
-                    "ODOO_BASE_DEVTOOLS_IMAGE",
-                    "ODOO_ADDON_REPOSITORIES",
-                    "OPENUPGRADE_ADDON_REPOSITORY",
-                    "OPENUPGRADELIB_INSTALL_SPEC",
-                    "ODOO_PYTHON_SYNC_SKIP_ADDONS",
-                ),
-            ),
-            ("PUBLISH_RUNTIME_ENVIRONMENT_KEYS[0]", "ODOO_VERSION"),
-            (
-                "PUBLISH_DEPENDENCY_REPOSITORY_KEYS",
-                {
-                    "devkit_repository": "ODOO_DEVKIT_REPOSITORY",
-                    "shared_addons_repository": "ODOO_SHARED_ADDONS_REPOSITORY",
-                },
-            ),
-            ("PUBLISH_DEPENDENCY_REPOSITORY_KEYS.devkit_repository", "ODOO_DEVKIT_REPOSITORY"),
-            ("instance", "testing"),
-        ):
-            with self.subTest(key=key):
-                self.assertEqual(
-                    _allow_reason(
-                        path="control_plane/workflows/odoo_artifact_publish.py",
-                        key=key,
-                        value=value,
-                    ),
-                    "schema_only",
-                )
-                self.assertEqual(
-                    _allow_reason(
-                        path="control_plane/workflows/other_publish.py",
-                        key=key,
-                        value=value,
-                    ),
-                    "",
-                )
-
-        for key, value in (
-            ("DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY", "REAL_PRODUCT_ENVIRONMENT_JSON"),
-            ("PUBLISH_RUNTIME_ENVIRONMENT_KEYS", "ODOO_VERSION"),
-            ("PUBLISH_RUNTIME_ENVIRONMENT_KEYS[0]", "REAL_PRODUCT_DOMAIN"),
-            ("PUBLISH_DEPENDENCY_REPOSITORY_KEYS", "ODOO_DEVKIT_REPOSITORY"),
-            ("PUBLISH_DEPENDENCY_REPOSITORY_KEYS.devkit_repository", "real-owner/real-repo"),
-            ("instance", "prod"),
-        ):
-            with self.subTest(key=key, wrong_value=value):
-                self.assertEqual(
-                    _allow_reason(
-                        path="control_plane/workflows/odoo_artifact_publish.py",
-                        key=key,
-                        value=value,
-                    ),
-                    "",
-                )
-
     def test_python_literal_with_tuple_keys_does_not_crash_scan(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2221,25 +2159,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             "launchplane_self_bootstrap",
         )
-        self.assertEqual(
-            _allow_reason(
-                path=".github/workflows/reusable-odoo-artifact-publish.yml",
-                key="launchplane-url",
-                value="${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",
-            ),
-            "launchplane_self_bootstrap",
-        )
-        self.assertEqual(
-            _allow_reason(
-                path=".github/workflows/reusable-product-driver-testing-deploy.yml",
-                key="launchplane-url",
-                value="${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",
-            ),
-            "launchplane_self_bootstrap",
-        )
         for path, key in (
-            (".github/workflows/odoo-driver-route-smoke.yml", "LAUNCHPLANE_URL"),
-            (".github/workflows/reusable-odoo-preview.yml", "launchplane-url"),
             (
                 ".github/workflows/reusable-generic-web-preview-lifecycle.yml",
                 "launchplane-url",
@@ -2349,186 +2269,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 )
 
         thin_connectors = (
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "idempotency-key",
-                "${{ steps.product.outputs.publish_idempotency_key }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "idempotency-key",
-                "${{ steps.product.outputs.publish_inputs_idempotency_key }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "repository",
-                "${{ steps.publish_inputs.outputs.repository }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "RESOLVED_IMAGE_REPOSITORY",
-                "${{ steps.publish_inputs.outputs.image_repository }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "LAUNCHPLANE_DEVKIT_REPOSITORY",
-                "${{ steps.publish_inputs.outputs.devkit_repository }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "LAUNCHPLANE_SHARED_ADDONS_REPOSITORY",
-                "${{ steps.publish_inputs.outputs.shared_addons_repository }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "token",
-                "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "ODOO_SOURCE_GITHUB_TOKEN",
-                "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "GITHUB_TOKEN",
-                "${{ github.token }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "GHCR_USERNAME",
-                "${{ github.repository_owner }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "username",
-                "${{ github.repository_owner }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "DEFAULT_REPOSITORY",
-                "${{ github.repository }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "GHCR_TOKEN",
-                "${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "GHCR_USERNAME",
-                "${{ github.repository_owner }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "GITHUB_TOKEN",
-                "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "IMAGE_REPOSITORY",
-                "${{ steps.publish_inputs.outputs.image_repository }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "ODOO_GHCR_PUBLISH_TOKEN",
-                "${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "ODOO_SOURCE_GITHUB_TOKEN",
-                "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "LAUNCHPLANE_DEVKIT_REPOSITORY",
-                "${{ steps.publish_inputs.outputs.devkit_repository }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "RESOLVED_IMAGE_REPOSITORY",
-                "${{ steps.publish_inputs.outputs.image_repository }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "LAUNCHPLANE_SHARED_ADDONS_REPOSITORY",
-                "${{ steps.publish_inputs.outputs.shared_addons_repository }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "checkout.repository[1]",
-                "${{ steps.facts.outputs.tenant_repository }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "checkout.repository[2]",
-                "${{ steps.build_repositories.outputs.devkit_repository }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "checkout.repository[3]",
-                "${{ steps.build_repositories.outputs.shared_addons_repository }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "idempotency-key",
-                "${{ steps.publish_inputs_request.outputs.idempotency-key }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "idempotency-key",
-                "${{ steps.dry_run_request.outputs.idempotency-key }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "idempotency-key",
-                "${{ steps.launchplane_request.outputs.idempotency-key }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "launchplane_url",
-                "${{ inputs.launchplane_url }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "launchplane_url",
-                "${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "password",
-                "${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "preview_url",
-                "${{ needs.preview-refresh.outputs.preview_url }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "preview_url",
-                "${{ steps.launchplane.outputs.preview_url }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "run_url",
-                "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "runs-on",
-                "${{ fromJSON(inputs.runs_on) }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "token",
-                "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                "username",
-                "${{ github.repository_owner }}",
-            ),
             (".github/workflows/ci.yml", "context", "."),
             (".github/workflows/build.yml", "context", "."),
             (".github/workflows/build.yml", "file", "docker/Dockerfile.sync"),
@@ -2553,16 +2293,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ".github/workflows/launchplane-deploy.yml",
                 "password",
                 "${{ github.token }}",
-            ),
-            (
-                ".github/workflows/odoo-driver-route-smoke.yml",
-                "odoo-driver-route-smoke",
-                "${{ env.PRODUCT }}:${{ env.CONTEXT_NAME }}",
-            ),
-            (
-                ".github/workflows/odoo-driver-route-smoke.yml",
-                "odoo-driver-route-smoke",
-                "${{ env.PRODUCT }}:${{",
             ),
             (
                 ".github/workflows/odoo-target-replacement-plan.yml",
@@ -2707,41 +2437,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@feature",
             ),
             (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "idempotency-key",
-                "${{ inputs.idempotency_key }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "repository",
-                "${{ vars.DEFAULT_REPOSITORY }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "repository",
-                "$repository",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "RESOLVED_IMAGE_REPOSITORY",
-                "${{ vars.IMAGE_REPOSITORY }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "ODOO_SOURCE_GITHUB_TOKEN",
-                "${{ secrets.OTHER_TOKEN }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "token",
-                "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || 'literal-token' }}",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "GITHUB_TOKEN",
-                "write",
-            ),
-            (
                 ".github/workflows/generic-workflow.yml",
                 "IMAGE_REPOSITORY",
                 "${{ steps.image_metadata.outputs.image_repository }}",
@@ -2850,74 +2545,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     expected_reason,
                 )
 
-    def test_reusable_odoo_workflow_aliases_are_path_scoped(self) -> None:
-        reusable_workflow_cases = (
-            (
-                ".github/workflows/reusable-odoo-preview.yml",
-                ("INPUT_CONTEXT", "${{ inputs.context }}"),
-                ("INPUT_PRODUCT", "${{ inputs.product }}"),
-                ("INPUT_TENANT_PATH", "${{ inputs.tenant_path }}"),
-                ("INPUT_TENANT_REPOSITORY", "${{ inputs.tenant_repository }}"),
-                (
-                    "SOURCE_ACCESS_PROBE_REPOSITORY",
-                    "${{ inputs.source_access_probe_repository }}",
-                ),
-            ),
-        )
-
-        for path, *aliases in reusable_workflow_cases:
-            for key, value in aliases:
-                with self.subTest(path=path, key=key):
-                    self.assertEqual(
-                        _allow_reason(path=path, key=key, value=value),
-                        "operator_supplied_runtime_input",
-                    )
-                    self.assertEqual(
-                        _allow_reason(
-                            path=".github/workflows/generic-workflow.yml",
-                            key=key,
-                            value=value,
-                        ),
-                        "",
-                    )
-                    self.assertEqual(
-                        _allow_reason(path=path, key=key, value="hard-coded-product"),
-                        "",
-                    )
-
-    def test_reusable_odoo_preview_workflow_mechanics_are_path_scoped(self) -> None:
-        path = ".github/workflows/reusable-odoo-preview.yml"
-        for key, value in (
-            ("inputs.runs_on.default", '"ubuntu-latest"'),
-            ("inputs.tenant_path.default", "tenant"),
-            ("inputs.timeout-ms.default", "660000"),
-            ("inputs.wait_for_deploy.default", "true"),
-        ):
-            with self.subTest(key=key):
-                self.assertEqual(
-                    _allow_reason(path=path, key=key, value=value), "thin_connector_input"
-                )
-                self.assertEqual(
-                    _allow_reason(
-                        path=".github/workflows/generic-workflow.yml",
-                        key=key,
-                        value=value,
-                    ),
-                    "",
-                )
-
-        for key, value in (
-            ("inputs.tenant_path.default", "real-tenant-path"),
-            ("inputs.timeout-ms.default", "120000"),
-            ("inputs.wait_for_deploy.default", "false"),
-            ("runs-on", "self-hosted-tenant-runner"),
-            ("checkout.repository[2]", "real-owner/real-devkit"),
-            ("preview_url", "https://preview.example.invalid"),
-            ("idempotency-key", "hard-coded-key"),
-        ):
-            with self.subTest(key=key, value=value):
-                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
-
     def test_remaining_workflow_aliases_are_path_scoped(self) -> None:
         workflow_aliases = (
             (
@@ -2926,10 +2553,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             (
                 ".github/workflows/odoo-config-parameter-override.yml",
-                ("CONTEXT_NAME", "${{ inputs.context }}"),
-            ),
-            (
-                ".github/workflows/odoo-driver-route-smoke.yml",
                 ("CONTEXT_NAME", "${{ inputs.context }}"),
             ),
             (
@@ -2973,30 +2596,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         _allow_reason(path=path, key=key, value="hard-coded-value"),
                         "",
                     )
-
-    def test_artifact_publish_operator_aliases_are_path_scoped(self) -> None:
-        for key, value in (
-            ("INPUT_PRODUCT", "${{ inputs.product }}"),
-            ("CONTEXT_NAME", "${{ inputs.context }}"),
-            ("INSTANCE_NAME", "${{ inputs.instance }}"),
-        ):
-            with self.subTest(key=key):
-                self.assertEqual(
-                    _allow_reason(
-                        path=".github/workflows/reusable-odoo-artifact-publish.yml",
-                        key=key,
-                        value=value,
-                    ),
-                    "operator_supplied_runtime_input",
-                )
-                self.assertEqual(
-                    _allow_reason(
-                        path=".github/workflows/generic-workflow.yml",
-                        key=key,
-                        value=value,
-                    ),
-                    "",
-                )
 
     def test_workflow_jq_response_fields_are_classified_narrowly(self) -> None:
         for key, value in (
@@ -3095,13 +2694,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
 
         for path, key, value in (
             (
-                ".github/workflows/odoo-driver-route-smoke.yml",
-                "ROUTE_PATHS",
-                "/v1/drivers/odoo/artifact-publish-inputs "
-                "/v1/drivers/odoo/preview-apply-inputs "
-                "/v1/drivers/odoo/preview-apply /v1/previews/pr-feedback",
-            ),
-            (
                 ".github/workflows/provider-target-operations.yml",
                 "path",
                 "provider-target-routes.json",
@@ -3110,11 +2702,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 ".github/workflows/provider-target-operations.yml",
                 "path",
                 "provider-target-operation-results/*.json",
-            ),
-            (
-                ".github/workflows/reusable-odoo-artifact-publish.yml",
-                "GITHUB_TOKEN",
-                "${{ github.token }}",
             ),
         ):
             with self.subTest(path=path, key=key):
@@ -3498,42 +3085,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
     def test_remaining_workflow_generated_idempotency_keys_are_path_scoped(
         self,
     ) -> None:
-        route_smoke_key = (
-            "odoo-driver-route-smoke:${{ env.PRODUCT }}:${{ env.CONTEXT_NAME }}:${{ "
-            "env.INSTANCE }}:run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
-        )
-        preview_apply_inputs_key = (
-            "odoo-driver-route-smoke:preview-apply-inputs:${{ "
-            "github.run_id }}:${{ github.run_attempt }}"
-        )
-        preview_apply_key = (
-            "odoo-driver-route-smoke:preview-apply:${{ github.run_id }}:${{ github.run_attempt }}"
-        )
-        preview_pr_feedback_key = (
-            "odoo-driver-route-smoke:preview-pr-feedback:${{ "
-            "github.run_id }}:${{ github.run_attempt }}"
-        )
         for path, key, value in (
-            (
-                ".github/workflows/odoo-driver-route-smoke.yml",
-                "idempotency-key",
-                route_smoke_key,
-            ),
-            (
-                ".github/workflows/odoo-driver-route-smoke.yml",
-                "idempotency-key",
-                preview_apply_inputs_key,
-            ),
-            (
-                ".github/workflows/odoo-driver-route-smoke.yml",
-                "idempotency-key",
-                preview_apply_key,
-            ),
-            (
-                ".github/workflows/odoo-driver-route-smoke.yml",
-                "idempotency-key",
-                preview_pr_feedback_key,
-            ),
             (
                 ".github/workflows/public-ingress-monitor.yml",
                 "idempotency-key",
@@ -3881,26 +3433,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     _allow_reason(path=path, key=key, value=value),
                     "thin_connector_input",
                 )
-
-        testing_deploy_path = ".github/workflows/reusable-product-driver-testing-deploy.yml"
-        for key, value in (
-            ("payload-fields.replacement.product", "${{ steps.request.outputs.product }}"),
-            (
-                "payload-fields.replacement.artifact_id",
-                "${{ needs.resolve.outputs.artifact_id }}",
-            ),
-            (
-                "payload-fields.replacement.source_git_ref",
-                "${{ needs.resolve.outputs.source_git_ref }}",
-            ),
-        ):
-            with self.subTest(path=testing_deploy_path, key=key, value=value):
-                self.assertEqual(
-                    _allow_reason(path=testing_deploy_path, key=key, value=value),
-                    "thin_connector_input",
-                )
-            with self.subTest(path=path, key=key, value=value):
-                self.assertEqual(_allow_reason(path=path, key=key, value=value), "")
 
         for key, value in (
             ("idempotency-key", "${{ inputs.idempotency_key }}"),
