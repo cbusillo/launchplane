@@ -153,3 +153,100 @@ class TestingReplacementResourceHttpTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestingResourceScheduleTests(unittest.TestCase):
+    def test_real_created_compose_defaults_and_provider_app_name_reach_host_readback(self) -> None:
+        from unittest.mock import Mock
+        from uuid import uuid4
+        from control_plane.odoo_testing_resources import OdooTestingResources
+        from control_plane.testing_replacement_resources import run_resource_schedule
+        from control_plane.dokploy import post_deploy
+
+        resources = OdooTestingResources(
+            product="example",
+            context="example",
+            operation_id="retained",
+            target_id="new",
+            namespace=f"lp-testing-{uuid4().hex}",
+        )
+        project = resources.namespace + "-abc123"
+        payload = {
+            "composeId": resources.target_id,
+            "environmentId": "new-environment",
+            "appName": project,
+            "sourceType": "github",
+            "autoDeploy": True,
+            "env": None,
+            "composeFile": None,
+        }
+        target = DokployTargetRecord(
+            context="example", instance="testing", updated_at="2026-01-01T00:00:00Z"
+        )
+        store = Mock()
+        store.read_dokploy_target_record.return_value = target
+        evidence = {
+            "testing_resources_ok": "true",
+            "testing_resources_binding_sha256": resources.binding_sha256,
+            "schedule_id": "new-schedule",
+        }
+        with (
+            patch(
+                "control_plane.testing_replacement_resources.source.read_dokploy_config",
+                return_value=("provider.invalid", "fixture"),
+            ),
+            patch(
+                "control_plane.testing_replacement_resources.api.fetch_dokploy_target_payload",
+                return_value=payload,
+            ),
+            patch(
+                "control_plane.testing_replacement_resources.api.list_deployments_for_target",
+                return_value=(),
+            ),
+            patch(
+                "control_plane.testing_replacement_resources.fetch_dokploy_compose_domains_for_target_setup",
+                return_value=(),
+            ),
+            patch.object(
+                post_deploy,
+                "_resolve_dokploy_schedule_runtime",
+                return_value=("server", "new-server", project, "new-server"),
+            ),
+            patch(
+                "control_plane.testing_replacement_resources.api.find_matching_dokploy_schedule",
+                return_value=None,
+            ),
+            patch.object(post_deploy, "run_manual_data_schedule", return_value=evidence) as run,
+        ):
+            self.assertEqual(
+                run_resource_schedule(
+                    root=Path("."),
+                    store=store,
+                    resources=resources,
+                    mode="readback",
+                    checkpoint=lambda: None,
+                ),
+                evidence,
+            )
+            # The executed artifact carries the actual provider project identity.
+            script = run.call_args.kwargs["schedule_payload"]["script"]
+            self.assertEqual(script, resources.script("readback", compose_project=project))
+            for field, value in (
+                ("customGitSSHKeyId", "existing-key"),
+                ("composeFile", "services: {}"),
+                ("appName", "foreign-project"),
+            ):
+                with self.subTest(field=field):
+                    changed = {**payload, field: value}
+                    with patch(
+                        "control_plane.testing_replacement_resources.api.fetch_dokploy_target_payload",
+                        return_value=changed,
+                    ):
+                        with self.assertRaises(ValueError):
+                            run_resource_schedule(
+                                root=Path("."),
+                                store=store,
+                                resources=resources,
+                                mode="prepare",
+                                checkpoint=lambda: None,
+                            )

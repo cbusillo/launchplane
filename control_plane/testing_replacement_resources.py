@@ -5,6 +5,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections.abc import Callable
 from typing import Literal
+import re
+
+import click
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,6 +34,7 @@ from control_plane.disposable_lanes import (
     disposable_lane_configuration,
 )
 from control_plane.dokploy import api, post_deploy, source
+from control_plane.dokploy.target_source_setup import require_empty_compose_source
 from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
@@ -53,6 +57,10 @@ from control_plane.testing_replacement_recovery import service_testing_operation
 from control_plane.workflows.ship import utc_now_timestamp
 
 ROUTE = TESTING_REPLACEMENT_RESOURCES_ROUTE
+
+
+class IncompleteTestingResources(ValueError):
+    """Actual terminal readback found only absent, service-named empty resources."""
 
 
 class TestingReplacementResourcesRequest(BaseModel):
@@ -233,13 +241,12 @@ def run_resource_schedule(
     )
     # This stage has no application or credential. A caller cannot use resource
     # preparation as permission to inspect or overwrite an already running lane.
+    require_empty_compose_source(payload, resources.target_id)
     if (
-        payload.get("composeId") != resources.target_id
-        or payload.get("appName") != resources.namespace
-        or payload.get("sourceType") != "raw"
+        not re.fullmatch(
+            re.escape(resources.namespace) + r"(?:-[a-z0-9]{6})?", str(payload.get("appName") or "")
+        )
         or payload.get("env") not in (None, "")
-        or payload.get("composeFile") not in (None, "")
-        or payload.get("autoDeploy") not in (None, False)
         or api.list_deployments_for_target(
             host=host, token=token, target_type="compose", target_id=resources.target_id
         )
@@ -269,33 +276,38 @@ def run_resource_schedule(
     if post_deploy._has_running_schedule_deployment(existing):
         raise ValueError("Replacement resource inspection is already running.")
     checkpoint()
-    evidence = post_deploy.run_manual_data_schedule(
-        host=host,
-        token=token,
-        target_definition=source.DokployTargetDefinition(
-            **target.model_dump(exclude={"schema_version", "updated_at", "source_label"}),
-            target_id=resources.target_id,
-        ),
-        schedule_lookup_id=lookup_id,
-        schedule_type=schedule_type,
-        schedule_name=name,
-        schedule_app_name=schedule_app_name,
-        schedule_payload={
-            "name": name,
-            "cronExpression": post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
-            "appName": schedule_app_name,
-            "shellType": "bash",
-            "scheduleType": schedule_type,
-            "command": "control-plane testing replacement resources",
-            "script": resources.script(mode),
-            "serverId": server_id,
-            "userId": lookup_id if schedule_type == "dokploy-server" else None,
-            "enabled": False,
-            "timezone": "UTC",
-        },
-        resolved_schedule_execution_timeout_seconds=300,
-        before_provider_mutation=lambda _phase: checkpoint(),
-    )
+    try:
+        evidence = post_deploy.run_manual_data_schedule(
+            host=host,
+            token=token,
+            target_definition=source.DokployTargetDefinition(
+                **target.model_dump(exclude={"schema_version", "updated_at", "source_label"}),
+                target_id=resources.target_id,
+            ),
+            schedule_lookup_id=lookup_id,
+            schedule_type=schedule_type,
+            schedule_name=name,
+            schedule_app_name=schedule_app_name,
+            schedule_payload={
+                "name": name,
+                "cronExpression": post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+                "appName": schedule_app_name,
+                "shellType": "bash",
+                "scheduleType": schedule_type,
+                "command": "control-plane testing replacement resources",
+                "script": resources.script(mode, compose_project=app_name),
+                "serverId": server_id,
+                "userId": lookup_id if schedule_type == "dokploy-server" else None,
+                "enabled": False,
+                "timezone": "UTC",
+            },
+            resolved_schedule_execution_timeout_seconds=300,
+            before_provider_mutation=lambda _phase: checkpoint(),
+        )
+    except post_deploy.OdooPostDeployReadbackFailure as error:
+        if mode == "readback" and error.evidence.get("testing_resources_incomplete") == "true":
+            raise IncompleteTestingResources("Fresh storage preparation is incomplete.") from error
+        raise
     checkpoint()
     if not resource_readback_passes(evidence, resources):
         raise ValueError("Replacement storage did not pass its actual backing-store readback.")
@@ -318,12 +330,140 @@ class TestingReplacementResourceAdapter:
             {"operation": self.request.operation_id, "product": self.product}
         )
 
+    def configuration_sha256(self) -> str:
+        return canonical_json_sha256(
+            {
+                "profile": self.store.read_product_profile_record(self.product).model_dump(
+                    mode="json"
+                ),
+                "configuration": [
+                    item.model_dump(mode="json")
+                    for item in disposable_lane_configuration(
+                        self.store, self.request.context, "testing"
+                    )
+                ],
+            }
+        )
+
+    def checkpoint(self, expected: str, old_check: Callable[[], None]) -> None:
+        old_check()
+        with self.store.serialize_disposable_testing_resources():
+            resource_context(self.store, product=self.product, request=self.request)
+            if self.configuration_sha256() != expected:
+                raise ValueError("Testing authority changed during resource qualification.")
+
+    def publish(self, resources: OdooTestingResources, schedule_id: str) -> dict[str, object]:
+        profile, operation, preparation, target, target_id, _ = resource_context(
+            self.store, product=self.product, request=self.request
+        )
+        current_runtime = next(
+            iter(
+                self.store.list_runtime_environment_records(
+                    scope="instance", context_name=self.request.context, instance_name="testing"
+                )
+            ),
+            None,
+        )
+        if preparation.resources_binding_sha256:
+            if preparation.resources_binding_sha256 != resources.binding_sha256 or (
+                current_runtime is None
+                or any(
+                    current_runtime.env.get(key) != value
+                    for key, value in resources.volumes.items()
+                )
+            ):
+                raise ValueError("Recorded testing resource authority changed.")
+        else:
+            runtime = RuntimeEnvironmentRecord(
+                **(
+                    {
+                        **current_runtime.model_dump(),
+                        "env": {**current_runtime.env, **resources.volumes},
+                        "updated_at": utc_now_timestamp(),
+                        "source_label": "service:testing-replacement-resources",
+                    }
+                    if current_runtime
+                    else {
+                        "scope": "instance",
+                        "context": self.request.context,
+                        "instance": "testing",
+                        "env": resources.volumes,
+                        "updated_at": utc_now_timestamp(),
+                        "source_label": "service:testing-replacement-resources",
+                    }
+                )
+            )
+            self.store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    required_context_owner=(self.product, self.request.context),
+                    expected_product_profiles=(profile,),
+                    runtime_environment_writes=(
+                        RuntimeEnvironmentWrite(
+                            record=runtime,
+                            expected_record=current_runtime,
+                            expected_absent=current_runtime is None,
+                        ),
+                    ),
+                )
+            )
+            self.store.compare_and_write_disposable_resource_preparation(
+                expected=preparation,
+                replacement=preparation.model_copy(
+                    update={
+                        "resources_binding_sha256": resources.binding_sha256,
+                    }
+                ),
+            )
+        binding = disposable_lane_binding_sha256(
+            profile,
+            target,
+            target_id,
+            configuration=disposable_lane_configuration(
+                self.store, self.request.context, "testing"
+            ),
+        )
+        now = datetime.now(timezone.utc)
+        reference = f"service:testing-resources:{resources.binding_sha256}"
+        self.store.write_disposable_lane_safety(
+            DisposableLaneSafety(
+                product=self.product,
+                context=self.request.context,
+                instance="testing",
+                observed_by="service:testing-replacement-resources",
+                observer_kind="director_agent",
+                binding_sha256=binding,
+                usage="unused",
+                data="reproducible",
+                production_resources="separation_ready",
+                usage_evidence=reference,
+                data_evidence=reference,
+                isolation_evidence=reference,
+                replaces_operation_id=operation.operation_id,
+                replaced_target_id=preparation.retained_target_id,
+                observed_at=now,
+                expires_at=now + timedelta(minutes=5),
+            )
+        )
+        return TestingReplacementResourcesReadback(
+            product=self.product,
+            context=self.request.context,
+            instance="testing",
+            operation_id=operation.operation_id,
+            resources_verified=True,
+            resources_binding_sha256=resources.binding_sha256,
+            binding_sha256=binding,
+            retained_target_preserved=True,
+            production_resources="separation_ready",
+            restore_started=False,
+            schedule_id=schedule_id,
+        ).model_dump(mode="json")
+
     def readback(self) -> dict[str, object]:
         with self.store.testing_replacement_execution_lock(self.request.operation_id) as old_check:
             if old_check is None:
                 raise ValueError("The retained executor is active.")
-            with self.store.serialize_disposable_testing_resources() as metadata_check:
-                profile, operation, preparation, target, target_id, _ = resource_context(
+            with self.store.serialize_disposable_testing_resources():
+                _, operation, preparation, _, _, _ = resource_context(
                     self.store, product=self.product, request=self.request
                 )
                 resources = OdooTestingResources(
@@ -333,89 +473,43 @@ class TestingReplacementResourceAdapter:
                     target_id=preparation.replacement_target_id,
                     namespace=preparation.resource_namespace,
                 )
-                if preparation.resources_binding_sha256 != resources.binding_sha256:
-                    raise ValueError("Replacement allocation has no matching completion receipt.")
-                runtime = next(
-                    iter(
-                        self.store.list_runtime_environment_records(
-                            scope="instance",
-                            context_name=self.request.context,
-                            instance_name="testing",
-                        )
-                    ),
-                    None,
-                )
-                if runtime is None or any(
-                    runtime.env.get(key) != value for key, value in resources.volumes.items()
-                ):
-                    raise ValueError("Testing volume authority changed after resource preparation.")
+                expected = self.configuration_sha256()
 
-                def checkpoint() -> None:
-                    old_check()
-                    metadata_check()
-                    resource_context(self.store, product=self.product, request=self.request)
+            def check() -> None:
+                self.checkpoint(expected, old_check)
 
-                evidence = run_resource_schedule(
-                    root=self.root,
-                    store=self.store,
-                    resources=resources,
-                    mode="readback",
-                    checkpoint=checkpoint,
-                )
-                checkpoint()
-                binding = disposable_lane_binding_sha256(
-                    profile,
-                    target,
-                    target_id,
-                    configuration=disposable_lane_configuration(
-                        self.store, self.request.context, "testing"
-                    ),
-                )
-                now = datetime.now(timezone.utc)
-                reference = f"service:testing-resources:{resources.binding_sha256}"
-                self.store.write_disposable_lane_safety(
-                    DisposableLaneSafety(
-                        product=self.product,
-                        context=self.request.context,
-                        instance="testing",
-                        observed_by="service:testing-replacement-resources",
-                        observer_kind="director_agent",
-                        binding_sha256=binding,
-                        usage="unused",
-                        data="reproducible",
-                        production_resources="separation_ready",
-                        usage_evidence=reference,
-                        data_evidence=reference,
-                        isolation_evidence=reference,
-                        replaces_operation_id=operation.operation_id,
-                        replaced_target_id=preparation.retained_target_id,
-                        observed_at=now,
-                        expires_at=now + timedelta(minutes=5),
-                    )
-                )
-                return {
-                    "product": self.product,
-                    "context": self.request.context,
-                    "instance": "testing",
-                    "operation_id": operation.operation_id,
-                    "resources_verified": True,
-                    "resources_binding_sha256": resources.binding_sha256,
-                    "binding_sha256": binding,
-                    "retained_target_preserved": True,
-                    "production_resources": "separation_ready",
-                    "restore_started": False,
-                    "schedule_id": evidence.get("schedule_id", ""),
-                }
+            evidence = run_resource_schedule(
+                root=self.root,
+                store=self.store,
+                resources=resources,
+                mode="readback",
+                checkpoint=check,
+            )
+            with self.store.serialize_disposable_testing_resources():
+                check()
+                return self.publish(resources, evidence.get("schedule_id", ""))
 
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        # An interrupted create may have made an unrecorded provider object. Do
-        # not infer absence or repeat it from a missing local receipt. A complete
-        # service allocation can be adopted only after a new actual readback.
+        # Observation never repeats a provider write. Completed host work can be
+        # adopted without its lost HTTP/metadata receipt, using actual readback.
         try:
             verified = self.readback()
-        except (ValueError, FileNotFoundError):
+        except IncompleteTestingResources:
+            preparation = self.store.read_disposable_resource_preparation(self.request.operation_id)
+            if (
+                preparation is not None
+                and preparation.replacement_target_id
+                and not preparation.resources_binding_sha256
+            ):
+                # Retry only the storage phase against the already captured
+                # empty compose. Apply cannot create another target. Every
+                # existing volume must match labels, backing, emptiness and
+                # non-use; an active remote schedule refused before this proof.
+                return ProviderObservation("absent", retry_safe=True)
+            return ProviderObservation("unknown")
+        except (ValueError, FileNotFoundError, click.ClickException):
             return ProviderObservation("unknown")
         return ProviderObservation(
             "present",
@@ -444,46 +538,56 @@ class TestingReplacementResourceAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
-        with self.store.testing_replacement_execution_lock(
-            self.request.operation_id
-        ) as old_checkpoint:
-            if old_checkpoint is None:
+        with self.store.testing_replacement_execution_lock(self.request.operation_id) as old_check:
+            if old_check is None:
                 raise ProviderMutationRejectedError(ValueError("The retained executor is active."))
-            with self.store.serialize_disposable_testing_resources() as metadata_checkpoint:
+            with self.store.serialize_disposable_testing_resources():
                 try:
                     plan = resource_plan(self.store, product=self.product, request=self.request)
+                    _, operation, preparation, _, target_id, provider = resource_context(
+                        self.store, product=self.product, request=self.request
+                    )
                 except (ValueError, FileNotFoundError) as error:
                     raise ProviderMutationRejectedError(
                         ValueError("The owned testing lane or retained operation changed.")
                     ) from error
-                if plan["plan_sha256"] != self.request.reviewed_plan_sha256:
+                if preparation.reviewed_plan_sha256:
+                    if preparation.reviewed_plan_sha256 != self.request.reviewed_plan_sha256:
+                        raise ProviderMutationRejectedError(
+                            ValueError("Use the original reviewed resource plan.")
+                        )
+                    plan["plan_sha256"] = preparation.reviewed_plan_sha256
+                elif plan["plan_sha256"] != self.request.reviewed_plan_sha256:
                     raise ProviderMutationRejectedError(
                         ValueError("The reviewed resource plan changed.")
                     )
-                profile, operation, preparation, target, target_id, provider = resource_context(
-                    self.store, product=self.product, request=self.request
-                )
-
-                def checkpoint() -> None:
-                    lease.assert_current()
-                    old_checkpoint()
-                    metadata_checkpoint()
-                    resource_context(self.store, product=self.product, request=self.request)
-
-                if not preparation.replacement_target_id:
-                    host, token = source.read_dokploy_config(control_plane_root=self.root)
-                    old_payload = api.fetch_dokploy_target_payload(
-                        host=host,
-                        token=token,
-                        target_type="compose",
-                        target_id=target_id.target_id,
+                else:
+                    updated = preparation.model_copy(
+                        update={"reviewed_plan_sha256": self.request.reviewed_plan_sha256}
                     )
-                    server_id = str(old_payload.get("serverId") or "").strip()
-                    if not server_id:
-                        raise ProviderMutationRejectedError(
-                            ValueError("Explicit testing placement is unavailable.")
-                        )
-                    lease.checkpoint_effect("create_empty_replacement")
+                    self.store.compare_and_write_disposable_resource_preparation(
+                        expected=preparation,
+                        replacement=updated,
+                    )
+                    preparation = updated
+                expected = self.configuration_sha256()
+
+            def check() -> None:
+                lease.assert_current()
+                self.checkpoint(expected, old_check)
+
+            if not preparation.replacement_target_id:
+                host, token = source.read_dokploy_config(control_plane_root=self.root)
+                old_payload = api.fetch_dokploy_target_payload(
+                    host=host, token=token, target_type="compose", target_id=target_id.target_id
+                )
+                server_id = str(old_payload.get("serverId") or "").strip()
+                if not server_id:
+                    raise ProviderMutationRejectedError(
+                        ValueError("Explicit testing placement is unavailable.")
+                    )
+                lease.checkpoint_effect("create_empty_replacement")
+                with self.store.capture_disposable_resource_adoption(preparation, checkpoint=check):
                     execute_dokploy_target_setup(
                         control_plane_root_path=self.root,
                         record_store=self.store,
@@ -501,134 +605,42 @@ class TestingReplacementResourceAdapter:
                             reason=self.request.reason,
                         ),
                         required_context_owner=(self.product, self.request.context),
-                        disposable_checkpoint=checkpoint,
+                        disposable_checkpoint=check,
                     )
-                    new_id = self.store.read_dokploy_target_id_record(
-                        context_name=self.request.context, instance_name="testing"
-                    )
-                    if new_id.target_id == preparation.retained_target_id:
-                        raise ValueError("Replacement creation retained the old target identity.")
-                    updated = preparation.model_copy(
-                        update={"replacement_target_id": new_id.target_id}
-                    )
-                    self.store.compare_and_write_disposable_resource_preparation(
-                        expected=preparation,
-                        replacement=updated,
-                    )
-                    preparation = updated
-                resources = OdooTestingResources(
-                    product=self.product,
-                    context=self.request.context,
-                    operation_id=operation.operation_id,
-                    target_id=preparation.replacement_target_id,
-                    namespace=preparation.resource_namespace,
-                )
-                lease.checkpoint_effect("prepare_fresh_storage")
-                evidence = run_resource_schedule(
-                    root=self.root,
-                    store=self.store,
-                    resources=resources,
-                    mode="prepare",
-                    checkpoint=checkpoint,
-                )
-                current_runtime = next(
-                    iter(
-                        self.store.list_runtime_environment_records(
-                            scope="instance",
-                            context_name=self.request.context,
-                            instance_name="testing",
-                        )
-                    ),
-                    None,
-                )
-                stamp = utc_now_timestamp()
-                runtime = RuntimeEnvironmentRecord(
-                    **(
-                        {
-                            **current_runtime.model_dump(),
-                            "env": {**current_runtime.env, **resources.volumes},
-                            "updated_at": stamp,
-                            "source_label": "service:testing-replacement-resources",
-                        }
-                        if current_runtime
-                        else {
-                            "scope": "instance",
-                            "context": self.request.context,
-                            "instance": "testing",
-                            "env": resources.volumes,
-                            "updated_at": stamp,
-                            "source_label": "service:testing-replacement-resources",
-                        }
-                    )
-                )
-                checkpoint()
-                self.store.write_product_authority_bundle(
-                    ProductAuthorityBundle(
-                        required_context_owner=(self.product, self.request.context),
-                        expected_product_profiles=(profile,),
-                        runtime_environment_writes=(
-                            RuntimeEnvironmentWrite(
-                                record=runtime,
-                                expected_record=current_runtime,
-                                expected_absent=current_runtime is None,
-                            ),
-                        ),
-                    )
-                )
-                updated = preparation.model_copy(
-                    update={"resources_binding_sha256": resources.binding_sha256}
-                )
-                self.store.compare_and_write_disposable_resource_preparation(
-                    expected=preparation, replacement=updated
-                )
-                checkpoint()
-                current_target = self.store.read_dokploy_target_record(
-                    context_name=self.request.context, instance_name="testing"
-                )
-                current_id = self.store.read_dokploy_target_id_record(
-                    context_name=self.request.context, instance_name="testing"
-                )
-                binding = disposable_lane_binding_sha256(
-                    profile,
-                    current_target,
-                    current_id,
-                    configuration=disposable_lane_configuration(
-                        self.store, self.request.context, "testing"
-                    ),
-                )
-                now = datetime.now(timezone.utc)
-                reference = f"service:testing-resources:{resources.binding_sha256}"
-                self.store.write_disposable_lane_safety(
-                    DisposableLaneSafety(
-                        product=self.product,
-                        context=self.request.context,
-                        instance="testing",
-                        observed_by="service:testing-replacement-resources",
-                        observer_kind="director_agent",
-                        binding_sha256=binding,
-                        usage="unused",
-                        data="reproducible",
-                        production_resources="separation_ready",
-                        usage_evidence=reference,
-                        data_evidence=reference,
-                        isolation_evidence=reference,
-                        replaces_operation_id=operation.operation_id,
-                        replaced_target_id=preparation.retained_target_id,
-                        observed_at=now,
-                        expires_at=now + timedelta(minutes=5),
-                    )
-                )
-                return ProviderMutationOutcome(
-                    202,
-                    provider_operation_response_payload(
-                        trace_id=self.trace_id,
-                        records={"operation": operation.operation_id},
-                        result={
-                            **plan,
-                            "applied": True,
-                            "resources_verified": True,
-                            "resources_binding_sha256": resources.binding_sha256,
-                            "schedule_id": evidence.get("schedule_id", ""),
-                        },
-                    ),
-                )
+                captured = self.store.read_disposable_resource_preparation(operation.operation_id)
+                if captured is None or not captured.replacement_target_id:
+                    raise ValueError("Atomic replacement target capture is unavailable.")
+                preparation = captured
+            resources = OdooTestingResources(
+                product=self.product,
+                context=self.request.context,
+                operation_id=operation.operation_id,
+                target_id=preparation.replacement_target_id,
+                namespace=preparation.resource_namespace,
+            )
+            check()
+            lease.checkpoint_effect("prepare_fresh_storage")
+            evidence = run_resource_schedule(
+                root=self.root,
+                store=self.store,
+                resources=resources,
+                mode="prepare",
+                checkpoint=check,
+            )
+            with self.store.serialize_disposable_testing_resources():
+                check()
+                verified = self.publish(resources, evidence.get("schedule_id", ""))
+            return ProviderMutationOutcome(
+                202,
+                provider_operation_response_payload(
+                    trace_id=self.trace_id,
+                    records={"operation": operation.operation_id},
+                    result={
+                        **plan,
+                        "applied": True,
+                        "resources_verified": True,
+                        "resources_binding_sha256": verified["resources_binding_sha256"],
+                        "schedule_id": verified["schedule_id"],
+                    },
+                ),
+            )

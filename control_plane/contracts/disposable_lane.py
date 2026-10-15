@@ -96,6 +96,7 @@ class DisposableTestingResourcePreparation(DisposableTestingReplacementPreparati
     resource_namespace: str = ""
     replacement_target_id: str = ""
     resources_binding_sha256: str = ""
+    reviewed_plan_sha256: str = ""
 
 
 class DisposableTestingSupersession(BaseModel):

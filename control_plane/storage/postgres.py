@@ -6637,6 +6637,16 @@ class PostgresRecordStore(HumanSessionStore):
         ):
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            adoption_checkpoint = getattr(
+                self._disposable_authority_context, "adoption_checkpoint", None
+            )
+            if adoption_checkpoint is not None:
+                outer = getattr(self._disposable_authority_context, "session", None)
+                self._disposable_authority_context.session = session
+                try:
+                    adoption_checkpoint()
+                finally:
+                    self._disposable_authority_context.session = outer
             self._lock_landing_authority(
                 session,
                 *(
@@ -6847,6 +6857,36 @@ class PostgresRecordStore(HumanSessionStore):
                     step_name="write_dokploy_target",
                 )
             for target_id_record in bundle.dokploy_target_ids:
+                adoption = getattr(self._disposable_authority_context, "adoption", None)
+                if adoption is not None:
+                    if (target_id_record.context, target_id_record.instance) != (
+                        adoption.context,
+                        "testing",
+                    ) or target_id_record.target_id == adoption.retained_target_id:
+                        raise ValueError("Resource adoption must capture its fresh testing target.")
+                    custody = session.get(
+                        LaunchplaneDisposableReplacementPreparationRow, adoption.operation_id
+                    )
+                    allocation = session.get(
+                        LaunchplaneDisposableTestingResourceAllocationRow,
+                        adoption.operation_id,
+                        with_for_update=True,
+                    )
+                    if (
+                        custody is None
+                        or allocation is None
+                        or (
+                            DisposableTestingResourcePreparation.model_validate(
+                                {**custody.payload, **allocation.payload}
+                            )
+                            != adoption
+                        )
+                    ):
+                        raise ValueError("Resource allocation changed before adoption.")
+                    allocation.payload = {
+                        **allocation.payload,
+                        "replacement_target_id": target_id_record.target_id,
+                    }
                 self._merge_authority_row(
                     session,
                     self._dokploy_target_id_row(target_id_record),
@@ -7810,7 +7850,8 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("Replacement resource qualification requires PostgreSQL.")
         held = getattr(self._disposable_authority_context, "session", None)
         if held is not None:
-            raise ValueError("Replacement resource qualification is already running.")
+            yield lambda: held.execute(text("SELECT 1"))
+            return
         with self._session_factory() as session:
             self._lock_product_authority_bundle_write(session)
             self._disposable_authority_context.session = session
@@ -7823,6 +7864,19 @@ class PostgresRecordStore(HumanSessionStore):
             finally:
                 self._disposable_authority_context.session = None
                 session.rollback()
+
+    @contextmanager
+    def capture_disposable_resource_adoption(
+        self, expected: DisposableTestingResourcePreparation, *, checkpoint: Callable[[], None]
+    ) -> Iterator[None]:
+        """Attach new target custody to the same transaction as target adoption."""
+        self._disposable_authority_context.adoption = expected
+        self._disposable_authority_context.adoption_checkpoint = checkpoint
+        try:
+            yield
+        finally:
+            self._disposable_authority_context.adoption = None
+            self._disposable_authority_context.adoption_checkpoint = None
 
     def _database_mutation_timestamp(self, session: Any) -> str:
         if self.database_url.startswith("sqlite"):
@@ -10507,7 +10561,12 @@ class PostgresRecordStore(HumanSessionStore):
         expected: DisposableTestingResourcePreparation,
         replacement: DisposableTestingResourcePreparation,
     ) -> None:
-        mutable = {"resource_namespace", "replacement_target_id", "resources_binding_sha256"}
+        mutable = {
+            "resource_namespace",
+            "replacement_target_id",
+            "resources_binding_sha256",
+            "reviewed_plan_sha256",
+        }
         if expected.model_dump(exclude=mutable) != replacement.model_dump(exclude=mutable):
             raise ValueError("Resource preparation cannot alter retained target custody.")
         for field in mutable:

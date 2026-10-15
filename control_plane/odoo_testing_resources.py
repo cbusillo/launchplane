@@ -32,10 +32,15 @@ class OdooTestingResources(BaseModel):
     def binding_sha256(self) -> str:
         return canonical_json_sha256(self.model_dump(mode="json"))
 
-    def script(self, mode: Literal["prepare", "readback"]) -> str:
+    def script(self, mode: Literal["prepare", "readback"], *, compose_project: str = "") -> str:
         if mode not in {"prepare", "readback"}:
             raise ValueError("Unsupported replacement resource mode.")
-        spec = {**self.model_dump(mode="json"), "volumes": self.volumes, "mode": mode}
+        spec = {
+            **self.model_dump(mode="json"),
+            "volumes": self.volumes,
+            "mode": mode,
+            "compose_project": compose_project or self.namespace,
+        }
         encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
         return (
             "#!/usr/bin/env bash\nset -euo pipefail\npython3 - "
@@ -104,13 +109,17 @@ def main():
     }
     if spec["volumes"] != volumes:
         raise RuntimeError("Invalid testing resource names")
-    binding = {key: value for key, value in spec.items() if key not in {"mode", "volumes"}}
+    project = spec.get("compose_project", namespace)
+    if not re.fullmatch(re.escape(namespace) + r"(?:-[a-z0-9]{6})?", project):
+        raise RuntimeError("Invalid testing compose project")
+    binding = {key: value for key, value in spec.items() if key not in {"mode", "volumes", "compose_project"}}
     digest = hashlib.sha256(
         json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     existing = set(docker("volume", "ls", "--format", "{{.Name}}").splitlines())
     paths = []
     identities = set()
+    missing = False
     for role, name in volumes.items():
         labels = {
             "io.launchplane.testing-resources": digest,
@@ -118,7 +127,8 @@ def main():
         }
         if name not in existing:
             if spec["mode"] != "prepare":
-                raise RuntimeError("Replacement resource is absent")
+                missing = True
+                continue
             arguments = ["volume", "create", "--driver", "local"]
             for key, value in labels.items():
                 arguments.extend(["--label", key + "=" + value])
@@ -156,7 +166,7 @@ def main():
             raise RuntimeError("Container mount inspection is incomplete")
         configuration = inspected[0].get("Config")
         labels = configuration.get("Labels") if isinstance(configuration, dict) else None
-        if isinstance(labels, dict) and labels.get("com.docker.compose.project") == namespace:
+        if isinstance(labels, dict) and labels.get("com.docker.compose.project") == project:
             raise RuntimeError("The new compose already has a container")
         mounts = inspected[0].get("Mounts")
         if not isinstance(mounts, list):
@@ -173,6 +183,10 @@ def main():
             if any(source == path or source in path.parents or path in source.parents for path in paths):
                 raise RuntimeError("Replacement backing storage overlaps an existing mount")
     print("testing_resources_binding_sha256=" + digest)
+    if missing:
+        print("testing_resources_incomplete=true")
+        print("testing_resources_ok=false")
+        sys.exit(1)
     print("testing_resources_ok=true")
 
 
