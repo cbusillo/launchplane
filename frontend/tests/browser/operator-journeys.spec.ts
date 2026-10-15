@@ -1,10 +1,4 @@
-import {
-  expect,
-  test,
-  type ConsoleMessage,
-  type Page,
-  type TestInfo,
-} from "@playwright/test";
+import { expect, test, setClockTime, waitForState, type ConsoleMessage, type Page, type TestInfo } from "./state";
 import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -296,7 +290,7 @@ test.describe("operator journeys", () => {
       const { productsForFixture } = await import(modulePath);
       return productsForFixture("products")[0].environments[0].provenance.refreshed_at;
     });
-    await page.clock.install({ time: new Date(recordedAt) });
+    await setClockTime(page, recordedAt);
     await page.reload();
 
     await expect(productsHeading).toBeFocused();
@@ -497,7 +491,7 @@ test.describe("operator journeys", () => {
       const { environmentForFixture } = await import(modulePath);
       return environmentForFixture("products", "atlas-commerce", "prod").provenance.refreshed_at;
     });
-    await page.clock.install({ time: new Date(recordedAt) });
+    await setClockTime(page, recordedAt);
     await page.reload();
 
     await expect(
@@ -885,6 +879,7 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByText("Evaluating exact readiness", { exact: true }),
     ).toBeVisible();
+    await waitForState(() => page.getByRole("heading", { name: "2 dimensions need attention" }).isVisible(), page).toBe(true);
     await expect(
       page.getByRole("heading", { name: "2 dimensions need attention" }),
     ).toBeVisible();
@@ -900,6 +895,7 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByText("fixture.prod_promotion", { exact: true }),
     ).toHaveCount(0);
+    await waitForState(() => page.getByText("fixture.stable_deploy", { exact: true }).isVisible(), page).toBe(true);
     await expect(
       page.getByText("fixture.stable_deploy", { exact: true }),
     ).toBeVisible();
@@ -1186,7 +1182,7 @@ test.describe("operator journeys", () => {
     await expect(
       page.getByText("Review each change before approving it"),
     ).toBeVisible();
-    await expect(page.getByText("Would rotate")).toBeVisible();
+    await waitForState(() => page.getByText("Would rotate").isVisible(), page).toBe(true);
     await expect(page.getByText("18", { exact: true }).first()).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Approve plan" }),
@@ -1194,6 +1190,7 @@ test.describe("operator journeys", () => {
     await expect(page.getByRole("button", { name: /execute/i })).toHaveCount(0);
     await expect(page.getByText(/secret-version/i)).toHaveCount(0);
     await page.getByRole("button", { name: "Merge-train policy" }).click();
+    await waitForState(() => page.getByText("Managed merge-train policy", { exact: true }).isVisible(), page).toBe(true);
     await expect(
       page.getByText("Managed merge-train policy", { exact: true }),
     ).toBeVisible();
@@ -1218,6 +1215,7 @@ test.describe("operator journeys", () => {
       "privileged-operation-merge-train-policy-review",
     );
     await page.getByRole("button", { name: "Access policy" }).click();
+    await waitForState(() => page.getByRole("heading", { name: "Managed authorization policy review" }).isVisible(), page).toBe(true);
     await expect(
       page.getByRole("heading", { name: "Managed authorization policy review" }),
     ).toBeVisible();
@@ -1274,6 +1272,7 @@ test.describe("operator journeys", () => {
 
     await page.goto("/ui/engineering/privileged-operations?fixture=products");
     await page.getByRole("button", { name: "Access policy" }).click();
+    await waitForState(() => page.getByRole("button", { name: "Prepare evidence access" }).isVisible(), page).toBe(true);
     await page.getByRole("button", { name: "Prepare evidence access" }).click();
     await expect(page.getByText("Preparation outcome is uncertain.")).toBeVisible();
     await expect(page.getByText("Trace: trace-access-policy-uncertain")).toBeVisible();
@@ -1300,7 +1299,8 @@ test.describe("operator journeys", () => {
     });
     await page.goto("/ui/engineering/privileged-operations?fixture=products");
     await page.getByRole("button", { name: "Access policy" }).click();
-    const card = page.locator("section").filter({ has: page.getByRole("heading", { name: "Prepare agent proposal access", exact: true }) });
+    const card = page.getByRole("region", { name: "Prepare agent proposal access", exact: true });
+    await waitForState(() => card.isVisible(), page).toBe(true);
     await expect(card.getByText(/Every plan remains pending until you approve it while signed in/)).toBeVisible();
     await card.getByRole("button", { name: "Prepare proposal access", exact: true }).click();
     await expect(card.getByText("The plan was prepared, but its review is not available yet.")).toBeVisible();
@@ -1338,14 +1338,14 @@ test.describe("operator journeys", () => {
       .filter({
         has: page.getByRole("heading", { name: "Prepare agent product setup" }),
       });
-    await expect(setupCard).toBeVisible();
+    await waitForState(() => setupCard.isVisible(), page).toBe(true);
     await expect(
       setupCard.getByText("cannot change the Client or release review", { exact: false }),
     ).toBeVisible();
     await expect(
       setupCard.getByText("changes nothing until it is approved", { exact: false }),
     ).toBeVisible();
-    await expect(setupCard.getByRole("checkbox")).toHaveCount(3);
+    await waitForState(() => setupCard.getByRole("checkbox").count(), page).toBe(3);
     await expect(setupCard.getByText("Example Live")).toBeVisible();
     const addButton = setupCard.getByRole("button", { name: "Prepare product setup access" });
     await expect(addButton).toBeDisabled();
@@ -1433,7 +1433,7 @@ test.describe("operator journeys", () => {
       .filter({
         has: page.getByRole("heading", { name: "Prepare project evidence access" }),
       });
-    await expect(evidenceCard).toBeVisible();
+    await waitForState(() => evidenceCard.isVisible(), page).toBe(true);
     await expect(
       evidenceCard.getByText(
         "project and environment evidence across all current and future projects",
@@ -1480,7 +1480,7 @@ test.describe("operator journeys", () => {
       ]);
     }
     await expect(evidenceCard.getByRole("button", { name: /approve/i })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Refresh plans" })).toBeVisible();
+    await waitForState(() => page.getByRole("button", { name: "Refresh plans" }).isVisible(), page).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
     await assertDocumentBasics(page);
     await captureScreenshot(page, test.info(), "access-policy-product-evidence-preparation");
@@ -1496,7 +1496,7 @@ test.describe("operator journeys", () => {
           name: "Review administrator product evidence access",
         }),
       });
-    await expect(evidenceReview).toBeVisible();
+    await waitForState(() => evidenceReview.isVisible(), page).toBe(true);
     await expect(
       evidenceReview
         .getByText("all current and future projects", { exact: false })

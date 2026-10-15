@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { waitForState, expect, test } from "./state";
 
 // Production API adapter against local HTTP fixtures; all requests must be reads.
 test("readable initial tab, refresh, explicit denial, and recovery", async ({ page }, testInfo) => {
@@ -43,7 +43,7 @@ test("readable initial tab, refresh, explicit denial, and recovery", async ({ pa
   expect(calls.length).toBe(beforeActiveClick);
   const beforeRefresh = calls.length;
   await page.getByRole("button", { name: "Refresh plans", exact: true }).click();
-  await expect.poll(() => calls.length).toBeGreaterThan(beforeRefresh);
+  await waitForState(() => calls.length).toBeGreaterThan(beforeRefresh);
   await expect(page.getByText("No changes are waiting for review")).toBeVisible();
   expect(calls.slice(beforeRefresh)).toEqual(["managed-merge-train-policy-import"]);
   await page.getByRole("button", { name: "Secret rotation", exact: true }).click();

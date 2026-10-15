@@ -1,12 +1,9 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./state";
 import { READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
 
 for (const view of ["products", "workspace", "environment"] as const) {
   for (const trigger of ["timer", "visibility"] as const) {
     test(`background ${view} ${trigger} expiry shows sign-in and recovers fresh evidence @responsive`, async ({ page }, testInfo) => {
-      const clockStart = Date.now() + 60_000;
-      await page.clock.install({ time: new Date(clockStart) });
-      await page.clock.pauseAt(new Date(clockStart + 60_000));
       await page.goto("/ui/products?fixture=products");
       const fixture = await page.evaluate(async () => {
         const modulePath = "/ui/src/dev-fixtures.ts";
@@ -104,9 +101,6 @@ for (const view of ["products", "workspace", "environment"] as const) {
 
 for (const status of [403, 503]) {
   test(`${status} background failure keeps its meaning without signing out @responsive`, async ({ page }) => {
-    const clockStart = Date.now() + 60_000;
-    await page.clock.install({ time: new Date(clockStart) });
-    await page.clock.pauseAt(new Date(clockStart + 60_000));
     await page.goto("/ui/products?fixture=products");
     const fixture = await page.evaluate(async () => {
       const modulePath = "/ui/src/dev-fixtures.ts";
@@ -130,9 +124,6 @@ for (const status of [403, 503]) {
 }
 
 test("pending identity verification recovers initial load without another sign-in", { tag: "@responsive" }, async ({ page }, testInfo) => {
-  const clockStart = Date.now() + 60_000;
-  await page.clock.install({ time: new Date(clockStart) });
-  await page.clock.pauseAt(new Date(clockStart + 60_000));
   await page.goto("/ui/products?fixture=products");
   await expect(page.locator(".product-directory-row").first()).toBeVisible();
   const fixture = await page.evaluate(async () => {

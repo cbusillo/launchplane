@@ -39,6 +39,13 @@ class DokployOdooCutoverProviderFactory:
             artifact_id=plan.candidate.artifact_id,
             release_id=plan.release_id,
         )
+        if expected is not None:
+            expected = expected.model_copy(
+                update={
+                    "website_settings": plan.website_settings,
+                    "production_website_settings": plan.production_website_settings,
+                }
+            )
         if expected != plan:
             raise ValueError("cutover differs from current persisted lane/artifact authority")
         profile = self.store.read_product_profile_record(plan.new.binding.product_id)

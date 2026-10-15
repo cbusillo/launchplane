@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { waitForState, expect, test } from "./state";
 for (const outcome of ["approved", "unchanged", "denied", "different-lane", "wrong-action", "credential", "changed", "uncertain", "uncertain-stale", "uncertain-denied", "stale", "readback-delayed", "read-only"]) {
   test(`production backup proposal handles ${outcome}`, { tag: "@layout" }, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
@@ -65,7 +65,7 @@ for (const outcome of ["approved", "unchanged", "denied", "different-lane", "wro
     if (["uncertain", "uncertain-stale", "uncertain-denied"].includes(outcome)) {
       await expect(panel.getByRole("button", { name: "Retry original backup approval" })).toBeEnabled(); await expect(file).toBeDisabled(); await page.reload();
       panel = page.getByRole("region", { name: "Production backup authority", exact: true }); await panel.getByRole("button", { name: "Retry original backup approval" }).click();
-      await expect.poll(() => requests.filter(x => x.body.mode === "apply").length).toBe(2); const applies = requests.filter(x => x.body.mode === "apply"); expect(applies[0]).toEqual(applies[1]);
+      await waitForState(() => requests.filter(x => x.body.mode === "apply").length).toBe(2); const applies = requests.filter(x => x.body.mode === "apply"); expect(applies[0]).toEqual(applies[1]);
     }
     if (["stale", "uncertain-stale"].includes(outcome)) { await expect(panel.locator('.operation-notice[data-phase="failed"]')).toBeVisible(); await expect(file).toBeEnabled(); await expect(panel.getByRole("button", { name: "Approve this product's backup policy", exact: true })).toBeDisabled(); return; }
     if (outcome === "uncertain-denied") {
@@ -73,7 +73,7 @@ for (const outcome of ["approved", "unchanged", "denied", "different-lane", "wro
       await expect(file).toBeDisabled(); return;
     }
     if (outcome === "readback-delayed") {
-      await expect.poll(() => releaseReadback !== null).toBe(true);
+      await waitForState(() => releaseReadback !== null).toBe(true);
       await expect(file).toBeDisabled(); await expect(approve).toBeDisabled();
       await (releaseReadback as unknown as () => Promise<void>)();
     }

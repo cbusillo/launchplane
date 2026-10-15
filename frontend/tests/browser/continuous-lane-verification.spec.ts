@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { setClockTime, expect, test } from "./state";
 
 test("declared no website stays reviewable and a failed private check still turns red", async ({ page }) => {
   await page.goto("/ui/products?fixture=products");
@@ -33,7 +33,7 @@ test("declared no website stays reviewable and a failed private check still turn
     return { products, detail, fixtureIdentity: fixtures.fixtureIdentity,
       incidents: fixtures.incidentsForFixture("products", detail.product, "testing") };
   });
-  await page.clock.install({ time: new Date(detail.provenance.refreshed_at) });
+  await setClockTime(page, detail.provenance.refreshed_at);
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "csrf", identity: fixtureIdentity } }));
   await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products } }));
   await page.route(`**/v1/product-profiles/${detail.product}`, route => route.fulfill({ status: 404, json: { status: "error", trace_id: "profile", error: { code: "not_found", message: "No profile in this browser fixture" } } }));
@@ -85,8 +85,7 @@ for (const detail of [false, true]) test(`an open ${detail ? "environment" : "wo
     return { product: product.product, expiry: Date.parse(lane.provenance.stale_after) };
   });
   // Pause one second before expiry so page load cannot spend the fresh window.
-  await page.clock.install({ time: new Date(expiry - 2000) });
-  await page.clock.pauseAt(new Date(expiry - 1000));
+  await setClockTime(page, expiry - 1000);
   await page.goto(`/ui/products/${product}${detail ? "/environments/testing" : ""}?fixture=products`);
   const signal = detail
     ? page.locator(".condition-tile").filter({ hasText: /^Runtime identity/i })
@@ -115,7 +114,7 @@ test("historical runtime match cannot show green without current monitor proof",
       incidents: fixtures.incidentsForFixture("products", detail.product, "testing"),
     };
   });
-  await page.clock.install({ time: new Date(detail.provenance.refreshed_at) });
+  await setClockTime(page, detail.provenance.refreshed_at);
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "csrf", identity: fixtureIdentity } }));
   await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products } }));
   await page.route(`**/v1/products/${detail.product}`, route => route.fulfill({ json: { status: "ok", trace_id: "product", product: products[0] } }));

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./state";
 import type { GovernanceProjectionResponse } from "../../src/generated/openapi.ts";
 
 test("legacy observation chronology stays visible and unqualified", async ({ page }, testInfo) => {
