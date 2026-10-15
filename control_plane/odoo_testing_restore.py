@@ -12,6 +12,7 @@ from control_plane.contracts.product_profile_record import (
     ProductSecretConfigRequirement,
     product_config_requirement_applies_to_lane,
 )
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -52,6 +53,25 @@ class FreshOdooTestingGeneration(BaseModel):
         if (self.source_mode == "container-export") != bool(self.source_binding_sha256):
             raise ValueError("A native source needs its exact binding; SSH generations carry none.")
         return self
+
+
+def fresh_testing_override_record(
+    record: OdooInstanceOverrideRecord | None, generation: FreshOdooTestingGeneration
+) -> OdooInstanceOverrideRecord | None:
+    """Render the same generation URL at deployment and restore, without editing intent."""
+    if record is None:
+        return None
+    if (record.context, record.instance) != (generation.context, generation.instance):
+        raise ValueError("Fresh testing overrides belong to another lane.")
+    if record.website_bootstrap is None:
+        return record
+    return record.model_copy(
+        update={
+            "website_bootstrap": record.website_bootstrap.model_copy(
+                update={"canonical_url": "https://" + generation.domain_host}
+            )
+        }
+    )
 
 
 def fresh_testing_mode_refusal(
@@ -1109,7 +1129,12 @@ def require_distinct_testing_credentials(
         )
 
 
-def fresh_testing_authority_sha256(store: object, generation: FreshOdooTestingGeneration) -> str:
+def fresh_testing_authority_sha256(
+    store: object,
+    generation: FreshOdooTestingGeneration,
+    *,
+    include_override_results: bool = False,
+) -> str:
     """Bind rendered values to recipient and supported-source version metadata."""
     from typing import cast
     from control_plane import secrets
@@ -1176,6 +1201,21 @@ def fresh_testing_authority_sha256(store: object, generation: FreshOdooTestingGe
             ).model_dump(mode="json"),
             "target_id": generation.target_id,
             "configuration": sorted(payloads, key=lambda item: json.dumps(item, sort_keys=True)),
-            "overrides": override.model_dump(mode="json") if override is not None else None,
+            # Apply results are observations written by this very execution. Bind
+            # every intent field, but do not make publishing a result look like
+            # a new restore intent. Legacy journals retain their exact digest;
+            # an absent preimage is never permission to rebind a held operation.
+            "overrides": override.model_dump(
+                mode="json",
+                exclude={}
+                if include_override_results
+                else {
+                    "last_apply": {"attempted", "status", "applied_at", "detail"},
+                    "updated_at": True,
+                    "source_label": True,
+                },
+            )
+            if override is not None
+            else None,
         }
     )
