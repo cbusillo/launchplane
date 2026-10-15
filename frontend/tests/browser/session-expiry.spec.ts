@@ -4,6 +4,9 @@ import { READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
 for (const view of ["products", "workspace", "environment"] as const) {
   for (const trigger of ["timer", "visibility"] as const) {
     test(`background ${view} ${trigger} expiry shows sign-in and recovers fresh evidence @responsive`, async ({ page }, testInfo) => {
+      const clockStart = Date.now() + 60_000;
+      await page.clock.install({ time: new Date(clockStart) });
+      await page.clock.pauseAt(new Date(clockStart + 60_000));
       await page.goto("/ui/products?fixture=products");
       const fixture = await page.evaluate(async () => {
         const modulePath = "/ui/src/dev-fixtures.ts";
@@ -12,8 +15,6 @@ for (const view of ["products", "workspace", "environment"] as const) {
         return { products, product: products[0], identity: module.fixtureIdentity,
           detail: module.environmentForFixture("products", products[0].product, "testing") };
       });
-      await page.clock.install();
-      await page.clock.pauseAt(new Date());
       let signedIn = false;
       let expired = false;
       let recovered = false;
@@ -103,14 +104,15 @@ for (const view of ["products", "workspace", "environment"] as const) {
 
 for (const status of [403, 503]) {
   test(`${status} background failure keeps its meaning without signing out @responsive`, async ({ page }) => {
+    const clockStart = Date.now() + 60_000;
+    await page.clock.install({ time: new Date(clockStart) });
+    await page.clock.pauseAt(new Date(clockStart + 60_000));
     await page.goto("/ui/products?fixture=products");
     const fixture = await page.evaluate(async () => {
       const modulePath = "/ui/src/dev-fixtures.ts";
       const module = await import(modulePath);
       return { products: module.productsForFixture("products"), identity: module.fixtureIdentity };
     });
-    await page.clock.install();
-    await page.clock.pauseAt(new Date());
     let failing = false;
     await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: fixture.identity } }));
     await page.route("**/v1/products", route => route.fulfill(failing
@@ -126,3 +128,34 @@ for (const status of [403, 503]) {
     await expect(page.locator(".inline-error")).toContainText(/last|stale|cached/i);
   });
 }
+
+test("pending identity verification recovers initial load without another sign-in", { tag: "@responsive" }, async ({ page }, testInfo) => {
+  const clockStart = Date.now() + 60_000;
+  await page.clock.install({ time: new Date(clockStart) });
+  await page.clock.pauseAt(new Date(clockStart + 60_000));
+  await page.goto("/ui/products?fixture=products");
+  await expect(page.locator(".product-directory-row").first()).toBeVisible();
+  const fixture = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const module = await import(modulePath);
+    return { products: module.productsForFixture("products"), identity: module.fixtureIdentity };
+  });
+  let sessionReads = 0;
+  await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { error: { code: "authorization_denied" } } }));
+  await page.route("**/v1/auth/session", route => {
+    sessionReads++;
+    return route.fulfill(sessionReads === 1
+      ? { status: 503, json: { error: { code: "identity_verification_pending", message: "Verification in progress" } } }
+      : { json: { status: "ok", csrf_token: "fixture", identity: fixture.identity } });
+  });
+  await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", products: fixture.products } }));
+  await page.goto("/ui/products");
+  await expect(page.locator(".session-card h1")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toHaveCount(0);
+  await page.screenshot({ path: `../tmp/browser-smoke/session-renewal-pending-${testInfo.project.name}.png`, fullPage: true });
+  await page.clock.runFor(60_000);
+  await expect(page.locator(".product-directory-row").first()).toBeVisible();
+  await page.getByRole("button", { name: "Refresh current evidence" }).click();
+  await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toHaveCount(0);
+  await page.screenshot({ path: `../tmp/browser-smoke/session-renewal-recovered-${testInfo.project.name}.png`, fullPage: true });
+});
