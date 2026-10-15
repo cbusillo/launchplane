@@ -1996,6 +1996,7 @@ export type OdooTestingDrillEvidence = {
     deployment_record_id: string;
     disposal_attention: number;
     disposal_pending: number;
+    disposal_pending_bindings: Array<string>;
     observed_at: string;
     operation_id: string;
     status: 'queued' | 'pass' | 'fail' | 'skipped';

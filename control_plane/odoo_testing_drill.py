@@ -493,9 +493,15 @@ class OdooTestingDrillScheduler:
                     )
             if operation.result is not None:
                 evidence = operation.result.post_deploy_override_evidence
-                if evidence.get("post_deploy_readback_testing_drill_disposal_deferred") == "true":
+                if (
+                    evidence.get("post_deploy_readback_testing_drill_disposal_deferred") == "true"
+                    and "disposal_status" not in payload
+                ):
                     payload.update(disposal_status="deferred", disposal_pending=1)
-                    if payload.get("failure_step") != "testing_disposal_deferred":
+                    if (
+                        payload["status"] != "fail"
+                        and payload.get("failure_step") != "testing_disposal_deferred"
+                    ):
                         payload.update(
                             failure_step="testing_disposal_deferred",
                             failure_trace=payload["trace"],
@@ -626,7 +632,16 @@ def testing_drill_evidence(
     if receipt is None:
         return None
     payload = dict(receipt.response_payload)
-    payload["disposal_pending"] = len(store.list_odoo_testing_disposal_receipts(product, context))
+    from control_plane._odoo_testing_storage_program import MAX_DISPOSALS_PER_PASS
+
+    pending = store.list_odoo_testing_disposal_receipts(product, context)
+    payload["disposal_pending"] = len(pending)
+    payload["disposal_pending_bindings"] = [
+        cast(dict[str, JsonValue], item.response_payload["planned_generation"])[
+            "discard_copy_binding"
+        ]
+        for item in pending[:MAX_DISPOSALS_PER_PASS]
+    ]
     payload["disposal_attention"] = len(
         store.list_odoo_testing_disposal_receipts(product, context, include_retained=True)
     ) - cast(int, payload["disposal_pending"])

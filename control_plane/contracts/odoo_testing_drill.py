@@ -40,4 +40,5 @@ class OdooTestingDrillEvidence(BaseModel):
     alert_delivered: bool = False
     disposal_pending: int = Field(default=0, ge=0)
     disposal_attention: int = Field(default=0, ge=0)
+    disposal_pending_bindings: tuple[str, ...] = ()
     storage_status: Literal["unknown", "pass", "insufficient", "unconfigured"] = "unknown"

@@ -36,6 +36,10 @@ def storage_key(operation_id: str) -> str:
     return "storage:" + operation_id
 
 
+def completed_storage_key(operation_id: str, evidence: dict[str, Any]) -> str:
+    return storage_key(operation_id) + ":completed:" + canonical_json_sha256(evidence)
+
+
 def storage_receipt(
     store: PostgresRecordStore, operation_id: str
 ) -> LaunchplaneIdempotencyRecord | None:
@@ -210,9 +214,15 @@ def prepare_drill_storage(
 
     def perform(dispatch_guard: MaintenanceDispatch) -> dict[str, object]:
         safety = store.read_disposable_lane_safety(operation.product, operation.context, "testing")
-        if safety is None:
+        if copies and safety is None:
             raise DrillPrerequisite("usage_custody_or_isolation_unverified")
-        spec = maintenance_spec(store, generation, copies, budget, safety.expires_at.timestamp())
+        spec = maintenance_spec(
+            store,
+            generation,
+            copies,
+            budget,
+            safety.expires_at.timestamp() if safety is not None else 0,
+        )
         return (execute or execute_maintenance)(root, generation.target_id, spec, dispatch_guard)
 
     from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
@@ -235,7 +245,11 @@ def prepare_drill_storage(
     if store.list_odoo_testing_disposal_receipts(operation.product, operation.context):
         # A healthy copy remains healthy. Refuse a *new* capture while old
         # witnessed storage is still deferred, rather than accumulating copies.
-        raise DrillPrerequisite("testing_disposal_deferred")
+        raise DrillPrerequisite(
+            "testing_disposal_deferred"
+            if "deferred" in cast(list[str], result["disposals"])
+            else "testing_storage_reconciliation_pending"
+        )
 
 
 def capacity_admission_binding(generation: FreshOdooTestingGeneration, operation: Any) -> str:

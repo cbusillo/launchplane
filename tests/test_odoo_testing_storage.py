@@ -13,7 +13,10 @@ from typing import Any, cast
 import unittest
 from unittest.mock import Mock, patch
 
-from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
+from control_plane._odoo_testing_storage_program import (
+    STORAGE_MAINTENANCE_LIBRARY,
+    MAX_DISPOSALS_PER_PASS,
+)
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.odoo_testing_drill import (
     DRILL_SCOPE,
@@ -23,7 +26,11 @@ from control_plane.odoo_testing_drill import (
     drill_receipt,
     lane_key,
 )
-from control_plane.odoo_testing_storage import prepare_drill_storage, storage_receipt
+from control_plane.odoo_testing_storage import (
+    prepare_drill_storage,
+    storage_receipt,
+    completed_storage_key,
+)
 from tests.test_odoo_testing_drill import TestingDrillScenario
 
 
@@ -149,12 +156,89 @@ class TestingStorageTests(TestingDrillScenario):
         self.assertEqual(intent.response_payload["phase"], "dispatching")
         self.old_receipt("later")
         execute = Mock(return_value={"capacity": True, "disposals": ["disposed"]})
-        with self.assertRaisesRegex(DrillPrerequisite, "testing_disposal_deferred"):
+        with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_reconciliation_pending"):
             self.prepare(execute)
         self.assertEqual(len(execute.call_args.args[2]["storage_maintenance"]["copies"]), 1)
         reconciled = storage_receipt(self.store, self.worker.operation_id)
         assert reconciled is not None
         self.assertEqual(reconciled.response_payload["receipts"], [original.idempotency_key])
+
+    def test_legacy_backlog_requeues_same_slot_and_finishes_before_capture(self) -> None:
+        from uuid import uuid4
+        from control_plane.workflows.odoo_stable_operation_worker import (
+            _execute_target_replacement_with_checkpoint,
+        )
+
+        for index in range(MAX_DISPOSALS_PER_PASS + 1):
+            receipt = self.old_receipt(str(index))
+            receipt.response_payload.pop("disposal_status")
+            receipt.response_payload["planned_generation"].update(
+                discard_drill_database="lp_drill_" + uuid4().hex,
+                discard_copy_binding=uuid4().hex + uuid4().hex,
+            )
+            self.store.write_idempotency_record(receipt)
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.DurableOperationAuthorizationGuard"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker._start_target_replacement_heartbeat"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply"
+            ) as apply,
+        ):
+            self.assertTrue(
+                _execute_target_replacement_with_checkpoint(
+                    record_store=self.store,
+                    control_plane_root_path=Path("."),
+                    operation=self.worker,
+                    lease_owner=self.worker.lease_owner,
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                    execution_checkpoint=lambda phase: None,
+                )
+            )
+        apply.assert_not_called()
+        queued = self.store.read_odoo_stable_target_replacement_operation_record(
+            self.worker.operation_id
+        )
+        self.assertEqual(queued.status, "pending")
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context),
+            self.gen,
+        )
+        self.scheduler.run_once()
+        self.notifications.assert_not_called()
+        self.assertEqual(self.evidence().disposal_pending, 1)
+        reclaimed = self.store.claim_next_odoo_stable_target_replacement_operation_record(
+            lease_owner="storage-fixture",
+            claimed_at=datetime.fromtimestamp(self.now, timezone.utc).isoformat(),
+            lease_expires_at=datetime.fromtimestamp(self.now + 300, timezone.utc).isoformat(),
+        )
+        assert reclaimed is not None
+        self.assertEqual(reclaimed.operation_id, self.worker.operation_id)
+        self.worker = reclaimed
+        self.prepare()
+        self.assertEqual(self.evidence().disposal_pending, 0)
+        self.store.activate_odoo_testing_drill(self.worker, self.now)
+
+    def test_completed_maintenance_evidence_survives_reuse_of_latest_intent(self) -> None:
+        self.old_receipt()
+        self.prepare()
+        completed = storage_receipt(self.store, self.worker.operation_id)
+        assert completed is not None
+        key = completed_storage_key(self.worker.operation_id, completed.response_payload)
+        with self.assertRaises(TimeoutError):
+            self.prepare(Mock(side_effect=TimeoutError))
+        archived = self.store.read_idempotency_record(
+            scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=key
+        )
+        assert archived is not None
+        self.assertEqual(archived.response_payload, completed.response_payload)
+        latest = storage_receipt(self.store, self.worker.operation_id)
+        assert latest is not None
+        self.assertEqual(latest.response_payload["phase"], "dispatching")
 
     def test_current_and_immediate_predecessor_are_not_cleanup_candidates(self) -> None:
         receipt = self.old_receipt()
@@ -245,6 +329,45 @@ class TestingStorageTests(TestingDrillScenario):
             self.prepare(execute)
         execute.assert_not_called()
 
+    def test_expired_general_facts_allow_only_read_only_capacity(self) -> None:
+        from datetime import timedelta
+        from tests.support.disposable_lanes import record_safety
+
+        record_safety(
+            self.store,
+            self.profile.product,
+            self.context,
+            "testing",
+            observed_at=datetime.fromtimestamp(self.now, timezone.utc) - timedelta(days=2),
+            expires_at=datetime.fromtimestamp(self.now, timezone.utc)
+            - timedelta(days=2)
+            + timedelta(minutes=1),
+        )
+        self.prepare()
+        self.assertEqual(
+            self.storage_executor.call_args.args[2]["storage_maintenance"]["copies"], []
+        )
+        self.old_receipt()
+        sent = Mock()
+
+        def execute(
+            root: Path, target: str, spec: dict[str, object], dispatch: Any
+        ) -> dict[str, object]:
+            dispatch(sent)
+            return {"capacity": True, "disposals": ["disposed"]}
+
+        with self.assertRaisesRegex(DrillPrerequisite, "usage_custody_or_isolation_unverified"):
+            prepare_drill_storage(
+                self.store,
+                self.worker,
+                Path("."),
+                execute=execute,
+                now=self.now,
+                checkpoint=lambda: None,
+            )
+        sent.assert_not_called()
+        self.assertEqual(self.evidence().disposal_pending, 1)
+
     def test_failed_activated_drill_keeps_its_disposal_in_the_ledger(self) -> None:
         receipt = self.old_receipt()
         receipt.response_payload.update(status="fail", activation_attempt=1)
@@ -259,7 +382,10 @@ class TestingStorageTests(TestingDrillScenario):
 
     def test_explicit_retention_uses_original_binding_and_preserves_a_copy(self) -> None:
         receipt = self.old_receipt()
-        witness = receipt.response_payload["planned_generation"]["discard_copy_binding"]
+        witness = self.evidence().disposal_pending_bindings[0]
+        self.assertEqual(
+            witness, receipt.response_payload["planned_generation"]["discard_copy_binding"]
+        )
         profile = self.profile.model_dump(mode="json")
         for lane in profile["lanes"]:
             if lane["instance"] == "testing":
@@ -283,6 +409,11 @@ class TestingStorageTests(TestingDrillScenario):
             self.storage_executor.call_args.args[2]["storage_maintenance"]["copies"], []
         )
         self.assertEqual(self.evidence().disposal_attention, 1)
+        self.store.activate_odoo_testing_drill(self.worker, self.now)
+        selected = self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context)
+        assert selected is not None
+        assert selected.drill_storage_budget is not None
+        self.assertIn(witness, selected.drill_storage_budget.retained_copy_bindings)
 
     def test_use_report_during_remote_wait_preserves_evidence_and_skips_activation(self) -> None:
         from tests.support.disposable_lanes import record_safety
@@ -417,6 +548,11 @@ class HostCapacityTests(unittest.TestCase):
                 self.assertFalse(namespace["storage_capacity"](spec, containers, budget))
                 self.assertTrue(
                     namespace["storage_capacity"](spec, containers, budget, staged_bytes=40)
+                )
+                self.assertFalse(
+                    namespace["storage_capacity"](
+                        spec, containers, budget, staged_bytes=40, assembly_bytes=40
+                    )
                 )
                 budget["staging_bytes"] = 10
                 self.assertTrue(namespace["storage_capacity"](spec, containers, budget))

@@ -423,6 +423,27 @@ class TestingDrillTests(TestingDrillScenario):
         self.assertNotIn("private provider", str(self.notifications.call_args))
         self.assertEqual(self.operation().operation_id, operation.operation_id)
 
+    def test_legacy_cleanup_marker_does_not_repeat_failed_restore_alert(self) -> None:
+        self.scheduler.run_once()
+        self.complete("fail")
+        operation = self.operation()
+        assert operation.result is not None
+        result = operation.result.model_copy(
+            update={
+                "post_deploy_override_evidence": {
+                    "post_deploy_readback_testing_drill_disposal_deferred": "true"
+                }
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(update={"result": result})
+        )
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().step, "restore_failed")
+        self.assertTrue(self.evidence().alert_delivered)
+        self.scheduler.run_once()
+        self.assertEqual(self.notifications.call_count, 1)
+
     def test_queue_starvation_alerts_and_retains_original_operation(self) -> None:
         self.scheduler.run_once()
         operation = self.operation()

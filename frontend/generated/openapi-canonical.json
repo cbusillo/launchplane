@@ -23285,6 +23285,14 @@
             "title": "Disposal Pending",
             "type": "integer"
           },
+          "disposal_pending_bindings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Disposal Pending Bindings",
+            "type": "array"
+          },
           "observed_at": {
             "title": "Observed At",
             "type": "string"

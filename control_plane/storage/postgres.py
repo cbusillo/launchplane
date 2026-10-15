@@ -10759,13 +10759,27 @@ class PostgresRecordStore(HumanSessionStore):
                     != (current.namespace, current.target_id, current.resources_binding_sha256)
                 ):
                     raise DrillPrerequisite("testing_disposal_identity_changed")
-            require_disposable_lane(
-                cast(DisposableLaneStore, self),
-                product=operation.product,
-                context=operation.context,
-                instance="testing",
-                now=datetime.fromtimestamp(clock(), timezone.utc),
-            )
+            if intent["copies"]:
+                require_disposable_lane(
+                    cast(DisposableLaneStore, self),
+                    product=operation.product,
+                    context=operation.context,
+                    instance="testing",
+                    now=datetime.fromtimestamp(clock(), timezone.utc),
+                )
+            else:
+                # Capacity reads grant no custody permission. Recorded protection
+                # still wins, including an expired report, and receiver inspection
+                # independently proves the exact resource isolation and witness.
+                safety = self.read_disposable_lane_safety(
+                    operation.product, operation.context, "testing"
+                )
+                if safety is not None and (
+                    safety.usage == "in_use"
+                    or safety.data == "only_copy"
+                    or safety.production_resources in {"shared", "separation_ready"}
+                ):
+                    raise DrillSkipped("lane_use_or_only_copy_protected")
             worker = session.get(
                 LaunchplaneOdooStableTargetReplacementOperationRow, operation.operation_id
             )
@@ -10899,6 +10913,18 @@ class PostgresRecordStore(HumanSessionStore):
             self._sync_idempotency_row(receipt_row, receipt)
             evidence = dict(intent)
             evidence.update(phase="complete", capacity=result["capacity"], disposals=results)
+            from control_plane.odoo_testing_storage import completed_storage_key
+
+            archive_key = completed_storage_key(operation.operation_id, evidence)
+            if (
+                session.scalar(
+                    self._idempotency_statement(
+                        scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=archive_key
+                    )
+                )
+                is None
+            ):
+                session.add(self._idempotency_row(drill_receipt(archive_key, clock(), evidence)))
             session.merge(
                 self._idempotency_row(
                     drill_receipt(storage_key(operation.operation_id), clock(), evidence)
@@ -11231,7 +11257,15 @@ class PostgresRecordStore(HumanSessionStore):
                 prepared_at=planned.prepared_at,
             )
             if generation_binding(prepared.generation) != generation_binding(planned):
-                raise DrillPrerequisite("drill_source_changed")
+                if prepared.generation.model_dump(
+                    exclude={"drill_storage_budget"}
+                ) != planned.model_dump(exclude={"drill_storage_budget"}):
+                    raise DrillPrerequisite("drill_source_changed")
+                # Only a not-yet-selected copy may take freshly qualified budget
+                # metadata. Its database/source identity and prior copy stay exact.
+                planned = prepared.generation
+                receipt.response_payload["planned_generation"] = planned.model_dump(mode="json")
+                receipt.response_payload["generation_binding"] = generation_binding(planned)
             previous_runtime = self.list_runtime_environment_records(
                 scope="instance", context_name=operation.context, instance_name="testing"
             )[0]

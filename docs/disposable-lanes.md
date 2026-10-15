@@ -838,6 +838,9 @@ alert through the existing policy, but do not permanently block the new lane.
 An outstanding retriable disposal prevents the next capture from starting;
 the last healthy copy keeps serving. Later scheduled attempts reconcile the
 same original identities instead of adding another copy to a growing backlog.
+Successful bounded batches with more work requeue the same slot for another worker
+pass before capture, without a cleanup-failure alert or waiting for tomorrow.
+Completed batch snapshots remain immutable when the latest intent is reused.
 
 Before DROP, the host fsyncs a write-ahead receipt in its account's private
 `~/.local/state/launchplane-testing-disposal/<namespace>/` directory, outside
@@ -869,6 +872,14 @@ an explicit capacity requirement, **not a quota or a claim about future source
 growth**. A budget is not established by a healthy deployment or yesterday's
 free-space observation.
 
+A capacity-only pass sends no deletion candidates and requires no general
+positive custody observation. Recorded holds, use, only-copy or shared-resource
+protection still wins, including expired protection. Receiver inspection proves
+actual resource isolation and the committed current-copy witness. This read
+does not authorize disposal: any old-copy deletion still requires fresh general
+custody facts for its original receipt; drill-scoped successful-login evidence
+is not silently generalized to other copies.
+
 On every new worker attempt, the shared resource guard reads current filesystem
 capacity, using non-root available bytes and the actual backing device. Demands
 for DB, filestore and capture staging on the same filesystem are summed before
@@ -894,7 +905,8 @@ still gates a passing operation and generation completion.
 `GET /v1/products/{product}/environments/testing` includes value-free
 `testing_rebuild_drill` evidence: queued/pass/fail/skipped, observation time,
 operation/deployment IDs, failing step, trace, alert delivery status, pending
-disposal count, retained-attention count and capacity status. A pass
+disposal count, up to four original pending discard-copy bindings,
+retained-attention count and capacity status. A pass
 requires the worker's health result and this exact generation's committed copy
 completion. It does not replace monitor freshness or prove platform updates.
 Failures use the lane's existing enabled Discord notification destinations and
@@ -948,13 +960,17 @@ existing drill flag prevents new scheduled captures and changes no retained copy
 
 For a deliberately retained copy, the existing authenticated profile path accepts
 `odoo_testing_drill_storage.retained_copy_bindings`, a list of exact original
-committed discard-copy bindings from private slot evidence. The bounded service
+committed discard-copy bindings exposed as `disposal_pending_bindings` in that
+existing environment evidence. The bounded service
 pass records these as retained attention without deleting data, erasing receipts,
 changing identity or granting access. This is the supported continuation for a
 copy that must stay connected or cannot be removed: it prevents an indefinite
 retriable-cleanup block while preserving its storage/custody. Capacity and fresh
 lane safety still gate each new capture. It is not a recurring manual usage
-approval or permission to delete a retained copy.
+approval or permission to delete a retained copy. Budget or retention edits made
+before activation are accepted only after fresh capacity qualification and only
+while every other source/copy identity remains unchanged. Once selected, recovery
+keeps the original generation and its budget.
 
 The guarded terminal program send has its own bounded deadline; expiry shuts
 down that connection and retains original-key uncertainty. Alert delivery writes

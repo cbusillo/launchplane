@@ -20548,6 +20548,14 @@
             "title": "Disposal Pending",
             "type": "integer"
           },
+          "disposal_pending_bindings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Disposal Pending Bindings",
+            "type": "array"
+          },
           "observed_at": {
             "title": "Observed At",
             "type": "string"
@@ -20594,6 +20602,7 @@
           "deployment_record_id",
           "disposal_attention",
           "disposal_pending",
+          "disposal_pending_bindings",
           "observed_at",
           "operation_id",
           "status",
