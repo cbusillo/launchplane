@@ -17,6 +17,7 @@ from control_plane.odoo_testing_restore import (
     read_current_testing_generation,
     fresh_testing_authority_sha256,
     fresh_testing_mode_refusal,
+    fresh_testing_override_record,
 )
 from control_plane.odoo_testing_native_source import (
     native_testing_source_authority,
@@ -2048,19 +2049,23 @@ def execute_odoo_stable_target_replacement_apply(
             "plan_not_ready.compose_or_override_render_failed",
             website_intent_error,
         )
-    normalized_override_record = _record_with_target_replacement_canonical(
-        record=odoo_override_record,
-        canonical_url=_target_origin_base_url(
-            lane=lane, domains=target_record.domains, public_hosts=target_record.public_hosts
+    normalized_override_record = (
+        fresh_testing_override_record(odoo_override_record, generation)
+        if generation is not None and not generation.completed_at
+        else _record_with_target_replacement_canonical(
+            record=odoo_override_record,
+            canonical_url=_target_origin_base_url(
+                lane=lane, domains=target_record.domains, public_hosts=target_record.public_hosts
+            )
+            if target_record.public_hosts
+            else base_url,
+            updated_at=started_at,
         )
-        if target_record.public_hosts
-        else base_url,
-        updated_at=started_at,
     )
     # Fresh generations bind the recorded intent for recovery. Their canonical
     # URL is a rendered lane value, not a persistent edit of that intent.
     if (
-        generation is None
+        (generation is None or generation.completed_at)
         and normalized_override_record is not None
         and normalized_override_record is not odoo_override_record
     ):

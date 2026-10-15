@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+from urllib.parse import urlsplit
 import unittest
 from collections.abc import Callable
 from tempfile import TemporaryDirectory
@@ -3365,6 +3366,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "product": "odoo-tenant-opw",
                 "context": "opw",
                 "target_id": "compose-opw",
+                "domain_host": urlsplit(
+                    _opw_profile_with_prelaunch_policy(enabled=True).lanes[0].base_url
+                ).hostname,
                 "reconcile_requested_at": "2026-10-15T00:00:00Z",
             }
         )
@@ -3439,6 +3443,74 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                             for key in store.last_provider_env
                         )
                     )
+
+    def test_fresh_restore_schedule_and_runtime_use_the_same_generation_canonical(self) -> None:
+        from tests.test_odoo_testing_restore import generation
+        from typing import Any
+        import shlex
+
+        lane = _opw_profile_with_prelaunch_policy(enabled=True).lanes[0]
+        fresh = generation().model_copy(
+            update={
+                "product": "odoo-tenant-opw",
+                "context": lane.context,
+                "target_id": "compose-opw",
+                "domain_host": urlsplit(lane.base_url).hostname,
+                "reconcile_requested_at": "queued",
+            }
+        )
+        override = _opw_website_override_record().model_copy(
+            update={"instance": "testing"}, deep=True
+        )
+        assert override.website_bootstrap is not None
+        override.website_bootstrap.canonical_url = "https://retained.example.invalid"
+        schedules: list[dict[str, Any]] = []
+
+        def run_schedule(**kwargs: Any) -> dict[str, str]:
+            script = kwargs["schedule_payload"]["script"]
+            encoded = shlex.split(script.splitlines()[2])[2]
+            schedules.append(json.loads(base64.b64decode(encoded)))
+            return {
+                key: "true"
+                for key in (
+                    "odoo_module_update_completed",
+                    "odoo_module_update_image_match",
+                    "odoo_module_update_modules_configured",
+                    "testing_copy_sanitized",
+                    "integration_readback_ok",
+                    "odoo_restore_completed",
+                    "log_available",
+                    "testing_copy_runtime_isolated",
+                    "testing_copy_pre_registry_sanitized",
+                )
+            }
+
+        with patch(
+            "control_plane.dokploy.post_deploy.run_manual_data_schedule", side_effect=run_schedule
+        ):
+            result, _, _, store = self._apply_upstream_restore(
+                override_record=override,
+                post_deploy_results=(),
+                test_instance="testing",
+                fresh_generation=fresh,
+                real_post_deploy=True,
+            )
+        self.assertEqual(result.deploy_status, "pass", result.error_message)
+        self.assertTrue(schedules)
+        runtime = store.last_provider_env["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"]
+        for spec in schedules:
+            self.assertEqual(spec["expected_overrides_payload"], runtime)
+            self.assertEqual(
+                spec["workflow_environment"]["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"], runtime
+            )
+        self.assertEqual(
+            json.loads(base64.b64decode(runtime))["website_bootstrap"]["canonical_url"],
+            lane.base_url,
+        )
+        assert store.odoo_instance_override_record is not None
+        self.assertEqual(
+            store.odoo_instance_override_record.website_bootstrap, override.website_bootstrap
+        )
 
     def test_real_restore_schedule_does_not_trigger_after_authorization_revocation(self) -> None:
         from control_plane.contracts.durable_operation_authorization import (

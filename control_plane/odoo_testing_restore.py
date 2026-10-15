@@ -12,6 +12,7 @@ from control_plane.contracts.product_profile_record import (
     ProductSecretConfigRequirement,
     product_config_requirement_applies_to_lane,
 )
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -52,6 +53,25 @@ class FreshOdooTestingGeneration(BaseModel):
         if (self.source_mode == "container-export") != bool(self.source_binding_sha256):
             raise ValueError("A native source needs its exact binding; SSH generations carry none.")
         return self
+
+
+def fresh_testing_override_record(
+    record: OdooInstanceOverrideRecord | None, generation: FreshOdooTestingGeneration
+) -> OdooInstanceOverrideRecord | None:
+    """Render the same generation URL at deployment and restore, without editing intent."""
+    if record is None:
+        return None
+    if (record.context, record.instance) != (generation.context, generation.instance):
+        raise ValueError("Fresh testing overrides belong to another lane.")
+    if record.website_bootstrap is None:
+        return record
+    return record.model_copy(
+        update={
+            "website_bootstrap": record.website_bootstrap.model_copy(
+                update={"canonical_url": "https://" + generation.domain_host}
+            )
+        }
+    )
 
 
 def fresh_testing_mode_refusal(

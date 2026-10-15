@@ -122,6 +122,7 @@ def current_binding_fingerprint(
     if generation is not None:
         legacy = bool(
             operation.recovery_journal
+            and operation.recovery_journal.attempt == operation.attempt
             and not operation.recovery_journal.target_fingerprint.startswith(
                 FRESH_TESTING_INTENT_BINDING_PREFIX
             )

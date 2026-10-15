@@ -533,10 +533,15 @@ immutable receipt; readback is never permission to replay bootstrap.
 
 New fresh-generation recovery journals bind override intent independently of
 `last_apply`, `updated_at` and `source_label`. Publishing post-deploy success or
-failure does not change that intent. The generation's canonical URL is rendered
-for the lane without rewriting the stored override intent. Product, target,
+failure does not change that intent. During the initial copy, deployment and
+post-deploy render the same generation hostname without rewriting the stored
+override intent. Later ordinary deployments retain their canonical-record
+normalization. Product, target,
 resource, configuration, secret-version and source checks remain bound; executor
 exclusion and acknowledged terminal-provider proof still precede recovery.
+The database checks the same fresh/legacy digest under its configuration-writer
+lock before publishing the existing supported recovery transition. An eligible
+read view alone does not release an operation.
 Legacy full-record journal digests retain their original meaning. A legacy
 binding mismatch stays fenced: without its original authority snapshot there is
 no safe automatic conversion to the new digest. Preserve the original operation,

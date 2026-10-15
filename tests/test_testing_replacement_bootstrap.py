@@ -319,6 +319,7 @@ class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
             current_binding_fingerprint,
             guard_testing_replacement,
             testing_replacement_recovery_read,
+            recover_stranded_testing_replacements,
         )
         from control_plane.odoo_testing_restore import fresh_testing_authority_sha256
         from control_plane.workflows.odoo_post_deploy import (
@@ -450,6 +451,11 @@ class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
             }
         )
         self.store.write_odoo_stable_target_replacement_operation_record(held)
+        for field, value in (("reason", "changed request"), ("source_mode", "container-export")):
+            with self.subTest(request_field=field), self.assertRaises(ValueError):
+                changed_adapter = self.adapter()
+                changed_adapter.request = self.request.model_copy(update={field: value})
+                changed_adapter.readback()
         # A new executing generation must not invalidate the original bootstrap
         # receipt, and reading it must not requeue, recapture or repeat a route.
         with patch.object(
@@ -529,6 +535,85 @@ class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
             )
             inspect.assert_not_called()
         self.store.write_odoo_stable_target_replacement_operation_record(held)
+        # Exercise the real store's final authority check and publication, not
+        # just the read-time eligibility classification.
+        assert legacy.recovery_journal is not None
+        retried = held.model_copy(
+            update={
+                "status": "running",
+                "phase": "running",
+                "attempt": held.attempt + 1,
+                "lease_owner": "worker",
+                "lease_expires_at": stamp(600),
+                "recovery_journal": legacy.recovery_journal,
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(retried)
+        with guard_testing_replacement(self.store, retried, "worker", lambda _: None) as checkpoint:
+            checkpoint("new_attempt")
+            _write_odoo_instance_override_apply_result(
+                record_store=self.store,
+                record=baseline_override,
+                status="pass",
+                detail="fixture recovered",
+            )
+            checkpoint("new_attempt_result")
+        retried = self.store.read_odoo_stable_target_replacement_operation_record(held.operation_id)
+        held = retried.model_copy(
+            update={
+                "status": "reconciliation_required",
+                "lease_owner": "",
+                "lease_expires_at": "",
+                "heartbeat_at": "",
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(held)
+        cancel = self.store.cancel_pending_odoo_stable_target_replacement_operation_record
+
+        def rotate_before_commit(*args: Any, **kwargs: Any) -> bool:
+            self.store.write_secret_record(
+                secret.model_copy(update={"current_version_id": "fixture-v2"})
+            )
+            return cancel(*args, **kwargs)
+
+        with (
+            patch.object(
+                self.store,
+                "cancel_pending_odoo_stable_target_replacement_operation_record",
+                side_effect=rotate_before_commit,
+            ),
+            patch(
+                "control_plane.testing_replacement_recovery.inspect_testing_replacement",
+                return_value={"state": "quiescent_safe_to_retry"},
+            ),
+        ):
+            self.assertEqual(
+                recover_stranded_testing_replacements(self.store, self.fixture.root), ()
+            )
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(held.operation_id), held
+        )
+        self.store.write_secret_record(secret)
+        with patch(
+            "control_plane.testing_replacement_recovery.inspect_testing_replacement",
+            return_value={"state": "quiescent_safe_to_retry"},
+        ):
+            self.assertEqual(
+                recover_stranded_testing_replacements(self.store, self.fixture.root),
+                (held.operation_id,),
+            )
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(
+                held.operation_id
+            ).status,
+            "cancelled",
+        )
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(
+                self.profile.product, self.fixture.context
+            ),
+            generation,
+        )
         self.assertEqual(
             self.store.read_dokploy_target_record(
                 context_name=self.fixture.context, instance_name="prod"
