@@ -42,6 +42,10 @@ uv run --extra dev python -m unittest tests.test_module_name
 uv run --extra dev python -m unittest tests.test_module_name.TestCaseName.test_behavior
 ```
 
+The Supervisor owns the measured comparison and brings the keep-or-revert
+decision to the Director on the linked trial issue. The rule becomes permanent
+only if the numbers support it.
+
 Use `.github/github.json` for the lint and type-check commands and inspection
 configuration. `qualityGate.test.local` is the focused command template;
 `qualityGate.test.ci` names the full-suite command, also available locally for
@@ -51,11 +55,13 @@ assert instruction wording or config text.
 
 The full sharded suite remains CI's required gate before merge. Wait for green
 current-head CI before the checked `gh-pr.py ready` handoff; a local test pass
-does not replace that evidence. CI workflows and required checks are unchanged.
+does not replace that evidence. The trial does not change CI workflows or
+required checks.
 
 Safety, authorization, approval-rule, destructive-helper, and shared-infrastructure
 changes are excluded from the focused-only trial and still run the full local
-suite before review. Broaden local validation when an affected shared contract,
+suite before review. Credential handling falls under the safety and authorization
+exceptions. Broaden local validation when an affected shared contract,
 storage boundary, generated surface, observed failure, or other risk requires
 it. The full local suite remains available through:
 
