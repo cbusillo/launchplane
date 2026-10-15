@@ -6409,10 +6409,11 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.json()["error"]["code"], expected_code)
 
     async def test_connection_repair_keeps_authorization_and_production_boundary(self) -> None:
-        for instance, action, expected_status in (
-            ("testing", "odoo_post_deploy.execute", 202),
-            ("testing", "product_environment.read", 403),
-            ("prod", "odoo_post_deploy.execute", 400),
+        for instance, action, mode, expected_status in (
+            ("testing", "odoo_post_deploy.execute", "dry-run", 202),
+            ("testing", "odoo_post_deploy.execute", "apply", 403),
+            ("testing", "product_environment.read", "dry-run", 403),
+            ("prod", "odoo_post_deploy.execute", "dry-run", 400),
         ):
             with self.subTest(instance=instance, action=action), TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -6439,15 +6440,16 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                             "post_deploy": {
                                 "context": "opw",
                                 "instance": instance,
-                                "connection_isolation": "dry-run",
+                                "connection_isolation": mode,
+                                "reviewed_dry_run": mode == "apply",
+                                "reviewed_plan_sha256": "a" * 64 if mode == "apply" else "",
+                                "reason": "Repair testing-copy connections",
                             },
                         },
                     )
                 self.assertEqual(response.status_code, expected_status)
                 if expected_status == 202:
-                    self.assertEqual(
-                        execute.call_args.kwargs["request"].connection_isolation, "dry-run"
-                    )
+                    self.assertEqual(execute.call_args.kwargs["request"].connection_isolation, mode)
                 else:
                     execute.assert_not_called()
 

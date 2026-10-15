@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -25,11 +27,73 @@ from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployRequest,
     execute_odoo_post_deploy,
 )
+from control_plane.provider_operations import (
+    ProviderMutationOutcome,
+    ProviderMutationRejectedError,
+    ProviderObservation,
+    ProviderOperationLease,
+    provider_operation_response_payload,
+)
+from control_plane.odoo_connection_isolation import ConnectionIsolationOutcomeUnknown
 
 
 ODOO_POST_DEPLOY_ROUTE = "/v1/drivers/odoo/post-deploy"
 ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE = "/v1/drivers/odoo/config-parameter-override"
 ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE = "/v1/drivers/odoo/website-bootstrap-override"
+
+
+@dataclass
+class ConnectionIsolationApplyAdapter:
+    product: str
+    context: str
+    instance: str
+    trace_id: str
+    reviewed_plan_sha256: str
+    execute: Callable[[Callable[[], None]], tuple[dict[str, object], dict[str, object]]]
+
+    def target_key(self) -> str:
+        return f"odoo-connection-isolation:{self.product}:{self.context}:{self.instance}"
+
+    def reconciliation_key(self) -> str:
+        return self.reviewed_plan_sha256
+
+    def observe(
+        self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
+    ) -> ProviderObservation:
+        # A passing DB read cannot prove the previous web/schedule outcome.
+        # Retain the original fence; an uncertain repair is never blindly retried.
+        return ProviderObservation(outcome="unknown")
+
+    def apply(
+        self, provider_operation_key: str, lease: ProviderOperationLease
+    ) -> ProviderMutationOutcome:
+        effect_started = False
+        checkpoint_entered = False
+
+        def before_mutation() -> None:
+            nonlocal effect_started, checkpoint_entered
+            checkpoint_entered = True
+            lease.assert_current()
+            lease.checkpoint_effect("connection-isolation")
+            effect_started = True
+
+        try:
+            records, result = self.execute(before_mutation)
+        except Exception as error:
+            if not checkpoint_entered:
+                raise ProviderMutationRejectedError(error) from error
+            if effect_started:
+                raise ConnectionIsolationOutcomeUnknown(
+                    "The isolation outcome is unverified."
+                ) from error
+            raise
+        return ProviderMutationOutcome(
+            response_status_code=202,
+            response_payload=provider_operation_response_payload(
+                trace_id=self.trace_id, records=records, result=result
+            ),
+            provider_effect_performed=effect_started,
+        )
 
 
 class OdooPostDeployProductMismatchError(ValueError):
@@ -171,6 +235,7 @@ def execute_odoo_post_deploy_result(
     control_plane_root: Path,
     record_store: object,
     request: OdooPostDeployEnvelope,
+    before_connection_isolation_mutation: Callable[[], None] | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     driver_result = execute_odoo_post_deploy(
         control_plane_root=control_plane_root,
@@ -178,6 +243,7 @@ def execute_odoo_post_deploy_result(
         request=request.post_deploy,
         # This command reapplies settings; it never selects a forward artifact.
         allow_historical_sender_contract=True,
+        before_connection_isolation_mutation=before_connection_isolation_mutation,
     )
     records: dict[str, object] = {
         "transition": (

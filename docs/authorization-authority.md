@@ -176,6 +176,21 @@ never ask for a grant to bypass it. Bounded empty testing replacement staging
 also follows this boundary; it creates only new placement and a new empty
 compose, leaving retained target/storage and historical effects untouched.
 
+### Testing-copy connection isolation
+
+The Odoo post-deploy endpoint classifies validated `connection_isolation`
+requests separately from general maintenance. Its instance-scoped plan and
+read actions inherit the Director's standing observation permission; a scoped
+`agent.read` rule alone does not execute its provider schedule. Isolation apply remains
+a write. Only the authenticated Director identity can use the source-owned
+testing repair without a policy grant, after fresh disposable-lane checks.
+Production, staff use, only-copy data, unknown safety and shared resources remain
+protected. No new policy record or credential is installed. General post-deploy
+authority does not authorize isolation apply. See the
+[repair procedure](operations.md#repair-copied-carrier-and-customer-sms-connections)
+for reviewed plan binding, stable idempotency, independent readback and current
+evidence-producer limitations.
+
 ## Current Transitional Model
 
 The current service has a DB-backed managed-rule reconciliation endpoint with

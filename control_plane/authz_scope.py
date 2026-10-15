@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from control_plane.action_effects import AGENT_READ_ROLE_ACTION
+from control_plane.action_effects import AGENT_READ_ROLE_ACTION, ODOO_CONNECTION_ISOLATION_ACTIONS
 
 
 # Creates one lane's Dokploy compose target; granted per context and instance.
@@ -11,6 +11,7 @@ VERIREEL_APP_MAINTENANCE_ACTION = "verireel_app_maintenance.execute"
 
 _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
     {
+        *ODOO_CONNECTION_ISOLATION_ACTIONS.values(),
         "backup_gate.write",
         # Retired capture grants still scope historical-operation cancellation.
         "verireel_prod_backup_gate.execute",
