@@ -17,7 +17,9 @@ from control_plane.service_auth import (
     LaunchplaneAuthzPolicy,
     TokenVerifier,
 )
+from control_plane.service_human_credentials import GitHubOAuthCredential
 from control_plane.service_human_auth import (
+    GitHubOAuthLogin,
     GitHubOAuthConfig,
     HumanSessionManager,
     InMemoryHumanSessionStore,
@@ -45,8 +47,8 @@ class _DeterministicGitHubOAuthLoginClient:
         code_verifier: str,
         authz_policy: LaunchplaneAuthzPolicy,
         is_product_owner: Callable[[int], bool] | None = None,
-    ) -> GitHubHumanIdentity:
-        return GitHubHumanIdentity(
+    ) -> GitHubOAuthLogin:
+        identity = GitHubHumanIdentity(
             login="launchplane-docs",
             github_id=1,
             name="Launchplane Docs",
@@ -55,6 +57,12 @@ class _DeterministicGitHubOAuthLoginClient:
             teams=frozenset({"docs"}),
             role="read_only",
         )
+        return GitHubOAuthLogin(identity, GitHubOAuthCredential("docs-fixture"))
+
+    def revalidate(
+        self, credential: GitHubOAuthCredential, *, authz_policy: LaunchplaneAuthzPolicy
+    ) -> GitHubOAuthLogin:
+        raise RuntimeError("OpenAPI export never refreshes OAuth credentials.")
 
 
 def _build_export_app() -> FastAPI:

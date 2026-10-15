@@ -4378,6 +4378,151 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_human_refresh_serializes_across_workers_and_preserves_csrf_consumption(self) -> None:
+        from control_plane.service_human_auth import (
+            GitHubOAuthClient,
+            GitHubOAuthLogin,
+            HumanSessionManager,
+        )
+        from control_plane.service_human_credentials import GitHubOAuthCredential
+        from tests.test_service_human_auth import _config, _identity
+        from tests.test_human_session_renewal import _policy
+        from control_plane.service_human_auth import SESSION_RENEW_AFTER_SECONDS
+
+        with _head_postgres_database() as url:
+            stores = [PostgresRecordStore(database_url=url) for _ in range(3)]
+            for store in stores:
+                self.addCleanup(store.close)
+            now = datetime.now(timezone.utc)
+            managers = [
+                HumanSessionManager(config=_config(), session_store=store, now=lambda: now)
+                for store in stores
+            ]
+            original = managers[0].issue(_identity(), GitHubOAuthCredential("original-access"))
+            csrf = managers[0].csrf_token(original)
+            now += timedelta(seconds=SESSION_RENEW_AFTER_SECONDS + 1)
+            entered = threading.Event()
+            release = threading.Event()
+            provider = Mock(spec=GitHubOAuthClient)
+
+            def exchange(*args: object, **kwargs: object) -> GitHubOAuthLogin:
+                entered.set()
+                if not release.wait(10):
+                    raise TimeoutError("test provider wait")
+                return GitHubOAuthLogin(_identity(), GitHubOAuthCredential("rotated-access"))
+
+            provider.revalidate.side_effect = exchange
+            with ThreadPoolExecutor(max_workers=3) as workers:
+                first = workers.submit(
+                    managers[0].refresh_authorization_claims,
+                    original,
+                    client=provider,
+                    authz_policy=_policy(),
+                )
+                try:
+                    self.assertTrue(entered.wait(5))
+                    second = workers.submit(
+                        managers[1].refresh_authorization_claims,
+                        original,
+                        client=provider,
+                        authz_policy=_policy(),
+                    )
+                    consume = workers.submit(managers[2].consume_csrf_token, original, csrf)
+                    deadline = time.monotonic() + 5
+                    waiting = 0
+                    while time.monotonic() < deadline:
+                        with stores[0]._engine.connect() as observer:
+                            waiting = observer.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                                )
+                            )
+                        if waiting >= 2:
+                            break
+                        time.sleep(0.01)
+                    self.assertGreaterEqual(waiting, 2)
+                finally:
+                    release.set()
+                refreshed = first.result(timeout=5)
+                other = second.result(timeout=5)
+                consumed = consume.result(timeout=5)
+            self.assertIsNotNone(refreshed)
+            self.assertIsNotNone(other)
+            self.assertIsNotNone(consumed)
+            assert refreshed is not None and other is not None and consumed is not None
+            self.assertEqual(provider.revalidate.call_count, 1)
+            stored = stores[0].read_session(original.session_id)
+            assert stored is not None
+            self.assertEqual(stored.oauth_credential, refreshed.oauth_credential)
+            self.assertEqual(stored.claims_verified_at, now)
+            self.assertEqual(stored.csrf_generation, consumed.csrf_generation)
+            self.assertIsNone(managers[0].consume_csrf_token(original, csrf))
+
+    def test_logout_during_human_refresh_cannot_resurrect_the_session(self) -> None:
+        from control_plane.service_human_auth import (
+            GitHubOAuthClient,
+            GitHubOAuthLogin,
+            HumanSessionManager,
+            SESSION_CLAIMS_REFRESH_AFTER_SECONDS,
+        )
+        from control_plane.service_human_credentials import GitHubOAuthCredential
+        from tests.test_service_human_auth import _config, _identity
+        from tests.test_human_session_renewal import _policy
+
+        with _head_postgres_database() as url:
+            store = PostgresRecordStore(database_url=url)
+            other = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            self.addCleanup(other.close)
+            now = datetime.now(timezone.utc)
+            manager = HumanSessionManager(config=_config(), session_store=store, now=lambda: now)
+            original = manager.issue(_identity(), GitHubOAuthCredential("original-access"))
+            now += timedelta(seconds=SESSION_CLAIMS_REFRESH_AFTER_SECONDS)
+            entered, release = threading.Event(), threading.Event()
+            provider = Mock(spec=GitHubOAuthClient)
+
+            def exchange(*args: object, **kwargs: object) -> GitHubOAuthLogin:
+                entered.set()
+                if not release.wait(10):
+                    raise TimeoutError("test provider wait")
+                return GitHubOAuthLogin(_identity(), GitHubOAuthCredential("rotated-access"))
+
+            provider.revalidate.side_effect = exchange
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                refresh = workers.submit(
+                    manager.refresh_authorization_claims,
+                    original,
+                    client=provider,
+                    authz_policy=_policy(),
+                )
+                try:
+                    self.assertTrue(entered.wait(5))
+                    logout = workers.submit(other.delete_session, original.session_id)
+                    deadline = time.monotonic() + 5
+                    waiting = 0
+                    while time.monotonic() < deadline:
+                        with store._engine.connect() as observer:
+                            waiting = observer.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                                )
+                            )
+                        if waiting:
+                            break
+                        time.sleep(0.01)
+                    self.assertGreater(waiting, 0)
+                finally:
+                    release.set()
+                refresh.result(timeout=5)
+                logout.result(timeout=5)
+            self.assertIsNone(store.read_session(original.session_id))
+            self.assertIsNone(
+                manager.refresh_authorization_claims(
+                    original, client=provider, authz_policy=_policy()
+                )
+            )
+            self.assertEqual(provider.revalidate.call_count, 1)
+
     def test_never_live_classification_waits_for_concurrent_production_history(self) -> None:
         from control_plane.contracts.deployment_record import DeploymentRecord
         from control_plane.contracts.promotion_record import DeploymentEvidence

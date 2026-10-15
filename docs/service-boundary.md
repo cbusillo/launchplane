@@ -714,6 +714,39 @@ on the request, and an email that still matches the configured bootstrap-admin
 root of trust remains admin. Logout deletes the cookie-backed session when auth
 is configured and always emits the Launchplane session clearing cookie.
 
+Human admin/read-only sessions use a sliding **14-day** cookie/store window,
+renewed after **24 hours** of use. Identity and membership claims remain valid
+for at most **24 hours** after provider verification. Ordinary authenticated
+background reads revalidate GitHub at **23 hours**, or earlier when an expiring
+access token is within five minutes of expiry. A return after the claims ceiling
+must complete provider verification before the request can use those claims;
+it never authorizes from stale membership. No activity means no renewal, and an
+expired 14-day session always requires sign-in. Client (`owner`) sessions keep
+their existing ownership checks, confinement and renewal behavior.
+
+OAuth callback retains the token pair and provider expiry metadata only for
+admin/read-only sessions. Every revalidation reads `/user`, all pages of
+organizations, teams and verified emails, binds the result to the original
+immutable GitHub ID, and derives permissions from current DB policy. Public
+profile email alone cannot establish bootstrap-admin identity. Expiring access
+tokens use GitHub's refresh grant and rotated pair; long-lived tokens are
+revalidated directly. No new OAuth scope or provider app setting is required.
+Any failed provider request, invalid response, expired/unusable refresh token,
+changed identity or corrupt credential revokes the session and requires sign-in;
+there is no stale-claims fallback or automatic retry of a token exchange.
+Sessions issued before credential retention can use their remaining fresh
+claims, then require one new sign-in.
+
+The server stores only authenticated ciphertext in the session payload, using
+AES-256-GCM and an HKDF key derived from the existing session bootstrap secret
+with a separate OAuth-custody purpose. Associated data binds ciphertext to the
+session ID and immutable GitHub ID. Tokens never enter cookies, browser session
+responses, logs or scrubbed record exports. Session-row locks serialize refresh
+and persistence across workers; CSRF consumption preserves current credential
+and claims metadata, and renewal cannot recreate a logged-out session. Provider
+requests have bounded timeouts and membership pagination fails closed at its
+bound. Read-only sensitive/preflight paths keep their nonrenewing behavior.
+
 ### Browser Mutation Boundary
 
 `SameSite=Lax` remains defense-in-depth; it is not the authorization or CSRF

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
@@ -15,6 +15,7 @@ from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlsplit
 
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
+from control_plane.service_human_credentials import GitHubOAuthCredential, HumanCredentialCipher
 
 
 GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
@@ -27,6 +28,9 @@ SESSION_COOKIE_NAME = "launchplane_session"
 SESSION_TTL_SECONDS = 14 * 24 * 60 * 60
 SESSION_RENEW_AFTER_SECONDS = 24 * 60 * 60
 SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS = 24 * 60 * 60
+SESSION_CLAIMS_REFRESH_AFTER_SECONDS = SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS - 60 * 60
+OAUTH_REFRESH_MARGIN_SECONDS = 5 * 60
+OAUTH_REQUEST_TIMEOUT_SECONDS = 10
 OAUTH_STATE_TTL_SECONDS = 10 * 60
 BROWSER_CSRF_HEADER_NAME = "X-CSRF-Token"
 _BROWSER_CSRF_TOKEN_VERSION = "v1"
@@ -62,9 +66,23 @@ class LaunchplaneHumanSession:
     created_at: datetime
     expires_at: datetime
     csrf_generation: int = 0
+    claims_verified_at: datetime | None = None
+    oauth_credential: str = field(default="", repr=False)
+
+
+@dataclass(frozen=True)
+class GitHubOAuthLogin:
+    identity: GitHubHumanIdentity
+    credential: GitHubOAuthCredential = field(repr=False)
 
 
 class HumanSessionStore(Protocol):
+    def update_session(
+        self,
+        session_id: str,
+        update: Callable[[LaunchplaneHumanSession], LaunchplaneHumanSession | None],
+    ) -> LaunchplaneHumanSession | None: ...
+
     def write_session(self, session: LaunchplaneHumanSession) -> None: ...
 
     def read_session(self, session_id: str) -> LaunchplaneHumanSession | None: ...
@@ -85,6 +103,8 @@ class HumanSessionStore(Protocol):
 
 
 class OAuthResponse(Protocol):
+    status_code: int
+
     def json(self) -> Any: ...
 
 
@@ -93,13 +113,54 @@ class OAuth2SessionType(Protocol):
 
     def fetch_token(self, url: str, **kwargs: object) -> object: ...
 
-    def get(self, url: str) -> OAuthResponse: ...
+    def get(self, url: str, **kwargs: object) -> OAuthResponse: ...
+
+    def refresh_token(self, url: str, **kwargs: object) -> object: ...
+
+    def close(self) -> None: ...
+
+    token: dict[str, Any]
+
+
+class GitHubOAuthLoginClient(Protocol):
+    def authorization_url(
+        self, *, state: str, code_challenge: str, reauthenticate: bool = False
+    ) -> str: ...
+
+    def fetch_identity(
+        self,
+        *,
+        code: str,
+        code_verifier: str,
+        authz_policy: LaunchplaneAuthzPolicy,
+        is_product_owner: Callable[[int], bool] | None = None,
+    ) -> GitHubOAuthLogin: ...
+
+    def revalidate(
+        self, credential: GitHubOAuthCredential, *, authz_policy: LaunchplaneAuthzPolicy
+    ) -> GitHubOAuthLogin: ...
 
 
 class InMemoryHumanSessionStore:
     def __init__(self) -> None:
         self._sessions: dict[str, LaunchplaneHumanSession] = {}
         self._lock = RLock()
+
+    def update_session(
+        self,
+        session_id: str,
+        update: Callable[[LaunchplaneHumanSession], LaunchplaneHumanSession | None],
+    ) -> LaunchplaneHumanSession | None:
+        with self._lock:
+            current = self.read_session(session_id)
+            if current is None:
+                return None
+            updated = update(current)
+            if updated is None:
+                self._sessions.pop(session_id, None)
+            else:
+                self._sessions[session_id] = updated
+            return updated
 
     def write_session(self, session: LaunchplaneHumanSession) -> None:
         with self._lock:
@@ -136,7 +197,9 @@ class InMemoryHumanSessionStore:
             current_session = self.read_session(human_session.session_id)
             if current_session is None or current_session.csrf_generation != expected_generation:
                 return False
-            self.write_session(human_session)
+            self.write_session(
+                replace(current_session, csrf_generation=human_session.csrf_generation)
+            )
             return True
 
 
@@ -269,28 +332,125 @@ class GitHubOAuthClient:
         code_verifier: str,
         authz_policy: LaunchplaneAuthzPolicy,
         is_product_owner: Callable[[int], bool] | None = None,
-    ) -> GitHubHumanIdentity:
+    ) -> GitHubOAuthLogin:
         client = self._new_session(
             client_id=self._config.client_id,
             client_secret=self._config.client_secret,
             scope=" ".join(self._config.scopes),
             redirect_uri=self._config.redirect_uri,
         )
-        client.fetch_token(GITHUB_TOKEN_URL, code=code, code_verifier=code_verifier)
-        user_payload = client.get(GITHUB_USER_URL).json()
-        org_payload = client.get(GITHUB_ORGS_URL).json()
-        team_payload = client.get(GITHUB_TEAMS_URL).json()
-        email_payload = client.get(GITHUB_EMAILS_URL).json()
-        login = str(user_payload.get("login", "")).strip()
+        try:
+            token = client.fetch_token(
+                GITHUB_TOKEN_URL,
+                code=code,
+                code_verifier=code_verifier,
+                timeout=OAUTH_REQUEST_TIMEOUT_SECONDS,
+            )
+            credential = GitHubOAuthCredential.from_token(token, now=_utc_now())
+            identity = self._fetch_identity(
+                client, authz_policy=authz_policy, is_product_owner=is_product_owner
+            )
+            return GitHubOAuthLogin(identity, credential)
+        finally:
+            client.close()
+
+    def revalidate(
+        self, credential: GitHubOAuthCredential, *, authz_policy: LaunchplaneAuthzPolicy
+    ) -> GitHubOAuthLogin:
+        client = self._new_session(
+            client_id=self._config.client_id,
+            client_secret=self._config.client_secret,
+            scope=" ".join(self._config.scopes),
+            redirect_uri=self._config.redirect_uri,
+        )
+        try:
+            now = _utc_now()
+            if credential.access_expires_at is not None and credential.access_expires_at <= (
+                now + timedelta(seconds=OAUTH_REFRESH_MARGIN_SECONDS)
+            ):
+                if (
+                    not credential.refresh_token
+                    or credential.refresh_expires_at is None
+                    or credential.refresh_expires_at <= now
+                ):
+                    raise PermissionError("GitHub OAuth credential requires sign-in.")
+                # GitHub invalidates both old tokens. The session store holds
+                # its row lock through refresh and replacement to serialize this.
+                token = client.refresh_token(
+                    GITHUB_TOKEN_URL,
+                    refresh_token=credential.refresh_token,
+                    scope=None,
+                    timeout=OAUTH_REQUEST_TIMEOUT_SECONDS,
+                )
+                credential = GitHubOAuthCredential.from_token(token, now=now)
+            client.token = {"access_token": credential.access_token, "token_type": "Bearer"}
+            identity = self._fetch_identity(client, authz_policy=authz_policy)
+            return GitHubOAuthLogin(identity, credential)
+        finally:
+            client.close()
+
+    @staticmethod
+    def _get_payload(client: OAuth2SessionType, url: str) -> Any:
+        response = client.get(url, timeout=OAUTH_REQUEST_TIMEOUT_SECONDS, allow_redirects=False)
+        if response.status_code != 200:
+            raise PermissionError("GitHub identity could not be verified.")
+        return response.json()
+
+    def _list_payload(self, client: OAuth2SessionType, url: str) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for page in range(1, 101):
+            payload = self._get_payload(client, f"{url}?per_page=100&page={page}")
+            if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+                raise ValueError("GitHub membership response is invalid.")
+            result.extend(payload)
+            if len(payload) < 100:
+                return result
+        raise ValueError("GitHub membership response exceeds its bound.")
+
+    def _fetch_identity(
+        self,
+        client: OAuth2SessionType,
+        *,
+        authz_policy: LaunchplaneAuthzPolicy,
+        is_product_owner: Callable[[int], bool] | None = None,
+    ) -> GitHubHumanIdentity:
+        user_payload = self._get_payload(client, GITHUB_USER_URL)
+        if not isinstance(user_payload, dict):
+            raise ValueError("GitHub user response is invalid.")
+        org_payload = self._list_payload(client, GITHUB_ORGS_URL)
+        team_payload = self._list_payload(client, GITHUB_TEAMS_URL)
+        email_payload = self._list_payload(client, GITHUB_EMAILS_URL)
+        if any(
+            not isinstance(org.get("login"), str) or not org["login"].strip() for org in org_payload
+        ):
+            raise ValueError("GitHub organization response is invalid.")
+        if any(
+            not isinstance(team.get("slug"), str)
+            or not team["slug"].strip()
+            or not isinstance(team.get("organization"), dict)
+            or not isinstance(team["organization"].get("login"), str)
+            or not team["organization"]["login"].strip()
+            for team in team_payload
+        ):
+            raise ValueError("GitHub team response is invalid.")
+        if any(
+            not isinstance(email.get("email"), str)
+            or not email["email"].strip()
+            or not isinstance(email.get("verified"), bool)
+            for email in email_payload
+        ):
+            raise ValueError("GitHub email response is invalid.")
+        login_value = user_payload.get("login")
+        login = login_value.strip() if isinstance(login_value, str) else ""
         if not login:
             raise ValueError("GitHub OAuth user response did not include a login.")
-        github_id = int(user_payload.get("id") or 0)
+        github_id = user_payload.get("id")
+        if isinstance(github_id, bool) or not isinstance(github_id, int) or github_id <= 0:
+            raise ValueError("GitHub user response has no immutable identity.")
         public_email = str(user_payload.get("email") or "").strip()
         verified_emails = _verified_email_addresses(email_payload)
         primary_email = _primary_email_address(email_payload)
         email_candidates = {email.lower() for email in verified_emails}
-        if public_email:
-            email_candidates.add(public_email.lower())
         organizations = frozenset(
             str(org.get("login", "")).strip()
             for org in org_payload
@@ -324,7 +484,7 @@ class GitHubOAuthClient:
             email=(
                 bootstrap_admin_email
                 or primary_email
-                or public_email
+                or (public_email if role == "owner" else "")
                 or next(iter(verified_emails), "")
             ),
             organizations=organizations,
@@ -411,6 +571,7 @@ class HumanSessionManager:
         self._config = config
         self._session_store = session_store
         self._now = now or _utc_now
+        self._credential_cipher = HumanCredentialCipher(config.session_secret)
 
     @property
     def public_origin(self) -> str:
@@ -435,7 +596,9 @@ class HumanSessionManager:
             return "admin"
         return None
 
-    def issue(self, identity: GitHubHumanIdentity) -> LaunchplaneHumanSession:
+    def issue(
+        self, identity: GitHubHumanIdentity, credential: GitHubOAuthCredential | None = None
+    ) -> LaunchplaneHumanSession:
         now = self._now()
         session = LaunchplaneHumanSession(
             session_id=secrets.token_urlsafe(32),
@@ -443,6 +606,14 @@ class HumanSessionManager:
             created_at=now,
             expires_at=now + timedelta(seconds=SESSION_TTL_SECONDS),
         )
+        if credential is not None and identity.role != "owner":
+            session = replace(
+                session,
+                claims_verified_at=now,
+                oauth_credential=self._credential_cipher.encrypt(
+                    credential, session_id=session.session_id, github_id=identity.github_id
+                ),
+            )
         self._session_store.write_session(session)
         return session
 
@@ -477,40 +648,94 @@ class HumanSessionManager:
 
     def authorization_claims_are_current(self, session: LaunchplaneHumanSession) -> bool:
         now = self._now()
+        verified_at = session.claims_verified_at or session.created_at
         return (
-            session.created_at
+            verified_at
             <= now
-            < session.created_at + timedelta(seconds=SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS)
+            < verified_at + timedelta(seconds=SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS)
         )
 
     def revoke(self, session: LaunchplaneHumanSession) -> None:
         self._session_store.delete_session(session.session_id)
 
+    def refresh_authorization_claims(
+        self,
+        session: LaunchplaneHumanSession,
+        *,
+        client: GitHubOAuthLoginClient | None,
+        authz_policy: LaunchplaneAuthzPolicy,
+    ) -> LaunchplaneHumanSession | None:
+        if session.identity.role == "owner":
+            return session
+
+        def refresh(current: LaunchplaneHumanSession) -> LaunchplaneHumanSession | None:
+            now = self._now()
+            verified_at = current.claims_verified_at or current.created_at
+            if current.expires_at <= now or verified_at > now:
+                return None
+            try:
+                credential = (
+                    self._credential_cipher.decrypt(
+                        current.oauth_credential,
+                        session_id=current.session_id,
+                        github_id=current.identity.github_id,
+                    )
+                    if current.oauth_credential
+                    else None
+                )
+                claims_due = now >= verified_at + timedelta(
+                    seconds=SESSION_CLAIMS_REFRESH_AFTER_SECONDS
+                )
+                token_due = (
+                    credential is not None
+                    and credential.access_expires_at is not None
+                    and (
+                        credential.access_expires_at
+                        <= now + timedelta(seconds=OAUTH_REFRESH_MARGIN_SECONDS)
+                    )
+                )
+                if not claims_due and not token_due:
+                    return current
+                if credential is None:
+                    return current if self.authorization_claims_are_current(current) else None
+                if client is None:
+                    return None
+                login = client.revalidate(credential, authz_policy=authz_policy)
+                if (
+                    login.identity.github_id != current.identity.github_id
+                    or login.identity.role == "owner"
+                ):
+                    return None
+                return replace(
+                    current,
+                    identity=login.identity,
+                    claims_verified_at=now,
+                    oauth_credential=self._credential_cipher.encrypt(
+                        login.credential,
+                        session_id=current.session_id,
+                        github_id=current.identity.github_id,
+                    ),
+                )
+            except Exception:
+                # Provider errors may contain credentials. Neither log them nor
+                # retain a session whose verification failed (including refresh).
+                return None
+
+        return self._session_store.update_session(session.session_id, refresh)
+
     def renew_if_needed(self, session: LaunchplaneHumanSession) -> LaunchplaneHumanSession | None:
         now = self._now()
-        if session.expires_at <= now:
-            self._session_store.delete_session(session.session_id)
-            return None
-        if session.expires_at - now > timedelta(
-            seconds=SESSION_TTL_SECONDS - SESSION_RENEW_AFTER_SECONDS
-        ):
-            return session
-        renewed_session = LaunchplaneHumanSession(
-            session_id=session.session_id,
-            identity=session.identity,
-            created_at=session.created_at,
-            expires_at=now + timedelta(seconds=SESSION_TTL_SECONDS),
-            csrf_generation=session.csrf_generation,
-        )
-        if self._session_store.write_session_if_csrf_generation(
-            renewed_session,
-            expected_generation=session.csrf_generation,
-        ):
-            return renewed_session
-        current_session = self._session_store.read_session(session.session_id)
-        if current_session is None or current_session.expires_at <= now:
-            return None
-        return current_session
+
+        def renew(current: LaunchplaneHumanSession) -> LaunchplaneHumanSession | None:
+            if current.expires_at <= now:
+                return None
+            if current.expires_at - now > timedelta(
+                seconds=SESSION_TTL_SECONDS - SESSION_RENEW_AFTER_SECONDS
+            ):
+                return current
+            return replace(current, expires_at=now + timedelta(seconds=SESSION_TTL_SECONDS))
+
+        return self._session_store.update_session(session.session_id, renew)
 
     def csrf_token(self, session: LaunchplaneHumanSession) -> str:
         generation = session.csrf_generation

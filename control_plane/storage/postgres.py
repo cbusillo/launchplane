@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 import hashlib
@@ -5532,6 +5532,10 @@ def _human_session_payload(session: LaunchplaneHumanSession) -> PayloadDict:
         "created_at": session.created_at.isoformat(),
         "expires_at": session.expires_at.isoformat(),
         "csrf_generation": session.csrf_generation,
+        "claims_verified_at": session.claims_verified_at.isoformat()
+        if session.claims_verified_at
+        else None,
+        "oauth_credential": session.oauth_credential,
         "identity": {
             "login": session.identity.login,
             "github_id": session.identity.github_id,
@@ -5570,6 +5574,12 @@ def _human_session_from_payload(payload: PayloadDict) -> LaunchplaneHumanSession
         created_at=datetime.fromisoformat(str(payload.get("created_at") or "")),
         expires_at=datetime.fromisoformat(str(payload.get("expires_at") or "")),
         csrf_generation=csrf_generation,
+        claims_verified_at=(
+            datetime.fromisoformat(str(payload["claims_verified_at"]))
+            if payload.get("claims_verified_at")
+            else None
+        ),
+        oauth_credential=str(payload.get("oauth_credential") or ""),
         identity=GitHubHumanIdentity(
             login=str(identity_payload.get("login") or ""),
             github_id=int(identity_payload.get("github_id") or 0),
@@ -13402,6 +13412,36 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
         return tuple(affected_operation_ids)
 
+    def update_session(
+        self,
+        session_id: str,
+        update: Callable[[LaunchplaneHumanSession], LaunchplaneHumanSession | None],
+    ) -> LaunchplaneHumanSession | None:
+        # A refresh token is single-use. Serialize the provider exchange and
+        # durable replacement across workers; never upsert a deleted session.
+        statement = (
+            select(LaunchplaneHumanSessionRow)
+            .where(LaunchplaneHumanSessionRow.session_id == session_id)
+            .with_for_update()
+        )
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                return None
+            current = _human_session_from_payload(row.payload)
+            updated = update(current) if current.expires_at > datetime.now(timezone.utc) else None
+            if updated is None:
+                session.delete(row)
+            elif updated != current:
+                row.login = updated.identity.login
+                row.github_id = updated.identity.github_id
+                row.role = updated.identity.role
+                row.created_at = updated.created_at.isoformat()
+                row.expires_at = updated.expires_at.isoformat()
+                row.payload = _human_session_payload(updated)
+            session.commit()
+            return updated
+
     def write_session(self, session: LaunchplaneHumanSession) -> None:
         self._write_row(
             LaunchplaneHumanSessionRow(
@@ -13479,12 +13519,11 @@ class PostgresRecordStore(HumanSessionStore):
                 return False
             if current_session.csrf_generation != expected_generation:
                 return False
-            row.login = human_session.identity.login
-            row.github_id = human_session.identity.github_id
-            row.role = human_session.identity.role
-            row.created_at = human_session.created_at.isoformat()
-            row.expires_at = human_session.expires_at.isoformat()
-            row.payload = _human_session_payload(human_session)
+            # CSRF consumption must not restore the credential/claims snapshot
+            # read before a concurrent provider refresh.
+            row.payload = _human_session_payload(
+                replace(current_session, csrf_generation=human_session.csrf_generation)
+            )
             session.commit()
         return True
 

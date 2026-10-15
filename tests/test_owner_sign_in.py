@@ -71,7 +71,7 @@ class OwnerSignInIdentityTests(unittest.TestCase):
                 code_verifier="verifier",
                 authz_policy=LaunchplaneAuthzPolicy.model_validate(policy),
                 is_product_owner=lambda candidate: candidate == OWNER_ID,
-            )
+            ).identity
 
     def test_named_owner_without_a_policy_role_signs_in_as_owner(self) -> None:
         identity = self.sign_in(github_id=OWNER_ID, policy={"github_humans": []})
