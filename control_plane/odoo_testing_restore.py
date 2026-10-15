@@ -260,6 +260,9 @@ def build_fresh_testing_restore_script(
     clear_stale_lock: bool,
     data_workflow_lock_path: str,
 ) -> str:
+    from control_plane.dokploy.compose import ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND
+    from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
+
     payload = workflow_environment.get(
         "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64",
         runtime_environment.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", ""),
@@ -270,6 +273,8 @@ def build_fresh_testing_restore_script(
         readback_spec=readback_spec,
     )
     spec = {
+        "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
+        "runner_healthcheck_command": ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
         "expected_overrides_payload": payload,
         "stale_lock_program": FRESH_TESTING_STALE_LOCK_PROGRAM,
         "clear_stale_lock": clear_stale_lock,
@@ -300,7 +305,7 @@ def build_fresh_testing_restore_script(
     )
 
 
-FRESH_TESTING_STALE_LOCK_PROGRAM = """import os,sys
+FRESH_TESTING_STALE_LOCK_PROGRAM = r"""import os,sys
 from pathlib import Path
 path=Path(sys.argv[1])
 if not path.is_absolute() or '..' in path.parts or not path.resolve().is_relative_to(Path(sys.argv[3]).resolve()) or path.is_symlink():
@@ -312,6 +317,11 @@ for process in Path(sys.argv[4]).iterdir():
         arguments=(process/'cmdline').read_bytes()
     except (FileNotFoundError, ProcessLookupError):
         continue
+    tokens=arguments.split(b'\0')
+    if b'-c' in tokens:
+        position=tokens.index(b'-c')
+        if position+1 < len(tokens) and tokens[position+1].strip() == sys.argv[6].encode():
+            continue
     if any(marker in arguments for marker in (b'odoo-bin', b'run_odoo_', b'pg_restore', sys.argv[5].encode())):
         raise RuntimeError('Testing data workflow still has an active process')
 if path.exists():
@@ -461,10 +471,10 @@ def restore_main():
                 raise RuntimeError("Testing storage has a bind consumer")
     runner = containers["script-runner"][0]
     web = containers["web"][0]
-    docker("exec", "-i", runner, "python3", "-", spec["data_workflow_lock_path"],
-        "true" if spec["clear_stale_lock"] else "false", "/volumes/data", "/proc", database, stdin=spec["stale_lock_program"].encode())
-    docker("exec", "-u", "root", runner, "rm", "-f", "/volumes/data/.launchplane_integration_readback_passed")
+    docker("exec", "-u", "root", runner, "rm", "-f", spec["web_gate_path"])
     docker("stop", web)
+    docker("exec", "-i", runner, "python3", "-", spec["data_workflow_lock_path"],
+        "true" if spec["clear_stale_lock"] else "false", "/volumes/data", "/proc", database, spec["runner_healthcheck_command"], stdin=spec["stale_lock_program"].encode())
     print("testing_copy_runtime_isolated=true", flush=True)
     docker("exec", runner, "python3", "-c", "import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert all(callable(getattr(R,name,None)) for name in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name'))")
     present = docker("exec", "-i", containers["database"][0], "sh", "-c",
@@ -542,7 +552,7 @@ def restore_main():
         for line in output.splitlines():
             if re.fullmatch(r"(?:website_bootstrap_[a-z_]+|odoo_[a-z_]+)=(?:true|false|[0-9]+)", line):
                 print(line)
-        marker = "/volumes/data/.launchplane_integration_readback_passed"
+        marker = spec["web_gate_path"]
         docker("exec", runner, "python3", "-c",
             "import hashlib,os;from pathlib import Path;Path(" + repr(marker) + ").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+'\\n'+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
         docker("exec", "-u", "root", runner, "rm", "-f", dump_path)

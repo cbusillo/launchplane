@@ -12,6 +12,9 @@ from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
 
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
+ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND = (
+    "test -x /odoo/odoo-bin && test -f /volumes/scripts/run_odoo_data_workflows.py"
+)
 
 
 def _traefik_route_name(*, domain_host: str) -> str:
@@ -292,7 +295,7 @@ services:
     healthcheck:
       <<: *healthcheck-defaults
       test: >-
-        test -x /odoo/odoo-bin && test -f /volumes/scripts/run_odoo_data_workflows.py
+        {ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND}
       retries: 3
       start_period: 10s
     environment:

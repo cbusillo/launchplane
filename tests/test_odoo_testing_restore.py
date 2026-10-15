@@ -10,6 +10,8 @@ from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
 from unittest.mock import Mock, patch
+from control_plane.dokploy.compose import ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND
+from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
 from control_plane.odoo_testing_restore import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
@@ -160,6 +162,8 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             "data_workflow_lock_path": "/volumes/data/.fixture_workflow_lock",
             "clear_stale_lock": False,
             "stale_lock_program": FRESH_TESTING_STALE_LOCK_PROGRAM,
+            "runner_healthcheck_command": ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
+            "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
             "expected_overrides_payload": "",
         }
         self.containers: dict[str, dict[str, Any]] = {}
@@ -284,6 +288,18 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertEqual(status, 0, output)
         self.assertIn("testing_copy_sanitized=true", output)
         stop = self.calls.index(["docker", "stop", "web"])
+        lock_check = next(
+            index
+            for index, call in enumerate(self.calls)
+            if self.spec["data_workflow_lock_path"] in call
+        )
+        clear_gate = next(
+            index
+            for index, call in enumerate(self.calls)
+            if call[:2] == ["docker", "exec"] and call[-1] == INTEGRATION_READBACK_PASSED_PATH
+        )
+        self.assertLess(clear_gate, stop)
+        self.assertLess(stop, lock_check)
         source = next(i for i, call in enumerate(self.calls) if call[0] == "ssh")
         start = self.calls.index(["docker", "start", "web"])
         self.assertLess(stop, source)
@@ -627,6 +643,11 @@ class FreshTestingIntentTests(unittest.TestCase):
             root = Path(directory).resolve()
             processes = root / "processes"
             processes.mkdir()
+            healthcheck = processes / str(os.getpid() + 2)
+            healthcheck.mkdir()
+            (healthcheck / "cmdline").write_bytes(
+                b"/bin/sh\0-c\0" + ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND.encode() + b"\0"
+            )
             lock = root / "workflow.lock"
             for alive, terminal, removed in (
                 (True, True, False),
@@ -646,6 +667,7 @@ class FreshTestingIntentTests(unittest.TestCase):
                                 str(root),
                                 str(processes),
                                 "fixture-database",
+                                ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
                             ],
                         ),
                         patch("os.kill", side_effect=None if alive else ProcessLookupError),
@@ -672,7 +694,15 @@ class FreshTestingIntentTests(unittest.TestCase):
                 patch.object(
                     sys,
                     "argv",
-                    ["lock", str(lock), "true", str(root), str(processes), "fixture-database"],
+                    [
+                        "lock",
+                        str(lock),
+                        "true",
+                        str(root),
+                        str(processes),
+                        "fixture-database",
+                        ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
+                    ],
                 ),
                 patch("os.kill", side_effect=ProcessLookupError),
                 self.assertRaises(RuntimeError),
@@ -688,7 +718,15 @@ class FreshTestingIntentTests(unittest.TestCase):
                 patch.object(
                     sys,
                     "argv",
-                    ["lock", str(lock), "true", str(root), str(processes), "fixture-database"],
+                    [
+                        "lock",
+                        str(lock),
+                        "true",
+                        str(root),
+                        str(processes),
+                        "fixture-database",
+                        ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
+                    ],
                 ),
                 patch("os.kill", side_effect=ProcessLookupError),
                 self.assertRaises(RuntimeError),

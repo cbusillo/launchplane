@@ -10824,3 +10824,24 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapScenario):
         self.assertEqual(replay.status_code, 202, replay.text)
         self.assertTrue(replay.json()["replayed"])
         self.assertEqual(self.route_writes, 1)
+
+    def test_bootstrap_refuses_production_profile_hostname_even_without_target_domains(
+        self,
+    ) -> None:
+        from urllib.parse import urlsplit
+        from control_plane.testing_replacement_bootstrap import bootstrap_plan
+
+        production = next(lane for lane in self.profile.lanes if lane.instance == "prod")
+        hostname = urlsplit(production.base_url).hostname
+        assert hostname is not None
+        self.assertFalse(self.production_before.domains)
+        with patch(
+            "control_plane.testing_replacement_bootstrap.require_distinct_testing_credentials"
+        ) as credentials:
+            with self.assertRaises(ValueError):
+                bootstrap_plan(
+                    self.store,
+                    self.profile.product,
+                    self.request.model_copy(update={"domain_host": hostname}),
+                )
+            credentials.assert_not_called()

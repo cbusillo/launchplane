@@ -138,6 +138,17 @@ def bootstrap_plan(
             )
             for other in store.list_dokploy_target_records()
         )
+        or any(
+            request.domain_host
+            in {urlsplit(candidate.base_url).hostname, urlsplit(candidate.health_url).hostname}
+            and not (
+                generation is not None
+                and other.product == product
+                and (candidate.context, candidate.instance) == (request.context, "testing")
+            )
+            for other in store.list_product_profile_records()
+            for candidate in other.lanes
+        )
     ):
         raise ValueError("Fresh testing requires an independent, unbound hostname.")
     bindings = site_delivered_secret_bindings_from_store(
