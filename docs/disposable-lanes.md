@@ -831,9 +831,10 @@ attempt requires fresh admission. It reads login history from the original serve
 copy witness, including when web is stopped or the new copy is incomplete;
 copied production login rows in the new database cannot stand in for testing use.
 An unavailable original database still skips rather than assuming non-use.
-If the selected new copy is running or already has its web-start gate, reclaim
+If the selected new copy already has its web-start gate, reclaim
 skips and preserves it: people may have used it before final completion was
 recorded. A stopped web process alone does not erase that gate's protection.
+A running container still waiting behind that gate can resume an unopened copy.
 Every provider checkpoint rechecks the generation, admitted use/custody/isolation facts and
 current hold. The normal replacement recovery guard also binds the profile,
 runtime configuration and source/secret metadata before provider effects and

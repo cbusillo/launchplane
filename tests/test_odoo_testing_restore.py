@@ -524,7 +524,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 self.assertEqual(
                     frame,
                     {"type": "complete", "new_copy_serving": True}
-                    if running or opened
+                    if opened
                     else {"type": "complete", "recent_signins": False},
                 )
         self.assertFalse(

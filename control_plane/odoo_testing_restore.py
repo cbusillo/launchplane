@@ -797,14 +797,13 @@ def restore_main():
             if present != '1':
                 raise RuntimeError('Testing login history is unavailable')
             if spec.get('usage_reclaim'):
-                state=containers['web'][1].get('State',{})
-                if type(state.get('Running')) is not bool:
-                    raise RuntimeError('Testing web state is unreadable')
-                web_env=dict(item.split('=',1) for item in containers['web'][1]['Config'].get('Env',[]) if '=' in item)
                 new_database=spec['usage_new_database']
                 if not re.fullmatch(r'lp_drill_[a-f0-9]{32}',new_database):
                     raise RuntimeError('Reclaimed testing database is unbound')
-                serving=state['Running'] and web_env.get('ODOO_DB_NAME')==new_database
+                # Running includes the shell waiting behind the web-start gate.
+                # The gate, removed before restore creates this database, is the
+                # existing witness that this new copy may have served testers.
+                serving=False
                 new_present=docker('exec','-i',containers['database'][0],'sh','-c',
                     'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
                     '_',new_database,stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
