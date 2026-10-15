@@ -38458,6 +38458,99 @@
         "title": "ProductionIndependentBackupPolicy",
         "type": "object"
       },
+      "ProductionRecipientRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "application_service": {
+            "minLength": 1,
+            "title": "Application Service",
+            "type": "string"
+          },
+          "context": {
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "database_service": {
+            "minLength": 1,
+            "title": "Database Service",
+            "type": "string"
+          },
+          "destination_server_id": {
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Destination Server Id",
+            "type": "string"
+          },
+          "instance": {
+            "const": "prod",
+            "default": "prod",
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback",
+              "receipt"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "ports": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Ports",
+            "type": "object"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          },
+          "service_limits": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/RecipientServiceLimits"
+            },
+            "title": "Service Limits",
+            "type": "object"
+          },
+          "source_commit": {
+            "pattern": "^[a-f0-9]{40}$",
+            "title": "Source Commit",
+            "type": "string"
+          },
+          "volume_keys": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Volume Keys",
+            "type": "object"
+          }
+        },
+        "required": [
+          "context",
+          "source_commit",
+          "destination_server_id",
+          "volume_keys",
+          "ports",
+          "application_service",
+          "database_service",
+          "service_limits",
+          "reason"
+        ],
+        "title": "ProductionRecipientRequest",
+        "type": "object"
+      },
       "PromotionEvidenceRequest": {
         "additionalProperties": false,
         "properties": {
@@ -40017,6 +40110,37 @@
           "recent_previews"
         ],
         "title": "RecentOperationsResponse",
+        "type": "object"
+      },
+      "RecipientServiceLimits": {
+        "additionalProperties": false,
+        "properties": {
+          "command_memory_limits": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "const": "--innodb-buffer-pool-size"
+            },
+            "title": "Command Memory Limits",
+            "type": "object"
+          },
+          "cpus": {
+            "exclusiveMinimum": 0.0,
+            "title": "Cpus",
+            "type": "number"
+          },
+          "memory_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Memory Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cpus",
+          "memory_bytes"
+        ],
+        "title": "RecipientServiceLimits",
         "type": "object"
       },
       "RecordFailure": {
@@ -86494,6 +86618,127 @@
           }
         },
         "summary": "Read original preview reservation classifications"
+      }
+    },
+    "/v1/products/{product}/production-recipient": {
+      "post": {
+        "operationId": "prepare_independent_production_recipient",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._-]+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductionRecipientRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Prepare a fresh private production recipient without changing the serving binding"
       }
     },
     "/v1/products/{product}/secret-bindings": {
