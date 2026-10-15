@@ -1005,6 +1005,9 @@ The service exposes product profile records through `GET /v1/product-profiles`,
 `GET /v1/product-profiles/{product}`, and `POST /v1/product-profiles`. Writes
 require the `product_profile.write` action for the target product in the
 Launchplane service context; reads use `product_profile.read`.
+An existing full-profile write preserves classification provenance when an
+older payload omits it, and refuses explicit classification or provenance
+changes. Use the reviewed production-use endpoint for those changes.
 
 The profile `owner` names the Client who may accept or request changes on
 previews and can never merge or deploy. Set or clear it with
@@ -1028,7 +1031,12 @@ and promotion evidence still work. Promotion refuses a testing lane that runs an
 image outside the current repository.
 
 `POST /v1/product-profiles/{product}/production-use` changes only the production-use
-classification and profile metadata under `product_profile.write`. Dry run returns a
+classification and profile metadata under `product_profile.write`. The source-owned
+Director-agent path also permits a reviewed never-live fact for an active
+testing-only product, subject to the contradictory-history checks in
+[authorization authority](authorization-authority.md#reviewed-never-live-classification-and-preview-execution).
+It persists bounded agent provenance and supplies no production-bootstrap exemption.
+Dry run returns a
 digest of the full starting profile, requested value, and reason; Apply must match it.
 Atomic compare-and-write and idempotency evidence record the caller, before/after,
 reason and timestamps. The Client panel reads the resulting profile back.

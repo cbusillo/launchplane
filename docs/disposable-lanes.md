@@ -20,6 +20,9 @@ minutes. A changed binding, expired observation, positive
 staff-testing hold or any required unknown fact refuses the new permission.
 A target ID also bound to another lane refuses it independently of the observation.
 Global and lane runtime configuration and secret metadata participate in the binding.
+For an Odoo preview, the binding also includes its copied template-lane runtime
+settings, secret metadata and bootstrap override. Changing those inputs
+invalidates preview safety even when no record under the preview slug changes.
 Recording or refreshing an observation changes no profile or ownership digest.
 Actual ownership and runtime/secret authority still must match, and each
 destructive checkpoint validates fresh facts.

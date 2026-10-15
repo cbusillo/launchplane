@@ -7111,12 +7111,16 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
 
-        if not native_routes.native_driver_route_authorization_allows(
-            endpoint=write_odoo_preview_apply,
-            authorization_allows=resolved_authz_policy_runtime.allows,
-            identity=identity,
-            product=product_profile.product,
-            context=product_profile.preview.context,
+        director_preview_apply = director_agent_identity(identity)
+        if (
+            not director_preview_apply
+            and not native_routes.native_driver_route_authorization_allows(
+                endpoint=write_odoo_preview_apply,
+                authorization_allows=resolved_authz_policy_runtime.allows,
+                identity=identity,
+                product=product_profile.product,
+                context=product_profile.preview.context,
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -7189,6 +7193,58 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
         )
 
+        preview_binding = ""
+
+        def preview_checkpoint() -> None:
+            nonlocal preview_binding
+            if not director_preview_apply:
+                return
+            try:
+                lane_store = cast(DisposableLaneStore, record_store)
+                current_profile = lane_store.read_product_profile_record(product_profile.product)
+                if current_profile != product_profile:
+                    raise DisposableLaneSafetyUnknown("The preview profile changed; plan again.")
+                preview = resolve_disposable_preview(
+                    lane_store, current_profile, issued_plan.context, issued_plan.preview_slug
+                )
+                compose_id = issued_plan.dry_run_plan.compose_ref
+                if not compose_id or compose_id.startswith("${created."):
+                    raise DisposableLaneSafetyUnknown(
+                        "The existing preview target is not resolved."
+                    )
+                try:
+                    target_id = lane_store.read_dokploy_target_id_record(
+                        context_name=issued_plan.context, instance_name=issued_plan.preview_slug
+                    )
+                except FileNotFoundError:
+                    target_id = None
+                if (target_id is not None and compose_id != target_id.target_id) or any(
+                    item.target_id == compose_id
+                    and (item.context, item.instance)
+                    != (issued_plan.context, issued_plan.preview_slug)
+                    for item in lane_store.list_dokploy_target_id_records()
+                ):
+                    raise DisposableLaneSafetyUnknown(
+                        "The discovered preview target changed or aliases another lane."
+                    )
+                binding = require_disposable_lane(
+                    lane_store,
+                    product=product_profile.product,
+                    context=issued_plan.context,
+                    instance=issued_plan.preview_slug,
+                    preview=preview,
+                )
+                if preview_binding and binding != preview_binding:
+                    raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
+                preview_binding = binding
+            except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="disposable_lane_safety_unknown",
+                    message=str(error),
+                ) from error
+
         payload_fingerprint = idempotency_request_fingerprint(
             route_path=_ODOO_PREVIEW_APPLY_ROUTE,
             payload=raw_payload,
@@ -7206,6 +7262,7 @@ def create_launchplane_fastapi_app(
             execute_apply=execute_odoo_preview_apply_result,
             observe_apply=observe_odoo_preview_apply_result,
             supersession_is_quiescent=odoo_preview_supersession_is_quiescent,
+            pre_mutation_guard=preview_checkpoint if director_preview_apply else None,
         )
         try:
             response = await run_provider_operation_http(
@@ -12811,6 +12868,20 @@ def create_launchplane_fastapi_app(
             existing_profile = profile_store.read_product_profile_record(profile.product)
         except (FileNotFoundError, KeyError):
             existing_profile = None
+        if existing_profile is not None and "production_use_authority" not in raw_payload:
+            profile = profile.model_copy(
+                update={"production_use_authority": existing_profile.production_use_authority}
+            )
+        if existing_profile is not None and (
+            profile.production_use != existing_profile.production_use
+            or profile.production_use_authority != existing_profile.production_use_authority
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="production_use_bounded_apply_required",
+                message="Change production classification through the reviewed production-use endpoint.",
+            )
         if profile.release_on_acceptance != (
             existing_profile.release_on_acceptance if existing_profile is not None else "held"
         ) or (
@@ -14041,7 +14112,8 @@ def create_launchplane_fastapi_app(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
-        if not isinstance(
+        director_classification = director_agent_identity(identity)
+        if not director_classification and not isinstance(
             identity,
             GitHubHumanIdentity
             | LocalOperatorIdentity
@@ -14069,18 +14141,27 @@ def create_launchplane_fastapi_app(
                 message="Product production use request failed validation.",
             ) from error
         normalized_product = product.strip()
-        if not resolved_authz_policy_runtime.allows(
+        explicit_profile_write = resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_profile.write",
             product=normalized_product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ) and not (
-            production_use_request.mode != "apply"
-            and resolved_authz_policy_runtime.allows(
-                identity=identity,
-                action="product_profile.plan",
-                product=normalized_product,
-                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        )
+        if (
+            not explicit_profile_write
+            and not (
+                director_classification
+                and production_use_request.production_use == "prelaunch"
+                and production_use_request.release_on_acceptance is None
+            )
+            and not (
+                production_use_request.mode != "apply"
+                and resolved_authz_policy_runtime.allows(
+                    identity=identity,
+                    action="product_profile.plan",
+                    product=normalized_product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                )
             )
         ):
             raise _launchplane_http_error(
@@ -14178,10 +14259,55 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message="Product profile was not found.",
             ) from error
+        source_classification = director_classification and not explicit_profile_write
+        if (
+            director_classification
+            and production_use_request.mode == "apply"
+            and profile.production_use == "live"
+            and production_use_request.production_use != "live"
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Director agents cannot downgrade a live product's classification.",
+            )
+        if source_classification and production_use_request.mode == "apply":
+            try:
+                control_plane_product_production_use_setting.require_never_live_classification(
+                    profile=profile,
+                    request=production_use_request,
+                    deployments=database_store.list_deployment_records(),
+                    promotions=database_store.list_promotion_records(),
+                    previews=database_store.list_preview_records(
+                        context_name=profile.preview.context
+                    ),
+                )
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message=str(error),
+                ) from error
+        classification_authority: control_plane_product_production_use_setting.ProductionUseAuthority = "explicit"
+        if source_classification:
+            classification_authority = (
+                profile.production_use_authority
+                if profile.production_use == "prelaunch"
+                else "director_agent"
+            )
+        elif (
+            production_use_request.production_use == profile.production_use
+            and production_use_request.release_on_acceptance is not None
+        ):
+            # Changing the release switch is not a bootstrap attestation.
+            classification_authority = profile.production_use_authority
         try:
             plan = control_plane_product_production_use_setting.build_product_production_use_plan(
                 profile=profile,
                 request=production_use_request,
+                authority=classification_authority,
             )
         except (
             control_plane_product_production_use_setting.ProductProductionUseChangedError
@@ -14214,6 +14340,7 @@ def create_launchplane_fastapi_app(
                     production_use=plan.production_use_after,
                     release_on_acceptance=plan.release_on_acceptance_after,
                     updated_at=utc_now_timestamp(),
+                    authority=classification_authority,
                 )
             except ValueError as error:
                 raise _launchplane_http_error(
@@ -14236,6 +14363,7 @@ def create_launchplane_fastapi_app(
         write_result = database_store.compare_and_write_product_profile_record(
             expected_record=profile,
             replacement_record=replacement_profile,
+            require_never_live_history=source_classification,
             mutation=DbOnlyMutationRequest(
                 scope=idempotency_scope(identity),
                 route_path=_PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
