@@ -55,10 +55,30 @@ def operation_status_read_view(operation: BaseModel, *, poll_url: str) -> dict[s
     }
     view["attempt"] = int(record.get("attempt") or 0)
     view.update(_safe_record_ids(record))
-    view["error_code"] = safe_operation_error_code(str(record.get("error_code") or ""))
+    failure = getattr(operation, "execution_failure", None)
+    error_source = (
+        failure.model_dump(mode="json")
+        if isinstance(failure, BaseModel) and record.get("status") == "cancelled"
+        else record
+    )
+    view["error_code"] = safe_operation_error_code(str(error_source.get("error_code") or ""))
     # Launchplane's fixed description of the code; stored text is never copied.
     view["error_description"] = deploy_failure_description(str(view["error_code"]))
-    view["error_detail_keys"] = list(safe_error_detail_keys(record.get("error_detail_keys") or ()))
+    view["error_detail_keys"] = list(
+        safe_error_detail_keys(error_source.get("error_detail_keys") or ())
+    )
+    cancellation = record.get("cancellation")
+    if isinstance(cancellation, dict):
+        caller = cancellation.get("caller")
+        if (
+            isinstance(caller, dict)
+            and caller.get("identity_type") == "launchplane_reconcile"
+            and cancellation.get("reconciliation_attestation")
+        ):
+            view["error_description"] = (
+                "Launchplane testing recovery cancelled this attempt after observing provider "
+                "quiescence. " + str(view["error_description"])
+            ).strip()
     checkpoints = record.get("checkpoints")
     if isinstance(checkpoints, list):
         view["checkpoints"] = [
