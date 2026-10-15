@@ -19,6 +19,7 @@ from control_plane.contracts.public_dns import PublicDnsExpectedTarget
 
 ProductLifecycleState = Literal["active", "retiring", "retired"]
 ProductPublicWebsite = Literal["required", "none"]
+ProductionUseAuthority = Literal["explicit", "director_agent"]
 OdooDataAuthority = Literal["unknown", "resettable", "restorable", "authoritative"]
 OdooRebuildSourceMode = Literal["empty", "upstream_restore"]
 BumpLevel = Literal["patch", "minor", "major"]
@@ -639,6 +640,13 @@ class LaunchplaneProductProfileRecord(BaseModel):
     lifecycle_state: ProductLifecycleState = "active"
     # Unknown existing records require review; only explicit prelaunch records are exempt.
     production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
+    # A bounded agent attestation records a fact, never a production bootstrap exemption.
+    # Older classifications came through the explicit write path and serialize unchanged.
+    production_use_authority: ProductionUseAuthority = Field(
+        default="explicit",
+        exclude_if=lambda value: value == "explicit",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     odoo_business_hours: OdooBusinessHoursPolicy | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -762,6 +770,10 @@ class LaunchplaneProductProfileRecord(BaseModel):
                 normalized_historical_contexts.append(context)
         self.historical_contexts = tuple(normalized_historical_contexts)
         return self
+
+    @property
+    def prelaunch_bootstrap_authorized(self) -> bool:
+        return self.production_use == "prelaunch" and self.production_use_authority == "explicit"
 
     @property
     def is_active(self) -> bool:

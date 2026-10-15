@@ -22,6 +22,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   denial handling, transitional GitHub boundary, and DB-native target.
 - [service-boundary.md](service-boundary.md) — Launchplane HTTP ingress, GitHub
   OIDC trust, and API contracts.
+- [dokploy-inventory.md](dokploy-inventory.md) — complete value-free provider
+  project/environment enumeration, pagination and placement limits.
 - [dokploy-service-deployments.md](dokploy-service-deployments.md) — contract
   for simple image-backed services deployed through Dokploy applications.
 - [prepared-public-serving.md](prepared-public-serving.md) — isolated prepared

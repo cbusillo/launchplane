@@ -1,5 +1,35 @@
 import { expect, test } from "@playwright/test";
 
+test("prelaunch reconfirmation shows the production consequence before Apply @responsive", async ({ page }, testInfo) => {
+  await page.goto("/ui/products/atlas-commerce?fixture=products");
+  const { products, fixtureIdentity } = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return { products: fixtures.productsForFixture("products"), fixtureIdentity: fixtures.fixtureIdentity };
+  });
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "csrf", identity: fixtureIdentity } }));
+  await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products } }));
+  await page.route("**/v1/products/atlas-commerce", route => route.fulfill({ json: { status: "ok", trace_id: "product", product: products[0] } }));
+  await page.route("**/v1/product-profiles/atlas-commerce", route => route.fulfill({ json: { status: "ok", trace_id: "profile", profile: {
+    repository: "example/atlas-commerce", owner: { github_login: "example-owner", github_id: "9001" },
+    image: { repository: "ghcr.io/example/atlas-commerce" }, production_use: "prelaunch", production_use_authority: "director_agent",
+  } } }));
+  await page.route("**/v1/product-profiles/atlas-commerce/production-use", async route => {
+    await route.fulfill({ status: 202, json: { status: "accepted", trace_id: "plan", records: {}, result: {
+      production_use_before: "prelaunch", production_use_after: "prelaunch", changed: true,
+      plan_sha256: "a".repeat(64), prelaunch_bootstrap_authorized_before: false, prelaunch_bootstrap_authorized_after: true,
+    } } });
+  });
+  await page.goto("/ui/products/atlas-commerce");
+  const panel = page.getByRole("region", { name: "Production use", exact: true });
+  await expect(panel.getByRole("note")).toHaveCount(0);
+  await panel.getByLabel("Change reason").fill("Reviewed original never-live facts for initial production setup.");
+  await panel.getByRole("button", { name: "Dry run", exact: true }).click();
+  await expect(panel.getByRole("note")).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Apply", exact: true })).toBeEnabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await panel.screenshot({ path: testInfo.outputPath("bootstrap-reconfirmation.png") });
+});
+
 for (const [field, option] of [["Image repository", ""], ["Production use", "live"], ["Releases on acceptance", "director_standing"], ["Releases on acceptance", "promote_with_rollback_drill"]]) {
   test(`${field} ${option}: dry run, draft invalidation, Apply and read-back`, async ({ page }, testInfo) => {
     const mutations: string[] = [];

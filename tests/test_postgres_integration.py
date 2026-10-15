@@ -22,7 +22,6 @@ from uuid import uuid4
 
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
-from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import create_engine, event, insert, inspect, select, text, update
 from sqlalchemy.engine import Engine
@@ -30,6 +29,11 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.workflows.dokploy_target_adoption import (
+    PROJECT_CREATE_PATH,
+    ENVIRONMENT_CREATE_PATH,
+    COMPOSE_CREATE_PATH,
+)
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
@@ -48,6 +52,7 @@ from tests.test_odoo_addon_settings_override import _existing_record as _addon_o
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetRecordChanged,
+    DokployTargetIntegrationAllowance,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from tests import test_http_app_product_retirement as retirement_tests
@@ -59,7 +64,6 @@ from control_plane.authz_candidate_preparation import (
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
     ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
 )
-from control_plane.contracts.canonical_json import canonical_json_sha256
 from tests.support.retired_approval_history import _policy as _change_impact_policy
 from tests.support.retired_approval_history import _audit as _change_impact_audit
 from control_plane.contracts.retired_change_impact_audit import (
@@ -90,7 +94,6 @@ from tests.test_every_code_feedback_resume_storage import (
     T0 as FEEDBACK_T0,
     T1 as FEEDBACK_T1,
 )
-from tests.test_ordinary_agent_qualification_storage import QualificationStorageScenario
 from tests.test_merge_train_historical_completion import (
     _HistoricalCompletionFixture,
     _ReadOnlyTransport,
@@ -109,7 +112,6 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptancePreviewBinding,
     owner_acceptance_runtime_identity_binding,
 )
-from control_plane.contracts.ordinary_agent_custody import OrdinaryAgentCustodyCandidate
 from control_plane.contracts.owner_control import (
     ApprovalRequest,
     ChannelBindingRecord,
@@ -258,7 +260,6 @@ from control_plane.storage.product_authority_bundle import (
     ProductProfileConflictError,
     ProductContextOwnershipError,
     ProductAuthorityBundle,
-    SecretRecordConflictError,
     RuntimeEnvironmentConflictError,
     RuntimeEnvironmentWrite,
 )
@@ -277,16 +278,6 @@ from control_plane.trusted_maintenance import (
     TrustedMaintenanceGitHubEventFacts,
 )
 from tests.support.artifact_manifests import artifact_manifest_v2
-from control_plane.ordinary_agent_authentication import parse_ordinary_agent_token
-from tests.support.ordinary_agent_lifecycle import (
-    TEST_CLAIM_SECRET,
-    TEST_ISSUER_KEY,
-    prepare_test_issuance,
-    apply_test_enrollment,
-    enrollment_envelope,
-    enrollment_mutation,
-    setup_ordinary_agent_authority,
-)
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.test_privileged_operation_worker import (
     FIXED_NOW as PRIVILEGED_OPERATION_FIXED_NOW,
@@ -2336,9 +2327,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(store.list_runtime_environment_records(), (runtime,))
 
-    def test_adopted_secret_insert_loses_to_a_record_written_after_the_absence_check(
-        self,
-    ) -> None:
+    def test_direct_secret_writer_waits_for_atomic_adoption_after_absence_check(self) -> None:
         with _store_for_fresh_head_database() as store:
             recorded = SecretRecord(
                 secret_id="secret-adopted",
@@ -2352,28 +2341,37 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 updated_at="2026-10-03T00:00:00Z",
                 updated_by="other-writer",
             )
-            database_url = store.database_url
+            other = PostgresRecordStore(database_url=store.database_url)
+            self.addCleanup(other.close)
+            reached_lock = threading.Event()
+            original_lock = other._lock_product_authority_bundle_write
+            futures = []
+            with ThreadPoolExecutor(max_workers=1) as workers:
 
-            class _RacingStore(PostgresRecordStore):
-                def _after_product_authority_bundle_step(self, step_name: str) -> None:
-                    # Another writer commits the same secret after the absence check,
-                    # outside the bundle lock, as a direct secret write does.
+                def lock(session: Any) -> None:
+                    reached_lock.set()
+                    original_lock(session)
+
+                def after_step(step_name: str) -> None:
                     if step_name == "write_secret_version":
-                        other_store = PostgresRecordStore(database_url=database_url)
-                        try:
-                            other_store.write_secret_record(recorded)
-                        finally:
-                            other_store.close()
+                        future = workers.submit(other.write_secret_record, recorded)
+                        futures.append(future)
+                        self.assertTrue(reached_lock.wait(10))
+                        with self.assertRaises(TimeoutError):
+                            future.result(timeout=0.1)
 
-            racing_store = _RacingStore(database_url=database_url)
-            try:
-                with self.assertRaises(SecretRecordConflictError):
-                    racing_store.write_product_authority_bundle(
+                with (
+                    patch.object(other, "_lock_product_authority_bundle_write", side_effect=lock),
+                    patch.object(
+                        store, "_after_product_authority_bundle_step", side_effect=after_step
+                    ),
+                ):
+                    store.write_product_authority_bundle(
                         ProductAuthorityBundle(
                             secret_versions=(
                                 SecretVersion(
                                     version_id="version-adopted",
-                                    secret_id="secret-adopted",
+                                    secret_id=recorded.secret_id,
                                     created_at="2026-10-03T00:00:01Z",
                                     key_id="test-key",
                                     ciphertext="ciphertext",
@@ -2387,12 +2385,15 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                                     }
                                 ),
                             ),
-                            absent_secret_ids=("secret-adopted",),
+                            absent_secret_ids=(recorded.secret_id,),
                         )
                     )
-            finally:
-                racing_store.close()
-            self.assertEqual(store.read_secret_record("secret-adopted"), recorded)
+                    for future in futures:
+                        future.result(timeout=10)
+            self.assertEqual(store.read_secret_record(recorded.secret_id), recorded)
+            self.assertEqual(
+                store.read_secret_version("version-adopted").secret_id, recorded.secret_id
+            )
 
     def test_historical_preflight_scopes_database_history_before_limits(self) -> None:
         with TemporaryDirectory() as directory, _store_for_fresh_head_database() as store:
@@ -4325,6 +4326,86 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_never_live_classification_waits_for_concurrent_production_history(self) -> None:
+        from control_plane.contracts.deployment_record import DeploymentRecord
+        from control_plane.contracts.promotion_record import DeploymentEvidence
+        from control_plane.storage.postgres import LaunchplaneDeploymentRow
+        from tests.support.profiles import _odoo_preview_profile_payload
+
+        with _head_postgres_database() as url:
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            store.write_product_profile_record(profile)
+            replacement = profile.model_copy(update={"production_use": "prelaunch"})
+            history = DeploymentRecord(
+                record_id="concurrent-production",
+                context=profile.lanes[0].context,
+                instance="prod",
+                source_git_ref="history",
+                deploy=DeploymentEvidence(
+                    status="pass", deploy_mode="compose", target_name="prod", target_type="compose"
+                ),
+            )
+            written = threading.Event()
+            release = threading.Event()
+
+            def pause_writer(
+                _connection: Any,
+                _cursor: Any,
+                _statement: Any,
+                _parameters: Any,
+                context: Any,
+                _many: Any,
+            ) -> None:
+                if (
+                    context.isinsert
+                    and getattr(getattr(context.compiled.statement, "table", None), "name", "")
+                    == LaunchplaneDeploymentRow.__tablename__
+                ):
+                    written.set()
+                    if not release.wait(10):
+                        raise AssertionError("History writer was not resumed")
+
+            event.listen(store._engine, "after_cursor_execute", pause_writer)
+            try:
+                with ThreadPoolExecutor(max_workers=2) as workers:
+                    writer = workers.submit(store.write_deployment_record, history)
+                    try:
+                        self.assertTrue(written.wait(5))
+                        classify = workers.submit(
+                            store.compare_and_write_product_profile_record,
+                            expected_record=profile,
+                            replacement_record=replacement,
+                            require_never_live_history=True,
+                        )
+                        deadline = time.monotonic() + 5
+                        # Observe any database wait only to control the interleaving.
+                        # The assertions below check refusal and preserved records,
+                        # not a particular locking implementation.
+                        while not classify.done() and time.monotonic() < deadline:
+                            with store._engine.connect() as observer:
+                                waiting = observer.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                                    )
+                                )
+                            if waiting:
+                                break
+                            time.sleep(0.01)
+                    finally:
+                        release.set()
+                    writer.result(timeout=5)
+                    result = classify.result(timeout=5)
+            finally:
+                release.set()
+                event.remove(store._engine, "after_cursor_execute", pause_writer)
+            self.assertEqual(result.status, "changed")
+            self.assertEqual(store.read_product_profile_record(profile.product), profile)
+            self.assertEqual(store.read_deployment_record(history.record_id), history)
+
     def test_expired_event_hold_blocks_only_while_its_execution_owner_is_present(self) -> None:
         from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
         from control_plane.product_reconcile import reconcile_reservation_scope
@@ -5264,122 +5345,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     winner.close()
                     loser.close()
                     base_store.close()
-
-    def test_concurrent_qualification_first_attempt_charges_once_after_competing_rollback(
-        self,
-    ) -> None:
-        from control_plane.contracts.ordinary_agent_effect import (
-            OrdinaryAgentQualificationAttemptRecord,
-        )
-
-        with _store_for_fresh_head_database() as first_store:
-            scenario = QualificationStorageScenario(self, store=first_store)
-            claimed = scenario.claim(lease_seconds=120)
-            second_store = PostgresRecordStore(database_url=first_store.database_url)
-            charged_before_insert = threading.Event()
-            competing_at_lock = threading.Event()
-            release_failure = threading.Event()
-            original_payload = first_store._payload_dict
-            original_lock = second_store._lock_landing_authority
-
-            def fail_after_charge(record: Any) -> dict[str, object]:
-                if isinstance(record, OrdinaryAgentQualificationAttemptRecord):
-                    charged_before_insert.set()
-                    if not release_failure.wait(timeout=10):
-                        raise AssertionError("competing qualification reservation did not start")
-                    raise RuntimeError("injected qualification reservation failure")
-                return original_payload(record)
-
-            def observe_competing_lock(session: Any, lock_name: str) -> None:
-                competing_at_lock.set()
-                original_lock(session, lock_name)
-
-            def reserve(store: PostgresRecordStore) -> OrdinaryAgentQualificationAttemptRecord:
-                return store.reserve_ordinary_agent_qualification_attempt(
-                    claim_fence=claimed.claim_fence, setup=scenario.setup
-                )
-
-            try:
-                with (
-                    patch.object(
-                        PostgresRecordStore,
-                        "_require_ordinary_agent_runtime_readiness",
-                        return_value=(object(), (), scenario.fixture.now),
-                    ),
-                    patch.object(
-                        PostgresRecordStore,
-                        "_ordinary_agent_qualification_setup_from_activation",
-                        return_value=scenario.setup,
-                    ),
-                    patch.object(first_store, "_payload_dict", side_effect=fail_after_charge),
-                    patch.object(
-                        second_store,
-                        "_lock_landing_authority",
-                        side_effect=observe_competing_lock,
-                    ),
-                    ThreadPoolExecutor(max_workers=2) as executor,
-                ):
-                    failing = executor.submit(reserve, first_store)
-                    self.assertTrue(charged_before_insert.wait(timeout=10))
-                    succeeding = executor.submit(reserve, second_store)
-                    self.assertTrue(competing_at_lock.wait(timeout=10))
-                    release_failure.set()
-                    with self.assertRaisesRegex(
-                        RuntimeError, "injected qualification reservation failure"
-                    ):
-                        failing.result(timeout=10)
-                    persisted = succeeding.result(timeout=10)
-
-                self.assertEqual(persisted.state, "reserved")
-                self.assertEqual(scenario.persisted_lease().budget.actions_used, 1)
-                self.assertEqual(reserve(first_store), persisted)
-                self.assertEqual(scenario.persisted_lease().budget.actions_used, 1)
-            finally:
-                release_failure.set()
-                second_store.close()
-
-    def test_ordinary_agent_custody_fence_serializes_same_principal_repository(self) -> None:
-        candidate = OrdinaryAgentCustodyCandidate(
-            principal_id="agent_one",
-            repository_id=123,
-            repository="example/repo",
-            base_branch="main",
-            credential_id="credential_one",
-            credential_version=1,
-            secret_id="secret-app",
-            secret_binding_id="binding-app",
-            secret_version_id="version-1",
-            expected_app_id=42,
-            effect_profile="guarded_merge",
-        )
-        with _store_for_fresh_head_database() as first_store:
-            second_store = PostgresRecordStore(database_url=first_store.database_url)
-            barrier = threading.Barrier(2)
-
-            def acquire(index: int) -> str:
-                barrier.wait(timeout=10)
-                store = (first_store, second_store)[index]
-                status, _record = store.acquire_ordinary_agent_custody_issue_attempt(
-                    attempt_id=f"custody_attempt_{index}",
-                    idempotency_key_sha256=str(index + 1) * 64,
-                    request_sha256=str(index + 3) * 64,
-                    candidate=candidate.model_copy(
-                        update={
-                            "repository": "example/renamed" if index else "example/repo",
-                            "base_branch": "release/next" if index else "main",
-                        }
-                    ),
-                    requested_permissions=("contents:write",),
-                    dispatch_window_seconds=30,
-                )
-                return status
-
-            try:
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    outcomes = tuple(executor.map(acquire, (0, 1)))
-                self.assertCountEqual(outcomes, ("acquired", "fenced"))
-            finally:
-                second_store.close()
 
     def test_owner_control_challenge_issuance_serializes_one_active_operation(self) -> None:
         with _store_for_fresh_head_database() as store:
@@ -8473,279 +8438,6 @@ class RealPostgresFeedbackResumeEvidenceTests(unittest.TestCase):
                 store.close()
 
 
-class RealPostgresOrdinaryAgentLifecycleTests(unittest.TestCase):
-    def test_idempotency_row_is_resolved_before_principal_advisory_lock(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            policy, inventory = setup_ordinary_agent_authority(store)
-            envelope = enrollment_envelope(policy_record=policy, inventory=inventory)
-            mutation = enrollment_mutation(envelope)
-            reserved = store.reserve_mutation(
-                scope=mutation.scope,
-                route_path=mutation.route_path,
-                idempotency_key=mutation.idempotency_key,
-                request_fingerprint=mutation.request_fingerprint,
-                lease_owner="existing-worker",
-            )
-            self.assertEqual(reserved.status, "acquired")
-
-            worker_reached_idempotency_lock = threading.Event()
-
-            def observe_worker_statement(
-                _connection: object, _cursor: object, statement: str, *_: object
-            ) -> None:
-                if (
-                    "FROM launchplane_idempotency_records" in statement
-                    and "FOR UPDATE" in statement
-                ):
-                    worker_reached_idempotency_lock.set()
-
-            blocker = store._engine.connect()
-            transaction = blocker.begin()
-            try:
-                blocker.execute(
-                    text(
-                        "select record_id from launchplane_idempotency_records "
-                        "where scope = :scope and route_path = :route_path "
-                        "and idempotency_key = :idempotency_key for update"
-                    ),
-                    {
-                        "scope": mutation.scope,
-                        "route_path": mutation.route_path,
-                        "idempotency_key": mutation.idempotency_key,
-                    },
-                )
-                event.listen(store._engine, "before_cursor_execute", observe_worker_statement)
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(
-                        apply_test_enrollment,
-                        store,
-                        envelope=envelope,
-                        mutation=mutation,
-                    )
-                    self.assertTrue(worker_reached_idempotency_lock.wait(timeout=5))
-                    with store._engine.connect() as probe:
-                        principal_lock_available: bool = probe.execute(
-                            text(
-                                "select pg_try_advisory_xact_lock(hashtextextended(:lock_name, 0))"
-                            ),
-                            {"lock_name": ("launchplane:ordinary-agent-principal:agent_one")},
-                        ).scalar_one()
-                        probe.rollback()
-                    self.assertTrue(principal_lock_available)
-                    transaction.commit()
-                    result = future.result(timeout=10)
-                self.assertEqual(result.status, "reservation_in_progress")
-            finally:
-                event.remove(store._engine, "before_cursor_execute", observe_worker_statement)
-                if transaction.is_active:
-                    transaction.rollback()
-                blocker.close()
-
-    def test_concurrent_first_enrollment_serializes_absent_principal(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            policy, inventory = setup_ordinary_agent_authority(store)
-            barrier = threading.Barrier(2)
-
-            def enroll(operation_id: str) -> str:
-                envelope = enrollment_envelope(
-                    policy_record=policy,
-                    inventory=inventory,
-                    operation_id=operation_id,
-                )
-                barrier.wait(timeout=10)
-                return apply_test_enrollment(
-                    store,
-                    envelope=envelope,
-                    mutation=enrollment_mutation(envelope),
-                ).status
-
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = tuple(
-                    executor.submit(enroll, operation_id)
-                    for operation_id in (
-                        "ordinary-agent-concurrent-a",
-                        "ordinary-agent-concurrent-b",
-                    )
-                )
-                statuses = tuple(future.result(timeout=30) for future in futures)
-
-            self.assertEqual(sorted(statuses), ["invalid_transition", "written"])
-            with store._engine.connect() as connection:
-                counts: tuple[int, ...] = tuple(
-                    connection.execute(text(f"select count(*) from {table_name}")).scalar_one()
-                    for table_name in (
-                        "launchplane_ordinary_agent_principals",
-                        "launchplane_ordinary_agent_authentication_credentials",
-                        "launchplane_ordinary_agent_credential_custody",
-                        "launchplane_ordinary_agent_lifecycle_audits",
-                    )
-                )
-            self.assertEqual(counts, (1, 1, 1, 1))
-
-    def test_domain_failure_rolls_back_records_and_completed_receipt(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            policy, inventory = setup_ordinary_agent_authority(store)
-            envelope = enrollment_envelope(policy_record=policy, inventory=inventory)
-
-            def reject_audit_insert(
-                _connection: object, _cursor: object, statement: str, *_: object
-            ) -> None:
-                if statement.startswith("INSERT INTO launchplane_ordinary_agent_lifecycle_audits"):
-                    raise RuntimeError("injected ordinary-agent audit failure")
-
-            event.listen(store._engine, "before_cursor_execute", reject_audit_insert)
-            try:
-                with self.assertRaisesRegex(RuntimeError, "injected ordinary-agent audit"):
-                    apply_test_enrollment(
-                        store,
-                        envelope=envelope,
-                        mutation=enrollment_mutation(envelope),
-                    )
-            finally:
-                event.remove(store._engine, "before_cursor_execute", reject_audit_insert)
-
-            with store._engine.connect() as connection:
-                counts: tuple[int, ...] = tuple(
-                    connection.execute(text(f"select count(*) from {table_name}")).scalar_one()
-                    for table_name in (
-                        "launchplane_ordinary_agent_principals",
-                        "launchplane_ordinary_agent_authentication_credentials",
-                        "launchplane_ordinary_agent_credential_custody",
-                        "launchplane_ordinary_agent_lifecycle_audits",
-                        "launchplane_idempotency_records",
-                        "launchplane_ordinary_agent_deliveries",
-                    )
-                )
-            self.assertEqual(counts, (0, 0, 0, 0, 0, 0))
-
-    def test_randomized_same_intent_has_one_credential_and_recoverable_capsule(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            policy, inventory = setup_ordinary_agent_authority(store)
-            envelope = enrollment_envelope(policy_record=policy, inventory=inventory)
-            first, first_bundle = prepare_test_issuance(envelope)
-            second, second_bundle = prepare_test_issuance(envelope)
-            self.assertNotEqual(first_bundle.token.value, second_bundle.token.value)
-            barrier = threading.Barrier(2)
-
-            def apply(prepared: Any, bundle: Any) -> Any:
-                barrier.wait(timeout=5)
-                return store.compare_and_apply_ordinary_agent_enrollment(
-                    envelope=prepared, mutation=enrollment_mutation(prepared), issuance=bundle
-                )
-
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = (
-                    executor.submit(apply, first, first_bundle),
-                    executor.submit(apply, second, second_bundle),
-                )
-                results = tuple(future.result(timeout=15) for future in futures)
-            self.assertEqual(sorted(result.status for result in results), ["replayed", "written"])
-            self.assertEqual(results[0].receipt, results[1].receipt)
-            with patch(
-                "control_plane.secrets._decrypt_secret_value",
-                side_effect=lambda ciphertext, key_id: (
-                    Fernet(TEST_ISSUER_KEY).decrypt(ciphertext.encode()).decode()
-                ),
-            ):
-                token = store.claim_ordinary_agent_credential(
-                    operation_id=envelope.operation_id, claim_secret=TEST_CLAIM_SECRET
-                )
-            self.assertIsNotNone(token)
-            assert token is not None
-            self.assertIn(token.value, (first_bundle.token.value, second_bundle.token.value))
-            self.assertIsNotNone(
-                store.verify_ordinary_agent_token(parse_ordinary_agent_token(token.value))
-            )
-            with store._engine.connect() as connection:
-                counts: tuple[int, ...] = tuple(
-                    connection.execute(text(f"select count(*) from {name}")).scalar_one()
-                    for name in (
-                        "launchplane_ordinary_agent_authentication_credentials",
-                        "launchplane_ordinary_agent_deliveries",
-                    )
-                )
-            self.assertEqual(counts, (1, 1))
-
-    def test_expiry_during_decryption_wins_without_network_lock_or_orphan_allow(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            policy, inventory = setup_ordinary_agent_authority(store)
-            envelope = enrollment_envelope(policy_record=policy, inventory=inventory)
-            prepared, bundle = prepare_test_issuance(envelope)
-            store.compare_and_apply_ordinary_agent_enrollment(
-                envelope=prepared, mutation=enrollment_mutation(prepared), issuance=bundle
-            )
-            decrypt_started = threading.Event()
-            release_decrypt = threading.Event()
-
-            def paused_decrypt(ciphertext: str, key_id: str) -> str:
-                decrypt_started.set()
-                if not release_decrypt.wait(timeout=10):
-                    raise RuntimeError(
-                        "Expiry failed to complete while decryption was outside locks"
-                    )
-                return Fernet(TEST_ISSUER_KEY).decrypt(ciphertext.encode()).decode()
-
-            with (
-                patch("control_plane.secrets._decrypt_secret_value", side_effect=paused_decrypt),
-                ThreadPoolExecutor(max_workers=1) as executor,
-            ):
-                future = executor.submit(
-                    store.claim_ordinary_agent_credential,
-                    operation_id=envelope.operation_id,
-                    claim_secret=TEST_CLAIM_SECRET,
-                )
-                self.assertTrue(decrypt_started.wait(timeout=5))
-                try:
-                    with patch.object(
-                        store,
-                        "_ordinary_agent_database_epoch",
-                        return_value=envelope.delivery.expires_at + 1,
-                    ):
-                        self.assertEqual(store.expire_ordinary_agent_deliveries(), 1)
-                finally:
-                    release_decrypt.set()
-                self.assertIsNone(future.result(timeout=10))
-            self.assertIsNone(
-                store.verify_ordinary_agent_token(parse_ordinary_agent_token(bundle.token.value))
-            )
-            principal = store.read_current_ordinary_agent_principal(
-                principal_id=envelope.principal_id
-            )
-            assert principal is not None
-            self.assertEqual(principal.status, "active")
-
-    def test_private_delivery_persistence_error_hides_parameters_and_postgres_detail(self) -> None:
-        import traceback
-        from control_plane.storage.postgres import OrdinaryAgentPersistenceError
-
-        with _store_for_fresh_head_database() as store:
-            policy, inventory = setup_ordinary_agent_authority(store)
-            envelope = enrollment_envelope(policy_record=policy, inventory=inventory)
-            prepared, bundle = prepare_test_issuance(envelope)
-            with store._engine.begin() as connection:
-                connection.execute(
-                    text(
-                        "alter table launchplane_ordinary_agent_deliveries add constraint test_reject_capsule check (delivery_status <> 'never_attempted')"
-                    )
-                )
-            with self.assertRaises(OrdinaryAgentPersistenceError) as raised:
-                store.compare_and_apply_ordinary_agent_enrollment(
-                    envelope=prepared, mutation=enrollment_mutation(prepared), issuance=bundle
-                )
-            rendered = "".join(traceback.format_exception(raised.exception))
-            for private in (
-                bundle.token.value,
-                bundle.ciphertext,
-                bundle.receiver_claim_sha256,
-                bundle.candidate.credential_digest,
-            ):
-                self.assertNotIn(private, rendered)
-            self.assertEqual(raised.exception.sqlstate, "23514")
-            self.assertIsNone(
-                store.read_current_ordinary_agent_principal(principal_id=envelope.principal_id)
-            )
-
-
 class RealPostgresFeedbackIntentMintTests(unittest.TestCase):
     @staticmethod
     def seed(
@@ -9347,657 +9039,6 @@ class RealPostgresFeedbackIntentMintTests(unittest.TestCase):
                 )
 
 
-class RealPostgresOrdinaryAgentSessionTests(unittest.TestCase):
-    def test_v2_qualification_round_trips_jsonb_without_pr_charge(self) -> None:
-        from control_plane.contracts.ordinary_agent_session_lifecycle import (
-            OrdinaryAgentQualificationFiniteRequestV2,
-            parse_ordinary_agent_finite_request,
-        )
-        from tests.support.ordinary_agent_session_approval import (
-            approve_existing_ordinary_agent_session,
-        )
-        from control_plane.storage.postgres import LaunchplaneOrdinaryAgentFiniteRequestRow
-        from tests import test_ordinary_agent_session_storage as session_tests
-
-        with _store_for_fresh_head_database() as store:
-            fixture = session_tests.OrdinaryAgentSessionStorageTests()
-            self.addCleanup(fixture.doCleanups)
-            fixture.prepare_store(store)
-            fixture.enroll()
-            attenuation = fixture.attenuation.model_copy(
-                update={
-                    "actions": ("preflight", "guarded_merge"),
-                    "action_limit": 2,
-                    "pull_request_limit": 1,
-                    "refresh_allowance": 0,
-                }
-            )
-            operation_id = store.propose_ordinary_agent_session(
-                proof=fixture.proof,
-                operation_id="postgres-qualification-session",
-                attenuation=attenuation,
-            ).operation_id
-            issued = approve_existing_ordinary_agent_session(
-                store=store,
-                manager=fixture.manager,
-                cookie_header=fixture.manager.session_cookie_header(fixture.human),
-                csrf_token=fixture.manager.csrf_token(fixture.human),
-                principal_id="agent_one",
-                operation_id=operation_id,
-            )
-            request = OrdinaryAgentQualificationFiniteRequestV2(
-                request_id="postgres-qualification-request",
-                idempotency_key="postgres-qualification-request",
-                principal_id=issued.session.principal_id,
-                session_id=issued.session.session_id,
-                lease_id=issued.leases[0].lease_id,
-                target=issued.leases[0].target,
-                admitted_at=fixture.now,
-                expires_at=fixture.now + 100,
-                continuation_expires_at=fixture.now + 200,
-            )
-
-            admitted = store.admit_ordinary_agent_finite_request(
-                proof=fixture.proof, request=request
-            )
-            self.assertEqual(
-                store.admit_ordinary_agent_finite_request(proof=fixture.proof, request=request),
-                admitted,
-            )
-            with store._session_factory() as session:
-                row = session.get(LaunchplaneOrdinaryAgentFiniteRequestRow, admitted.request_id)
-                assert row is not None
-                self.assertEqual(parse_ordinary_agent_finite_request(row.payload), admitted)
-                self.assertNotIn("base_sha", row.payload)
-                self.assertNotIn("pull_requests", row.payload)
-            replayed = store.reconnect_ordinary_agent_session(
-                proof=fixture.proof, operation_id=operation_id
-            )
-            preflight = next(lease for lease in replayed.leases if lease.action == "preflight")
-            self.assertEqual(preflight.budget.pull_requests_used, 0)
-
-    def test_postgres_closed_missing_outcome_reserves_qualification_successor(self) -> None:
-        from control_plane.contracts.ordinary_agent_effect import (
-            OrdinaryAgentQualificationAttemptRecord,
-            parse_ordinary_agent_read_attempt,
-        )
-        from control_plane.ordinary_agent_session_lifecycle import (
-            OrdinaryAgentSessionAdmissionDenied,
-        )
-        from control_plane.storage.postgres import LaunchplaneOrdinaryAgentReadAttemptRow
-
-        with _store_for_fresh_head_database() as store:
-            scenario = QualificationStorageScenario(
-                self, store=store, request_id="postgres-qualification-missing-outcome"
-            )
-            claimed = scenario.claim(lease_seconds=120)
-            attempt = scenario.reserve_attempt(claimed)
-            reservation = scenario.reserve_custody(claimed=claimed, attempt=attempt)
-            scenario.issue(reservation)
-            store.close_ordinary_agent_custody_issue_attempt(
-                attempt_id=reservation.custody_attempt_id,
-                reason="confirmed_revoked",
-            )
-
-            with self.assertRaisesRegex(
-                OrdinaryAgentSessionAdmissionDenied, "qualification_setup_required"
-            ):
-                store.reserve_ordinary_agent_qualification_attempt(
-                    claim_fence=claimed.claim_fence, setup=None
-                )
-            successor = store.reserve_ordinary_agent_qualification_attempt(
-                claim_fence=claimed.claim_fence, setup=scenario.setup
-            )
-
-            with store._session_factory() as session:
-                row = session.get(LaunchplaneOrdinaryAgentReadAttemptRow, attempt.attempt_id)
-                assert row is not None
-                recovered = parse_ordinary_agent_read_attempt(row.payload)
-            self.assertIsInstance(recovered, OrdinaryAgentQualificationAttemptRecord)
-            assert isinstance(recovered, OrdinaryAgentQualificationAttemptRecord)
-            self.assertEqual(recovered.state, "incomplete")
-            self.assertEqual(recovered.reason_code, "read_outcome_missing")
-            self.assertIsNone(recovered.failure_counts)
-            self.assertEqual(successor.attempt_ordinal, 2)
-            self.assertEqual(scenario.persisted_lease().budget.actions_used, 1)
-
-    def test_guarded_provider_gap_rolls_back_postgres_admission_budget_and_history(
-        self,
-    ) -> None:
-        from control_plane.contracts.ordinary_agent import OrdinaryAgentPullRequest
-        from control_plane.contracts.ordinary_agent_client import (
-            OrdinaryAgentGuardedDeliveryFiniteClientRequest,
-        )
-        from control_plane.contracts.ordinary_agent_session_lifecycle import (
-            OrdinaryAgentLeaseRecord,
-        )
-        from control_plane.ordinary_agent_session_lifecycle import (
-            OrdinaryAgentSessionAdmissionDenied,
-        )
-        from control_plane.storage.postgres import (
-            LaunchplaneOrdinaryAgentFiniteRequestRow,
-            LaunchplaneOrdinaryAgentLeaseRow,
-        )
-        from tests import test_ordinary_agent_session_storage as session_tests
-
-        with _store_for_fresh_head_database() as store:
-            fixture = session_tests.OrdinaryAgentSessionStorageTests()
-            self.addCleanup(fixture.doCleanups)
-            fixture.prepare_store(store)
-            fixture.enroll()
-            lease = fixture.issued.leases[0]
-            intent = OrdinaryAgentGuardedDeliveryFiniteClientRequest(
-                idempotency_key="postgres-guarded-provider-gap",
-                session_id=fixture.issued.session.session_id,
-                lease_id=lease.lease_id,
-                base_sha="a" * 40,
-                pull_requests=(OrdinaryAgentPullRequest(number=12, head_sha="b" * 40),),
-                permitted_stack_edit_pull_requests=(),
-                refresh_allowance=0,
-            )
-            guarded_readiness = PostgresRecordStore._require_and_project_guarded_readiness.__get__(
-                store, PostgresRecordStore
-            )
-            with (
-                patch.object(
-                    store,
-                    "_require_and_project_guarded_readiness",
-                    wraps=guarded_readiness,
-                ),
-                patch.object(
-                    store,
-                    "_require_ordinary_agent_runtime_readiness",
-                    side_effect=OrdinaryAgentSessionAdmissionDenied(
-                        "provider_readiness_unavailable"
-                    ),
-                ),
-                self.assertRaisesRegex(
-                    OrdinaryAgentSessionAdmissionDenied,
-                    "provider_readiness_unavailable",
-                ),
-            ):
-                store.admit_ordinary_agent_client_request(proof=fixture.proof, request=intent)
-
-            with store._session_factory() as session:
-                lease_row = session.get(LaunchplaneOrdinaryAgentLeaseRow, lease.lease_id)
-                assert lease_row is not None
-                persisted_lease = OrdinaryAgentLeaseRecord.model_validate(lease_row.payload)
-                request_row = session.scalar(
-                    select(LaunchplaneOrdinaryAgentFiniteRequestRow).where(
-                        LaunchplaneOrdinaryAgentFiniteRequestRow.idempotency_key
-                        == intent.idempotency_key
-                    )
-                )
-            self.assertEqual(persisted_lease, lease)
-            self.assertIsNone(request_row)
-
-    def test_qualification_reservation_and_finish_share_request_then_claim_lock_order(
-        self,
-    ) -> None:
-        from control_plane.contracts.ordinary_agent_effect import (
-            OrdinaryAgentJobAttemptDisposition,
-            OrdinaryAgentJobView,
-        )
-
-        with _store_for_fresh_head_database() as store:
-            scenario = QualificationStorageScenario(
-                self, store=store, request_id="postgres-qualification-lock-order"
-            )
-            claimed = scenario.claim(lease_seconds=120)
-            reservation_store = PostgresRecordStore(database_url=store.database_url)
-            finish_store = PostgresRecordStore(database_url=store.database_url)
-            request_locked = threading.Event()
-            release_reservation = threading.Event()
-            finish_request_lock_attempted = threading.Event()
-            finish_completed = threading.Event()
-
-            def pause_reservation_after_request_lock(
-                _connection: object,
-                _cursor: object,
-                statement: str,
-                _parameters: object,
-                _context: object,
-                _executemany: bool,
-            ) -> None:
-                if (
-                    "launchplane_ordinary_agent_finite_requests" in statement
-                    and "FOR UPDATE" in statement
-                    and not request_locked.is_set()
-                ):
-                    request_locked.set()
-                    if not release_reservation.wait(timeout=10):
-                        raise TimeoutError("qualification reservation was not released")
-
-            def observe_finish_request_lock(
-                _connection: object,
-                _cursor: object,
-                statement: str,
-                _parameters: object,
-                _context: object,
-                _executemany: bool,
-            ) -> None:
-                if (
-                    "launchplane_ordinary_agent_finite_requests" in statement
-                    and "FOR UPDATE" in statement
-                ):
-                    finish_request_lock_attempted.set()
-
-            def finish_waiting() -> OrdinaryAgentJobView:
-                try:
-                    return finish_store.finish_ordinary_agent_job_attempt(
-                        claim_fence=claimed.claim_fence,
-                        disposition=OrdinaryAgentJobAttemptDisposition(
-                            status="waiting", reason_code="qualification_wait"
-                        ),
-                    )
-                finally:
-                    finish_completed.set()
-
-            event.listen(
-                reservation_store._engine,
-                "after_cursor_execute",
-                pause_reservation_after_request_lock,
-            )
-            event.listen(
-                finish_store._engine,
-                "before_cursor_execute",
-                observe_finish_request_lock,
-            )
-            executor = ThreadPoolExecutor(max_workers=2)
-            try:
-                with (
-                    patch.object(
-                        PostgresRecordStore,
-                        "_require_ordinary_agent_runtime_readiness",
-                        return_value=(object(), (), scenario.fixture.now),
-                    ),
-                    patch.object(
-                        PostgresRecordStore,
-                        "_ordinary_agent_qualification_setup_from_activation",
-                        return_value=scenario.setup,
-                    ),
-                ):
-                    reservation_future = executor.submit(
-                        reservation_store.reserve_ordinary_agent_qualification_attempt,
-                        claim_fence=claimed.claim_fence,
-                        setup=scenario.setup,
-                    )
-                    self.assertTrue(request_locked.wait(timeout=10))
-                    finish_future = executor.submit(finish_waiting)
-                    self.assertTrue(finish_request_lock_attempted.wait(timeout=10))
-                    self.assertFalse(finish_completed.wait(timeout=0.2))
-                    release_reservation.set()
-                    attempt = reservation_future.result(timeout=10)
-                    finished = finish_future.result(timeout=10)
-            finally:
-                release_reservation.set()
-                executor.shutdown(wait=True)
-                event.remove(
-                    reservation_store._engine,
-                    "after_cursor_execute",
-                    pause_reservation_after_request_lock,
-                )
-                event.remove(
-                    finish_store._engine,
-                    "before_cursor_execute",
-                    observe_finish_request_lock,
-                )
-                reservation_store.close()
-                finish_store.close()
-
-        self.assertEqual(attempt.state, "reserved")
-        self.assertEqual(finished.status, "waiting")
-
-    def test_concurrent_admission_charges_one_budget_and_replay_is_free(self) -> None:
-        from tests import test_ordinary_agent_session_storage as session_tests
-        from control_plane.ordinary_agent_session_lifecycle import (
-            OrdinaryAgentSessionAdmissionDenied,
-        )
-
-        with _store_for_fresh_head_database() as store:
-            fixture = session_tests.OrdinaryAgentSessionStorageTests()
-            self.addCleanup(fixture.doCleanups)
-            fixture.prepare_store(store)
-            fixture.enroll()
-            barrier = threading.Barrier(2)
-
-            def admit(number: int) -> str:
-                barrier.wait(timeout=10)
-                request = fixture.request.model_copy(
-                    update={
-                        "request_id": f"request-{number}",
-                        "idempotency_key": f"request-{number}",
-                    }
-                )
-                try:
-                    return store.admit_ordinary_agent_finite_request(
-                        proof=fixture.proof, request=request
-                    ).request_id
-                except OrdinaryAgentSessionAdmissionDenied as error:
-                    return error.reason_code
-
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                outcomes = tuple(pool.map(admit, (1, 2)))
-            self.assertEqual(outcomes.count("budget_exhausted"), 1)
-            winner = next(item for item in outcomes if item != "budget_exhausted")
-            request = fixture.request.model_copy(
-                update={"request_id": winner, "idempotency_key": winner}
-            )
-            self.assertEqual(
-                store.admit_ordinary_agent_finite_request(
-                    proof=fixture.proof, request=request
-                ).request_id,
-                winner,
-            )
-            lease = store.reconnect_ordinary_agent_session(
-                proof=fixture.proof, operation_id=fixture.envelope.operation_id
-            ).leases[0]
-            self.assertEqual(lease.budget.pull_requests_used, 1)
-
-    def test_approval_racing_logout_rechecks_locked_human_session(self) -> None:
-        from tests import test_ordinary_agent_session_storage as session_tests
-        from tests.support.ordinary_agent_session_approval import (
-            approve_existing_ordinary_agent_session,
-        )
-        from control_plane.ordinary_agent_session_lifecycle import (
-            OrdinaryAgentSessionAdmissionDenied,
-        )
-
-        with _store_for_fresh_head_database() as store:
-            fixture = session_tests.OrdinaryAgentSessionStorageTests()
-            self.addCleanup(fixture.doCleanups)
-            fixture.prepare_store(store)
-            fixture.enroll()
-            operation = (
-                store.propose_ordinary_agent_session(
-                    proof=fixture.proof,
-                    operation_id="fresh-session-one",
-                    attenuation=fixture.attenuation,
-                )
-            ).operation_id
-            reached = threading.Event()
-
-            def before_statement(
-                _connection: object, _cursor: object, statement: str, *_: object
-            ) -> None:
-                if "launchplane_human_sessions" in statement and "FOR UPDATE" in statement:
-                    reached.set()
-
-            with store._engine.connect() as blocker:
-                transaction = blocker.begin()
-                blocker.execute(
-                    text(
-                        "SELECT session_id FROM launchplane_human_sessions WHERE session_id=:id FOR UPDATE"
-                    ),
-                    {"id": fixture.human.session_id},
-                )
-                event.listen(store._engine, "before_cursor_execute", before_statement)
-                try:
-                    with ThreadPoolExecutor(max_workers=1) as pool:
-                        pending = pool.submit(
-                            approve_existing_ordinary_agent_session,
-                            store=store,
-                            manager=fixture.manager,
-                            cookie_header=fixture.manager.session_cookie_header(fixture.human),
-                            csrf_token=fixture.manager.csrf_token(fixture.human),
-                            principal_id="agent_one",
-                            operation_id=operation,
-                        )
-                        self.assertTrue(reached.wait(timeout=10))
-                        blocker.execute(
-                            text("DELETE FROM launchplane_human_sessions WHERE session_id=:id"),
-                            {"id": fixture.human.session_id},
-                        )
-                        transaction.commit()
-                        with self.assertRaisesRegex(
-                            OrdinaryAgentSessionAdmissionDenied, "administrator_session_unavailable"
-                        ):
-                            pending.result(timeout=10)
-                finally:
-                    if transaction.is_active:
-                        transaction.rollback()
-                    event.remove(store._engine, "before_cursor_execute", before_statement)
-
-    def test_recovery_scan_supports_bigint_deadlines_and_keyset(self) -> None:
-        from tests import test_ordinary_agent_session_storage as session_tests
-        from control_plane.contracts.ordinary_agent_lifecycle import OrdinaryAgentEnrollmentIntent
-        from tests.support.ordinary_agent_session_approval import approve_ordinary_agent_enrollment
-        from control_plane.service_auth import TerminalAgentIdentity
-
-        with _store_for_fresh_head_database() as store:
-            fixture = session_tests.OrdinaryAgentSessionStorageTests()
-            self.addCleanup(fixture.doCleanups)
-            fixture.prepare_store(store)
-            intent = OrdinaryAgentEnrollmentIntent.from_envelope(fixture.envelope).model_copy(
-                update={
-                    "operation_id": "z-bigint-recovery",
-                    "session_attenuation": None,
-                    "delivery": fixture.envelope.delivery.model_copy(
-                        update={"expires_at": 2**31 + 100}
-                    ),
-                }
-            )
-            store.propose_ordinary_agent_enrollment(
-                intent=intent,
-                requester=TerminalAgentIdentity(subject="test-cli", token_label="test"),
-            )
-            approve_ordinary_agent_enrollment(
-                store=store,
-                manager=fixture.manager,
-                cookie_header=fixture.manager.session_cookie_header(fixture.human),
-                csrf_token=fixture.manager.csrf_token(fixture.human),
-                principal_id=intent.principal_id,
-                operation_id=intent.operation_id,
-            )
-            first = store.list_pending_approved_ordinary_agent_enrollments(limit=1)
-            page = store.list_pending_approved_ordinary_agent_enrollments(after=first[0])
-            self.assertEqual([reference.operation_id for reference in page], [intent.operation_id])
-
-
-class RealPostgresProviderDeliveryReadinessTests(unittest.TestCase):
-    def test_repository_single_flight_and_capability_retry_charge_once(self) -> None:
-        from control_plane.contracts.merge_train_policy import (
-            ProviderDeliveryProtectionExpectationV1,
-            ProviderRequiredStatusCheckExpectationV1,
-        )
-        from control_plane.contracts.provider_delivery_readiness import (
-            ProviderDeliveryInspectionBindingV1,
-            ProviderDeliveryInspectionReservationV1,
-            ProviderDeliveryReadinessDecision,
-        )
-        from control_plane.github_app_identity import GitHubAppIdentity
-        from control_plane.provider_delivery_inspection_profile import (
-            ResolvedProviderDeliveryInspectionProfile,
-        )
-        from control_plane.storage.postgres import (
-            _OrdinaryAgentRuntimePrerequisites,
-            LaunchplaneOrdinaryAgentLeaseRow,
-            LaunchplaneProviderDeliveryInspectionRow,
-        )
-        from control_plane.ordinary_agent_session_lifecycle import (
-            OrdinaryAgentSessionAdmissionDenied,
-        )
-        from tests import test_ordinary_agent_effect_storage as effect_tests
-        from tests import test_ordinary_agent_session_storage as session_tests
-
-        with _store_for_fresh_head_database() as store:
-            session_fixture = session_tests.OrdinaryAgentSessionStorageTests()
-            self.addCleanup(session_fixture.doCleanups)
-            session_fixture.prepare_store(store, pull_request_limit=2)
-            effect_fixture = effect_tests.OrdinaryAgentEffectStorageTests()
-            effect_fixture.prepare_effect_fixture(session_fixture)
-            expectation = ProviderDeliveryProtectionExpectationV1(
-                required_status_checks=(
-                    ProviderRequiredStatusCheckExpectationV1(context="ci", app_id=9001),
-                ),
-                strict_required_status_checks_policy=True,
-                code_scanning_tools=(),
-                pull_request=None,
-                allowed_merge_methods=("merge",),
-            )
-            binding = ProviderDeliveryInspectionBindingV1(
-                target=effect_fixture.request.target,
-                repository_owner_id=456,
-                inventory_record_id="inventory-r1",
-                inventory_revision=1,
-                inventory_sha256="1" * 64,
-                installed_activation_sha256="2" * 64,
-                ordinary_delivery_app_id=42,
-                ordinary_delivery_installation_id=43,
-                merge_policy_record_id="policy-r1",
-                merge_policy_sha256="3" * 64,
-                merge_policy_semantics_sha256="4" * 64,
-                expectation_sha256=canonical_json_sha256(expectation.model_dump(mode="json")),
-                inspection_profile_id="provider-delivery-inspection-v1",
-                inspection_profile_sha256="6" * 64,
-                inspection_app_id=700,
-                inspection_secret_id="secret",
-                inspection_secret_binding_id="binding",
-                inspection_secret_version_id="version",
-                permission_sha256="7" * 64,
-            )
-            profile = ResolvedProviderDeliveryInspectionProfile(
-                identity=GitHubAppIdentity(app_id=700, private_key="private"),
-                profile_id=binding.inspection_profile_id,
-                profile_sha256=binding.inspection_profile_sha256,
-                app_id=700,
-                secret_id="secret",
-                secret_binding_id="binding",
-                secret_version_id="version",
-                permissions=(
-                    "administration:write",
-                    "contents:read",
-                    "metadata:read",
-                ),
-            )
-
-            def actions_used() -> int:
-                with store._session_factory() as session:
-                    row = session.get(
-                        LaunchplaneOrdinaryAgentLeaseRow,
-                        effect_fixture.request.lease_id,
-                    )
-                    assert row is not None
-                    return int(row.payload["budget"]["actions_used"])
-
-            barrier = threading.Barrier(2)
-
-            def reserve() -> object:
-                barrier.wait(timeout=10)
-                return store.reserve_provider_delivery_inspection_for_job(
-                    request_id=effect_fixture.request.request_id,
-                    profile=profile,
-                )
-
-            before = actions_used()
-            activation = Mock()
-            activation.activation_expires_at = datetime.fromtimestamp(
-                effect_fixture.request.expires_at + 60, timezone.utc
-            ).isoformat()
-            with (
-                patch.object(
-                    store,
-                    "_require_ordinary_agent_runtime_prerequisites",
-                    side_effect=lambda *_args, **_kwargs: _OrdinaryAgentRuntimePrerequisites(
-                        activation=activation,
-                        evidence_ids=(),
-                        custody_valid_from=0,
-                        custody_expires_at=effect_fixture.request.expires_at,
-                        qualification_expires_at=effect_fixture.request.expires_at,
-                        observed_at=session_fixture.now,
-                    ),
-                ),
-                patch.object(
-                    store,
-                    "_provider_delivery_binding_locked",
-                    return_value=(binding, expectation),
-                ),
-                ThreadPoolExecutor(max_workers=2) as pool,
-            ):
-                results = tuple(
-                    future.result(timeout=15)
-                    for future in (pool.submit(reserve), pool.submit(reserve))
-                )
-                reservations = tuple(
-                    item
-                    for item in results
-                    if isinstance(item, ProviderDeliveryInspectionReservationV1)
-                )
-                decisions = tuple(
-                    item for item in results if isinstance(item, ProviderDeliveryReadinessDecision)
-                )
-                self.assertEqual(len(reservations), 1)
-                self.assertEqual(
-                    [(item.status, item.reason_code) for item in decisions],
-                    [("in_progress", "provider_readiness_in_progress")],
-                )
-                first = reservations[0].attempt
-                self.assertEqual(actions_used(), before + 1)
-
-                closed = store.close_provider_delivery_inspection_without_token(
-                    attempt_id=first.attempt_id,
-                    expected_revision=first.revision,
-                )
-                deferred = store.finish_provider_delivery_inspection(
-                    attempt_id=closed.attempt_id,
-                    expected_revision=closed.revision,
-                    capability_reason="provider_wait",
-                    retry_not_before=session_fixture.now + 15,
-                )
-                session_fixture.now = deferred.retry_not_before or 0
-                session_fixture.clock.return_value = datetime.fromtimestamp(
-                    session_fixture.now, timezone.utc
-                ).isoformat()
-                successor = store.reserve_provider_delivery_inspection_for_job(
-                    request_id=effect_fixture.request.request_id,
-                    profile=profile,
-                )
-                assert isinstance(successor, ProviderDeliveryInspectionReservationV1)
-                self.assertEqual(
-                    (
-                        successor.attempt.generation,
-                        successor.attempt.provider_attempt_ordinal,
-                        successor.attempt.action_ordinal,
-                    ),
-                    (first.generation, 2, first.action_ordinal),
-                )
-                self.assertEqual(actions_used(), before + 1)
-
-                with store._session_factory() as session:
-                    row = session.get(
-                        LaunchplaneProviderDeliveryInspectionRow,
-                        successor.attempt.attempt_id,
-                        with_for_update=True,
-                    )
-                    assert row is not None
-                    now = store._ordinary_agent_database_epoch(session)
-                    crashed = successor.attempt.model_copy(
-                        update={
-                            "inspection_started_at": now - 61,
-                            "dispatch_deadline": now - 16,
-                            "publication_deadline": now - 1,
-                        }
-                    )
-                    store._sync_provider_delivery_inspection_row(row, crashed)
-                    session.commit()
-                recovered = store.reserve_provider_delivery_inspection_for_job(
-                    request_id=effect_fixture.request.request_id,
-                    profile=profile,
-                )
-                assert isinstance(recovered, ProviderDeliveryReadinessDecision)
-                self.assertEqual(
-                    (recovered.status, recovered.reason_code),
-                    ("capability_unavailable", "provider_inspection_abandoned"),
-                )
-                with self.assertRaises(OrdinaryAgentSessionAdmissionDenied):
-                    store.finish_provider_delivery_inspection(
-                        attempt_id=successor.attempt.attempt_id,
-                        expected_revision=successor.attempt.revision,
-                        capability_reason="provider_wait",
-                    )
-                self.assertEqual(actions_used(), before + 1)
-
-
 class RealPostgresServiceTokenRetirementTests(unittest.TestCase):
     def test_retirement_rechecks_consumers_and_selector_absence_after_waiting_for_lock(
         self,
@@ -10086,6 +9127,436 @@ class RealPostgresServiceTokenRetirementTests(unittest.TestCase):
 
 
 class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
+    def test_resource_guard_excludes_absent_configuration_alias_and_evidence_writers(self) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+        from tests.support.disposable_lanes import record_safety
+        from tests.support.profiles import _generic_site_profile_payload
+
+        for change in ("global-insert", "instance-insert", "new-alias", "evidence-refresh"):
+            with self.subTest(change=change), _head_postgres_database() as url:
+                first = PostgresRecordStore(database_url=url)
+                second = PostgresRecordStore(database_url=url)
+                self.addCleanup(first.close)
+                self.addCleanup(second.close)
+                profile = LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload()
+                )
+                first.write_product_profile_record(profile)
+                lane = next(item for item in profile.lanes if item.instance == "testing")
+                target = DokployTargetIdRecord(
+                    context=lane.context,
+                    instance="testing",
+                    target_id="fresh-compose",
+                    updated_at=profile.updated_at,
+                )
+                first.write_dokploy_target_id_record(target)
+                reached_lock = threading.Event()
+                original_lock = second._lock_product_authority_bundle_write
+
+                def signal_lock(session: Any) -> None:
+                    reached_lock.set()
+                    original_lock(session)
+
+                def competing_write() -> None:
+                    if change == "new-alias":
+                        second.write_dokploy_target_id_record(
+                            target.model_copy(
+                                update={"context": "another-lane", "instance": "prod"}
+                            )
+                        )
+                    elif change == "evidence-refresh":
+                        record_safety(second, profile.product, lane.context, "testing")
+                    else:
+                        second.write_runtime_environment_record(
+                            RuntimeEnvironmentRecord(
+                                scope="global" if change == "global-insert" else "instance",
+                                context="" if change == "global-insert" else lane.context,
+                                instance="" if change == "global-insert" else "testing",
+                                env={"EXAMPLE_RUNTIME_SETTING": "new"},
+                                updated_at=profile.updated_at,
+                            )
+                        )
+
+                with (
+                    patch.object(
+                        second, "_lock_product_authority_bundle_write", side_effect=signal_lock
+                    ),
+                    ThreadPoolExecutor(max_workers=1) as pool,
+                ):
+                    with first.serialize_disposable_testing_resources() as checkpoint:
+                        future = pool.submit(competing_write)
+                        self.assertTrue(reached_lock.wait(10))
+                        with self.assertRaises(TimeoutError):
+                            future.result(timeout=0.1)
+                        checkpoint()
+                        # Same-thread evidence writes can commit under the held
+                        # coordinator without deadlocking its separate connection.
+                        record_safety(first, profile.product, lane.context, "testing")
+                        checkpoint()
+                    future.result(timeout=10)
+
+    def test_fresh_resource_preparation_replay_and_readback_preserve_retained_operation(
+        self,
+    ) -> None:
+        self._fresh_resource_preparation_case("normal")
+
+    def test_lost_resource_receipt_adopts_actual_work_without_another_create(self) -> None:
+        self._fresh_resource_preparation_case("lost-receipt")
+
+    def test_partial_empty_resources_resume_only_on_the_recorded_target(self) -> None:
+        self._fresh_resource_preparation_case("partial")
+
+    def test_created_compose_is_recovered_after_adoption_transaction_was_lost(self) -> None:
+        self._fresh_resource_preparation_case("lost-adoption")
+
+    def test_alias_insert_during_provider_io_refuses_positive_publication(self) -> None:
+        self._fresh_resource_preparation_case("alias")
+
+    def _fresh_resource_preparation_case(self, fault: str) -> None:
+        from tests.test_testing_replacement_resources import TestingReplacementResourceHttpTests
+        from control_plane.odoo_testing_resources import OdooTestingResources
+
+        with _head_postgres_database() as url:
+            fixture = TestingReplacementResourceHttpTests()
+            fixture.database_url = url
+            fixture.setUp()
+            self.addCleanup(fixture.doCleanups)
+            retained_record = fixture.store.read_dokploy_target_record(
+                context_name=fixture.context, instance_name="testing"
+            )
+            retained_record = retained_record.model_copy(
+                update={
+                    "domains": ("retained.example.invalid",),
+                    "public_hosts": ("retained-public.example.invalid",),
+                    "env": {"ODOO_DATA_VOLUME": "retained-data"},
+                    "require_test_gate": True,
+                    "policies": retained_record.policies.model_copy(
+                        update={
+                            "integration_allowances": (
+                                DokployTargetIntegrationAllowance(
+                                    integration="shopify",
+                                    kind="pre_live",
+                                    reason="retained lane evidence",
+                                ),
+                            ),
+                            "shopify": retained_record.policies.shopify.model_copy(
+                                update={"protected_store_keys": ("protected-store",)}
+                            ),
+                        }
+                    ),
+                }
+            )
+            fixture.store.write_dokploy_target_record(retained_record)
+            policy = LaunchplaneAuthzPolicy()
+            fixture.store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id=build_authz_policy_record_id(
+                        revision=1, policy_sha256=authz_policy_sha256(policy)
+                    ),
+                    revision=1,
+                    status="active",
+                    source="test:resource-preparation",
+                    updated_at=fixture.profile.updated_at,
+                    policy=policy,
+                )
+            )
+            calls: list[tuple[str, dict[str, Any]]] = []
+            phases: list[str] = []
+            adoption_lost = False
+            original_merge = fixture.store._merge_authority_row
+
+            def merge(session: Any, row: Any, *, step_name: str) -> None:
+                nonlocal adoption_lost
+                if (
+                    fault == "lost-adoption"
+                    and step_name == "write_dokploy_target_id"
+                    and not adoption_lost
+                ):
+                    adoption_lost = True
+                    raise RuntimeError("fixture lost adoption transaction")
+                original_merge(session, row, step_name=step_name)
+
+            def projects(**kwargs: Any) -> Any:
+                project = next(
+                    (payload for path, payload in calls if path == PROJECT_CREATE_PATH), None
+                )
+                if project is None:
+                    return ()
+                namespace = project["name"]
+                return (
+                    {
+                        "projectId": "fresh-projectId",
+                        "name": namespace,
+                        "environments": [
+                            {
+                                "name": namespace,
+                                "environmentId": "fresh-environmentId",
+                                "applications": [],
+                                "composes": [{"composeId": "fresh-composeId", "name": namespace}],
+                            }
+                        ],
+                    },
+                )
+
+            def mutate(host: str, token: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+                calls.append((path, payload))
+                identifiers = {
+                    PROJECT_CREATE_PATH: "projectId",
+                    ENVIRONMENT_CREATE_PATH: "environmentId",
+                    COMPOSE_CREATE_PATH: "composeId",
+                }
+                self.assertIn(path, identifiers)
+                return {identifiers[path]: "fresh-" + identifiers[path]}
+
+            def fetch(host: str, token: str, target_type: str, target_id: str) -> dict[str, Any]:
+                self.assertEqual(target_type, "compose")
+                namespace = next(
+                    (payload["name"] for path, payload in calls if path == COMPOSE_CREATE_PATH),
+                    "fixture-compose",
+                )
+                return {
+                    "composeId": target_id,
+                    "name": namespace,
+                    "appName": namespace + "-abc123",
+                    "environmentId": "fresh-environmentId",
+                    "serverId": "fixture-server",
+                    "sourceType": "raw",
+                    "env": "",
+                    "composeFile": "",
+                }
+
+            def schedule(**kwargs: Any) -> dict[str, str]:
+                resources = kwargs["resources"]
+                self.assertIsInstance(resources, OdooTestingResources)
+                self.assertNotEqual(resources.target_id, "compose-testing")
+                kwargs["checkpoint"]()
+                # Unrelated authority remains writable while the provider is
+                # doing I/O; final positive publication still serializes.
+                second = PostgresRecordStore(database_url=url)
+                pool = ThreadPoolExecutor(max_workers=1)
+                try:
+                    pool.submit(
+                        second.write_runtime_environment_record,
+                        RuntimeEnvironmentRecord(
+                            scope="context",
+                            context="unrelated",
+                            env={"SETTING": "value"},
+                            updated_at=fixture.profile.updated_at,
+                        ),
+                    ).result(timeout=5)
+                finally:
+                    pool.shutdown(wait=False)
+                    second.close()
+                phases.append(kwargs["mode"])
+                if fault == "alias":
+                    fixture.store.write_dokploy_target_id_record(
+                        DokployTargetIdRecord(
+                            context="another-context",
+                            instance="prod",
+                            target_id=resources.target_id,
+                            updated_at=fixture.profile.updated_at,
+                        )
+                    )
+                    kwargs["checkpoint"]()
+                if fault in {"lost-receipt", "partial"} and phases == ["prepare"]:
+                    # Remote work completed (or is partially prepared) but the
+                    # request died before the allocation receipt publication.
+                    raise RuntimeError("fixture lost schedule reply")
+                if (fault == "partial" and phases == ["prepare", "readback"]) or (
+                    fault == "lost-adoption" and phases == ["readback"]
+                ):
+                    from control_plane.testing_replacement_resources import (
+                        IncompleteTestingResources,
+                    )
+
+                    raise IncompleteTestingResources("fixture actual missing empty volumes")
+                return {
+                    "testing_resources_ok": "true",
+                    "testing_resources_binding_sha256": resources.binding_sha256,
+                    "schedule_id": "resource-schedule",
+                }
+
+            async def scenario() -> None:
+                before_profile = fixture.store.read_product_profile_record(fixture.profile.product)
+                before_production = fixture.store.read_dokploy_target_id_record(
+                    context_name=fixture.context, instance_name="prod"
+                )
+                plan = await fixture.post()
+                self.assertEqual(plan.status_code, 202, plan.text)
+                body = {
+                    "mode": "apply",
+                    "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
+                }
+                with (
+                    patch.object(fixture.store, "_merge_authority_row", side_effect=merge),
+                    patch(
+                        "control_plane.testing_replacement_resources.api.fetch_dokploy_projects",
+                        side_effect=projects,
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.api.list_deployments_for_target",
+                        return_value=(),
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.fetch_dokploy_compose_domains_for_target_setup",
+                        return_value=(),
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.source.read_dokploy_config",
+                        return_value=("provider.invalid", "fixture-token"),
+                    ),
+                    patch(
+                        "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
+                        return_value=("provider.invalid", "fixture-token"),
+                    ),
+                    patch(
+                        "control_plane.dokploy_target_setup_http.mutate_dokploy_payload_for_target_setup",
+                        side_effect=mutate,
+                    ),
+                    patch(
+                        "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                        side_effect=fetch,
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.api.fetch_dokploy_target_payload",
+                        side_effect=lambda **kw: fetch(
+                            kw["host"], kw["token"], kw["target_type"], kw["target_id"]
+                        ),
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.run_resource_schedule",
+                        side_effect=schedule,
+                    ),
+                ):
+                    invalid = await fixture.post(mode="apply", reviewed_plan_sha256="0" * 64)
+                    self.assertEqual(invalid.status_code, 409, invalid.text)
+                    self.assertFalse(calls)
+                    if fault == "alias":
+                        refused = await fixture.post(**body)
+                        self.assertEqual(refused.status_code, 409, refused.text)
+                        self.assertIsNone(
+                            fixture.store.read_disposable_lane_safety(
+                                fixture.profile.product, fixture.context, "testing"
+                            )
+                        )
+                        self.assertEqual(
+                            fixture.store.read_odoo_stable_target_replacement_operation_record(
+                                fixture.operation.operation_id
+                            ),
+                            fixture.operation,
+                        )
+                        return
+                    if fault != "normal":
+                        interrupted = await fixture.post(**body)
+                        self.assertEqual(interrupted.status_code, 409, interrupted.text)
+                        captured = fixture.store.read_disposable_resource_preparation(
+                            fixture.operation.operation_id
+                        )
+                        assert captured is not None
+                        if fault == "lost-adoption":
+                            self.assertFalse(captured.replacement_target_id)
+                        else:
+                            self.assertEqual(
+                                captured.replacement_target_id,
+                                fixture.store.read_dokploy_target_id_record(
+                                    context_name=fixture.context, instance_name="testing"
+                                ).target_id,
+                            )
+                        self.assertFalse(captured.resources_binding_sha256)
+                        count = len(calls)
+                    applied = await fixture.post(**body)
+                    self.assertEqual(applied.status_code, 202, applied.text)
+                    if fault != "normal":
+                        self.assertEqual(len(calls), count)
+                    count = len(calls)
+                    replay = await fixture.post(**body)
+                    self.assertEqual(replay.status_code, 202, replay.text)
+                    self.assertTrue(replay.json()["replayed"])
+                    self.assertEqual(len(calls), count)
+                    import click
+
+                    with patch(
+                        "control_plane.testing_replacement_resources.run_resource_schedule",
+                        side_effect=click.ClickException("private-provider-error"),
+                    ):
+                        failed = await fixture.post(mode="readback")
+                        self.assertEqual(failed.status_code, 409, failed.text)
+                        self.assertNotIn("private-provider-error", failed.text)
+                    readback = await fixture.post(mode="readback")
+                    self.assertEqual(readback.status_code, 202, readback.text)
+                    self.assertEqual(
+                        readback.json()["result"]["resources_binding_sha256"],
+                        applied.json()["result"]["resources_binding_sha256"],
+                    )
+                self.assertEqual(
+                    fixture.store.read_product_profile_record(fixture.profile.product),
+                    before_profile,
+                )
+                custody = fixture.store.read_disposable_resource_preparation(
+                    fixture.operation.operation_id
+                )
+                assert custody is not None
+                self.assertEqual(custody.retained_target_record, retained_record)
+                replacement_record = fixture.store.read_dokploy_target_record(
+                    context_name=fixture.context, instance_name="testing"
+                )
+                self.assertEqual(
+                    replacement_record.policies.shopify, retained_record.policies.shopify
+                )
+                self.assertFalse(replacement_record.policies.integration_allowances)
+                self.assertEqual(
+                    replacement_record.require_test_gate, retained_record.require_test_gate
+                )
+                self.assertFalse(replacement_record.domains)
+                self.assertFalse(replacement_record.public_hosts)
+                self.assertFalse(replacement_record.env)
+                self.assertTrue(
+                    set(retained_record.domains).issubset(
+                        fixture.store.retained_disposable_hostnames()
+                    )
+                )
+                with self.assertRaises(DokployTargetRecordChanged):
+                    fixture.store.write_dokploy_target_record(
+                        replacement_record.model_copy(update={"domains": retained_record.domains})
+                    )
+                production_record = fixture.store.read_dokploy_target_record(
+                    context_name=fixture.context, instance_name="prod"
+                )
+                with self.assertRaises(DokployTargetRecordChanged):
+                    fixture.store.write_dokploy_target_record(
+                        production_record.model_copy(
+                            update={"public_hosts": retained_record.public_hosts}
+                        )
+                    )
+                self.assertEqual(
+                    fixture.store.read_dokploy_target_record(
+                        context_name=fixture.context, instance_name="prod"
+                    ),
+                    production_record,
+                )
+                self.assertEqual(
+                    fixture.store.read_dokploy_target_id_record(
+                        context_name=fixture.context, instance_name="prod"
+                    ),
+                    before_production,
+                )
+                self.assertEqual(
+                    fixture.store.read_odoo_stable_target_replacement_operation_record(
+                        fixture.operation.operation_id
+                    ),
+                    fixture.operation,
+                )
+                safety = fixture.store.read_disposable_lane_safety(
+                    fixture.profile.product, fixture.context, "testing"
+                )
+                assert safety is not None
+                self.assertEqual(safety.production_resources, "separation_ready")
+                self.assertFalse(
+                    fixture.store.supersede_disposable_testing_replacement(fixture.operation)
+                )
+
+            asyncio.run(scenario())
+
     def test_disposable_records_survive_schema_rollback_without_changing_legacy_payloads(
         self,
     ) -> None:
@@ -10096,9 +9567,10 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
         from control_plane.storage.postgres import (
             LaunchplaneProductProfileRow,
             LaunchplaneOdooStableTargetReplacementOperationRow,
+            LaunchplaneDisposableReplacementPreparationRow,
         )
         from control_plane.storage.migrations.versions import (
-            de647804f004_disposable_lane_records as migration,
+            ef758915f005_disposable_testing_resource_allocations as migration,
         )
 
         with _head_postgres_database() as url:
@@ -10132,6 +9604,25 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             record_safety(store, profile.product, lane.context, "testing")
             evidence = store.read_disposable_lane_safety(profile.product, lane.context, "testing")
             preparation = store.read_disposable_replacement_preparation(operation.operation_id)
+            allocation = store.read_disposable_resource_preparation(operation.operation_id)
+            assert preparation is not None and allocation is not None
+            store.compare_and_write_disposable_resource_preparation(
+                expected=allocation,
+                replacement=allocation.model_copy(
+                    update={
+                        "resource_namespace": "lp-testing-" + "a" * 32,
+                        "replacement_target_id": "new-fixture",
+                    }
+                ),
+            )
+            allocation = store.read_disposable_resource_preparation(operation.operation_id)
+            with store._session_factory() as session:
+                custody = session.get(
+                    LaunchplaneDisposableReplacementPreparationRow, operation.operation_id
+                )
+                assert custody is not None
+                # The older strict reader still sees exactly its original payload.
+                self.assertEqual(custody.payload, preparation.model_dump(mode="json"))
             with store._session_factory() as session:
                 profile_row = session.get(LaunchplaneProductProfileRow, profile.product)
                 operation_row = session.get(
@@ -10150,6 +9641,9 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 store.read_disposable_replacement_preparation(operation.operation_id), preparation
             )
+            self.assertEqual(
+                store.read_disposable_resource_preparation(operation.operation_id), allocation
+            )
             self.assertEqual(store.read_product_profile_record(profile.product), profile)
             self.assertEqual(
                 store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
@@ -10159,6 +9653,9 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             store.verify_schema()
             self.assertEqual(
                 store.read_disposable_replacement_preparation(operation.operation_id), preparation
+            )
+            self.assertEqual(
+                store.read_disposable_resource_preparation(operation.operation_id), allocation
             )
 
     def test_disposable_replacement_safety_and_exclusion_on_postgres(self) -> None:

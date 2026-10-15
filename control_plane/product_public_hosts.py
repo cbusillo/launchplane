@@ -150,6 +150,8 @@ def plan_public_hosts(
     mode: str,
 ) -> PublicHostsPlan:
     try:
+        if set(hosts).intersection(record_store.retained_disposable_hostnames()):
+            raise ValueError("A hostname remains reserved by retained testing custody.")
         target = record_store.read_dokploy_target_record(
             context_name=context, instance_name=instance
         )

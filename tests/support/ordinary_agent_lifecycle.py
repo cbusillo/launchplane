@@ -25,8 +25,6 @@ from control_plane.contracts.ordinary_agent_lifecycle import (
     OrdinaryAgentAdministratorAuthorizationBinding,
     OrdinaryAgentAuthenticationCredentialCandidate,
     OrdinaryAgentDeliveryBinding,
-    OrdinaryAgentEnrollmentApplyEnvelope,
-    OrdinaryAgentEnrollmentCompareWriteResult,
     OrdinaryAgentCredentialCustodyCandidate,
     OrdinaryAgentEnrollApplyEnvelope,
     OrdinaryAgentManagedSecretBinding,
@@ -398,22 +396,6 @@ def prepare_test_issuance(
         ),
     )
     return envelope.model_copy(update={"authentication_credential": bundle.candidate}), bundle
-
-
-def apply_test_enrollment(
-    store: PostgresRecordStore,
-    *,
-    envelope: OrdinaryAgentEnrollmentApplyEnvelope,
-    mutation: DbOnlyMutationRequest,
-) -> OrdinaryAgentEnrollmentCompareWriteResult:
-    if isinstance(envelope, OrdinaryAgentRevokePrincipalApplyEnvelope):
-        return store.compare_and_apply_ordinary_agent_enrollment(
-            envelope=envelope, mutation=mutation
-        )
-    prepared, issuance = prepare_test_issuance(envelope)
-    return store.compare_and_apply_ordinary_agent_enrollment(
-        envelope=prepared, mutation=mutation, issuance=issuance
-    )
 
 
 def prepare_approved_test_issuance(

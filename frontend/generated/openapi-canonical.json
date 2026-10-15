@@ -13588,6 +13588,183 @@
         "title": "IntegrationKeyReadbackFinding",
         "type": "object"
       },
+      "InventoryEnvironment": {
+        "additionalProperties": false,
+        "properties": {
+          "environment_id": {
+            "title": "Environment Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryTarget"
+            },
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "environment_id",
+          "name",
+          "targets"
+        ],
+        "title": "InventoryEnvironment",
+        "type": "object"
+      },
+      "InventoryPage": {
+        "additionalProperties": false,
+        "properties": {
+          "inventory_digest": {
+            "title": "Inventory Digest",
+            "type": "string"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryProject"
+            },
+            "title": "Projects",
+            "type": "array"
+          },
+          "provider_pagination": {
+            "const": "unpaginated_project_all",
+            "default": "unpaginated_project_all",
+            "title": "Provider Pagination",
+            "type": "string"
+          },
+          "scope": {
+            "const": "provider_credential_visible",
+            "default": "provider_credential_visible",
+            "title": "Scope",
+            "type": "string"
+          },
+          "total_environments": {
+            "title": "Total Environments",
+            "type": "integer"
+          },
+          "total_projects": {
+            "title": "Total Projects",
+            "type": "integer"
+          },
+          "total_targets": {
+            "title": "Total Targets",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "inventory_digest",
+          "total_projects",
+          "total_environments",
+          "total_targets",
+          "offset",
+          "limit",
+          "next_offset",
+          "projects"
+        ],
+        "title": "InventoryPage",
+        "type": "object"
+      },
+      "InventoryProject": {
+        "additionalProperties": false,
+        "properties": {
+          "environments": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryEnvironment"
+            },
+            "title": "Environments",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "name",
+          "environments"
+        ],
+        "title": "InventoryProject",
+        "type": "object"
+      },
+      "InventoryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "inventory": {
+            "$ref": "#/components/schemas/InventoryPage"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "inventory"
+        ],
+        "title": "InventoryResponse",
+        "type": "object"
+      },
+      "InventoryTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "placement": {
+            "$ref": "#/components/schemas/Placement"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_id",
+          "category",
+          "name",
+          "placement"
+        ],
+        "title": "InventoryTarget",
+        "type": "object"
+      },
       "JsonValue": {},
       "LaneServiceRestartPlan": {
         "additionalProperties": false,
@@ -14359,6 +14536,16 @@
             ],
             "title": "Production Use",
             "type": "string"
+          },
+          "production_use_authority": {
+            "default": "explicit",
+            "enum": [
+              "explicit",
+              "director_agent"
+            ],
+            "title": "Production Use Authority",
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "promotion_workflow": {
             "$ref": "#/components/schemas/ProductPromotionWorkflowProfile"
@@ -25532,6 +25719,48 @@
           "description"
         ],
         "title": "PathCheckStep",
+        "type": "object"
+      },
+      "Placement": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "server",
+              "dokploy_host"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "server_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Id"
+          },
+          "server_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Name"
+          }
+        },
+        "required": [
+          "kind",
+          "server_id",
+          "server_name"
+        ],
+        "title": "Placement",
         "type": "object"
       },
       "PostDeployUpdateEvidence": {
@@ -46881,6 +47110,55 @@
         "title": "TestingReplacementRecoveryRead",
         "type": "object"
       },
+      "TestingReplacementResourcesRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "operation_id",
+          "reason"
+        ],
+        "title": "TestingReplacementResourcesRequest",
+        "type": "object"
+      },
       "TestingRestorePolicyRequest": {
         "additionalProperties": false,
         "properties": {
@@ -54907,6 +55185,130 @@
           }
         },
         "summary": "Plan or apply Dokploy target setup"
+      }
+    },
+    "/v1/dokploy/inventory": {
+      "get": {
+        "operationId": "read_dokploy_inventory",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "inventory_digest",
+            "required": false,
+            "schema": {
+              "default": "",
+              "pattern": "^$|^[a-f0-9]{64}$",
+              "title": "Inventory Digest",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InventoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read value-free Dokploy project, environment and placement inventory"
       }
     },
     "/v1/drivers": {
@@ -85283,6 +85685,137 @@
           }
         },
         "summary": "List product runtime secret binding metadata without values"
+      }
+    },
+    "/v1/products/{product}/testing-replacement-resources": {
+      "post": {
+        "operationId": "prepare_testing_replacement_resources",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestingReplacementResourcesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Prepare fresh independent Odoo testing replacement resources"
       }
     },
     "/v1/promotions/{record_id}": {
