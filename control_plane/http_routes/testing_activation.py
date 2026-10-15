@@ -10,6 +10,8 @@ from fastapi import Depends, Header, Path as PathParameter
 from control_plane.contracts.testing_activation import (
     TestingActivationRequest,
     TestingActivationResult,
+    TestingActivationRefusal,
+    TestingActivationRefusalCode,
 )
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
@@ -70,10 +72,16 @@ def register_testing_activation_routes(
                     idempotency_key=idempotency_key.strip(),
                 )
                 if row is None or row.state != "completed":
-                    raise ValueError("The original activation has no completed receipt.")
+                    raise TestingActivationRefusal(
+                        "The original activation has no completed receipt.",
+                        code=TestingActivationRefusalCode.RECEIPT_UNAVAILABLE,
+                    )
                 result = TestingActivationResult.model_validate(row.response_payload.get("result"))
                 if (result.product, result.context) != (product, body.context):
-                    raise ValueError("The receipt belongs to another lane.")
+                    raise TestingActivationRefusal(
+                        "The receipt belongs to another lane.",
+                        code=TestingActivationRefusalCode.RECEIPT_UNAVAILABLE,
+                    )
                 return accepted_evidence_response(
                     trace_id=trace,
                     records={"activation": row.record_id},
@@ -86,7 +94,10 @@ def register_testing_activation_routes(
                 def readback() -> dict[str, object]:
                     record = adapter.current()
                     if not record.published:
-                        raise ValueError("Activation has no qualified published recipient.")
+                        raise TestingActivationRefusal(
+                            "Activation has no qualified published recipient.",
+                            code=TestingActivationRefusalCode.RECIPIENT_UNQUALIFIED,
+                        )
                     adapter.require_unchanged(record)
                     adapter.verify_provider(record)
                     return adapter.result(record)
@@ -120,6 +131,13 @@ def register_testing_activation_routes(
                     in_progress_message="Testing activation is running under its original key.",
                     reconcile_message="Testing activation outcome is unknown; preserve original placement, holds and fences.",
                 )
+        except TestingActivationRefusal as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace,
+                code=error.public_code,
+                message="Testing activation qualification refused; preserve the original resources and interlock.",
+            ) from error
         except (
             ValueError,
             FileNotFoundError,
@@ -130,7 +148,7 @@ def register_testing_activation_routes(
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace,
-                code="testing_activation_unverified",
+                code=TestingActivationRefusalCode.DEPENDENCY_UNVERIFIED.value,
                 message="Testing activation inputs, recipient or isolation proof remain unverified.",
             ) from error
         return accepted_evidence_response(trace_id=trace, records={}, result=result_payload)
