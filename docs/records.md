@@ -1026,6 +1026,15 @@ Dry run returns a
 digest of the full starting profile, requested value, and reason; Apply must match it.
 Atomic compare-and-write and idempotency evidence record the caller, before/after,
 reason and timestamps. The Client panel reads the resulting profile back.
+The never-live check waits at most five seconds for each classification authority
+or history lock. If a writer still holds a lock, Apply returns `409
+production_history_busy` and rolls back its transaction, including its new
+reservation. Retry the same reviewed request with the same `Idempotency-Key`;
+the retry checks the current profile and history again. A changed profile needs
+a fresh review, and committed contradictory production history still refuses
+classification. Contention never records a successful result or relaxes production
+authority. History locking remains broad across products, so an unrelated history
+writer can temporarily delay classification too.
 
 Expected-config metadata changes use
 `POST /v1/product-profiles/expected-config/apply`. The request carries

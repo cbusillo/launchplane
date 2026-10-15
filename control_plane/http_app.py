@@ -14695,6 +14695,16 @@ def create_launchplane_fastapi_app(
                 lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
             ),
         )
+        if write_result.status == "history_busy":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="production_history_busy",
+                message=(
+                    "Product history is being written. No classification change was applied. "
+                    "Retry the same reviewed request with the same Idempotency-Key."
+                ),
+            )
         if write_result.status == "replayed":
             if write_result.idempotency_record is None:
                 raise RuntimeError("Replayed product production use write requires evidence.")
